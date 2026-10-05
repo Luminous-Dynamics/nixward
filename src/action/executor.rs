@@ -161,6 +161,35 @@ impl HostExecutionPolicy {
     }
 }
 
+fn validate_rebuild_boundary(flake: &Option<String>, extra_args: &[String]) -> HostExecutionPolicy {
+    let Some(flake) = flake else {
+        return HostExecutionPolicy::Forbidden {
+            reason: "system rebuild requires an explicit flake reference including a #host selector".into(),
+        };
+    };
+
+    let flake = flake.trim();
+    if flake.is_empty() || !flake.contains('#') || flake.chars().any(char::is_control) {
+        return HostExecutionPolicy::Forbidden {
+            reason: "system rebuild flake reference must be non-empty, control-character-free, and include a #host selector".into(),
+        };
+    }
+
+    if flake.starts_with('-') {
+        return HostExecutionPolicy::Forbidden {
+            reason: "system rebuild flake reference must not begin with an option prefix".into(),
+        };
+    }
+
+    if !extra_args.is_empty() {
+        return HostExecutionPolicy::Forbidden {
+            reason: "nixos-rebuild passthrough arguments are forbidden; expose any approved behavior as a typed command field instead".into(),
+        };
+    }
+
+    HostExecutionPolicy::Allowed
+}
+
 impl NixOSCommand {
     /// Create a Custom command with auto-classified safety level.
     ///
@@ -268,11 +297,12 @@ impl NixOSCommand {
                     }
                 }
             }
-            Self::RebuildSwitch { .. }
-            | Self::RebuildTest { .. }
-            | Self::RebuildBoot { .. }
-            | Self::Search { .. }
-            | Self::CollectGarbage { .. } => Allowed,
+            Self::RebuildSwitch { flake, extra_args }
+            | Self::RebuildTest { flake, extra_args }
+            | Self::RebuildBoot { flake, extra_args } => {
+                validate_rebuild_boundary(flake, extra_args)
+            }
+            Self::Search { .. } | Self::CollectGarbage { .. } => Allowed,
         }
     }
 
@@ -1189,7 +1219,7 @@ mod tests {
         assert_eq!(install.safety_level(), SafetyLevel::UserModify);
 
         let rebuild = NixOSCommand::RebuildSwitch {
-            flake: None,
+            flake: Some(".#test-host".to_string()),
             extra_args: vec![],
         };
         assert_eq!(rebuild.safety_level(), SafetyLevel::SystemCritical);
@@ -1353,6 +1383,48 @@ mod tests {
             .execute_authorized(rebuild, exec_auth, Some(1.0))
             .await;
         assert!(matches!(result, ExecutionResult::Success { .. }));
+    }
+
+    #[test]
+    fn test_rebuild_host_boundary_requires_explicit_flake() {
+        let ambient = NixOSCommand::RebuildSwitch {
+            flake: None,
+            extra_args: vec![],
+        };
+        assert!(matches!(
+            ambient.host_execution_policy(),
+            HostExecutionPolicy::Forbidden { .. }
+        ));
+
+        let explicit = NixOSCommand::RebuildSwitch {
+            flake: Some(".#test-host".to_string()),
+            extra_args: vec![],
+        };
+        assert!(matches!(explicit.host_execution_policy(), HostExecutionPolicy::Allowed));
+    }
+
+    #[test]
+    fn test_rebuild_host_boundary_rejects_passthrough_flags() {
+        let command = NixOSCommand::RebuildSwitch {
+            flake: Some(".#test-host".to_string()),
+            extra_args: vec!["--override-input".to_string(), "nixpkgs".to_string()],
+        };
+        assert!(matches!(
+            command.host_execution_policy(),
+            HostExecutionPolicy::Forbidden { .. }
+        ));
+    }
+
+    #[test]
+    fn test_rebuild_host_boundary_rejects_option_like_flake_reference() {
+        let command = NixOSCommand::RebuildSwitch {
+            flake: Some("--impure#test-host".to_string()),
+            extra_args: vec![],
+        };
+        assert!(matches!(
+            command.host_execution_policy(),
+            HostExecutionPolicy::Forbidden { .. }
+        ));
     }
 
     #[test]
