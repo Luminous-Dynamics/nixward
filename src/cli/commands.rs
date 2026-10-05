@@ -90,12 +90,9 @@ pub enum Command {
         /// Rebuild mode.
         #[arg(value_enum, default_value = "switch")]
         mode: RebuildMode,
-        /// Flake reference (e.g. ".#hostname").
+        /// Explicit flake reference including the #host selector.
         #[arg(long)]
         flake: Option<String>,
-        /// Extra arguments to pass to nixos-rebuild.
-        #[arg(last = true)]
-        extra_args: Vec<String>,
     },
 
     /// Roll back to a previous generation.
