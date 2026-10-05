@@ -34,33 +34,33 @@ name = "nixward-owner-key"
 path = "src/bin/nixward_owner_key.rs"
 
 [dependencies]
-symthaea-core = { path = "../symthaea-core" }
+symthaea-core = { git = "https://github.com/Luminous-Dynamics/symthaea.git", rev = "a03379d7cea94d1c3409d258a0a6be02b2c79913", package = "symthaea-core" }
 # Native-only (C FFI, async)
-tree-sitter = { workspace = true, optional = true }
-tree-sitter-nix = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-nix = { version = "0.3", optional = true }
+tokio = { version = "1.35", features = ["full"], optional = true }
 
 # WASM-safe
-blake3 = { workspace = true }
+blake3 = "1.5"
 sha2 = "0.10"
-petgraph = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-regex = { workspace = true }
-strsim = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-chrono = { workspace = true }
-lru = { workspace = true }
-dashmap = { workspace = true }
+petgraph = { version = "0.6", features = ["serde-1"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.10"
+strsim = "0.11"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+lru = "0.16"
+dashmap = "5.5"
 nix = { version = "0.27", optional = true }
-rusqlite = { workspace = true, optional = true }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rnix = "0.11"
-ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc"] }
 
 # CLI (optional)
-clap = { workspace = true, optional = true }
+clap = { version = "4.4", features = ["derive"], optional = true }
 clap_complete = { version = "4.4", optional = true }
 
 # TUI (optional)
