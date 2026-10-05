@@ -1,0 +1,7 @@
+/target/
+Cargo.lock
+*.drv
+result
+result-*
+.direnv/
+.envrc
