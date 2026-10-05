@@ -11,8 +11,10 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.nixward-daemon or (throw "nixward-daemon package not found; add the symthaea overlay");
-      description = "The nixward-daemon package to use.";
+      description = ''
+        The exact nixward-daemon package to use. Bind this explicitly to the
+        standalone flake revision used by the host.
+      '';
     };
 
     snapshotInterval = lib.mkOption {
@@ -176,10 +178,6 @@ in {
         Group = cfg.group;
         Restart = "on-failure";
         RestartSec = 10;
-
-        # State directory
-        StateDirectory = "nixward";
-        StateDirectoryMode = "0750";
 
         # Read-only access to system state
         ReadOnlyPaths = [
