@@ -63,8 +63,7 @@ nixward observe journal
 # System health check
 nixward doctor
 
-# Rebuild with consciousness gating
-nixward rebuild switch
+# Rebuild with consciousness gating; an explicit host flake selector is required
 nixward rebuild switch --flake ".#myhost"
 
 # Generation management
