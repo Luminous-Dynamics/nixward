@@ -122,22 +122,24 @@ Configure via environment:
 
 ## NixOS Module
 
-Add to your `flake.nix`:
+Add the standalone flake as an input and bind the daemon package explicitly:
 
 ```nix
 {
-  inputs.symthaea.url = "github:luminous-dynamics/symthaea";
+  inputs.nixward.url = "github:Luminous-Dynamics/nixward";
 
-  outputs = { self, nixpkgs, symthaea, ... }: {
+  outputs = { self, nixpkgs, nixward, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
       modules = [
-        symthaea.nixosModules.nixward
+        nixward.nixosModules.nixward
         {
           services.nixward = {
             enable = true;
-            snapshotInterval = 60;  # seconds between observations
-            pollInterval = 5;       # seconds between journal checks
-            surpriseThreshold = 0.3; # prediction error threshold
+            package = nixward.packages.x86_64-linux.nixward-daemon;
+            snapshotInterval = 60;
+            pollInterval = 5;
+            surpriseThreshold = 0.3;
           };
         }
       ];
@@ -145,6 +147,9 @@ Add to your `flake.nix`:
   };
 }
 ```
+
+The package binding is deliberate: the host never falls back to an ambient
+`pkgs.nixward-daemon` or an old monorepo checkout.
 
 The module creates a hardened systemd service with:
 - Dedicated `nixward` user/group
@@ -186,7 +191,7 @@ User input is processed through the Free Energy Principle:
 
 ```bash
 # Enter dev shell
-nix develop ./crates/nixward
+nix develop
 
 # Build
 cargo build -p nixward --features cli
@@ -220,4 +225,4 @@ Measured on 16,384-dim vectors (criterion, release mode):
 
 ## License
 
-MIT
+AGPL-3.0-or-later
