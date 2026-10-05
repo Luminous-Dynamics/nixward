@@ -54,15 +54,20 @@ fn main() {
             cmd_search(&query, options, limit, cli.format);
         }
 
-        Command::Rebuild {
-            mode,
-            flake,
-            extra_args,
-        } => {
+        Command::Rebuild { mode, flake } => {
             let cmd = match mode {
-                RebuildMode::Switch => NixOSCommand::RebuildSwitch { flake, extra_args },
-                RebuildMode::Test => NixOSCommand::RebuildTest { flake, extra_args },
-                RebuildMode::Boot => NixOSCommand::RebuildBoot { flake, extra_args },
+                RebuildMode::Switch => NixOSCommand::RebuildSwitch {
+                    flake,
+                    extra_args: Vec::new(),
+                },
+                RebuildMode::Test => NixOSCommand::RebuildTest {
+                    flake,
+                    extra_args: Vec::new(),
+                },
+                RebuildMode::Boot => NixOSCommand::RebuildBoot {
+                    flake,
+                    extra_args: Vec::new(),
+                },
             };
             cmd_execute(cmd, cli.dry_run, cli.phi, cli.approve);
         }
