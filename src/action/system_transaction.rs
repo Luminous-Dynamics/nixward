@@ -146,8 +146,8 @@ impl SystemTransaction {
         authorization: &ChangeAuthorization,
     ) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if self.validation.is_none() {
-            return Err("authorization requires validation evidence".into());
+        if !matches!(self.phase, TransactionPhase::Validated) || self.validation.is_none() {
+            return Err("authorization requires completed validation evidence".into());
         }
         authorization.validate_plan(plan)?;
         self.authorization = Some(AuthorizationReceipt {
@@ -193,8 +193,11 @@ impl SystemTransaction {
         recovery_binding_digest: [u8; 32],
     ) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if self.validation.is_none() {
-            return Err("snapshot cannot be recorded before validation".into());
+        if !matches!(self.phase, TransactionPhase::Authorized)
+            || self.validation.is_none()
+            || self.authorization.is_none()
+        {
+            return Err("snapshot requires validated and authorized transaction intent".into());
         }
         if pre_state_digest == [0; 32] || recovery_binding_digest == [0; 32] {
             return Err("snapshot digests must be non-zero".into());
@@ -216,11 +219,12 @@ impl SystemTransaction {
         exit_status: i32,
     ) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if self.authorization.is_none()
+        if !matches!(self.phase, TransactionPhase::Snapshotted)
+            || self.authorization.is_none()
             || self.validation.is_none()
             || self.snapshot.is_none()
         {
-            return Err("application requires authorization, validation, and snapshot evidence".into());
+            return Err("application requires authorized, validated, and snapshotted transaction intent".into());
         }
         if command_digest == [0; 32] {
             return Err("application command digest must be non-zero".into());
@@ -298,8 +302,10 @@ impl SystemTransaction {
 
     pub fn recover(&mut self, plan: &ChangePlan, reason: impl Into<String>) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if self.snapshot.is_none() {
-            return Err("recovery requires snapshot/recovery evidence".into());
+        if !matches!(self.phase, TransactionPhase::Failed | TransactionPhase::Verified)
+            || self.snapshot.is_none()
+        {
+            return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
         }
         self.phase = TransactionPhase::Recovered;
         self.outcome = Some(OutcomeReceipt {
@@ -368,6 +374,17 @@ mod tests {
         assert_eq!(tx.plan_digest, digest_hex(&plan.digest()));
         assert_eq!(tx.target_machine_digest, digest_hex(&plan.machine().digest()));
         assert_eq!(tx.transaction_id, transaction_id(&plan));
+    }
+
+    #[test]
+    fn snapshot_requires_authorization_even_after_validation() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        assert!(tx.record_snapshot(&plan, [4; 32], [5; 32]).is_err());
+
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
     }
 
     #[test]
