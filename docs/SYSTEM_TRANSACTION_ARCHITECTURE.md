@@ -158,6 +158,111 @@ candidate → boot attempt → health assessment
 Recovery must itself be bounded by the original transaction and must never
 silently overwrite concurrent operator changes.
 
+## Federated organizational profiles
+
+Nixward should support portable policy profiles for individuals, teams,
+enterprises, regulated environments, and public/community baselines.
+
+The profile is deliberately not a second executable configuration language.
+It is semantic policy that the Nixward planner resolves against authoritative
+target observations and the operator's desired state.
+
+A profile may contain:
+
+- stable profile identity and version
+- publisher and provenance metadata
+- applicability constraints (architecture, environment, labels)
+- composable inherited profiles identified by content digest
+- semantic rules such as required/prohibited capabilities or settings
+- references to external control frameworks, including OSCAL identifiers
+- extension metadata that cannot silently alter rule semantics
+
+Recommended composition:
+
+public/industry baseline
+        ↓
+organization baseline
+        ↓
+department / workload role
+        ↓
+machine-specific overlay
+        ↓
+owner or operator intent
+
+Composition is not "last writer wins". If two required rules conflict, the
+resolver must produce a deterministic conflict record and block realization
+until the conflict is resolved or an explicitly authorized exception exists.
+
+### Standards interoperability
+
+OSCAL should be treated as the interoperability layer for control catalogs,
+baselines, parameters, and control mappings rather than as Nixward's internal
+execution format. OSCAL Profiles are already designed to select and tailor
+controls and can be composed from multiple catalogs/profiles.
+
+Nixward semantic rules can reference OSCAL controls without importing OSCAL
+semantics into the privileged execution engine. This preserves a small,
+auditable internal model while allowing organizations to map their baselines
+to established frameworks.
+
+For distributed profile delivery, use content-addressed profile references
+and an explicit trust policy. TUF is a strong candidate for repository
+metadata, delegated publishers, expiration, rollback resistance, and key
+compromise containment. TUF's delegated roles allow trust to be scoped to
+specific targets rather than granting every publisher universal authority.
+
+For resulting system/build evidence, prefer interoperable in-toto/SLSA
+attestation structures where they fit. These should describe provenance and
+verification evidence; they must not be confused with owner authorization.
+
+### Trust boundaries
+
+A downloaded profile is untrusted policy data until:
+
+1. the retrieval channel's metadata is verified,
+2. the expected profile digest matches,
+3. the profile schema validates,
+4. its applicability is checked against the target,
+5. its composition is conflict-free,
+6. its resulting plan is independently validated,
+7. and the final exact plan is authorized.
+
+Profile publisher trust and machine-mutation authority are separate domains.
+
+A company can publish a mandatory engineering baseline without gaining the
+ability to silently mutate a personal machine. Conversely, an enrolled
+enterprise machine can receive organization authority only through an
+explicit machine enrollment and authority policy.
+
+### Exceptions
+
+Exceptions must be first-class, time-bounded, and attached to exact rules.
+
+An exception should identify:
+
+- profile/rule being excepted
+- reason
+- scope
+- issuer
+- issuance and expiry
+- exact affected target(s)
+- evidence or compensating control
+- authorization
+
+Never encode exceptions by silently editing or deleting the inherited rule.
+
+## Profile lifecycle
+
+Profiles follow the same evidence discipline as system changes:
+
+publish → retrieve → authenticate → validate → compose → plan → authorize →
+apply → verify → attest
+
+A profile update therefore cannot directly change a machine. It changes the
+set of constraints from which a future SystemPlan is generated.
+
+This creates a clean separation between policy distribution and machine control.
+
 ## Installation and management are the same model
 
 The installer should not have a special privileged path.
