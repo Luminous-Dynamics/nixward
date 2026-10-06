@@ -1,0 +1,241 @@
+# Nixward System Transaction Architecture
+
+## Purpose
+
+Nixward is the sovereign system control plane for NixOS. Installation, rebuilds,
+service changes, software realization, boot promotion, recovery, and other
+consequential operations should converge on one safety model:
+
+**observe → plan → validate → authorize → snapshot → apply → verify → promote/recover**
+
+The goal is not to make an AI more powerful than the owner. The goal is to make
+machine state transitions understandable, reproducible, cryptographically
+authorized, and recoverable.
+
+## Authority boundary
+
+Cognitive subsystems are advisory:
+
+- HDC similarity
+- active inference
+- causal reasoning
+- generated explanations
+- Phi / confidence / decision-quality signals
+- natural-language conversation
+
+None of these is an authorization primitive.
+
+A consequential mutation requires explicit authorization over the exact change
+intent. Natural-language phrases such as "yes", "install", or "go ahead" must
+never be treated as cryptographic approval.
+
+The current detached Ed25519 authority protocol remains the authority layer.
+Owner authority and release authority remain separate.
+
+## Canonical transaction
+
+A system transaction is the logical unit connecting a proposed change to its
+evidence and resulting state.
+
+Conceptually:
+
+```
+Transaction
+├── transaction identity
+├── target identity
+├── observed pre-state
+├── desired-state / command intent
+├── generated plan
+├── validation evidence
+├── authority evidence
+├── rollback / recovery binding
+├── application receipt
+├── observed post-state
+├── verification receipt
+└── promotion or recovery outcome
+```
+
+The transaction must be bound to the exact target and exact mutation. A change
+made after approval is a different transaction.
+
+## Lifecycle
+
+### 1. Observe
+
+Collect target-side facts and retain provenance.
+
+Each fact should be classifiable as:
+
+- observed directly
+- user specified
+- derived / inferred
+- defaulted
+- unknown
+
+Browser-side observations may improve the preview, but target-side observations
+are authoritative for machine-affecting decisions.
+
+### 2. Plan
+
+Construct a typed ChangePlan. It must bind:
+
+- machine identity
+- exact configuration mutation, if any
+- exact structured command, if any
+- rollback binding
+- nonce
+- issuance time
+- expiry
+
+The plan digest is the stable subject for authorization.
+
+### 3. Validate
+
+Validation is read-only and should establish, as applicable:
+
+- syntax
+- Nix evaluation
+- flake integrity
+- target compatibility
+- policy compliance
+- safety constraints
+- immutable closure identity
+- recovery feasibility
+
+Validation failure never becomes authorization.
+
+### 4. Authorize
+
+The owner/operator authorizes the exact plan.
+
+Authority verification must establish:
+
+- trusted signer
+- non-revocation
+- permitted action
+- exact subject
+- exact target / Holon
+- exact audience
+- freshness
+- valid signature
+
+Replay protection is consumed only immediately before the real mutation.
+
+### 5. Snapshot
+
+Before mutation, capture enough state to support safe rollback/recovery.
+
+For configuration changes this includes exact pre-state. For generation
+changes it includes the previous generation and the resulting expected
+generation / closure. For destructive storage changes, the transaction must
+carry an explicit recovery strategy or be blocked.
+
+### 6. Apply
+
+Only the already-authorized exact command/patch/capability may execute.
+
+The executor must not reinterpret the approved request or substitute a new
+command.
+
+### 7. Verify
+
+A successful process exit is not sufficient.
+
+Verification should observe the resulting target state and compare it with the
+expected post-state. For a boot-changing transaction, post-reboot health is
+part of the verification boundary.
+
+### 8. Promote or recover
+
+For generation-changing operations:
+
+```
+candidate → boot attempt → health assessment
+                              ├─ healthy → bless/promote
+                              └─ unhealthy → recover/rollback
+```
+
+Recovery must itself be bounded by the original transaction and must never
+silently overwrite concurrent operator changes.
+
+## Installation and management are the same model
+
+The installer should not have a special privileged path.
+
+An install is a high-impact System Transaction whose plan contains:
+
+- authoritative hardware snapshot
+- disk topology / Disko plan
+- boot policy
+- encryption policy
+- generated NixOS configuration
+- immutable system closure expectation
+- recovery generation/media strategy
+- owner authorization
+- application evidence
+- boot verification
+
+The management UI should use the same transaction primitives for:
+
+- configuration changes
+- rebuilds
+- service actions
+- software realization
+- garbage collection
+- boot changes
+- recovery
+
+This removes the architecture smell of an installer plus a separate admin tool.
+
+## Boot trust
+
+For systems using systemd-boot/UKI style boot assessment, the transaction should
+remain pending until the new generation reaches the configured boot-complete
+health boundary.
+
+A candidate generation is not "successful" merely because nixos-rebuild
+returned zero. Promotion requires actual post-boot evidence.
+
+## Recovery invariant
+
+Every consequential transaction should answer:
+
+**"How do we get back to the last known-good state?"**
+
+If no bounded recovery path exists, the action should either be classified as
+non-reversible and require stronger explicit treatment, or be refused.
+
+## Spore boundary
+
+Spore remains the portable/browser embodiment.
+
+Nixward remains the authoritative machine-management implementation.
+
+The stable boundary should be serialized and versioned rather than exposing
+Nixward implementation types directly through the Spore WASM build.
+
+The existing sovereign configuration/conversation APIs are useful compatibility
+seams during migration, but new privileged semantics should use the canonical
+transaction protocol.
+
+## Immediate implementation sequence
+
+1. Keep the existing ChangePlan/ChangeAuthorization machinery as the security
+   foundation.
+2. Add transaction/receipt types only where they collapse an actual duplicated
+   lifecycle; do not introduce a second parallel authorization model.
+3. Add target-state observation and post-state verification to high-impact
+   operations.
+4. Connect generation-changing transactions to boot health and promotion.
+5. Convert installer and management UIs to display transaction identity,
+   provenance, authorization, verification, and recovery.
+6. Complete the Spore/Nixward boundary extraction after contract fixtures prove
+   compatibility.
+
+## Current hardening note
+
+ChangePlan freshness now rejects future-dated plans, malformed freshness
+windows, policy-overlong TTLs, and zero nonces. This protects against a valid
+but not-yet-effective plan becoming executable before its declared issuance
+time.
+
