@@ -18,7 +18,7 @@ content locations.
 
 ## Lifecycle
 
-planned -> authorized -> validated -> snapshotted -> applied -> verified -> promoted
+planned -> validated -> authorized -> snapshotted -> applied -> verified -> promoted
 
 Failure may terminate at failed, followed by bounded recovered when a valid
 recovery binding exists. Promotion is forbidden when boot-health evidence is false.
@@ -44,10 +44,13 @@ separate concerns.
 ## State-machine invariants
 
 Consumer state transitions are ordered as planned -> validated -> authorized ->
-validation before authorization, snapshot without authorization plus validation,
-authorization/validation/snapshot, command-digest mismatches, verification before
-successful application, promotion before verification, unhealthy promotion, and
-recovery without snapshot/recovery evidence.
+snapshotted -> applied -> verified -> promoted.
+
+A consumer must reject unsupported schema/version, plan or target mismatches,
+validation after authorization, snapshot without authorization plus validation,
+application without authorization/validation/snapshot, command-digest mismatches,
+verification before successful application, promotion before verification, unhealthy
+promotion, and recovery without snapshot/recovery evidence.
 
 A transaction is terminal only in promoted, recovered, or failed.
 
