@@ -345,6 +345,20 @@ mod tests {
     }
 
     #[test]
+    fn wire_fixture_round_trips_with_stable_schema() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/system-transaction-v1.json"
+        ));
+        let parsed: SystemTransaction = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.schema, SYSTEM_TRANSACTION_SCHEMA);
+        assert_eq!(parsed.version, SYSTEM_TRANSACTION_VERSION);
+        assert_eq!(parsed.phase, TransactionPhase::Planned);
+        assert!(!parsed.is_terminal());
+        assert!(parsed.digest_hex().unwrap().len() == 64);
+    }
+
+    #[test]
     fn transaction_id_is_bound_to_plan_and_nonce() {
         let plan = plan();
         let tx = SystemTransaction::planned(&plan);
