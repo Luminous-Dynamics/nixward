@@ -4,6 +4,14 @@ nixward brings hyperdimensional computing (HDC) and active inference to NixOS sy
 
 Part of the [Symthaea](https://luminousdynamics.org) cognitive architecture.
 
+## System Transaction Architecture
+
+Consequential machine changes use an evidence-bound transaction lifecycle:
+
+**observe → plan → validate → authorize → snapshot → apply → verify → promote/recover**
+
+Cognitive signals and natural-language conversation are advisory only; they never constitute machine-mutation authority. See [docs/SYSTEM_TRANSACTION_ARCHITECTURE.md](docs/SYSTEM_TRANSACTION_ARCHITECTURE.md) for the canonical model.
+
 
 ## Software Ingress Covenant
 
