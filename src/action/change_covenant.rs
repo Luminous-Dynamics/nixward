@@ -308,11 +308,36 @@ impl ChangePlan {
         self.expires_at_ms
     }
 
-    pub fn validate_fresh(&self) -> Result<(), String> {
-        if now_ms() > self.expires_at_ms {
+    /// Validate the plan against an explicit wall-clock instant.
+    ///
+    /// Plans arriving from an external caller must not become executable before
+    /// their declared issuance time. This is intentionally separate from
+    /// cryptographic binding: a valid digest is not proof that the freshness
+    /// window is currently valid.
+    pub fn validate_fresh_at(&self, now_ms: u64) -> Result<(), String> {
+        if self.version != 1 {
+            return Err("unsupported change plan version".into());
+        }
+        if self.expires_at_ms <= self.issued_at_ms {
+            return Err("change plan has an invalid freshness window".into());
+        }
+        if self.expires_at_ms - self.issued_at_ms > MAX_PLAN_TTL_MS {
+            return Err("change plan TTL exceeds policy".into());
+        }
+        if now_ms < self.issued_at_ms {
+            return Err("change plan is not yet valid".into());
+        }
+        if now_ms > self.expires_at_ms {
             return Err("change plan expired".into());
         }
+        if self.nonce == [0; 32] {
+            return Err("change plan nonce is invalid".into());
+        }
         Ok(())
+    }
+
+    pub fn validate_fresh(&self) -> Result<(), String> {
+        self.validate_fresh_at(now_ms())
     }
 
     pub fn validate_machine(&self, machine: &MachineBinding) -> Result<(), String> {
@@ -741,6 +766,38 @@ mod tests {
         let second = ChangePlan::command_only(machine, command(), 60_000).unwrap();
         assert_ne!(first.nonce(), second.nonce());
         assert_ne!(first.digest(), second.digest());
+    }
+
+    #[test]
+    fn future_dated_plan_is_not_yet_valid() {
+        let machine = MachineBinding::new("machine-a").unwrap();
+        let plan = ChangePlan::command_only(machine, command(), 60_000).unwrap();
+        assert!(plan.validate_fresh_at(plan.expires_at_ms()).is_ok());
+
+        let future = plan.issued_at_ms + 1;
+        assert!(plan.validate_fresh_at(plan.issued_at_ms - 1).is_err());
+        assert!(plan.validate_fresh_at(future).is_ok());
+    }
+
+    #[test]
+    fn malformed_freshness_window_is_rejected() {
+        let machine = MachineBinding::new("machine-a").unwrap();
+        let mut plan = ChangePlan::command_only(machine, command(), 60_000).unwrap();
+
+        plan.expires_at_ms = plan.issued_at_ms;
+        assert!(plan.validate_fresh_at(plan.issued_at_ms).is_err());
+
+        let mut plan = ChangePlan::command_only(
+            MachineBinding::new("machine-a").unwrap(),
+            command(),
+            60_000,
+        )
+        .unwrap();
+        plan.expires_at_ms = plan.issued_at_ms + MAX_PLAN_TTL_MS + 1;
+        assert!(plan.validate_fresh_at(plan.issued_at_ms).is_err());
+
+        plan.nonce = [0; 32];
+        assert!(plan.validate_fresh_at(plan.issued_at_ms).is_err());
     }
 
     #[test]
