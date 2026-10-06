@@ -146,6 +146,9 @@ impl SystemTransaction {
         authorization: &ChangeAuthorization,
     ) -> Result<(), String> {
         self.ensure_identity(plan)?;
+        if self.validation.is_none() {
+            return Err("authorization requires validation evidence".into());
+        }
         authorization.validate_plan(plan)?;
         self.authorization = Some(AuthorizationReceipt {
             issuer: authorization.issuer().to_string(),
@@ -169,8 +172,8 @@ impl SystemTransaction {
         summary: impl Into<String>,
     ) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if self.authorization.is_none() {
-            return Err("validation cannot be recorded before authorization in this envelope".into());
+        if !matches!(self.phase, TransactionPhase::Planned) {
+            return Err("validation must occur before authorization and snapshot".into());
         }
         if evidence_digest == [0; 32] {
             return Err("validation evidence digest must be non-zero".into());
@@ -374,9 +377,10 @@ mod tests {
         let mut tx = SystemTransaction::planned(&plan);
 
         assert!(tx.record_snapshot(&plan, [1; 32], [2; 32]).is_err());
-        tx.authorize(&plan, &auth).unwrap();
+        assert!(tx.authorize(&plan, &auth).is_err());
         tx.record_validation(&plan, [3; 32], "syntax + policy validation")
             .unwrap();
+        tx.authorize(&plan, &auth).unwrap();
         tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
 
         let command = plan.command().unwrap().command_digest();
@@ -395,8 +399,8 @@ mod tests {
         let plan = plan();
         let auth = authorization(&plan);
         let mut tx = SystemTransaction::planned(&plan);
-        tx.authorize(&plan, &auth).unwrap();
         tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &auth).unwrap();
         tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
 
         let command = plan.command().unwrap().command_digest();
@@ -414,8 +418,8 @@ mod tests {
         let plan = plan();
         let auth = authorization(&plan);
         let mut tx = SystemTransaction::planned(&plan);
-        tx.authorize(&plan, &auth).unwrap();
         tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &auth).unwrap();
         tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
         let command = plan.command().unwrap().command_digest();
         tx.record_application(&plan, command, 10, 20, 0).unwrap();
