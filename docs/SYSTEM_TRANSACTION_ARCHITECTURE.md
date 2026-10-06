@@ -317,7 +317,10 @@ Spore remains the portable/browser embodiment.
 Nixward remains the authoritative machine-management implementation.
 
 The stable boundary should be serialized and versioned rather than exposing
-Nixward implementation types directly through the Spore WASM build.
+Nixward implementation types directly through the Spore WASM build. The current
+wire contract is defined in [docs/SYSTEM_TRANSACTION_WIRE_V1.md](SYSTEM_TRANSACTION_WIRE_V1.md)
+with a machine-readable compatibility fixture in
+[docs/fixtures/system-transaction-v1.json](fixtures/system-transaction-v1.json).
 
 The existing sovereign configuration/conversation APIs are useful compatibility
 seams during migration, but new privileged semantics should use the canonical
