@@ -1,0 +1,14 @@
+{
+  "schema": "luminous-nixward-system-transaction-v1",
+  "version": 1,
+  "transaction_id": "0000000000000000000000000000000000000000000000000000000000000000",
+  "target_machine_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "plan_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "phase": "planned",
+  "authorization": null,
+  "validation": null,
+  "snapshot": null,
+  "application": null,
+  "verification": null,
+  "outcome": null
+}
