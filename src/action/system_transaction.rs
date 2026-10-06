@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 const TRANSACTION_DOMAIN: &[u8] = b"nixward-system-transaction-v1\0";
 pub const SYSTEM_TRANSACTION_SCHEMA: &str = "luminous-nixward-system-transaction-v1";
 pub const SYSTEM_TRANSACTION_VERSION: u16 = 1;
+const MAX_ISSUER_BYTES: usize = 256;
+const MAX_SUMMARY_BYTES: usize = 4096;
+const MAX_REASON_BYTES: usize = 4096;
+const MAX_SIGNER_KEY_ID_BYTES: usize = 256;
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -150,6 +154,9 @@ impl SystemTransaction {
             return Err("authorization requires completed validation evidence".into());
         }
         authorization.validate_plan(plan)?;
+        if authorization.issuer().len() > MAX_ISSUER_BYTES {
+            return Err("authorization issuer exceeds wire limit".into());
+        }
         self.authorization = Some(AuthorizationReceipt {
             issuer: authorization.issuer().to_string(),
             evidence_digest: digest_hex(&authorization.evidence_digest()),
@@ -178,9 +185,13 @@ impl SystemTransaction {
         if evidence_digest == [0; 32] {
             return Err("validation evidence digest must be non-zero".into());
         }
+        let summary = summary.into();
+        if summary.len() > MAX_SUMMARY_BYTES {
+            return Err("validation summary exceeds wire limit".into());
+        }
         self.validation = Some(ValidationReceipt {
             evidence_digest: digest_hex(&evidence_digest),
-            summary: summary.into(),
+            summary,
         });
         self.phase = TransactionPhase::Validated;
         Ok(())
@@ -231,6 +242,13 @@ impl SystemTransaction {
         }
         if finished_at_ms < started_at_ms {
             return Err("application receipt has an invalid time range".into());
+        }
+        if let Some(authorization) = &self.authorization {
+            if let Some(signer_key_id) = &authorization.signer_key_id {
+                if signer_key_id.len() > MAX_SIGNER_KEY_ID_BYTES {
+                    return Err("authorization signer key id exceeds wire limit".into());
+                }
+            }
         }
         let Some(command) = plan.command() else {
             return Err("application receipt requires a command-backed change plan".into());
@@ -307,15 +325,141 @@ impl SystemTransaction {
         {
             return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
         }
+        let reason = reason.into();
+        if reason.len() > MAX_REASON_BYTES {
+            return Err("recovery reason exceeds wire limit".into());
+        }
         self.phase = TransactionPhase::Recovered;
         self.outcome = Some(OutcomeReceipt {
             phase: TransactionPhase::Recovered,
-            reason: Some(reason.into()),
+            reason: Some(reason),
         });
         Ok(())
     }
 
+    pub fn validate_wire(&self) -> Result<(), String> {
+        if self.schema != SYSTEM_TRANSACTION_SCHEMA || self.version != SYSTEM_TRANSACTION_VERSION {
+            return Err("unsupported system transaction schema".into());
+        }
+
+        for (label, value) in [
+            ("transaction_id", &self.transaction_id),
+            ("target_machine_digest", &self.target_machine_digest),
+            ("plan_digest", &self.plan_digest),
+        ] {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!("{label} must be 64 lowercase hexadecimal characters"));
+            }
+        }
+
+        if let Some(auth) = &self.authorization {
+            if auth.issuer.is_empty() || auth.issuer.len() > MAX_ISSUER_BYTES {
+                return Err("authorization issuer has invalid size".into());
+            }
+            if auth.evidence_digest.len() != 64
+                || !auth
+                    .evidence_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err("authorization evidence digest is invalid".into());
+            }
+            if let Some(value) = &auth.signer_key_id {
+                if value.is_empty() || value.len() > MAX_SIGNER_KEY_ID_BYTES {
+                    return Err("authorization signer key id has invalid size".into());
+                }
+            }
+            for (label, value) in [
+                ("authorization challenge", &auth.challenge_blake3),
+                ("authorization replay", &auth.replay_key),
+            ] {
+                if let Some(value) = value {
+                    if value.len() != 64
+                        || !value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        return Err(format!("{label} digest is invalid"));
+                    }
+                }
+            }
+        }
+
+        if let Some(validation) = &self.validation {
+            if validation.evidence_digest.len() != 64
+                || !validation
+                    .evidence_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err("validation evidence digest is invalid".into());
+            }
+            if validation.summary.len() > MAX_SUMMARY_BYTES {
+                return Err("validation summary exceeds wire limit".into());
+            }
+        }
+
+        if let Some(snapshot) = &self.snapshot {
+            for (label, value) in [
+                ("snapshot pre-state", &snapshot.pre_state_digest),
+                ("snapshot recovery", &snapshot.recovery_binding_digest),
+            ] {
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(format!("{label} digest is invalid"));
+                }
+            }
+        }
+
+        if let Some(application) = &self.application {
+            if application.command_digest.len() != 64
+                || !application
+                    .command_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err("application command digest is invalid".into());
+            }
+            if application.finished_at_ms < application.started_at_ms {
+                return Err("application receipt has an invalid time range".into());
+            }
+        }
+
+        if let Some(verification) = &self.verification {
+            for (label, value) in [
+                ("verification post-state", &verification.post_state_digest),
+                ("verification evidence", &verification.evidence_digest),
+            ] {
+                if value.len() != 64
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                {
+                    return Err(format!("{label} digest is invalid"));
+                }
+            }
+        }
+
+        if let Some(outcome) = &self.outcome {
+            if let Some(reason) = &outcome.reason {
+                if reason.len() > MAX_REASON_BYTES {
+                    return Err("outcome reason exceeds wire limit".into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn digest(&self) -> Result<[u8; 32], String> {
+        self.validate_wire()?;
         let bytes = serde_json::to_vec(self).map_err(|error| error.to_string())?;
         Ok(*blake3::hash(bytes.as_slice()).as_bytes())
     }
@@ -351,6 +495,22 @@ mod tests {
 
     fn authorization(plan: &ChangePlan) -> ChangeAuthorization {
         ChangeAuthorization::from_verified_approval(plan, "test-owner", [7; 32]).unwrap()
+    }
+
+    #[test]
+    fn external_wire_receipts_are_bounded_and_structurally_validated() {
+        let mut tx = SystemTransaction::planned(&plan());
+        assert!(tx.validate_wire().is_ok());
+
+        tx.transaction_id = "A".repeat(64);
+        assert!(tx.validate_wire().is_err());
+
+        let mut tx = SystemTransaction::planned(&plan());
+        tx.validation = Some(ValidationReceipt {
+            evidence_digest: "00".repeat(32),
+            summary: "x".repeat(MAX_SUMMARY_BYTES + 1),
+        });
+        assert!(tx.validate_wire().is_err());
     }
 
     #[test]
