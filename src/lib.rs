@@ -129,6 +129,8 @@ pub mod observability;
 #[cfg(feature = "native")]
 pub use action::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
 #[cfg(feature = "native")]
+pub use action::system_transaction::{SystemTransaction, TransactionPhase};
+#[cfg(feature = "native")]
 pub use action::executor::{
     ExecutionAuthorization, ExecutionResult, HostExecutionPolicy, NixOSCommand, NixOSExecutor,
     SafetyLevel,
