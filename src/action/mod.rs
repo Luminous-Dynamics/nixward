@@ -20,6 +20,7 @@ pub mod generation_manager;
 pub mod phi_gate;
 pub mod plan_executor;
 pub mod service_manager;
+pub mod system_transaction;
 
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
@@ -46,3 +47,8 @@ pub use generation_manager::{Generation, GenerationDiff, GenerationManager};
 pub use phi_gate::{classify_command_destructiveness, get_nixos_rollback};
 pub use plan_executor::{PlanExecutionResult, PlanExecutor, PlanStep, StepStatus};
 pub use service_manager::{ServiceManager, ServiceStatus};
+pub use system_transaction::{
+    ApplicationReceipt, AuthorizationReceipt, OutcomeReceipt, SnapshotReceipt,
+    SystemTransaction, TransactionPhase, ValidationReceipt, VerificationReceipt,
+    SYSTEM_TRANSACTION_SCHEMA, SYSTEM_TRANSACTION_VERSION,
+};
