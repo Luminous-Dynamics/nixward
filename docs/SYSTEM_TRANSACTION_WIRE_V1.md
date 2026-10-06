@@ -43,8 +43,8 @@ separate concerns.
 
 ## State-machine invariants
 
-A consumer must reject unsupported schema/version, plan or target mismatches,
-validation without authorization, snapshot without validation, application without
+Consumer state transitions are ordered as planned -> validated -> authorized ->
+validation before authorization, snapshot without authorization plus validation,
 authorization/validation/snapshot, command-digest mismatches, verification before
 successful application, promotion before verification, unhealthy promotion, and
 recovery without snapshot/recovery evidence.
