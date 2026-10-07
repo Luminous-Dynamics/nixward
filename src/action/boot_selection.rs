@@ -45,6 +45,7 @@ pub struct BlsEntry {
     pub machine_id: Option<String>,
     pub linux: Option<String>,
     pub initrd: Vec<String>,
+    pub options: Option<String>,
     pub efi: Option<String>,
     pub uki: Option<String>,
     pub boot_count_state: BootCountState,
@@ -86,6 +87,7 @@ pub fn parse_bls_entry(entry_id: &str, text: &str) -> Result<BlsEntry, String> {
     let mut machine_id = None;
     let mut linux = None;
     let mut initrd = Vec::new();
+    let mut options = None;
     let mut efi = None;
     let mut uki = None;
 
@@ -105,6 +107,7 @@ pub fn parse_bls_entry(entry_id: &str, text: &str) -> Result<BlsEntry, String> {
             "machine-id" => machine_id = Some(value.to_string()),
             "linux" => linux = Some(value.to_string()),
             "initrd" => initrd.push(value.to_string()),
+            "options" => options = Some(value.to_string()),
             "efi" => efi = Some(value.to_string()),
             "uki" => uki = Some(value.to_string()),
             _ => {}
@@ -122,6 +125,7 @@ pub fn parse_bls_entry(entry_id: &str, text: &str) -> Result<BlsEntry, String> {
         machine_id,
         linux,
         initrd,
+        options,
         efi,
         uki,
         boot_count_state,
@@ -260,6 +264,21 @@ fn exact_store_path_from_entry(entry: &BlsEntry) -> Option<String> {
             && value.contains("-nixos-system-")
     })
     .map(str::to_string)
+    .or_else(|| {
+        entry.options.as_deref().and_then(|options| {
+            options.split_whitespace().find_map(|token| {
+                let init = token.strip_prefix("init=")?;
+                let store_path = init.strip_suffix("/init")?;
+                if super::execution_intent::is_valid_nix_store_path(store_path)
+                    && store_path.contains("-nixos-system-")
+                {
+                    Some(store_path.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+    )
 }
 
 fn contains_selection_pattern(value: &str) -> bool {
@@ -328,8 +347,9 @@ mod tests {
             r#"title NixOS
 version 6.12
 machine-id 0123456789abcdef0123456789abcdef
-linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate
-initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
+linux /EFI/nixos/abc-linux-6.12.efi
+initrd /EFI/nixos/def-initrd.efi
+options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet
 "#,
         );
 
@@ -355,14 +375,14 @@ initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
             "candidate.conf".into(),
             entry(
                 "candidate.conf",
-                "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+                "linux /EFI/nixos/abc-linux-6.12.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet\n",
             ),
         );
         entries.insert(
             "old.conf".into(),
             entry(
                 "old.conf",
-                "linux /nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old\n",
+                "linux /EFI/nixos/old-linux-6.11.efi\noptions init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old/init quiet\n",
             ),
         );
 
