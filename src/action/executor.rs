@@ -954,6 +954,23 @@ impl NixOSExecutor {
             .await
     }
 
+    fn validate_exact_activation_observation(
+        observed: &str,
+        candidate: &str,
+        prior: &str,
+    ) -> Result<(), String> {
+        if observed != prior {
+            return Err(format!(
+                "pre-state drift detected: expected exact prior system closure {}, observed {}",
+                prior, observed
+            ));
+        }
+        if candidate == prior {
+            return Err("activation target is identical to the bound prior system closure".into());
+        }
+        Ok(())
+    }
+
     fn validate_exact_activation_pre_state(
         command: &NixOSCommand,
         authorization: &ExecutionAuthorization,
@@ -975,14 +992,19 @@ impl NixOSExecutor {
         let observed = GenerationManager::current_system_closure().map_err(|error| {
             format!("failed to observe current system closure before activation: {error}")
         })?;
-        if observed != *prior_closure {
+        Self::validate_exact_activation_observation(&observed, store_path, prior_closure)
+    }
+
+    fn validate_exact_recovery_observation(
+        observed: &str,
+        candidate: &str,
+        prior: &str,
+    ) -> Result<(), String> {
+        if observed != candidate && observed != prior {
             return Err(format!(
-                "pre-state drift detected: expected exact prior system closure {}, observed {}",
-                prior_closure, observed
+                "recovery refused because system state changed outside the transaction: expected {} or {}, observed {}",
+                prior, candidate, observed
             ));
-        }
-        if store_path == prior_closure {
-            return Err("activation target is identical to the bound prior system closure".into());
         }
         Ok(())
     }
@@ -1011,12 +1033,7 @@ impl NixOSExecutor {
         let observed = GenerationManager::current_system_closure().map_err(|error| {
             format!("failed to observe current system closure before recovery: {error}")
         })?;
-        if observed != *candidate && observed != *prior {
-            return Err(format!(
-                "recovery refused because system state changed outside the transaction: expected {} or {}, observed {}",
-                prior, candidate, observed
-            ));
-        }
+        Self::validate_exact_recovery_observation(&observed, candidate, prior)?;
         Ok(observed)
     }
 
@@ -1424,6 +1441,63 @@ mod tests {
         let (cmd, args) = search.to_command();
         assert_eq!(cmd, "nix");
         assert_eq!(args, vec!["search", "nixpkgs", "editor", "--json"]);
+    }
+
+    #[test]
+    fn exact_activation_observation_accepts_bound_prior_and_rejects_drift() {
+        assert!(NixOSExecutor::validate_exact_activation_observation(
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+        )
+        .is_ok());
+
+        assert!(
+            NixOSExecutor::validate_exact_activation_observation(
+                "/nix/store/11111111111111111111111111111111-nixos-system-other",
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_activation_observation_rejects_candidate_equal_to_prior() {
+        assert!(
+            NixOSExecutor::validate_exact_activation_observation(
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_recovery_observation_accepts_only_transaction_states() {
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+        )
+        .is_ok());
+
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+        )
+        .is_ok());
+
+        assert!(
+            NixOSExecutor::validate_exact_recovery_observation(
+                "/nix/store/11111111111111111111111111111111-nixos-system-other",
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            )
+            .is_err()
+        );
     }
 
     #[test]
