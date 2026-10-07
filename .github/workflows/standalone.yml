@@ -19,6 +19,7 @@ jobs:
     concurrency:
       group: standalone-bootstrap-${{ github.ref }}
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     steps:
@@ -27,12 +28,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Rebase bootstrap workspace to branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
+
+      - name: Skip when branch already has a lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -f Cargo.lock
 
       - name: Generate lockfile
         shell: bash
