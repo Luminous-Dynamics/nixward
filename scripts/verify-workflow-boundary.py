@@ -64,6 +64,22 @@ else:
         r"(?ms)^  provenance:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
+    nix_job = re.search(
+        r"(?ms)^  nix:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
+        text,
+    )
+    if not nix_job:
+        errors.append("missing Nix packaging qualification job")
+    else:
+        nix_body = nix_job.group(0)
+        for marker in [
+            "nix flake check --no-update-lock-file --no-write-lock-file",
+            "nix build .#nixward --no-update-lock-file --no-write-lock-file",
+            "persist-credentials: false",
+        ]:
+            if marker not in nix_body:
+                errors.append(f"Nix qualification job missing required marker: {marker}")
+
     if not provenance:
         errors.append("missing provenance job")
     else:
@@ -79,6 +95,8 @@ else:
             "predicate-path: qualification-predicate.json",
             "Generate signed SLSA provenance",
             "Generate signed qualification attestation",
+            "nix_flake_check",
+            "nix_package_build",
         ]
         for marker in expected:
             if marker not in body:
