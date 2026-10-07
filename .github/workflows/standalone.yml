@@ -35,24 +35,34 @@ jobs:
           git fetch origin "${GITHUB_REF_NAME}"
           git reset --hard "origin/${GITHUB_REF_NAME}"
 
+      - name: Inspect branch-tip lockfile state
+        id: lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.lock ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock already present at branch tip"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock missing; bootstrap required"
+          fi
+
       - name: Install pinned Rust toolchain
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
 
-      - name: Skip when branch already has a lockfile
-        shell: bash
-        run: |
-          set -euo pipefail
-          test ! -f Cargo.lock
-
       - name: Generate lockfile
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: cargo generate-lockfile
 
       - name: Persist generated lockfile
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
