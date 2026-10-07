@@ -215,16 +215,11 @@ impl SystemProfileInterlock {
                 format!("failed to open Nix system-profile lock {}: {error}", path.display())
             })?;
 
-        let result = unsafe {
-            nix::libc::flock(
-                file.as_raw_fd(),
-                nix::libc::LOCK_EX | nix::libc::LOCK_NB,
-            )
-        };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            let errno = error.raw_os_error();
-            if errno == Some(nix::libc::EWOULDBLOCK) || errno == Some(nix::libc::EAGAIN) {
+        if let Err(error) = nix::fcntl::flock(
+            file.as_raw_fd(),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        ) {
+            if error == nix::errno::Errno::EWOULDBLOCK {
                 return Err(format!(
                     "Nix system-profile lock {} is already held; refusing concurrent activation",
                     path.display()
@@ -252,7 +247,7 @@ impl Drop for SystemProfileInterlock {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
-            let _ = unsafe { nix::libc::flock(self.file.as_raw_fd(), nix::libc::LOCK_UN) };
+            let _ = nix::fcntl::flock(self.file.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
         }
     }
 
