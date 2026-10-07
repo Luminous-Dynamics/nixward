@@ -659,12 +659,9 @@ fn cmd_closure_prepare(
             store_path: bundle.expected_out_path().to_string(),
             action: action.to_system_activation(),
         };
-        let recovery_action = match action {
-            ClosureAction::Boot => nixward::action::SystemActivation::Boot,
-            ClosureAction::Switch | ClosureAction::Test => {
-                nixward::action::SystemActivation::Switch
-            }
-        };
+        // Recovery must preserve the same activation semantics as the
+        // transaction that failed: test must not silently become switch.
+        let recovery_action = action.to_system_activation();
         let plan = ChangePlan::command_only_with_system_recovery(
             machine,
             command,
