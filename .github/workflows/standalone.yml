@@ -141,10 +141,38 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  nix:
+    name: Nix packaging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - name: Verify standalone boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Check locked flake
+        run: nix flake check --no-update-lock-file --no-write-lock-file
+
+      - name: Build exact Nixward package
+        run: nix build .#nixward --no-update-lock-file --no-write-lock-file
+
   provenance:
     name: Signed Nixward provenance
-    needs: validate
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validate.result == 'success' }}
+    needs:
+      - validate
+      - nix
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validate.result == 'success' && needs.nix.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -195,7 +223,9 @@ jobs:
               "full_native_feature_check": "pass",
               "library_tests": "pass",
               "format_check": "pass",
-              "clippy": "pass"
+              "clippy": "pass",
+              "nix_flake_check": "pass",
+              "nix_package_build": "pass"
             },
             "inputs": {
               "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
