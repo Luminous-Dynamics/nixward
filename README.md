@@ -83,9 +83,36 @@ nixward observe journal
 nixward doctor
 
 # Preview a rebuild candidate; direct privileged nixos-rebuild
-# mutation is intentionally blocked by the host boundary
+# mutation is intentionally blocked by the host boundary.
+# Use the exact-closure flow above for privileged system activation.
 nixward rebuild switch
 nixward rebuild switch --flake ".#myhost"
+
+# Exact closure activation
+# 1. Verify the exact framework execution-intent + realization-plan pair
+nixward closure prepare \
+  --intent intent.json \
+  --realization-plan realization-plan.json \
+  --action switch \
+  --holon-id <holon-digest> \
+  --plan-out change-plan.json \
+  --challenge-out authority-challenge.json
+
+# 2. Sign authority offline; keep the private seed off the host
+nixward-owner-key sign \
+  --seed-file /secure/owner-seed \
+  --challenge authority-challenge.json \
+  --signature-out authority-signature.json \
+  --key-id owner-root-1
+
+# 3. Re-verify the exact realization + signed authority, then activate
+nixward closure activate \
+  --intent intent.json \
+  --realization-plan realization-plan.json \
+  --plan change-plan.json \
+  --signature authority-signature.json \
+  --policy authority-policy.json \
+  --holon-id <holon-digest>
 
 # Generation management
 nixward rollback
