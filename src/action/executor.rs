@@ -195,6 +195,7 @@ impl NixwardTransactionInterlock {
             .read(true)
             .write(true)
             .create(true)
+            .mode(0o600)
             .custom_flags(nix::libc::O_NOFOLLOW);
         let file = options.open(path).map_err(|error| {
             format!("failed to open Nixward transaction lock {}: {error}", path.display())
