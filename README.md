@@ -53,7 +53,7 @@ Observation ──> Encoding ──> Cognition ──> Action
    │ systemd      │ HDC         │ Active     │ Phi-gated
    │ journal      │ 16384-dim   │ Inference  │ execution
    │ store        │ vectors     │ Causal     │ with rollback
-   │ hardware     │             │ graph      │ verification
+   │ hardware     │             │ graph       │ verification
    └──────────────┴─────────────┴────────────┘
 ```
 
@@ -62,7 +62,7 @@ Observation ──> Encoding ──> Cognition ──> Action
 2. **Encoding** -- System state, options, packages, configs to HDC vectors
 3. **Mind** -- World model, active inference, causal graph, episodic memory
 4. **Observe** -- Live system state observation (systemd, journal, store, hardware)
-5. **Action** -- Consciousness-gated command execution with pre/post verification
+5. **Action** -- Evidence-bound command execution with pre/post verification
 6. **Plugin** -- Bridge to full Symthaea consciousness pipeline
 
 ## Quick Start
@@ -82,7 +82,7 @@ nixward observe journal
 # System health check
 nixward doctor
 
-# Rebuild with consciousness gating
+# Rebuild with evidence-bound authorization
 nixward rebuild switch
 nixward rebuild switch --flake ".#myhost"
 
@@ -127,7 +127,7 @@ The TUI displays six panels:
 
 Tab to switch focus. Type commands in the input panel. The TUI refreshes system data every ~4 seconds and shows `[daemon]` in the World Model title when the background daemon is running.
 
-### Daemon
+## Daemon
 
 ```bash
 nixward-daemon
@@ -195,7 +195,7 @@ User input is processed through the Free Energy Principle:
 2. Infer goal via working memory context
 3. Generate action candidates
 4. Rank by Expected Free Energy (pragmatic + epistemic value)
-5. Gate execution by consciousness level (phi)
+5. Gate execution by evidence-bound authorization and host policy
 
 ### Predictive Hierarchy
 
@@ -205,7 +205,7 @@ User input is processed through the Free Energy Principle:
 
 ```bash
 # Enter dev shell
-nix develop ./crates/nixward
+nix develop
 
 # Build
 cargo build -p nixward --features cli
@@ -213,10 +213,13 @@ cargo build -p nixward --features tui
 cargo build -p nixward --features daemon
 
 # Test
-cargo test -p nixward --features tui --lib       # 339 unit tests
-cargo test -p nixward --features cli --test cli_integration  # 24 integration tests
-cargo test -p nixward --test e2e_consciousness_loop  # 7 e2e tests
-cargo test -p nixward --test proptest_hdc            # 16 property tests
+cargo test -p nixward --features tui --lib
+cargo test -p nixward --features cli --test cli_integration
+cargo test -p nixward --test e2e_consciousness_loop
+cargo test -p nixward --test proptest_hdc
+
+# Standalone boundary
+python3 scripts/verify-standalone-boundary.py
 
 # Benchmarks
 cargo bench -p nixward --bench hdc_benchmarks
@@ -239,4 +242,4 @@ Measured on 16,384-dim vectors (criterion, release mode):
 
 ## License
 
-MIT
+AGPL-3.0-or-later. See [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).
