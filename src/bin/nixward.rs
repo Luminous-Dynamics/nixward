@@ -370,11 +370,6 @@ fn cmd_search(query: &str, options: bool, limit: usize, format: OutputFormat) {
 /// to a machine-scoped ChangePlan before deriving `ExecutionAuthorization`.
 const DEFAULT_CLI_DECISION_QUALITY: f32 = 0.35;
 
-fn format_for_cli(phi_override: Option<f64>, _dry_run: bool) -> OutputFormat {
-    let _ = phi_override;
-    OutputFormat::Human
-}
-
 fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, approve: bool) {
     let decision_quality = phi_override
         .map(|p| p as f32)
@@ -385,18 +380,7 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
     // Host policy is evaluated before approval/preview handling so a forbidden
     // operation can never be presented as an executable dry-run candidate.
     if let nixward::action::HostExecutionPolicy::Forbidden { reason } = cmd.host_execution_policy() {
-        if matches!(format_for_cli(phi_override, dry_run), OutputFormat::Json) {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "status": "blocked",
-                    "reason": reason,
-                    "safety_level": format!("{:?}", safety),
-                })
-            );
-        } else {
-            eprintln!("  Blocked: {reason}");
-        }
+        eprintln!("  Blocked: {reason}");
         return;
     }
 
