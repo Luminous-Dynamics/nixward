@@ -64,10 +64,19 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out source
+      - name: Check out exact validation subject
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert exact validation subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$expected_commit"
 
       - name: Refresh hardening branch after lock bootstrap
         if: github.event_name == 'push' && github.ref != 'refs/heads/main'
@@ -117,10 +126,13 @@ jobs:
           set -euo pipefail
           validated_commit="$(git rev-parse HEAD)"
           trigger_commit="${GITHUB_SHA}"
+          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          test "$validated_commit" = "$expected_commit"
           cat > qualification-receipt.json <<JSON
           {
             "schema": "luminous-nixward-standalone-qualification-v1",
             "validated_commit": "$validated_commit",
+            "expected_commit": "$expected_commit",
             "trigger_commit": "$trigger_commit",
             "rustc": "$(rustc --version)",
             "cargo": "$(cargo --version)",
@@ -147,10 +159,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out source
+      - name: Check out exact validation subject
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Assert exact validation subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected_commit"
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
