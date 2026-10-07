@@ -78,8 +78,8 @@ else:
         validate_body = validate_job.group(0)
         for marker in [
             "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
-            "expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"",
-            "test "$actual_commit" = "$expected_commit"",
+            "expected_commit=\"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}\"",
+            "test \"$actual_commit\" = \"$expected_commit\"",
         ]:
             if marker not in validate_body:
                 errors.append(f"validation job missing exact-subject marker: {marker}")
