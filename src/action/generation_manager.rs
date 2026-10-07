@@ -7,7 +7,8 @@
 //! Produces `NixOSCommand` values for anything that modifies state;
 //! read-only queries (list, diff) run directly.
 
-use super::executor::{NixOSCommand, SafetyLevel};
+use super::executor::{NixOSCommand, SafetyLevel, SystemActivation};
+use super::execution_intent::is_valid_nix_store_path;
 use std::process::Command;
 
 /// Manages NixOS generations: switch, rollback, delete, and boot configuration.
@@ -71,7 +72,59 @@ impl GenerationManager {
             })
     }
 
-    /// Generate a command to switch to a specific generation.
+    /// Resolve one NixOS generation to its exact immutable system closure.
+    ///
+    /// The generation link itself is mutable profile state; authorization must
+    /// bind the resolved store closure rather than the generation number.
+    pub fn exact_generation_closure(generation: u32) -> Result<String, std::io::Error> {
+        let link_path = format!("/nix/var/nix/profiles/system-{generation}-link");
+        let target = std::fs::read_link(&link_path)?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            std::path::Path::new("/nix/var/nix/profiles").join(target)
+        };
+        let store_path = target.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "generation link target is not valid UTF-8",
+            )
+        })?;
+        if !is_valid_nix_store_path(store_path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "generation link does not resolve to a canonical Nix store path",
+            ));
+        }
+        Ok(store_path.to_string())
+    }
+
+    /// Construct the canonical immutable activation command for one generation.
+    pub fn activate_generation(
+        generation: u32,
+        action: SystemActivation,
+    ) -> Result<NixOSCommand, std::io::Error> {
+        let store_path = Self::exact_generation_closure(generation)?;
+        Ok(NixOSCommand::ActivateSystemClosure { store_path, action })
+    }
+
+    /// Resolve the newest generation older than the current one.
+    pub fn previous_generation() -> Result<u32, std::io::Error> {
+        let current = Self::current_generation()?;
+        Self::list()?
+            .into_iter()
+            .filter(|generation| generation.number < current)
+            .map(|generation| generation.number)
+            .max()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no previous NixOS generation found",
+                )
+            })
+    }
+
+    /// Legacy ambient generation switch retained only as preview vocabulary.
     pub fn switch_to(generation: u32) -> NixOSCommand {
         NixOSCommand::Custom {
             command: "nix-env".to_string(),
@@ -85,7 +138,7 @@ impl GenerationManager {
         }
     }
 
-    /// Generate a rollback command (switch to previous generation).
+    /// Legacy ambient rollback retained only as preview vocabulary.
     pub fn rollback() -> NixOSCommand {
         NixOSCommand::Custom {
             command: "nixos-rebuild".to_string(),
@@ -290,6 +343,20 @@ mod tests {
     fn test_parse_generations_empty() {
         let gens = GenerationManager::parse_generations("").unwrap();
         assert!(gens.is_empty());
+    }
+
+    #[test]
+    fn test_exact_generation_activation_command_uses_immutable_store_path() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            action: SystemActivation::Switch,
+        };
+        let (bin, args) = command.to_command();
+        assert_eq!(
+            bin,
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/bin/switch-to-configuration"
+        );
+        assert_eq!(args, vec!["switch".to_string()]);
     }
 
     #[test]

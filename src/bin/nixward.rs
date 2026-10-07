@@ -7,17 +7,23 @@
 //! natural language input through the cognitive core.
 
 use clap::Parser;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use nixward::action::authority_approval::verify_execution_intent_change_authority;
 use nixward::action::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
 use nixward::action::config_writer::ConfigWriter;
 use nixward::action::executor::{
     ExecutionAuthorization, ExecutionResult, NixOSCommand, NixOSExecutor, SafetyLevel,
 };
+use nixward::action::execution_intent::verify_nixward_execution_bundle;
+use nixward::authority_signature::{AuthorityTrustPolicy, DetachedAuthoritySignature};
 use nixward::action::flake_ops::FlakeOps;
 use nixward::action::gc_manager::GcManager;
 use nixward::action::generation_manager::GenerationManager;
 use nixward::action::service_manager::ServiceManager;
 use nixward::cli::commands::{
-    Cli, Command, ConfigCommand, ObserveDomain, OutputFormat, RebuildMode,
+    Cli, ClosureAction, ClosureCommand, Command, ConfigCommand, ObserveDomain, OutputFormat,
+    RebuildMode,
 };
 use nixward::cli::completions;
 use nixward::cli::interactive;
@@ -66,6 +72,44 @@ fn main() {
             };
             cmd_execute(cmd, cli.dry_run, cli.phi, cli.approve);
         }
+
+        Command::Closure { op } => match op {
+            ClosureCommand::Prepare {
+                intent,
+                realization_plan,
+                action,
+                holon_id,
+                plan_out,
+                challenge_out,
+                ttl_ms,
+            } => cmd_closure_prepare(
+                intent,
+                realization_plan,
+                action,
+                holon_id,
+                plan_out,
+                challenge_out,
+                ttl_ms,
+            ),
+            ClosureCommand::Activate {
+                intent,
+                realization_plan,
+                plan,
+                signature,
+                policy,
+                holon_id,
+            } => cmd_closure_activate(
+                intent,
+                realization_plan,
+                plan,
+                signature,
+                policy,
+                holon_id,
+                cli.dry_run,
+                cli.phi,
+                cli.format,
+            ),
+        },
 
         Command::Rollback { generation } => {
             let cmd = if let Some(g) = generation {
@@ -333,6 +377,13 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
     let safety = cmd.safety_level();
     let (bin, args) = cmd.to_command();
 
+    // Host policy is evaluated before approval/preview handling so a forbidden
+    // operation can never be presented as an executable dry-run candidate.
+    if let nixward::action::HostExecutionPolicy::Forbidden { reason } = cmd.host_execution_policy() {
+        eprintln!("  Blocked: {reason}");
+        return;
+    }
+
     if safety != SafetyLevel::ReadOnly && !approve {
         if dry_run {
             println!("  [DRY-RUN] Would execute: {} {}", bin, args.join(" "));
@@ -458,6 +509,298 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
             }
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn secure_entropy() -> Result<[u8; 32], String> {
+    let mut entropy = [0u8; 32];
+    let mut source = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("secure OS entropy unavailable: {e}"))?;
+    source
+        .read_exact(&mut entropy)
+        .map_err(|e| format!("secure OS entropy read failed: {e}"))?;
+    Ok(entropy)
+}
+
+fn write_private_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
+
+    // Creation is deliberately exclusive. This prevents an existing file or
+    // attacker-created symlink from becoming the destination of a privileged
+    // preparation artifact.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("refusing to create {}: {e}", path.display()))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync {}: {e}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to harden {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))
+}
+
+fn print_execution_result(result: ExecutionResult, dry_run: bool, format: OutputFormat) {
+    if matches!(format, OutputFormat::Json) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
+        return;
+    }
+
+    match result {
+        ExecutionResult::Success { stdout, stderr, .. } => {
+            if !stdout.is_empty() {
+                println!("{}", stdout.trim_end());
+            } else if dry_run {
+                println!("  [DRY-RUN] Exact closure activation was not executed.");
+            } else {
+                println!("  Exact closure activation completed.");
+            }
+            if !stderr.is_empty() {
+                eprintln!("{}", stderr.trim_end());
+            }
+        }
+        ExecutionResult::RolledBack {
+            error,
+            rollback_output,
+        } => {
+            eprintln!("  Activation command failed and rollback completed: {error}");
+            if !rollback_output.is_empty() {
+                eprintln!("  Rollback: {}", rollback_output.trim_end());
+            }
+        }
+        ExecutionResult::PendingConfirmation { .. } => {
+            eprintln!("  Blocked: exact closure activation requires cryptographic authority.");
+        }
+        ExecutionResult::Blocked { reason, .. } => {
+            eprintln!("  Blocked: {reason}");
+        }
+        ExecutionResult::FailedNoRollback {
+            error,
+            rollback_error,
+        } => {
+            eprintln!("  Activation command failed: {error}");
+            if let Some(rollback_error) = rollback_error {
+                eprintln!("  Rollback failed/unavailable: {rollback_error}");
+            }
+        }
+    }
+}
+
+fn cmd_closure_prepare(
+    intent_path: PathBuf,
+    realization_plan_path: PathBuf,
+    action: ClosureAction,
+    holon_id: String,
+    plan_out: PathBuf,
+    challenge_out: PathBuf,
+    ttl_ms: u64,
+) {
+    let result = (|| -> Result<(), String> {
+        let intent_json = std::fs::read(&intent_path)
+            .map_err(|e| format!("failed to read {}: {e}", intent_path.display()))?;
+        let realization_json = std::fs::read(&realization_plan_path).map_err(|e| {
+            format!(
+                "failed to read {}: {e}",
+                realization_plan_path.display()
+            )
+        })?;
+
+        let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
+        let machine = MachineBinding::new(bundle.execution_target_identity())?;
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: bundle.expected_out_path().to_string(),
+            action: action.to_system_activation(),
+        };
+        let plan = ChangePlan::command_only(machine, command, ttl_ms)?;
+
+        let challenge = nixward::action::authority_approval::build_execution_intent_change_challenge(
+            &plan,
+            &bundle,
+            holon_id,
+            secure_entropy()?,
+            now_ms(),
+            ttl_ms,
+        )?;
+
+        write_private_json(&plan_out, &plan)?;
+        write_private_json(&challenge_out, &challenge)?;
+
+        println!("  Exact realization verified.");
+        println!("  Store closure: {}", bundle.expected_out_path());
+        println!("  Plan digest: {}", hex32(&plan.digest()));
+        println!("  Authority challenge: {}", challenge.digest().map_err(|e| e.to_string())?);
+        println!("  Plan output: {}", plan_out.display());
+        println!("  Challenge output: {}", challenge_out.display());
+        println!("  Next step: sign the challenge with nixward-owner-key sign.");
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        eprintln!("  closure prepare: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_closure_activate(
+    intent_path: PathBuf,
+    realization_plan_path: PathBuf,
+    plan_path: PathBuf,
+    signature_path: PathBuf,
+    policy_path: PathBuf,
+    holon_id: String,
+    dry_run: bool,
+    phi_override: Option<f64>,
+    format: OutputFormat,
+) {
+    let result = (|| -> Result<ExecutionResult, String> {
+        let intent_json = std::fs::read(&intent_path)
+            .map_err(|e| format!("failed to read {}: {e}", intent_path.display()))?;
+        let realization_json = std::fs::read(&realization_plan_path).map_err(|e| {
+            format!(
+                "failed to read {}: {e}",
+                realization_plan_path.display()
+            )
+        })?;
+        let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
+        let plan: ChangePlan = read_json(&plan_path)?;
+        let signed: DetachedAuthoritySignature = read_json(&signature_path)?;
+        let policy: AuthorityTrustPolicy = read_json(&policy_path)?;
+
+        // A valid owner signature does not authorize execution on another host.
+        // Bind the serialized plan to the machine actually performing activation.
+        let local_machine = MachineBinding::local()
+            .map_err(|e| format!("cannot bind activation to local machine identity: {e}"))?;
+        plan.validate_machine(&local_machine)?;
+
+        let command = plan
+            .command()
+            .ok_or_else(|| "serialized change plan contains no executable command".to_string())?;
+        match command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                action: _,
+            } if store_path == bundle.expected_out_path()
+                && plan.machine().machine_id() == bundle.execution_target_identity() => {}
+            NixOSCommand::ActivateSystemClosure { .. } => {
+                return Err(
+                    "serialized plan does not match the verified execution target or exact store closure"
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "serialized change plan is not an ActivateSystemClosure mutation".into(),
+                );
+            }
+        }
+
+        let activation_path = match command {
+            NixOSCommand::ActivateSystemClosure { store_path, .. } => {
+                Path::new(store_path).join("bin/switch-to-configuration")
+            }
+            _ => unreachable!(),
+        };
+        let metadata = std::fs::metadata(&activation_path).map_err(|e| {
+            format!(
+                "exact closure activation binary is unavailable at {}: {e}",
+                activation_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "exact closure activation path is not a regular file: {}",
+                activation_path.display()
+            ));
+        }
+
+        let authorization = verify_execution_intent_change_authority(
+            &plan,
+            &bundle,
+            &policy,
+            &signed,
+            &holon_id,
+            now_ms(),
+        )?;
+        let execution_authorization =
+            ExecutionAuthorization::from_change_authorization(&plan, &authorization)?;
+
+        let decision_quality = phi_override
+            .map(|p| p as f32)
+            .unwrap_or(DEFAULT_CLI_DECISION_QUALITY);
+        let mut executor = NixOSExecutor::new().with_dry_run(dry_run);
+        let command = command.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to create Nixward CLI executor runtime: {e}"))?;
+        Ok(runtime.block_on(async move {
+            executor
+                .execute_authorized(
+                    command,
+                    execution_authorization,
+                    Some(decision_quality),
+                )
+                .await
+        }))
+    })();
+
+    match result {
+        Ok(result) => {
+            println!("  Exact closure: {}", match &result {
+                ExecutionResult::Success { .. } | ExecutionResult::RolledBack { .. } |
+                ExecutionResult::FailedNoRollback { .. } | ExecutionResult::Blocked { .. } |
+                ExecutionResult::PendingConfirmation { .. } => "verified",
+            });
+            print_execution_result(result, dry_run, format);
+        }
+        Err(error) => {
+            if matches!(format, OutputFormat::Json) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "blocked",
+                        "reason": error,
+                    })
+                );
+            } else {
+                eprintln!("  closure activate: {error}");
+            }
+        }
+    }
+}
+
+fn hex32(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Preview or apply a `configuration.nix` edit. Unlike `cmd_execute`, this
