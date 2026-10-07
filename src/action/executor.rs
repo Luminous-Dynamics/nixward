@@ -11,6 +11,7 @@
 
 use super::authority_replay::AuthorityReplayLedger;
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
+use super::generation_manager::GenerationManager;
 use crate::traits::{ActionType, ConsciousnessThresholds, PhiAwareScoring};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -564,6 +565,9 @@ pub struct ExecutionAuthorization {
     authority_challenge_blake3: Option<String>,
     authority_replay_key: Option<String>,
     authority_subject_blake3: Option<String>,
+    /// Exact recovery command bound into the original ChangePlan.
+    #[serde(default)]
+    recovery_command: Option<NixOSCommand>,
     automatic_read_only: bool,
     rollback_only: bool,
 }
@@ -597,6 +601,7 @@ impl ExecutionAuthorization {
             authority_challenge_blake3: None,
             authority_replay_key: None,
             authority_subject_blake3: None,
+            recovery_command: None,
             automatic_read_only: true,
             rollback_only: false,
         })
@@ -615,7 +620,31 @@ impl ExecutionAuthorization {
         let command = plan
             .command()
             .ok_or_else(|| "change plan does not contain an executable command".to_string())?;
-        let rollback_digest = plan.rollback().command_digest();
+        let recovery_command = match (
+            plan.rollback().prior_system_closure(),
+            plan.rollback().recovery_action(),
+        ) {
+            (Some(store_path), Some(action)) => Some(NixOSCommand::ActivateSystemClosure {
+                store_path: store_path.to_string(),
+                action,
+            }),
+            (None, None) => None,
+            _ => return Err("change plan recovery binding is incomplete".into()),
+        };
+
+        let rollback_digest = recovery_command
+            .as_ref()
+            .map(NixOSCommand::command_digest)
+            .or_else(|| plan.rollback().command_digest());
+
+        if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
+            && recovery_command.is_none()
+        {
+            return Err(
+                "ActivateSystemClosure authorization requires exact prior-closure recovery".into(),
+            );
+        }
+
         Ok(Self {
             command_digest: command.command_digest(),
             rollback_digest,
@@ -640,6 +669,7 @@ impl ExecutionAuthorization {
             authority_subject_blake3: authorization
                 .authority_subject_blake3()
                 .map(|value| value.to_string()),
+            recovery_command,
             automatic_read_only: false,
             rollback_only: false,
         })
@@ -714,6 +744,7 @@ impl ExecutionAuthorization {
             return Err("authority-backed execution is missing signer, challenge, subject or replay binding".into());
         }
         if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
+            && !self.rollback_only
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
                 || self.execution_intent_digest.is_none()
                 || self.realization_plan_digest.is_none()
@@ -734,9 +765,15 @@ impl ExecutionAuthorization {
         if expected != rollback.command_digest() {
             return Err("rollback command does not match authorized rollback".into());
         }
+        if let Some(exact) = &self.recovery_command {
+            if exact.command_digest() != expected {
+                return Err("stored exact recovery command does not match rollback binding".into());
+            }
+        }
         let mut derived = self.clone();
         derived.command_digest = expected;
         derived.rollback_digest = None;
+        derived.recovery_command = None;
         // Rollback authority was pre-bound by the original ChangePlan. Reusing
         // the original replay key would incorrectly attempt a second consumption.
         derived.authority_replay_key = None;
@@ -765,6 +802,12 @@ pub enum ExecutionResult {
     RolledBack {
         error: String,
         rollback_output: String,
+        /// Exact immutable closure targeted by the recovery operation.
+        #[serde(default)]
+        recovery_closure: Option<String>,
+        /// Observed exact system closure after recovery.
+        #[serde(default)]
+        post_recovery_closure: Option<String>,
     },
     FailedNoRollback {
         error: String,
@@ -909,6 +952,72 @@ impl NixOSExecutor {
             .await
     }
 
+    fn validate_exact_activation_pre_state(
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+    ) -> Result<(), String> {
+        let NixOSCommand::ActivateSystemClosure { store_path, .. } = command else {
+            return Ok(());
+        };
+        let Some(NixOSCommand::ActivateSystemClosure {
+            store_path: prior_closure,
+            ..
+        }) = authorization.recovery_command.as_ref()
+        else {
+            return Err(
+                "exact system closure activation has no exact prior-closure recovery binding"
+                    .into(),
+            );
+        };
+
+        let observed = GenerationManager::current_system_closure().map_err(|error| {
+            format!("failed to observe current system closure before activation: {error}")
+        })?;
+        if observed != *prior_closure {
+            return Err(format!(
+                "pre-state drift detected: expected exact prior system closure {}, observed {}",
+                prior_closure, observed
+            ));
+        }
+        if store_path == prior_closure {
+            return Err("activation target is identical to the bound prior system closure".into());
+        }
+        Ok(())
+    }
+
+    fn validate_exact_recovery_state(
+        original_command: &NixOSCommand,
+        recovery_command: &NixOSCommand,
+    ) -> Result<String, String> {
+        let (
+            NixOSCommand::ActivateSystemClosure {
+                store_path: candidate,
+                ..
+            },
+            NixOSCommand::ActivateSystemClosure {
+                store_path: prior,
+                ..
+            },
+        ) = (original_command, recovery_command)
+        else {
+            return Err(
+                "exact system recovery requires ActivateSystemClosure for both primary and recovery commands"
+                    .into(),
+            );
+        };
+
+        let observed = GenerationManager::current_system_closure().map_err(|error| {
+            format!("failed to observe current system closure before recovery: {error}")
+        })?;
+        if observed != *candidate && observed != *prior {
+            return Err(format!(
+                "recovery refused because system state changed outside the transaction: expected {} or {}, observed {}",
+                prior, candidate, observed
+            ));
+        }
+        Ok(observed)
+    }
+
     /// Execute an exact command under an evidence-bound capability.
     pub async fn execute_authorized(
         &mut self,
@@ -928,6 +1037,19 @@ impl NixOSExecutor {
                 reason,
                 safety_level: safety,
             };
+        }
+
+        if !self.dry_run {
+            if let Err(reason) =
+                Self::validate_exact_activation_pre_state(&command, &authorization)
+            {
+                let blocked = ExecutionResult::Blocked {
+                    reason,
+                    safety_level: safety,
+                };
+                self.record_execution(&command, decision_quality, &authorization, &blocked);
+                return blocked;
+            }
         }
 
         let (cmd, args) = command.to_command();
@@ -1010,7 +1132,30 @@ impl NixOSExecutor {
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
                 warn!(error = %error, "Command failed, attempting authorized rollback");
 
-                if let Some(rollback_cmd) = command.rollback_command() {
+                let rollback_cmd = authorization
+                    .recovery_command
+                    .clone()
+                    .or_else(|| command.rollback_command());
+
+                if let Some(rollback_cmd) = rollback_cmd {
+                    if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+                        if let Err(reason) =
+                            Self::validate_exact_recovery_state(&command, &rollback_cmd)
+                        {
+                            let exec_result = ExecutionResult::FailedNoRollback {
+                                error,
+                                rollback_error: Some(reason),
+                            };
+                            self.record_execution(
+                                &command,
+                                decision_quality,
+                                &authorization,
+                                &exec_result,
+                            );
+                            return exec_result;
+                        }
+                    }
+
                     match authorization.for_rollback(&rollback_cmd) {
                         Ok(rollback_authorization) => {
                             if let Err(reason) = rollback_authorization.validate_for(&rollback_cmd)
@@ -1058,10 +1203,58 @@ impl NixOSExecutor {
 
                             let exec_result = match rb_result {
                                 Ok(rb_output) if rb_output.status.success() => {
-                                    ExecutionResult::RolledBack {
-                                        error,
-                                        rollback_output: String::from_utf8_lossy(&rb_output.stdout)
+                                    if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+                                        match GenerationManager::current_system_closure() {
+                                            Ok(post_recovery_closure) => {
+                                                let expected_post = match &rollback_cmd {
+                                                    NixOSCommand::ActivateSystemClosure {
+                                                        store_path, ..
+                                                    } => store_path,
+                                                    _ => unreachable!(),
+                                                };
+                                                if post_recovery_closure != *expected_post {
+                                                    ExecutionResult::FailedNoRollback {
+                                                        error,
+                                                        rollback_error: Some(format!(
+                                                            "exact recovery command succeeded but post-recovery closure is {} rather than {}",
+                                                            post_recovery_closure, expected_post
+                                                        )),
+                                                    }
+                                                } else {
+                                                    ExecutionResult::RolledBack {
+                                                        error,
+                                                        rollback_output: String::from_utf8_lossy(
+                                                            &rb_output.stdout,
+                                                        )
+                                                        .to_string(),
+                                                        recovery_closure: Some(
+                                                            expected_post.clone(),
+                                                        ),
+                                                        post_recovery_closure: Some(
+                                                            post_recovery_closure,
+                                                        ),
+                                                    }
+                                                }
+                                            }
+                                            Err(recovery_error) => {
+                                                ExecutionResult::FailedNoRollback {
+                                                    error,
+                                                    rollback_error: Some(format!(
+                                                        "exact recovery executed but post-recovery closure could not be verified: {recovery_error}"
+                                                    )),
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        ExecutionResult::RolledBack {
+                                            error,
+                                            rollback_output: String::from_utf8_lossy(
+                                                &rb_output.stdout,
+                                            )
                                             .to_string(),
+                                            recovery_closure: None,
+                                            post_recovery_closure: None,
+                                        }
                                     }
                                 }
                                 Ok(rb_output) => ExecutionResult::FailedNoRollback {
@@ -1229,6 +1422,26 @@ mod tests {
         let (cmd, args) = search.to_command();
         assert_eq!(cmd, "nix");
         assert_eq!(args, vec!["search", "nixpkgs", "editor", "--json"]);
+    }
+
+    #[test]
+    fn exact_activation_authorization_requires_exact_recovery_binding() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            action: SystemActivation::Switch,
+        };
+        let plan = ChangePlan::command_only_with_system_recovery(
+            super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
+            command,
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            SystemActivation::Switch,
+            60_000,
+        )
+        .unwrap();
+        let approval =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
+        let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
+        assert!(auth.recovery_command.is_some());
     }
 
     #[test]
