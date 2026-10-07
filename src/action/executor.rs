@@ -184,6 +184,7 @@ struct NixwardTransactionInterlock {
 impl NixwardTransactionInterlock {
     const PATH: &'static str = "/run/nixward-system-transaction.lock";
 
+    #[cfg(unix)]
     fn acquire() -> Result<Self, String> {
         Self::acquire_at(Path::new(Self::PATH))
     }
@@ -255,6 +256,7 @@ struct SystemProfileInterlock {
 impl SystemProfileInterlock {
     const PATH: &'static str = "/nix/var/nix/profiles/system.lock";
 
+    #[cfg(unix)]
     fn acquire() -> Result<Self, String> {
         Self::acquire_at(Path::new(Self::PATH))
     }
