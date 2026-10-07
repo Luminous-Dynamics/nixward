@@ -41,7 +41,7 @@ path = "src/bin/nixward_owner_key.rs"
 # from crates.io so this repository remains independently buildable.
 symthaea-core = {
   git = "https://github.com/Luminous-Dynamics/symthaea.git",
-  rev = "10f004ce824af40c069cc630ad867d9d2cfabd10",
+  rev = "77b872fd116c7b6f44fedd82bb8c6100240caa73",
   package = "symthaea-core",
 }
 
