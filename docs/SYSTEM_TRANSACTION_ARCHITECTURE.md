@@ -168,11 +168,14 @@ Only the already-authorized exact command/patch/capability may execute.
 
 For an exact NixOS system closure activation, Nixward first takes its
 cross-process transaction interlock before the final pre-state validation. The
-authorized profile target is then set and verified, after which Nixward acquires
-the Nix-managed system-profile lock, re-verifies the selected closure under
-that lock, and invokes the exact closure's `switch-to-configuration` action.
-The executor must not reinterpret the approved request, substitute an ambient
-generation selector, or silently redirect the profile target.
+authorized profile target is then set and verified, after which the exact
+closure's `switch-to-configuration` action is invoked. Nixward does not hold
+the Nix profile lock across the child activation: `nix-env --set` owns its
+profile lock for its own mutation, while `switch-to-configuration` uses its
+own activation lock. This keeps the interlocks composable rather than creating
+self-deadlock. The executor must not reinterpret the approved request,
+substitute an ambient generation selector, or silently redirect the profile
+target.
 
 ### 7. Verify
 
@@ -373,14 +376,15 @@ Recovery evidence records the exact closure targeted for recovery and the exact
 post-recovery closure observed by Nixward.
 
 The exact system-profile transition is now part of the privileged activation
-primitive. After the authorized profile is set, Nixward acquires the same
-Nix-managed `/nix/var/nix/profiles/system.lock` used for profile mutations,
-re-verifies the exact selected closure under that interlock, and holds it while
-invoking the exact immutable `switch-to-configuration` action. This closes the
-Nix-client concurrency window during activation; a profile change that wins the
-small handoff window before the interlock is acquired is detected and fails
-closed. This does not authorize or claim to prevent arbitrary direct filesystem
-mutation that bypasses Nix's locking protocol.
+primitive. The Nixward transaction interlock remains held across the exact
+profile transition, the immutable `switch-to-configuration` action, and
+post-state verification/recovery. The underlying Nix profile mutation and the
+closure activation retain their own Nix-managed locks; Nixward does not hold
+the profile lock across the child activation. This prevents concurrent Nixward
+transactions from interleaving while preserving Nix's native activation
+serialization. It does not authorize or claim to prevent arbitrary direct
+filesystem mutation that bypasses Nix's locking protocol, nor does it remove
+the unsupported external-writer compare-and-set gap documented in Issue #9.
 
 Bootloader-specific next-boot selection remains a separate evidence boundary
 tracked in Issue #8 and must not be silently folded into the runtime or profile
