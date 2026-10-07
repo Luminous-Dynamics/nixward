@@ -600,10 +600,18 @@ fn print_execution_result(result: ExecutionResult, dry_run: bool, format: Output
         ExecutionResult::RolledBack {
             error,
             rollback_output,
+            recovery_closure,
+            post_recovery_closure,
         } => {
-            eprintln!("  Activation command failed and rollback completed: {error}");
+            eprintln!("  Activation command failed and exact recovery completed: {error}");
             if !rollback_output.is_empty() {
-                eprintln!("  Rollback: {}", rollback_output.trim_end());
+                eprintln!("  Recovery: {}", rollback_output.trim_end());
+            }
+            if let Some(recovery_closure) = recovery_closure {
+                eprintln!("  Recovery closure: {recovery_closure}");
+            }
+            if let Some(post_recovery_closure) = post_recovery_closure {
+                eprintln!("  Verified post-recovery closure: {post_recovery_closure}");
             }
         }
         ExecutionResult::PendingConfirmation { .. } => {
