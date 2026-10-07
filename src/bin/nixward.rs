@@ -652,7 +652,7 @@ fn cmd_closure_prepare(
         })?;
 
         let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
-        let prior_system_closure = GenerationManager::current_system_closure()
+        let prior_system_closure = GenerationManager::current_runtime_system_closure()
             .map_err(|error| format!("failed to capture exact pre-state system closure: {error}"))?;
         let machine = MachineBinding::new(bundle.execution_target_identity())?;
         let command = NixOSCommand::ActivateSystemClosure {
