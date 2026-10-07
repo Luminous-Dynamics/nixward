@@ -339,6 +339,39 @@ Every consequential transaction should answer:
 
 **"How do we get back to the last known-good state?"**
 
+For generation-changing system transactions, "last known-good" is not a
+generation number or the ambient result of a later `--rollback` operation.
+Preparation captures the exact prior `/nix/store/...-nixos-system-*` closure
+before authorization, and that closure becomes part of the signed ChangePlan's
+recovery binding.
+
+The exact recovery boundary is:
+
+```
+observe exact pre-state closure
+        ↓
+authorize candidate exact closure + recovery closure
+        ↓
+re-check pre-state immediately before mutation
+        ↓
+activate exact candidate closure
+        ↓
+on failure, re-observe and refuse recovery if state is outside
+the transaction's {prior, candidate} closure set
+        ↓
+activate the exact bound prior closure
+        ↓
+verify the observed post-recovery closure
+```
+
+Recovery evidence records the exact closure targeted for recovery and the exact
+post-recovery closure observed by Nixward.
+
+This does not make direct `switch-to-configuration` execution equivalent to
+the complete NixOS system-profile transition. The profile/boot transition remains
+a separate hardening boundary tracked in Issue #6 and must not be silently folded
+into the recovery claim.
+
 If no bounded recovery path exists, the action should either be classified as
 non-reversible and require stronger explicit treatment, or be refused.
 
