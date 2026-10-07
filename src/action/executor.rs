@@ -989,7 +989,7 @@ impl NixOSExecutor {
             );
         };
 
-        let observed = GenerationManager::current_system_closure().map_err(|error| {
+        let observed = GenerationManager::current_runtime_system_closure().map_err(|error| {
             format!("failed to observe current system closure before activation: {error}")
         })?;
         Self::validate_exact_activation_observation(&observed, store_path, prior_closure)
@@ -1030,7 +1030,7 @@ impl NixOSExecutor {
             );
         };
 
-        let observed = GenerationManager::current_system_closure().map_err(|error| {
+        let observed = GenerationManager::current_runtime_system_closure().map_err(|error| {
             format!("failed to observe current system closure before recovery: {error}")
         })?;
         Self::validate_exact_recovery_observation(&observed, candidate, prior)?;
@@ -1223,7 +1223,7 @@ impl NixOSExecutor {
                             let exec_result = match rb_result {
                                 Ok(rb_output) if rb_output.status.success() => {
                                     if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
-                                        match GenerationManager::current_system_closure() {
+                                        match GenerationManager::current_runtime_system_closure() {
                                             Ok(post_recovery_closure) => {
                                                 let expected_post = match &rollback_cmd {
                                                     NixOSCommand::ActivateSystemClosure {
