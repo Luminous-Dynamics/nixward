@@ -1684,6 +1684,30 @@ mod tests {
     }
 
     #[test]
+    fn software_ingress_covenant_blocks_ambient_rebuilds() {
+        for command in [
+            NixOSCommand::RebuildSwitch {
+                flake: Some(".#myhost".into()),
+                extra_args: vec![],
+            },
+            NixOSCommand::RebuildTest {
+                flake: Some(".#myhost".into()),
+                extra_args: vec![],
+            },
+            NixOSCommand::RebuildBoot {
+                flake: Some(".#myhost".into()),
+                extra_args: vec![],
+            },
+        ] {
+            let policy = command.host_execution_policy();
+            assert!(!policy.is_allowed(), "ambient rebuild unexpectedly admitted");
+            let reason = policy.reason().unwrap();
+            assert!(reason.contains("exact realized"));
+            assert!(reason.contains("ActivateSystemClosure"));
+        }
+    }
+
+    #[test]
     fn software_ingress_covenant_blocks_ambient_package_profiles() {
         for command in [
             NixOSCommand::EnvInstall {
