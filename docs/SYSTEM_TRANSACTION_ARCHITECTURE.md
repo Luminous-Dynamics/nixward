@@ -166,8 +166,11 @@ carry an explicit recovery strategy or be blocked.
 
 Only the already-authorized exact command/patch/capability may execute.
 
-The executor must not reinterpret the approved request or substitute a new
-command.
+For an exact NixOS system closure activation, the authorized profile target is
+set first and verified, then the exact closure's `switch-to-configuration`
+action is invoked. The executor must not reinterpret the approved request,
+substitute an ambient generation selector, or silently redirect the profile
+target.
 
 ### 7. Verify
 
@@ -367,10 +370,10 @@ verify the observed post-recovery running closure
 Recovery evidence records the exact closure targeted for recovery and the exact
 post-recovery closure observed by Nixward.
 
-This does not make direct `switch-to-configuration` execution equivalent to
-the complete NixOS system-profile transition. The profile/boot transition remains
-a separate hardening boundary tracked in Issue #6 and must not be silently folded
-into the recovery claim.
+The exact system-profile transition is now part of the privileged activation
+primitive. Bootloader-specific next-boot selection remains a separate evidence
+boundary tracked in Issue #8 and must not be silently folded into the runtime or
+profile claims.
 
 If no bounded recovery path exists, the action should either be classified as
 non-reversible and require stronger explicit treatment, or be refused.
