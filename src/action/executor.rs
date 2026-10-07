@@ -1195,6 +1195,143 @@ impl NixOSExecutor {
         Ok(observed)
     }
 
+    async fn try_recover_after_failure(
+        &mut self,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+        error: String,
+        decision_quality: Option<f32>,
+    ) -> Option<ExecutionResult> {
+        let rollback_cmd = authorization
+            .recovery_command
+            .clone()
+            .or_else(|| command.rollback_command());
+
+        let rollback_cmd = rollback_cmd?;
+
+        if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            if let Err(reason) = Self::validate_exact_recovery_state(command, &rollback_cmd) {
+                let exec_result = ExecutionResult::FailedNoRollback {
+                    error,
+                    rollback_error: Some(reason),
+                };
+                self.record_execution(command, decision_quality, authorization, &exec_result);
+                return Some(exec_result);
+            }
+        }
+
+        let rollback_authorization = match authorization.for_rollback(&rollback_cmd) {
+            Ok(value) => value,
+            Err(reason) => {
+                let exec_result = ExecutionResult::FailedNoRollback {
+                    error,
+                    rollback_error: Some(format!(
+                        "rollback was not included in the execution capability: {reason}"
+                    )),
+                };
+                self.record_execution(command, decision_quality, authorization, &exec_result);
+                return Some(exec_result);
+            }
+        };
+
+        if let Err(reason) = rollback_authorization.validate_for(&rollback_cmd) {
+            let exec_result = ExecutionResult::FailedNoRollback {
+                error,
+                rollback_error: Some(format!("rollback authorization invalid: {reason}")),
+            };
+            self.record_execution(command, decision_quality, authorization, &exec_result);
+            return Some(exec_result);
+        }
+
+        if let HostExecutionPolicy::Forbidden { reason } = rollback_cmd.host_execution_policy() {
+            let exec_result = ExecutionResult::FailedNoRollback {
+                error,
+                rollback_error: Some(format!(
+                    "rollback violates sovereign host execution policy: {reason}"
+                )),
+            };
+            self.record_execution(command, decision_quality, authorization, &exec_result);
+            return Some(exec_result);
+        }
+
+        let rb_result = Self::run_bound_command(&rollback_cmd).await;
+
+        let exec_result = match rb_result {
+            Ok(rb_output) if rb_output.status.success() => {
+                if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+                    let (expected_runtime, expected_profile) = match &rollback_cmd {
+                        NixOSCommand::ActivateSystemClosure {
+                            store_path,
+                            profile_store_path: Some(profile_store_path),
+                            ..
+                        } => (store_path, profile_store_path),
+                        _ => unreachable!(),
+                    };
+
+                    match GenerationManager::current_runtime_system_closure() {
+                        Ok(post_runtime) if post_runtime == *expected_runtime => {
+                            match GenerationManager::current_system_profile_closure() {
+                                Ok(post_profile) if post_profile == *expected_profile => {
+                                    ExecutionResult::RolledBack {
+                                        error,
+                                        rollback_output: String::from_utf8_lossy(&rb_output.stdout)
+                                            .to_string(),
+                                        recovery_closure: Some(expected_runtime.clone()),
+                                        post_recovery_closure: Some(post_runtime),
+                                    }
+                                }
+                                Ok(post_profile) => ExecutionResult::FailedNoRollback {
+                                    error,
+                                    rollback_error: Some(format!(
+                                        "exact recovery runtime succeeded but selected system profile is {} rather than {}",
+                                        post_profile, expected_profile
+                                    )),
+                                },
+                                Err(profile_error) => ExecutionResult::FailedNoRollback {
+                                    error,
+                                    rollback_error: Some(format!(
+                                        "exact recovery runtime succeeded but selected system profile could not be verified: {profile_error}"
+                                    )),
+                                },
+                            }
+                        }
+                        Ok(post_runtime) => ExecutionResult::FailedNoRollback {
+                            error,
+                            rollback_error: Some(format!(
+                                "exact recovery command succeeded but post-recovery runtime is {} rather than {}",
+                                post_runtime, expected_runtime
+                            )),
+                        },
+                        Err(runtime_error) => ExecutionResult::FailedNoRollback {
+                            error,
+                            rollback_error: Some(format!(
+                                "exact recovery executed but post-recovery runtime could not be verified: {runtime_error}"
+                            )),
+                        },
+                    }
+                } else {
+                    ExecutionResult::RolledBack {
+                        error,
+                        rollback_output: String::from_utf8_lossy(&rb_output.stdout).to_string(),
+                        recovery_closure: None,
+                        post_recovery_closure: None,
+                    }
+                }
+            }
+            Ok(rb_output) => ExecutionResult::FailedNoRollback {
+                error,
+                rollback_error: Some(String::from_utf8_lossy(&rb_output.stderr).to_string()),
+            },
+            Err(recovery_error) => ExecutionResult::FailedNoRollback {
+                error,
+                rollback_error: Some(recovery_error),
+            },
+        };
+
+        self.record_execution(command, decision_quality, authorization, &exec_result);
+        Some(exec_result)
+    }
+
     /// Execute an exact command under an evidence-bound capability.
     pub async fn execute_authorized(
         &mut self,
@@ -1317,166 +1454,16 @@ impl NixOSExecutor {
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
                 warn!(error = %error, "Command failed, attempting authorized rollback");
 
-                let rollback_cmd = authorization
-                    .recovery_command
-                    .clone()
-                    .or_else(|| command.rollback_command());
-
-                if let Some(rollback_cmd) = rollback_cmd {
-                    if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
-                        if let Err(reason) =
-                            Self::validate_exact_recovery_state(&command, &rollback_cmd)
-                        {
-                            let exec_result = ExecutionResult::FailedNoRollback {
-                                error,
-                                rollback_error: Some(reason),
-                            };
-                            self.record_execution(
-                                &command,
-                                decision_quality,
-                                &authorization,
-                                &exec_result,
-                            );
-                            return exec_result;
-                        }
-                    }
-
-                    match authorization.for_rollback(&rollback_cmd) {
-                        Ok(rollback_authorization) => {
-                            if let Err(reason) = rollback_authorization.validate_for(&rollback_cmd)
-                            {
-                                let exec_result = ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(format!(
-                                        "rollback authorization invalid: {reason}"
-                                    )),
-                                };
-                                self.record_execution(
-                                    &command,
-                                    decision_quality,
-                                    &authorization,
-                                    &exec_result,
-                                );
-                                return exec_result;
-                            }
-
-                            if let HostExecutionPolicy::Forbidden { reason } =
-                                rollback_cmd.host_execution_policy()
-                            {
-                                let exec_result = ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(format!(
-                                        "rollback violates sovereign host execution policy: {reason}"
-                                    )),
-                                };
-                                self.record_execution(
-                                    &command,
-                                    decision_quality,
-                                    &authorization,
-                                    &exec_result,
-                                );
-                                return exec_result;
-                            }
-
-                            let (rb_cmd, rb_args) = rollback_cmd.to_command();
-                            let rb_result = Command::new(&rb_cmd)
-                                .args(&rb_args)
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped())
-                                .output()
-                                .await;
-
-                            let exec_result = match rb_result {
-                                Ok(rb_output) if rb_output.status.success() => {
-                                    if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
-                                        match GenerationManager::current_runtime_system_closure() {
-                                            Ok(post_recovery_closure) => {
-                                                let expected_post = match &rollback_cmd {
-                                                    NixOSCommand::ActivateSystemClosure {
-                                                        store_path, ..
-                                                    } => store_path,
-                                                    _ => unreachable!(),
-                                                };
-                                                if post_recovery_closure != *expected_post {
-                                                    ExecutionResult::FailedNoRollback {
-                                                        error,
-                                                        rollback_error: Some(format!(
-                                                            "exact recovery command succeeded but post-recovery closure is {} rather than {}",
-                                                            post_recovery_closure, expected_post
-                                                        )),
-                                                    }
-                                                } else {
-                                                    ExecutionResult::RolledBack {
-                                                        error,
-                                                        rollback_output: String::from_utf8_lossy(
-                                                            &rb_output.stdout,
-                                                        )
-                                                        .to_string(),
-                                                        recovery_closure: Some(
-                                                            expected_post.clone(),
-                                                        ),
-                                                        post_recovery_closure: Some(
-                                                            post_recovery_closure,
-                                                        ),
-                                                    }
-                                                }
-                                            }
-                                            Err(recovery_error) => {
-                                                ExecutionResult::FailedNoRollback {
-                                                    error,
-                                                    rollback_error: Some(format!(
-                                                        "exact recovery executed but post-recovery closure could not be verified: {recovery_error}"
-                                                    )),
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        ExecutionResult::RolledBack {
-                                            error,
-                                            rollback_output: String::from_utf8_lossy(
-                                                &rb_output.stdout,
-                                            )
-                                            .to_string(),
-                                            recovery_closure: None,
-                                            post_recovery_closure: None,
-                                        }
-                                    }
-                                }
-                                Ok(rb_output) => ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(
-                                        String::from_utf8_lossy(&rb_output.stderr).to_string(),
-                                    ),
-                                },
-                                Err(e) => ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(e.to_string()),
-                                },
-                            };
-                            self.record_execution(
-                                &command,
-                                decision_quality,
-                                &authorization,
-                                &exec_result,
-                            );
-                            exec_result
-                        }
-                        Err(reason) => {
-                            let exec_result = ExecutionResult::FailedNoRollback {
-                                error,
-                                rollback_error: Some(format!(
-                                    "rollback was not included in the execution capability: {reason}"
-                                )),
-                            };
-                            self.record_execution(
-                                &command,
-                                decision_quality,
-                                &authorization,
-                                &exec_result,
-                            );
-                            exec_result
-                        }
-                    }
+                if let Some(exec_result) = self
+                    .try_recover_after_failure(
+                        &command,
+                        &authorization,
+                        error.clone(),
+                        decision_quality,
+                    )
+                    .await
+                {
+                    exec_result
                 } else {
                     let exec_result = ExecutionResult::FailedNoRollback {
                         error,
@@ -1487,12 +1474,25 @@ impl NixOSExecutor {
                 }
             }
             Err(e) => {
-                let exec_result = ExecutionResult::FailedNoRollback {
-                    error: e.to_string(),
-                    rollback_error: None,
-                };
-                self.record_execution(&command, decision_quality, &authorization, &exec_result);
-                exec_result
+                let error = e.to_string();
+                if let Some(exec_result) = self
+                    .try_recover_after_failure(
+                        &command,
+                        &authorization,
+                        error.clone(),
+                        decision_quality,
+                    )
+                    .await
+                {
+                    exec_result
+                } else {
+                    let exec_result = ExecutionResult::FailedNoRollback {
+                        error,
+                        rollback_error: None,
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &exec_result);
+                    exec_result
+                }
             }
         }
     }
