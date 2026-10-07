@@ -689,6 +689,12 @@ fn cmd_closure_activate(
         let signed: DetachedAuthoritySignature = read_json(&signature_path)?;
         let policy: AuthorityTrustPolicy = read_json(&policy_path)?;
 
+        // A valid owner signature does not authorize execution on another host.
+        // Bind the serialized plan to the machine actually performing activation.
+        let local_machine = MachineBinding::local()
+            .map_err(|e| format!("cannot bind activation to local machine identity: {e}"))?;
+        plan.validate_machine(&local_machine)?;
+
         let command = plan
             .command()
             .ok_or_else(|| "serialized change plan contains no executable command".to_string())?;
