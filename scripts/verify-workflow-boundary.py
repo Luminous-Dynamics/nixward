@@ -68,6 +68,22 @@ else:
         r"(?ms)^  nix:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
+    validate_job = re.search(
+        r"(?ms)^  validate:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
+        text,
+    )
+    if not validate_job:
+        errors.append("missing validation job")
+    else:
+        validate_body = validate_job.group(0)
+        for marker in [
+            "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+            "expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"",
+            "test "$actual_commit" = "$expected_commit"",
+        ]:
+            if marker not in validate_body:
+                errors.append(f"validation job missing exact-subject marker: {marker}")
+
     if not nix_job:
         errors.append("missing Nix packaging qualification job")
     else:
