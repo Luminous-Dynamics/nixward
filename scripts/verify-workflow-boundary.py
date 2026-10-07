@@ -19,15 +19,16 @@ else:
 
     # Every checkout step is untrusted-source-adjacent and must not persist the
     # GitHub token into the working tree.
-    step_blocks = re.split(r"(?m)^      - name: ", text)[1:]
+    step_blocks = re.findall(
+        r"(?ms)^      - name:.*?(?=^      - name:|\Z)",
+        text,
+    )
     checkout_count = 0
     for block in step_blocks:
         if "uses: actions/checkout@" not in block:
             continue
         checkout_count += 1
-        first_block = block.split("
-      - name: ", 1)[0]
-        if "persist-credentials: false" not in first_block:
+        if "persist-credentials: false" not in block:
             errors.append("actions/checkout step is missing persist-credentials: false")
 
     if checkout_count == 0:
@@ -35,25 +36,32 @@ else:
 
     # Only the lockfile bootstrap job may receive repository write authority.
     bootstrap = re.search(
-        r"(?ms)^  bootstrap-lockfile:.*?(?=^  \w[-\w]*:|\Z)",
+        r"(?ms)^  bootstrap-lockfile:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
-    if not bootstrap or "permissions:\n      contents: write" not in bootstrap.group(0):
+    if not bootstrap or not re.search(
+        r"(?m)^    permissions:\n      contents: write\s*$",
+        bootstrap.group(0),
+    ):
         errors.append("bootstrap-lockfile job must have contents: write")
 
-    write_permission_sites = re.findall(r"^      contents: write\s*$", text, flags=re.M)
+    write_permission_sites = re.findall(
+        r"^      contents: write\s*$",
+        text,
+        flags=re.M,
+    )
     if len(write_permission_sites) != 1:
         errors.append("workflow must contain exactly one job-level contents: write permission")
 
     global_permissions = re.search(
-        r"(?ms)^permissions:\n  contents: read\s*(?=\n\n|\nconcurrency:)",
+        r"(?ms)^permissions:\n  contents: read\s*(?=\n\n|concurrency:)",
         text,
     )
     if not global_permissions:
         errors.append("workflow must default to contents: read")
 
     provenance = re.search(
-        r"(?ms)^  provenance:.*?(?=^  \w[-\w]*:|\Z)",
+        r"(?ms)^  provenance:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
     if not provenance:
