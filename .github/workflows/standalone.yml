@@ -85,6 +85,7 @@ jobs:
           set -euo pipefail
           git fetch origin "${GITHUB_REF_NAME}"
           git reset --hard "origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${GITHUB_REF_NAME}")"
 
       - name: Install pinned Rust toolchain
         shell: bash
@@ -126,13 +127,15 @@ jobs:
           set -euo pipefail
           validated_commit="$(git rev-parse HEAD)"
           trigger_commit="${GITHUB_SHA}"
-          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-          test "$validated_commit" = "$expected_commit"
+          requested_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$validated_commit" = "$requested_commit"
+          fi
           cat > qualification-receipt.json <<JSON
           {
             "schema": "luminous-nixward-standalone-qualification-v1",
             "validated_commit": "$validated_commit",
-            "expected_commit": "$expected_commit",
+            "requested_commit": "$requested_commit",
             "trigger_commit": "$trigger_commit",
             "rustc": "$(rustc --version)",
             "cargo": "$(cargo --version)",
@@ -155,6 +158,8 @@ jobs:
 
   nix:
     name: Nix packaging
+    needs: bootstrap-lockfile
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -171,6 +176,15 @@ jobs:
           set -euo pipefail
           expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
           test "$(git rev-parse HEAD)" = "$expected_commit"
+
+      - name: Refresh hardening branch after lock bootstrap
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${GITHUB_REF_NAME}")"
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
