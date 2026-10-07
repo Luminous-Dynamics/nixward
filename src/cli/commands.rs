@@ -49,8 +49,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub phi: Option<f64>,
 
-    /// Explicitly approve the exact modifying command requested on this invocation.
-    /// Has no effect on read-only commands.
+    /// Approve an exact modifying command when the host execution policy permits it.
+    /// This never bypasses policy or cryptographic exact-realization requirements.
     #[arg(long, global = true)]
     pub approve: bool,
 
@@ -85,7 +85,10 @@ pub enum Command {
         limit: usize,
     },
 
-    /// Rebuild the NixOS system.
+    /// Preview a NixOS rebuild candidate.
+    ///
+    /// Direct nixos-rebuild system mutation is not permitted through this command.
+    /// Privileged activation must use an exact realized closure via ActivateSystemClosure.
     Rebuild {
         /// Rebuild mode.
         #[arg(value_enum, default_value = "switch")]
