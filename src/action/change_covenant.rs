@@ -147,10 +147,13 @@ pub struct RollbackBinding {
     config_restore_digest: Option<[u8; 32]>,
     /// Exact structured rollback/recovery command.
     command_digest: Option<[u8; 32]>,
-    /// Exact prior NixOS system closure observed before authorization.
+    /// Exact prior running NixOS system closure observed before authorization.
     #[serde(default)]
     prior_system_closure: Option<String>,
-    /// Exact activation action used to restore the prior closure.
+    /// Exact prior selected system-profile closure observed before authorization.
+    #[serde(default)]
+    prior_system_profile_closure: Option<String>,
+    /// Exact activation action used to restore the prior state.
     #[serde(default)]
     recovery_action: Option<SystemActivation>,
 }
@@ -166,6 +169,10 @@ impl RollbackBinding {
 
     pub fn prior_system_closure(&self) -> Option<&str> {
         self.prior_system_closure.as_deref()
+    }
+
+    pub fn prior_system_profile_closure(&self) -> Option<&str> {
+        self.prior_system_profile_closure.as_deref()
     }
 
     pub fn recovery_action(&self) -> Option<SystemActivation> {
@@ -208,6 +215,7 @@ impl ChangePlan {
         config_mutation: Option<ConfigMutationBinding>,
         command: Option<NixOSCommand>,
         prior_system_closure: Option<String>,
+        prior_system_profile_closure: Option<String>,
         recovery_action: Option<SystemActivation>,
         ttl_ms: u64,
     ) -> Result<Self, String> {
@@ -232,13 +240,26 @@ impl ChangePlan {
                             .into(),
                     );
                 }
+                let profile = prior_system_profile_closure.ok_or_else(|| {
+                    "exact system closure activation requires an exact prior system-profile closure"
+                        .to_string()
+                })?;
+                if !is_valid_nix_store_path(&profile) {
+                    return Err(
+                        "prior system-profile closure must be one canonical immutable /nix/store path"
+                            .into(),
+                    );
+                }
                 let action = recovery_action.ok_or_else(|| {
                     "exact system closure activation requires a recovery action".to_string()
                 })?;
-                Some((prior, action))
+                Some((prior, profile, action))
             }
             Some(_) | None => {
-                if prior_system_closure.is_some() || recovery_action.is_some() {
+                if prior_system_closure.is_some()
+                    || prior_system_profile_closure.is_some()
+                    || recovery_action.is_some()
+                {
                     return Err(
                         "exact system recovery binding is only valid for ActivateSystemClosure plans"
                             .into(),
@@ -250,12 +271,13 @@ impl ChangePlan {
 
         let issued_at_ms = now_ms();
         let expires_at_ms = issued_at_ms.saturating_add(ttl_ms);
-        let recovery_command = exact_recovery.as_ref().map(|(store_path, action)| {
-            NixOSCommand::ActivateSystemClosure {
+        let recovery_command = exact_recovery.as_ref().map(
+            |(store_path, profile_store_path, action)| NixOSCommand::ActivateSystemClosure {
                 store_path: store_path.clone(),
+                profile_store_path: profile_store_path.clone(),
                 action: *action,
-            }
-        });
+            },
+        );
         let rollback = RollbackBinding {
             config_restore_digest: config_mutation.as_ref().map(|c| c.original_digest),
             command_digest: recovery_command
@@ -269,8 +291,11 @@ impl ChangePlan {
                 }),
             prior_system_closure: exact_recovery
                 .as_ref()
-                .map(|(store_path, _)| store_path.clone()),
-            recovery_action: exact_recovery.as_ref().map(|(_, action)| *action),
+                .map(|(store_path, _, _)| store_path.clone()),
+            prior_system_profile_closure: exact_recovery
+                .as_ref()
+                .map(|(_, profile_store_path, _)| profile_store_path.clone()),
+            recovery_action: exact_recovery.as_ref().map(|(_, _, action)| *action),
         };
 
         let nonce = Self::fresh_nonce(
@@ -306,6 +331,7 @@ impl ChangePlan {
         machine: MachineBinding,
         command: NixOSCommand,
         prior_system_closure: impl Into<String>,
+        prior_system_profile_closure: impl Into<String>,
         recovery_action: SystemActivation,
         ttl_ms: u64,
     ) -> Result<Self, String> {
@@ -314,6 +340,7 @@ impl ChangePlan {
             None,
             Some(command),
             Some(prior_system_closure.into()),
+            Some(prior_system_profile_closure.into()),
             Some(recovery_action),
             ttl_ms,
         )
@@ -412,14 +439,21 @@ impl ChangePlan {
                     .into(),
             );
         };
+        let Some(profile) = self.rollback.prior_system_profile_closure() else {
+            return Err(
+                "ActivateSystemClosure plan is missing exact prior system-profile recovery binding"
+                    .into(),
+            );
+        };
         let Some(action) = self.rollback.recovery_action() else {
             return Err("ActivateSystemClosure plan is missing exact recovery action".into());
         };
-        if !is_valid_nix_store_path(prior) {
+        if !is_valid_nix_store_path(prior) || !is_valid_nix_store_path(profile) {
             return Err("ActivateSystemClosure recovery closure is not a canonical Nix store path".into());
         }
         let expected = NixOSCommand::ActivateSystemClosure {
             store_path: prior.to_string(),
+            profile_store_path: profile.to_string(),
             action,
         };
         if self.rollback.command_digest() != Some(expected.command_digest()) {
@@ -945,6 +979,7 @@ mod tests {
             MachineBinding::new("machine-a").unwrap(),
             command,
             "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
             SystemActivation::Switch,
             60_000,
         )
@@ -952,6 +987,10 @@ mod tests {
 
         assert_eq!(
             plan.rollback().prior_system_closure(),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
+        );
+        assert_eq!(
+            plan.rollback().prior_system_profile_closure(),
             Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
         );
         assert_eq!(
