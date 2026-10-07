@@ -19,7 +19,7 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Stdio;
 #[cfg(unix)]
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OpenOptionsExt};
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -191,29 +191,23 @@ impl SystemProfileInterlock {
 
     #[cfg(unix)]
     fn acquire_at(path: &Path) -> Result<Self, String> {
-        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(nix::libc::O_NOFOLLOW);
+        let file = options.open(path).map_err(|error| {
+            format!("failed to open Nix system-profile lock {}: {error}", path.display())
+        })?;
+        let metadata = file.metadata().map_err(|error| {
             format!("failed to inspect Nix system-profile lock {}: {error}", path.display())
         })?;
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "Nix system-profile lock {} is a symlink; refusing to trust redirected lock state",
-                path.display()
-            ));
-        }
         if !metadata.file_type().is_file() {
             return Err(format!(
                 "Nix system-profile lock {} is not a regular file",
                 path.display()
             ));
         }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| {
-                format!("failed to open Nix system-profile lock {}: {error}", path.display())
-            })?;
 
         if let Err(error) = nix::fcntl::flock(
             file.as_raw_fd(),
