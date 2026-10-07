@@ -24,7 +24,7 @@ jobs:
       contents: write
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install pinned Rust toolchain
         shell: bash
@@ -100,3 +100,28 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Emit qualification receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > qualification-receipt.json <<JSON
+          {
+            "schema": "luminous-nixward-standalone-qualification-v1",
+            "commit": "${GITHUB_SHA}",
+            "rustc": "$(rustc --version)",
+            "cargo": "$(cargo --version)",
+            "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
+            "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
+            "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
+            "boundary": "standalone-filesystem-boundary-pass"
+          }
+          JSON
+
+      - name: Upload qualification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nixward-standalone-qualification-${{ github.sha }}
+          path: qualification-receipt.json
+          if-no-files-found: error
+          retention-days: 30
