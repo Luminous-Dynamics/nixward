@@ -24,7 +24,7 @@ jobs:
       contents: write
     steps:
       - name: Check out source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install pinned Rust toolchain
         shell: bash
@@ -54,16 +54,19 @@ jobs:
 
   validate:
     needs: bootstrap-lockfile
-    if: github.event_name == 'pull_request' || needs.bootstrap-lockfile.result == 'success'
+    # A skipped bootstrap is expected for pull_request and main pushes. GitHub
+    # otherwise skips dependent jobs too; always() preserves the fail-closed
+    # qualification decision instead of silently producing a skipped check.
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Refresh hardening branch after lock bootstrap
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
