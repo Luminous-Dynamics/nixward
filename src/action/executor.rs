@@ -420,7 +420,7 @@ impl NixOSCommand {
                 args.extend(extra_args.iter().cloned());
                 ("nixos-rebuild".to_string(), args)
             }
-            Self::ActivateSystemClosure { store_path, action } => (
+            Self::ActivateSystemClosure { store_path, action, .. } => (
                 format!("{store_path}/bin/switch-to-configuration"),
                 vec![action.as_arg().to_string()],
             ),
@@ -1569,6 +1569,9 @@ mod tests {
 
         let exact = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         assert!(
