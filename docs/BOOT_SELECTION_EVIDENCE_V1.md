@@ -36,8 +36,13 @@ not sufficient to establish candidate_closure.
 ## systemd-boot
 
 For UAPI.1 Type #1 entries, resolve the effective entry identifier to the exact
-$BOOT/loader/entries/<id>.conf file. For UKIs, resolve the selected EFI image
-identity separately.
+$BOOT/loader/entries/<id>.conf file. For NixOS entries, the exact system closure
+may be exposed by the entry's kernel command-line options through an
+init=/nix/store/...-nixos-system-.../init binding; this binding is preferred
+over kernel/initrd artifact paths, which identify boot artifacts rather than the
+whole system closure. For UKIs, resolve the selected EFI image identity
+separately and require a separate exact image-to-system binding before claiming
+the candidate closure.
 
 The effective selection is:
 
