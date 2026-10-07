@@ -280,13 +280,24 @@ impl NixOSCommand {
             // This is the canonical privileged system mutation primitive: the
             // store path is immutable and the execution-intent authority path binds
             // source/configuration/lock identities to that exact realization.
-            Self::ActivateSystemClosure { store_path, .. } => {
-                if super::execution_intent::is_valid_nix_store_path(store_path) {
-                    Allowed
-                } else {
+            Self::ActivateSystemClosure {
+                store_path,
+                profile_store_path,
+                ..
+            } => {
+                if !super::execution_intent::is_valid_nix_store_path(store_path) {
                     Forbidden {
                         reason: "system closure activation requires one canonical immutable /nix/store path".into(),
                     }
+                } else if profile_store_path
+                    .as_deref()
+                    .is_none_or(|path| !super::execution_intent::is_valid_nix_store_path(path))
+                {
+                    Forbidden {
+                        reason: "system closure activation requires one canonical immutable profile /nix/store path".into(),
+                    }
+                } else {
+                    Allowed
                 }
             }
 
