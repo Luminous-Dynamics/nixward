@@ -116,10 +116,22 @@ impl GenerationManager {
     /// Resolve the live NixOS system profile to its exact immutable system closure.
     ///
     /// This is an observation only. Callers that intend to mutate the machine
-    /// must compare the observed closure again immediately before execution.
-    pub fn current_system_closure() -> Result<String, std::io::Error> {
+    /// must compare the observed profile closure again immediately before any
+    /// profile mutation.
+    pub fn current_system_profile_closure() -> Result<String, std::io::Error> {
         Self::resolve_profile_link_to_store_closure(
             std::path::Path::new("/nix/var/nix/profiles/system"),
+        )
+    }
+
+    /// Resolve the exact system closure currently running on the machine.
+    ///
+    /// NixOS documents /run/current-system as the running system toplevel.
+    /// Recovery must bind to this runtime subject rather than infer runtime
+    /// state from the mutable system profile alone.
+    pub fn current_runtime_system_closure() -> Result<String, std::io::Error> {
+        Self::resolve_profile_link_to_store_closure(
+            std::path::Path::new("/run/current-system"),
         )
     }
 
