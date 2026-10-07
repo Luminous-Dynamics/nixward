@@ -341,14 +341,14 @@ Every consequential transaction should answer:
 
 For generation-changing system transactions, "last known-good" is not a
 generation number or the ambient result of a later `--rollback` operation.
-Preparation captures the exact prior `/nix/store/...-nixos-system-*` closure
+Preparation captures the exact prior running `/nix/store/...-nixos-system-*` closure
 before authorization, and that closure becomes part of the signed ChangePlan's
 recovery binding.
 
 The exact recovery boundary is:
 
 ```
-observe exact pre-state closure
+observe exact pre-state running closure
         ↓
 authorize candidate exact closure + recovery closure
         ↓
@@ -361,7 +361,7 @@ the transaction's {prior, candidate} closure set
         ↓
 activate the exact bound prior closure
         ↓
-verify the observed post-recovery closure
+verify the observed post-recovery running closure
 ```
 
 Recovery evidence records the exact closure targeted for recovery and the exact
