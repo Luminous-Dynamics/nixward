@@ -171,6 +171,75 @@ impl HostExecutionPolicy {
     }
 }
 
+/// Cross-process interlock for complete Nixward exact-system transactions.
+///
+/// This lock is Nixward's coordination boundary. It covers exact pre-state
+/// observation through profile mutation, activation, verification, and any
+/// bound recovery. It is separate from Nix's own profile lock because Nix
+/// releases its profile lock before the immutable closure is invoked.
+struct NixwardTransactionInterlock {
+    file: File,
+}
+
+impl NixwardTransactionInterlock {
+    const PATH: &'static str = "/run/nixward-system-transaction.lock";
+
+    fn acquire() -> Result<Self, String> {
+        Self::acquire_at(Path::new(Self::PATH))
+    }
+
+    #[cfg(unix)]
+    fn acquire_at(path: &Path) -> Result<Self, String> {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .create(true)
+            .custom_flags(nix::libc::O_NOFOLLOW);
+        let file = options.open(path).map_err(|error| {
+            format!("failed to open Nixward transaction lock {}: {error}", path.display())
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            format!("failed to inspect Nixward transaction lock {}: {error}", path.display())
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "Nixward transaction lock {} is not a regular file",
+                path.display()
+            ));
+        }
+        if let Err(error) = nix::fcntl::flock(
+            file.as_raw_fd(),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        ) {
+            if error == nix::errno::Errno::EWOULDBLOCK {
+                return Err(format!(
+                    "Nixward transaction lock {} is already held; refusing concurrent activation",
+                    path.display()
+                ));
+            }
+            return Err(format!(
+                "failed to acquire Nixward transaction lock {}: {error}",
+                path.display()
+            ));
+        }
+        Ok(Self { file })
+    }
+
+    #[cfg(not(unix))]
+    fn acquire() -> Result<Self, String> {
+        Err("Nixward transaction interlock is unsupported on non-Unix target".into())
+    }
+}
+
+impl Drop for NixwardTransactionInterlock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = nix::fcntl::flock(self.file.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
+        }
+    }
+}
 /// Exclusive interlock for the NixOS system profile mutation boundary.
 ///
 /// Nix profile operations use <profile>.lock as an advisory BSD flock lock.
@@ -1485,6 +1554,24 @@ impl NixOSExecutor {
             };
         }
 
+        let _transaction_interlock = if !self.dry_run
+            && matches!(command, NixOSCommand::ActivateSystemClosure { .. })
+        {
+            match NixwardTransactionInterlock::acquire() {
+                Ok(lock) => Some(lock),
+                Err(reason) => {
+                    let blocked = ExecutionResult::Blocked {
+                        reason,
+                        safety_level: safety,
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &blocked);
+                    return blocked;
+                }
+            }
+        } else {
+            None
+        };
+
         if !self.dry_run && !authorization.rollback_only {
             if let Err(reason) =
                 Self::validate_exact_activation_pre_state(&command, &authorization)
@@ -2477,6 +2564,22 @@ mod tests {
             .host_execution_policy()
             .is_allowed()
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_is_exclusive_and_releases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+
+        let first = NixwardTransactionInterlock::acquire_at(&path).expect("first lock");
+        let second = NixwardTransactionInterlock::acquire_at(&path);
+        assert!(second
+            .expect_err("second exclusive lock must fail closed")
+            .contains("already held"));
+
+        drop(first);
+        NixwardTransactionInterlock::acquire_at(&path)
+            .expect("lock must be reusable after release");
     }
     #[cfg(unix)]
     #[test]
