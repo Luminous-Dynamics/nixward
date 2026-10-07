@@ -256,9 +256,20 @@ impl NixOSCommand {
                 }
             }
 
-            // Rebuilds, read-only search/checks and garbage collection are
-            // native Nix/NixOS operations whose mutation authority is still
-            // separately bound by ChangePlan/ExecutionAuthorization.
+            // A privileged system mutation must operate on one exact realized
+            // closure. Direct nixos-rebuild commands resolve ambient source/configuration
+            // at execution time, so their command digest alone is not a sufficient
+            // mutation subject. They remain available as candidate/preview vocabulary,
+            // but are not executable through the host mutation boundary.
+            Self::RebuildSwitch { .. }
+            | Self::RebuildTest { .. }
+            | Self::RebuildBoot { .. } => Forbidden {
+                reason: "direct nixos-rebuild mutation is not authorized by the sovereign host boundary; realize the exact system closure first and activate it through ActivateSystemClosure".into(),
+            },
+
+            // This is the canonical privileged system mutation primitive: the
+            // store path is immutable and the execution-intent authority path binds
+            // source/configuration/lock identities to that exact realization.
             Self::ActivateSystemClosure { store_path, .. } => {
                 if super::execution_intent::is_valid_nix_store_path(store_path) {
                     Allowed
@@ -268,11 +279,8 @@ impl NixOSCommand {
                     }
                 }
             }
-            Self::RebuildSwitch { .. }
-            | Self::RebuildTest { .. }
-            | Self::RebuildBoot { .. }
-            | Self::Search { .. }
-            | Self::CollectGarbage { .. } => Allowed,
+
+            Self::Search { .. } | Self::CollectGarbage { .. } => Allowed,
         }
     }
 
@@ -1269,31 +1277,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_decision_quality_never_authorizes_modification() {
+    async fn test_ambient_rebuild_is_blocked_even_with_high_decision_quality() {
         let mut executor = NixOSExecutor::new().with_dry_run(true);
 
         let rebuild = NixOSCommand::RebuildSwitch {
             flake: None,
             extra_args: vec![],
         };
-        // Even an unrealistically high cognitive score is recommendation-only.
+        // The candidate vocabulary remains representable, but direct mutation
+        // is now outside the privileged host boundary regardless of Phi/approval.
         let result = executor.execute(rebuild, 1.0).await;
 
         match result {
-            ExecutionResult::PendingConfirmation {
-                decision_quality,
-                recommended_quality,
-                ..
-            } => {
-                assert_eq!(decision_quality, 1.0);
-                assert!(recommended_quality <= 1.0);
+            ExecutionResult::Blocked { reason, .. } => {
+                assert!(reason.contains("direct nixos-rebuild mutation"));
+                assert!(reason.contains("ActivateSystemClosure"));
             }
-            _ => panic!("Expected pending confirmation"),
+            _ => panic!("Expected ambient rebuild to be blocked"),
         }
     }
 
     #[tokio::test]
-    async fn test_change_plan_approval_executes_exact_command_only() {
+    async fn test_general_change_approval_cannot_activate_ambient_rebuild() {
         use super::super::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
 
         let mut executor = NixOSExecutor::new().with_dry_run(true);
@@ -1310,25 +1315,22 @@ mod tests {
         let change_auth =
             ChangeAuthorization::from_verified_approval(&plan, "test-human-approval", [7; 32])
                 .unwrap();
-        let auth = ExecutionAuthorization::from_change_authorization(&plan, &change_auth).unwrap();
+        let auth =
+            ExecutionAuthorization::from_change_authorization(&plan, &change_auth).unwrap();
 
         let result = executor
-            .execute_authorized(rebuild.clone(), auth.clone(), Some(0.0))
+            .execute_authorized(rebuild, auth, Some(1.0))
             .await;
-        assert!(matches!(result, ExecutionResult::Success { .. }));
-
-        let different = NixOSCommand::RebuildBoot {
-            flake: None,
-            extra_args: vec![],
-        };
-        let blocked = executor
-            .execute_authorized(different, auth, Some(1.0))
-            .await;
-        assert!(matches!(blocked, ExecutionResult::Blocked { .. }));
+        match result {
+            ExecutionResult::Blocked { reason, .. } => {
+                assert!(reason.contains("direct nixos-rebuild mutation"));
+            }
+            _ => panic!("Expected ambient rebuild mutation to be blocked"),
+        }
     }
 
     #[tokio::test]
-    async fn test_change_authorization_binds_execution_to_full_plan() {
+    async fn test_change_authorization_remains_exact_plan_bound_for_ambient_rebuilds() {
         use super::super::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
 
         let mut executor = NixOSExecutor::new().with_dry_run(true);
@@ -1352,7 +1354,7 @@ mod tests {
         let result = executor
             .execute_authorized(rebuild, exec_auth, Some(1.0))
             .await;
-        assert!(matches!(result, ExecutionResult::Success { .. }));
+        assert!(matches!(result, ExecutionResult::Blocked { .. }));
     }
 
     #[test]
