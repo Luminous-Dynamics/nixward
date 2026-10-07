@@ -25,6 +25,16 @@ The privileged path therefore converges on:
 → `switch-to-configuration`
 → `post-state verification`
 
+The CLI exposes this as a two-phase boundary:
+
+`closure prepare` → offline detached signature → `closure activate`
+
+Preparation is non-mutating and creates the exact ChangePlan plus authority
+challenge. Activation re-verifies the execution-intent/realization pair, the
+serialized plan, the detached Ed25519 authority, and the exact store closure
+before invoking `switch-to-configuration`. No local `--approve` convenience
+flag can substitute for this authority class.
+
 `ActivateSystemClosure` is the canonical executor primitive for that final
 mutation. This avoids a time-of-check/time-of-use gap in which the same rebuild
 command could resolve different source/configuration state between review and
@@ -359,7 +369,7 @@ transaction protocol.
 4. Add target-state observation and post-state verification to high-impact
    operations.
 5. Connect generation-changing transactions to boot health and promotion.
-5. Convert installer and management UIs to display transaction identity,
+6. Convert installer and management UIs to display transaction identity,
    provenance, authorization, verification, and recovery.
 6. Complete the Spore/Nixward boundary extraction after contract fixtures prove
    compatibility.
