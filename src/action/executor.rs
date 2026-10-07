@@ -313,6 +313,7 @@ impl Drop for SystemProfileInterlock {
             let _ = nix::fcntl::flock(self.file.as_raw_fd(), nix::fcntl::FlockArg::Unlock);
         }
     }
+}
 
 impl NixOSCommand {
     /// Create a Custom command with auto-classified safety level.
