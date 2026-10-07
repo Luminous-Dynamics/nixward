@@ -973,6 +973,9 @@ mod tests {
     fn exact_system_recovery_binding_captures_prior_closure() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         let plan = ChangePlan::command_only_with_system_recovery(
