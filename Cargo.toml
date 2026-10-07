@@ -67,7 +67,7 @@ dashmap = "5.5"
 nix = { version = "0.27", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rnix = "0.11"
-ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc", "rand_core"] }
 
 # CLI (optional)
 clap = { version = "4.4", features = ["derive"], optional = true }
