@@ -361,7 +361,7 @@ impl NixOSCommand {
             // Exact closure activation has a transaction-bound recovery command
             // in ChangePlan::RollbackBinding. There is deliberately no generic
             // rollback fallback for this mutation class.
-            Self::ActivateSystemClosure { .. } => None
+            Self::ActivateSystemClosure { .. } => None,
             Self::EnvInstall { .. } | Self::EnvRemove { .. } => {
                 Some(NixOSCommand::EnvRollback)
             }
