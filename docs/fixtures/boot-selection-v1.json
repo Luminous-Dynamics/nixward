@@ -11,13 +11,15 @@
           "title": "NixOS candidate",
           "version": "6.12",
           "machine-id": "0123456789abcdef0123456789abcdef",
-          "linux": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate",
-          "boot_count": "good"
+          "linux": "/EFI/nixos/abc-linux-6.12.efi",
+          "boot_count": "good",
+          "options": "init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet"
         },
         "old.conf": {
           "title": "NixOS old",
-          "linux": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-          "boot_count": "good"
+          "linux": "/EFI/nixos/old-linux-6.11.efi",
+          "boot_count": "good",
+          "options": "init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old/init quiet"
         }
       },
       "expected": {
