@@ -82,7 +82,8 @@ nixward observe journal
 # System health check
 nixward doctor
 
-# Rebuild with evidence-bound authorization
+# Preview a rebuild candidate; direct privileged nixos-rebuild
+# mutation is intentionally blocked by the host boundary
 nixward rebuild switch
 nixward rebuild switch --flake ".#myhost"
 
