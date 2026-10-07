@@ -9,6 +9,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "native")]
+use std::process::Command;
 
 /// Supported bootloader evidence families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +219,152 @@ pub fn require_candidate_binding(
         }),
     }
 }
+/// Read-only systemd-boot observer.
+///
+/// The observer uses the authoritative current-loader path, UAPI EFI selection
+/// variables, and the BLS entry directory discovered by bootctl. It never
+/// changes loader state. Unsupported or incomplete observations become
+/// explicit Unknown results.
+#[cfg(feature = "native")]
+pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    let loader_name = Path::new(loader_path.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if !loader_name.to_ascii_lowercase().starts_with("systemd-boot") {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("current EFI loader is not systemd-boot: {}", loader_path.trim()),
+        });
+    }
+
+    let boot_path = PathBuf::from(run_read_only(["-x"])? .trim());
+    if !boot_path.is_absolute() {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "bootctl -x returned a non-absolute BLS root".into(),
+        });
+    }
+    let entries_path = boot_path.join("loader/entries");
+    let entries = read_bls_entries(&entries_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+
+    let one_shot = read_efi_variable("LoaderEntryOneShot").map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    let persistent_default = read_efi_variable("LoaderEntryDefault").map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+
+    let evidence = resolve_systemd_boot_selection(one_shot.as_deref(), persistent_default.as_deref(), &entries)?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    if evidence.boot_count_state == BootCountState::Bad {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "selected systemd-boot entry is marked bad by boot-counting state".into(),
+        });
+    }
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+fn run_read_only<const N: usize>(args: [&str; N]) -> Result<String, UnknownBootSelection> {
+    let output = Command::new("bootctl")
+        .args(args)
+        .output()
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("failed to execute bootctl read-only query: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!(
+                "bootctl read-only query failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|error| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Unknown,
+        reason: format!("bootctl produced invalid UTF-8: {error}"),
+    })
+}
+
+#[cfg(feature = "native")]
+fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, String> {
+    let mut entries = BTreeMap::new();
+    let directory = std::fs::read_dir(entries_path).map_err(|error| {
+        format!("failed to read authoritative BLS entry directory {}: {error}", entries_path.display())
+    })?;
+    for item in directory {
+        let item = item.map_err(|error| format!("failed to enumerate BLS entry directory: {error}"))?;
+        let path = item.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("conf") {
+            continue;
+        }
+        let id = path
+            .file_name()
+            .and_then(|x| x.to_str())
+            .ok_or_else(|| format!("BLS entry filename is not valid UTF-8: {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read BLS entry {}: {error}", path.display()))?;
+        let entry = parse_bls_entry(id, &text)?;
+        entries.insert(id.to_string(), entry);
+    }
+    if entries.is_empty() {
+        return Err(format!("no Type #1 BLS entries found in {}", entries_path.display()));
+    }
+    Ok(entries)
+}
+
+#[cfg(feature = "native")]
+fn read_efi_variable(name: &str) -> Result<Option<String>, String> {
+    let dir = Path::new("/sys/firmware/efi/efivars");
+    let prefix = format!("{}-", name);
+    let mut matches = Vec::new();
+    for item in std::fs::read_dir(dir)
+        .map_err(|error| format!("failed to read EFI variable directory: {error}"))?
+    {
+        let item = item.map_err(|error| format!("failed to enumerate EFI variables: {error}"))?;
+        let file_name = item.file_name();
+        let Some(file_name) = file_name.to_str() else { continue; };
+        if file_name.starts_with(&prefix) {
+            matches.push(item.path());
+        }
+    }
+    if matches.len() > 1 {
+        return Err(format!("EFI variable {name} has multiple vendor instances"));
+    }
+    let Some(path) = matches.into_iter().next() else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("failed to read EFI variable {}: {error}", path.display()))?;
+    decode_efivar_string(&bytes).map(Some)
+}
+
+#[cfg(feature = "native")]
+fn decode_efivar_string(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() < 4 || (bytes.len() - 4) % 2 != 0 {
+        return Err("EFI variable payload is not a valid UTF-16LE string".into());
+    }
+    let mut units = Vec::new();
+    for chunk in bytes[4..].chunks_exact(2) {
+        let value = u16::from_le_bytes([chunk[0], chunk[1]]);
+        if value == 0 {
+            break;
+        }
+        units.push(value);
+    }
+    String::from_utf16(&units).map_err(|error| format!("EFI variable UTF-16 decoding failed: {error}"))
+}
+
 /// Parse GRUB environment variables used by NixOS-generated configuration.
 pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
     text.lines()
@@ -402,6 +551,22 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             super::exact_store_path_from_entry(&parsed).as_deref(),
             Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate"),
         );
+    }
+    #[cfg(feature = "native")]
+    #[test]
+    fn decodes_efi_variable_attributes_and_utf16_payload() {
+        let mut bytes = vec![0, 0, 0, 7];
+        for unit in "candidate.conf".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(decode_efivar_string(&bytes).unwrap(), "candidate.conf");
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn malformed_efi_variable_payload_is_unknown() {
+        assert!(decode_efivar_string(&[0, 0, 0, 7, 1]).is_err());
     }
     #[test]
     fn boot_count_zero_is_bad() {
