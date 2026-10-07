@@ -1,0 +1,80 @@
+{
+  "schema": "luminous-nixward-boot-selection-v1",
+  "cases": [
+    {
+      "id": "systemd-oneshot-exact",
+      "family": "systemd-boot",
+      "one_shot": "candidate.conf",
+      "persistent_default": "old.conf",
+      "entries": {
+        "candidate.conf": {
+          "title": "NixOS candidate",
+          "version": "6.12",
+          "machine-id": "0123456789abcdef0123456789abcdef",
+          "linux": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate",
+          "boot_count": "good"
+        },
+        "old.conf": {
+          "title": "NixOS old",
+          "linux": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+          "boot_count": "good"
+        }
+      },
+      "expected": {
+        "selection_kind": "OneShot",
+        "selected_entry_id": "candidate.conf",
+        "candidate_closure": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate"
+      }
+    },
+    {
+      "id": "systemd-pattern-default-unknown",
+      "family": "systemd-boot",
+      "one_shot": null,
+      "persistent_default": "nixos-*",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "pattern"
+      }
+    },
+    {
+      "id": "grub-next-entry-exact",
+      "family": "grub",
+      "environment": {
+        "next_entry": "candidate",
+        "saved_entry": "old"
+      },
+      "generated_default": null,
+      "expected": {
+        "selection_kind": "OneShot",
+        "selected_entry_id": "candidate"
+      }
+    },
+    {
+      "id": "grub-numeric-default-unknown",
+      "family": "grub",
+      "environment": {},
+      "generated_default": "0",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "menu position"
+      }
+    },
+    {
+      "id": "boot-count-bad",
+      "family": "systemd-boot",
+      "entry_id": "nixos+00-04.efi",
+      "expected": {
+        "boot_count_state": "Bad"
+      }
+    },
+    {
+      "id": "artifact-not-system-closure",
+      "family": "systemd-boot",
+      "entry_id": "kernel-only.conf",
+      "entry_text": "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel",
+      "expected": {
+        "candidate_closure": null
+      }
+    }
+  ]
+}
