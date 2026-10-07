@@ -183,6 +183,39 @@ pub fn resolve_systemd_boot_selection(
     })
 }
 
+/// Require an observed boot selection to bind to the exact authorized system closure.
+///
+/// This is deliberately separate from selection resolution: knowing which entry
+/// the bootloader selects does not prove that the entry denotes the authorized
+/// NixOS closure.
+pub fn require_candidate_binding(
+    evidence: &BootSelectionEvidence,
+    expected_candidate_closure: &str,
+) -> Result<(), UnknownBootSelection> {
+    if !super::execution_intent::is_valid_nix_store_path(expected_candidate_closure)
+        || !expected_candidate_closure.contains("-nixos-system-")
+    {
+        return Err(UnknownBootSelection {
+            bootloader_family: evidence.bootloader_family,
+            reason: "authorized candidate is not an exact NixOS system store closure".into(),
+        });
+    }
+
+    match evidence.candidate_closure.as_deref() {
+        Some(observed) if observed == expected_candidate_closure => Ok(()),
+        Some(observed) => Err(UnknownBootSelection {
+            bootloader_family: evidence.bootloader_family,
+            reason: format!(
+                "selected boot entry resolves to {}, not the authorized candidate {}",
+                observed, expected_candidate_closure
+            ),
+        }),
+        None => Err(UnknownBootSelection {
+            bootloader_family: evidence.bootloader_family,
+            reason: "selected boot entry does not expose an exact NixOS system closure binding".into(),
+        }),
+    }
+}
 /// Parse GRUB environment variables used by NixOS-generated configuration.
 pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
     text.lines()
@@ -413,6 +446,32 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert!(error.reason.contains("menu position"));
     }
 
+    #[test]
+    fn candidate_binding_rejects_mismatch_and_missing_binding() {
+        let evidence = BootSelectionEvidence {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            selection_kind: SelectionKind::OneShot,
+            selected_entry_id: Some("candidate.conf".into()),
+            selected_entry_source: "efi:LoaderEntryOneShot".into(),
+            candidate_closure: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other".into(),
+            ),
+            boot_count_state: BootCountState::Good,
+        };
+        let expected =
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate";
+        let mismatch = require_candidate_binding(&evidence, expected)
+            .expect_err("foreign candidate binding must not qualify");
+        assert!(mismatch.reason.contains("not the authorized candidate"));
+
+        let unbound = BootSelectionEvidence {
+            candidate_closure: None,
+            ..evidence
+        };
+        let missing = require_candidate_binding(&unbound, expected)
+            .expect_err("unbound boot entry must not qualify");
+        assert!(missing.reason.contains("does not expose an exact"));
+    }
     #[test]
     fn grub_next_entry_requires_exact_mapping() {
         let environment =
