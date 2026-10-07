@@ -75,6 +75,10 @@ else:
             "github.event_name == 'push'",
             "github.ref == 'refs/heads/main'",
             "uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+            "predicate-type: https://github.com/Luminous-Dynamics/nixward/attestations/qualification/v1",
+            "predicate-path: qualification-predicate.json",
+            "Generate signed SLSA provenance",
+            "Generate signed qualification attestation",
         ]
         for marker in expected:
             if marker not in body:
