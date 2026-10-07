@@ -989,6 +989,7 @@ impl NixOSExecutor {
         };
         let Some(NixOSCommand::ActivateSystemClosure {
             store_path: prior_closure,
+            profile_store_path: Some(prior_profile_closure),
             ..
         }) = authorization.recovery_command.as_ref()
         else {
@@ -999,9 +1000,20 @@ impl NixOSExecutor {
         };
 
         let observed = GenerationManager::current_runtime_system_closure().map_err(|error| {
-            format!("failed to observe current system closure before activation: {error}")
+            format!("failed to observe current running system closure before activation: {error}")
         })?;
-        Self::validate_exact_activation_observation(&observed, store_path, prior_closure)
+        Self::validate_exact_activation_observation(&observed, store_path, prior_closure)?;
+
+        let observed_profile = GenerationManager::current_system_profile_closure().map_err(|error| {
+            format!("failed to observe current system-profile closure before activation: {error}")
+        })?;
+        if observed_profile != *prior_profile_closure {
+            return Err(format!(
+                "system-profile pre-state drift detected: expected exact prior profile {}, observed {}",
+                prior_profile_closure, observed_profile
+            ));
+        }
+        Ok(())
     }
 
     fn validate_exact_recovery_observation(
@@ -1029,6 +1041,7 @@ impl NixOSExecutor {
             },
             NixOSCommand::ActivateSystemClosure {
                 store_path: prior,
+                profile_store_path: Some(prior_profile),
                 ..
             },
         ) = (original_command, recovery_command)
@@ -1040,9 +1053,18 @@ impl NixOSExecutor {
         };
 
         let observed = GenerationManager::current_runtime_system_closure().map_err(|error| {
-            format!("failed to observe current system closure before recovery: {error}")
+            format!("failed to observe current running system closure before recovery: {error}")
         })?;
         Self::validate_exact_recovery_observation(&observed, candidate, prior)?;
+        let observed_profile = GenerationManager::current_system_profile_closure().map_err(|error| {
+            format!("failed to observe current system-profile closure before recovery: {error}")
+        })?;
+        if observed_profile != *prior_profile && observed_profile != *candidate {
+            return Err(format!(
+                "recovery refused because selected system profile changed outside the transaction: expected {} or {}, observed {}",
+                prior_profile, candidate, observed_profile
+            ));
+        }
         Ok(observed)
     }
 
