@@ -1094,15 +1094,22 @@ impl NixOSExecutor {
 
         let expected_runtime = match action {
             SystemActivation::Switch | SystemActivation::Test => candidate.as_str(),
-            SystemActivation::Boot => match authorization.recovery_command.as_ref() {
-                Some(NixOSCommand::ActivateSystemClosure {
-                    store_path: prior,
-                    ..
-                }) => prior.as_str(),
-                _ => {
-                    return Err(
-                        "boot activation is missing exact prior runtime recovery binding".into()
-                    )
+            SystemActivation::Boot => {
+                if authorization.rollback_only {
+                    candidate.as_str()
+                } else {
+                    match authorization.recovery_command.as_ref() {
+                        Some(NixOSCommand::ActivateSystemClosure {
+                            store_path: prior,
+                            ..
+                        }) => prior.as_str(),
+                        _ => {
+                            return Err(
+                                "boot activation is missing exact prior runtime recovery binding"
+                                    .into(),
+                            )
+                        }
+                    }
                 }
             },
         };
@@ -1190,7 +1197,7 @@ impl NixOSExecutor {
             };
         }
 
-        if !self.dry_run {
+        if !self.dry_run && !authorization.rollback_only {
             if let Err(reason) =
                 Self::validate_exact_activation_pre_state(&command, &authorization)
             {
