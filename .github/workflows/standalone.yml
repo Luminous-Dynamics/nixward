@@ -127,7 +127,9 @@ jobs:
             "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
             "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
             "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
-            "boundary": "standalone-filesystem-boundary-pass"
+            "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
+            "rust_toolchain_sha256": "$(sha256sum rust-toolchain.toml | cut -d' ' -f1)",
+            "boundary": "standalone-source-and-lock-boundary-pass"
           }
           JSON
 
@@ -199,6 +201,8 @@ jobs:
               "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
               "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
               "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
+              "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
+              "rust_toolchain_sha256": "$(sha256sum rust-toolchain.toml | cut -d' ' -f1)",
               "git_tree": "$(git rev-parse HEAD^{tree})"
             }
           }
