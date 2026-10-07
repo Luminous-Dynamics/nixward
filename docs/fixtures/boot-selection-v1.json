@@ -77,6 +77,17 @@
       "expected": {
         "candidate_closure": null
       }
+    },
+    {
+      "id": "candidate-binding-mismatch",
+      "family": "systemd-boot",
+      "selected_entry_id": "candidate.conf",
+      "observed_candidate_closure": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other",
+      "authorized_candidate_closure": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "not the authorized candidate"
+      }
     }
   ]
 }
