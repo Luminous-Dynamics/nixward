@@ -245,8 +245,12 @@ impl NixOSCommand {
                             }
                         }
                     }
-                    "nixos-rebuild" if args.len() == 2 && args[0] == "switch" && args[1] == "--rollback" => Allowed,
-                    "nix-env" if is_system_generation_maintenance(args) => Allowed,
+                    "nixos-rebuild" if args.len() == 2 && args[0] == "switch" && args[1] == "--rollback" => Forbidden {
+                        reason: "ambient nixos-rebuild rollback is forbidden; recovery must target an exact immutable system closure".into(),
+                    },
+                    "nix-env" if is_system_generation_maintenance(args) => Forbidden {
+                        reason: "ambient system-generation profile mutation is forbidden; resolve the exact generation closure and activate it immutably".into(),
+                    },
                     "nix" if is_flake_init(args) => Allowed,
                     _ => Forbidden {
                         reason: format!(
@@ -1681,6 +1685,32 @@ mod tests {
         let (bin, args) = restored.to_command();
         assert_eq!(bin, "nixos-rebuild");
         assert!(args.contains(&".#host".to_string()));
+    }
+
+    #[test]
+    fn software_ingress_covenant_blocks_ambient_generation_mutation() {
+        let rollback = NixOSCommand::Custom {
+            command: "nixos-rebuild".into(),
+            args: vec!["switch".into(), "--rollback".into()],
+            safety_level: SafetyLevel::SystemCritical,
+        };
+        let policy = rollback.host_execution_policy();
+        assert!(!policy.is_allowed());
+        assert!(policy.reason().unwrap().contains("exact immutable system closure"));
+
+        let generation_switch = NixOSCommand::Custom {
+            command: "nix-env".into(),
+            args: vec![
+                "--switch-generation".into(),
+                "42".into(),
+                "-p".into(),
+                "/nix/var/nix/profiles/system".into(),
+            ],
+            safety_level: SafetyLevel::SystemCritical,
+        };
+        let policy = generation_switch.host_execution_policy();
+        assert!(!policy.is_allowed());
+        assert!(policy.reason().unwrap().contains("exact generation closure"));
     }
 
     #[test]
