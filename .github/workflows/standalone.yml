@@ -66,6 +66,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Refresh hardening branch after lock bootstrap
         if: github.event_name == 'push' && github.ref != 'refs/heads/main'
@@ -133,6 +135,7 @@ jobs:
           path: qualification-receipt.json
           if-no-files-found: error
           retention-days: 30
+
   provenance:
     name: Signed Nixward provenance
     needs: validate
