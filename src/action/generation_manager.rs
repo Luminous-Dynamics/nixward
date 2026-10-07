@@ -72,31 +72,64 @@ impl GenerationManager {
             })
     }
 
+    fn resolve_profile_link_to_store_closure(
+        path: &std::path::Path,
+    ) -> Result<String, std::io::Error> {
+        let mut current = path.to_path_buf();
+
+        for _ in 0..8 {
+            let metadata = std::fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&current)?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("/"))
+                        .join(target)
+                };
+                continue;
+            }
+
+            let store_path = current.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "profile link target is not valid UTF-8",
+                )
+            })?;
+            if !is_valid_nix_store_path(store_path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "profile link does not resolve to a canonical Nix store path",
+                ));
+            }
+            return Ok(store_path.to_string());
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "profile link resolution exceeded symlink depth limit",
+        ))
+    }
+
+    /// Resolve the live NixOS system profile to its exact immutable system closure.
+    ///
+    /// This is an observation only. Callers that intend to mutate the machine
+    /// must compare the observed closure again immediately before execution.
+    pub fn current_system_closure() -> Result<String, std::io::Error> {
+        Self::resolve_profile_link_to_store_closure(
+            std::path::Path::new("/nix/var/nix/profiles/system"),
+        )
+    }
+
     /// Resolve one NixOS generation to its exact immutable system closure.
     ///
     /// The generation link itself is mutable profile state; authorization must
     /// bind the resolved store closure rather than the generation number.
     pub fn exact_generation_closure(generation: u32) -> Result<String, std::io::Error> {
         let link_path = format!("/nix/var/nix/profiles/system-{generation}-link");
-        let target = std::fs::read_link(&link_path)?;
-        let target = if target.is_absolute() {
-            target
-        } else {
-            std::path::Path::new("/nix/var/nix/profiles").join(target)
-        };
-        let store_path = target.to_str().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "generation link target is not valid UTF-8",
-            )
-        })?;
-        if !is_valid_nix_store_path(store_path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "generation link does not resolve to a canonical Nix store path",
-            ));
-        }
-        Ok(store_path.to_string())
+        Self::resolve_profile_link_to_store_closure(std::path::Path::new(&link_path))
     }
 
     /// Construct the canonical immutable activation command for one generation.
