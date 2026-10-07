@@ -4,6 +4,17 @@ nixward brings hyperdimensional computing (HDC) and active inference to NixOS sy
 
 Part of the [Symthaea](https://luminousdynamics.org) cognitive architecture.
 
+## Standalone qualification status
+
+This repository is undergoing a standalone extraction hardening pass in pull
+request #2. The standalone boundary is **not considered qualified** until the
+exact validated checkout has a completed successful CI run and emits its
+qualification receipt.
+
+The only cross-repository Rust dependency is `symthaea-core`, pinned to commit
+`77b872fd116c7b6f44fedd82bb8c6100240caa73`. The repository-local boundary
+checker rejects escaping local paths and floating Git branch/tag selectors.
+
 ## System Transaction Architecture
 
 Consequential machine changes use an evidence-bound transaction lifecycle:
