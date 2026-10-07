@@ -15,7 +15,11 @@ use super::generation_manager::GenerationManager;
 use crate::traits::{ActionType, ConsciousnessThresholds, PhiAwareScoring};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 use std::process::Stdio;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -166,6 +170,91 @@ impl HostExecutionPolicy {
         }
     }
 }
+
+/// Exclusive interlock for the NixOS system profile mutation boundary.
+///
+/// Nix profile operations use <profile>.lock as an advisory BSD flock lock.
+/// Nixward deliberately uses that same lock rather than inventing a separate
+/// mutex that ordinary Nix clients would not honor. The lock is acquired only
+/// after nix-env --set has completed (that command must own the lock itself),
+/// then held while the exact immutable closure activation runs.
+struct SystemProfileInterlock {
+    file: File,
+}
+
+impl SystemProfileInterlock {
+    const PATH: &'static str = "/nix/var/nix/profiles/system.lock";
+
+    fn acquire() -> Result<Self, String> {
+        Self::acquire_at(Path::new(Self::PATH))
+    }
+
+    #[cfg(unix)]
+    fn acquire_at(path: &Path) -> Result<Self, String> {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            format!("failed to inspect Nix system-profile lock {}: {error}", path.display())
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Nix system-profile lock {} is a symlink; refusing to trust redirected lock state",
+                path.display()
+            ));
+        }
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "Nix system-profile lock {} is not a regular file",
+                path.display()
+            ));
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| {
+                format!("failed to open Nix system-profile lock {}: {error}", path.display())
+            })?;
+
+        let result = unsafe {
+            nix::libc::flock(
+                file.as_raw_fd(),
+                nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            let errno = error.raw_os_error();
+            if errno == Some(nix::libc::EWOULDBLOCK) || errno == Some(nix::libc::EAGAIN) {
+                return Err(format!(
+                    "Nix system-profile lock {} is already held; refusing concurrent activation",
+                    path.display()
+                ));
+            }
+            return Err(format!(
+                "failed to acquire Nix system-profile lock {}: {error}",
+                path.display()
+            ));
+        }
+
+        Ok(Self { file })
+    }
+
+    #[cfg(not(unix))]
+    fn acquire_at(path: &Path) -> Result<Self, String> {
+        Err(format!(
+            "Nix system-profile interlock is unsupported on non-Unix target {}",
+            path.display()
+        ))
+    }
+}
+
+impl Drop for SystemProfileInterlock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { nix::libc::flock(self.file.as_raw_fd(), nix::libc::LOCK_UN) };
+        }
+    }
 
 impl NixOSCommand {
     /// Create a Custom command with auto-classified safety level.
@@ -1027,23 +1116,46 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
-        if let NixOSCommand::ActivateSystemClosure {
+    async fn run_bound_command(
+        command: &NixOSCommand,
+    ) -> Result<(std::process::Output, Option<SystemProfileInterlock>), String> {
+        let interlock = if let NixOSCommand::ActivateSystemClosure {
             profile_store_path: Some(profile_store_path),
             ..
         } = command
         {
+            // Nix itself owns the profile lock while performing --set. We
+            // therefore acquire the same lock immediately afterward, verify
+            // the exact requested profile again, and keep the lock through
+            // immutable closure activation. This closes the Nix-client
+            // interleaving window without pretending the profile mutation is
+            // one atomic syscall.
             Self::set_exact_system_profile(profile_store_path).await?;
-        }
+            let interlock = SystemProfileInterlock::acquire()?;
+            let observed = GenerationManager::current_system_profile_closure().map_err(|error| {
+                format!("failed to verify exact system profile under interlock: {error}")
+            })?;
+            if observed != *profile_store_path {
+                return Err(format!(
+                    "system profile changed before exact activation interlock was secured: expected {}, observed {}",
+                    profile_store_path, observed
+                ));
+            }
+            Some(interlock)
+        } else {
+            None
+        };
 
         let (cmd, args) = command.to_command();
-        Command::new(&cmd)
+        let output = Command::new(&cmd)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|error| format!("failed to execute command {cmd}: {error}"))
+            .map_err(|error| format!("failed to execute command {cmd}: {error}"))?;
+
+        Ok((output, interlock))
     }
 
     async fn set_exact_system_profile(profile_store_path: &str) -> Result<(), String> {
@@ -1288,7 +1400,7 @@ impl NixOSExecutor {
         let rb_result = Self::run_bound_command(&rollback_cmd).await;
 
         let exec_result = match rb_result {
-            Ok(rb_output) if rb_output.status.success() => {
+            Ok((rb_output, _interlock)) if rb_output.status.success() => {
                 if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
                     let (expected_runtime, expected_profile) = match &rollback_cmd {
                         NixOSCommand::ActivateSystemClosure {
@@ -1349,7 +1461,7 @@ impl NixOSExecutor {
                     }
                 }
             }
-            Ok(rb_output) => ExecutionResult::FailedNoRollback {
+            Ok((rb_output, _interlock)) => ExecutionResult::FailedNoRollback {
                 error,
                 rollback_error: Some(String::from_utf8_lossy(&rb_output.stderr).to_string()),
             },
@@ -1459,7 +1571,7 @@ impl NixOSExecutor {
         let elapsed = start.elapsed().as_millis() as u64;
 
         match result {
-            Ok(output) if output.status.success() => {
+            Ok((output, _interlock)) if output.status.success() => {
                 if let Err(error) =
                     Self::verify_exact_activation_post_state(&command, &authorization).await
                 {
@@ -1481,7 +1593,10 @@ impl NixOSExecutor {
                     exec_result
                 }
             }
-            Ok(output) => {
+            Ok((output, interlock)) => {
+                // A failed activation must release the profile interlock before
+                // the recovery path acquires it again for the exact prior closure.
+                drop(interlock);
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
                 warn!(error = %error, "Command failed, attempting authorized rollback");
 
@@ -2374,4 +2489,21 @@ mod tests {
             .is_allowed()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn system_profile_interlock_is_exclusive_and_releases() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("system.lock");
+        std::fs::File::create(&path).expect("create lock file");
+
+        let first = SystemProfileInterlock::acquire_at(&path).expect("first lock");
+        let second = SystemProfileInterlock::acquire_at(&path);
+        assert!(second
+            .expect_err("second exclusive lock must fail closed")
+            .contains("already held"));
+
+        drop(first);
+        SystemProfileInterlock::acquire_at(&path).expect("lock must be reusable after release");
+    }
+
 }
