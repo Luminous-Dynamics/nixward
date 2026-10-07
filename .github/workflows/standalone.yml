@@ -10,15 +10,18 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: standalone-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  cargo:
+  bootstrap-lockfile:
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -29,25 +32,56 @@ jobs:
           set -euo pipefail
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
-          rustc --version
-          cargo --version
 
       - name: Generate lockfile
         shell: bash
         run: cargo generate-lockfile
 
       - name: Persist generated lockfile
-        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
+          if git diff --quiet -- Cargo.lock && git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            echo "Cargo.lock already current"
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.lock
-          if ! git diff --cached --quiet -- Cargo.lock; then
-            git commit -m "build: add standalone Cargo lockfile"
-            git push
-          fi
+          git commit -m "build: add standalone Cargo lockfile"
+          git push origin HEAD:"${GITHUB_REF_NAME}"
+
+  validate:
+    needs: bootstrap-lockfile
+    if: github.event_name == 'pull_request' || needs.bootstrap-lockfile.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Refresh hardening branch after lock bootstrap
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+          cargo --version
+
+      - name: Require repository lockfile
+        shell: bash
+        run: test -f Cargo.lock
 
       - name: Check default feature set
         run: cargo check --locked --all-targets
