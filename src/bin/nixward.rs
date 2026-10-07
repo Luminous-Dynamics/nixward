@@ -7,7 +7,7 @@
 //! natural language input through the cognitive core.
 
 use clap::Parser;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use nixward::action::authority_approval::verify_execution_intent_change_authority;
 use nixward::action::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
@@ -524,8 +524,26 @@ fn secure_entropy() -> Result<[u8; 32], String> {
 fn write_private_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
-    std::fs::write(path, bytes)
+
+    // Creation is deliberately exclusive. This prevents an existing file or
+    // attacker-created symlink from becoming the destination of a privileged
+    // preparation artifact.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("refusing to create {}: {e}", path.display()))?;
+    file.write_all(&bytes)
         .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync {}: {e}", path.display()))?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
