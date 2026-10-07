@@ -638,8 +638,12 @@ impl ChangeAuthorization {
             "execution-intent authorization requires an executable command".to_string()
         })?;
         match command {
-            NixOSCommand::ActivateSystemClosure { store_path, .. }
-                if store_path == bundle.expected_out_path() => {}
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                ..
+            } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path() => {}
             NixOSCommand::ActivateSystemClosure { .. } => {
                 return Err("system closure differs from the verified realization plan".into());
             }
