@@ -351,15 +351,17 @@ impl NixOSCommand {
     /// Get the rollback command if available
     pub fn rollback_command(&self) -> Option<NixOSCommand> {
         match self {
-            Self::RebuildSwitch { .. } | Self::RebuildTest { .. } | Self::RebuildBoot { .. }
-            | Self::ActivateSystemClosure { action: SystemActivation::Switch, .. }
-            | Self::ActivateSystemClosure { action: SystemActivation::Test, .. } => {
+            Self::RebuildSwitch { .. } | Self::RebuildTest { .. } | Self::RebuildBoot { .. } => {
                 Some(NixOSCommand::Custom {
                     command: "nixos-rebuild".to_string(),
                     args: vec!["switch".to_string(), "--rollback".to_string()],
                     safety_level: SafetyLevel::SystemCritical,
                 })
             }
+            // Exact closure activation has a transaction-bound recovery command
+            // in ChangePlan::RollbackBinding. There is deliberately no generic
+            // rollback fallback for this mutation class.
+            Self::ActivateSystemClosure { .. } => None
             Self::EnvInstall { .. } | Self::EnvRemove { .. } => {
                 Some(NixOSCommand::EnvRollback)
             }
@@ -1456,6 +1458,15 @@ mod tests {
             packages: vec!["vim".to_string()],
         };
         assert!(install.rollback_command().is_some());
+
+        let exact = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            action: SystemActivation::Switch,
+        };
+        assert!(
+            exact.rollback_command().is_none(),
+            "exact closure activation must never fall back to ambient rollback"
+        );
 
         let search = NixOSCommand::Search {
             query: "vim".to_string(),
