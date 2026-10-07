@@ -7,7 +7,8 @@
 //! Natural language is the primary interface — subcommands exist
 //! as convenience shortcuts for common goals.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 /// nixward: A conscious NixOS management tool.
 ///
@@ -99,6 +100,18 @@ pub enum Command {
         /// Extra arguments to pass to nixos-rebuild.
         #[arg(last = true)]
         extra_args: Vec<String>,
+    },
+
+    /// Prepare or activate an exact realized NixOS system closure.
+    ///
+    /// The prepare phase verifies the framework execution-intent/realization-plan
+    /// pair and emits an immutable ChangePlan plus detached authority challenge.
+    /// The challenge can be signed offline with nixward-owner-key. Activation
+    /// re-verifies the complete evidence chain before executing the exact store
+    /// closure's switch-to-configuration action.
+    Closure {
+        #[command(subcommand)]
+        op: ClosureCommand,
     },
 
     /// Roll back to a previous generation.
@@ -226,14 +239,88 @@ pub enum Command {
 }
 
 /// Rebuild modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RebuildMode {
-    /// Apply and make default boot entry.
+    /// Candidate/preview mode; privileged switch activation is blocked.
     Switch,
-    /// Apply temporarily (no boot entry).
+    /// Candidate/preview mode; privileged test activation is blocked.
     Test,
-    /// Set as default for next boot only.
+    /// Candidate/preview mode; privileged boot activation is blocked.
     Boot,
+}
+
+/// Activation actions for one already-realized NixOS system closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ClosureAction {
+    /// Make the realized closure current.
+    Switch,
+    /// Test the realized closure without making it the boot default.
+    Test,
+    /// Make the realized closure the next boot entry.
+    Boot,
+}
+
+impl ClosureAction {
+    pub fn to_system_activation(self) -> nixward::action::SystemActivation {
+        match self {
+            Self::Switch => nixward::action::SystemActivation::Switch,
+            Self::Test => nixward::action::SystemActivation::Test,
+            Self::Boot => nixward::action::SystemActivation::Boot,
+        }
+    }
+}
+
+/// Exact-realization preparation/activation commands.
+#[derive(Subcommand, Debug)]
+pub enum ClosureCommand {
+    /// Verify an exact framework execution-intent/realization pair and emit
+    /// an immutable activation plan plus detached authority challenge.
+    Prepare {
+        /// Canonical framework execution-intent JSON.
+        #[arg(long)]
+        intent: PathBuf,
+        /// Canonical Nix realization-plan JSON.
+        #[arg(long)]
+        realization_plan: PathBuf,
+        /// Activation action for the exact realized closure.
+        #[arg(value_enum, default_value = "switch")]
+        action: ClosureAction,
+        /// Framework Holon identity as a 64-character hex digest.
+        #[arg(long)]
+        holon_id: String,
+        /// Output path for the serialized ChangePlan.
+        #[arg(long)]
+        plan_out: PathBuf,
+        /// Output path for the detached authority challenge.
+        #[arg(long)]
+        challenge_out: PathBuf,
+        /// Authorization TTL in milliseconds.
+        #[arg(long, default_value_t = 60_000)]
+        ttl_ms: u64,
+    },
+
+    /// Verify a signed exact-realization authority and activate the immutable
+    /// NixOS system closure named by the realization plan.
+    Activate {
+        /// Canonical framework execution-intent JSON.
+        #[arg(long)]
+        intent: PathBuf,
+        /// Canonical Nix realization-plan JSON.
+        #[arg(long)]
+        realization_plan: PathBuf,
+        /// Serialized ChangePlan produced by closure prepare.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Detached authority signature produced by nixward-owner-key sign.
+        #[arg(long)]
+        signature: PathBuf,
+        /// JSON authority trust policy containing the trusted signing key.
+        #[arg(long)]
+        policy: PathBuf,
+        /// Framework Holon identity as a 64-character hex digest.
+        #[arg(long)]
+        holon_id: String,
+    },
 }
 
 /// Observation domains.
@@ -371,6 +458,34 @@ mod tests {
         } else {
             panic!("Expected Rebuild command");
         }
+    }
+
+    #[test]
+    fn test_parse_exact_closure_prepare() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "closure",
+            "prepare",
+            "--intent",
+            "intent.json",
+            "--realization-plan",
+            "plan.json",
+            "--holon-id",
+            "11",
+            "--plan-out",
+            "change.json",
+            "--challenge-out",
+            "challenge.json",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Closure {
+                op: ClosureCommand::Prepare {
+                    action: ClosureAction::Switch,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]
