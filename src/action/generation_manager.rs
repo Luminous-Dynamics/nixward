@@ -150,7 +150,11 @@ impl GenerationManager {
         action: SystemActivation,
     ) -> Result<NixOSCommand, std::io::Error> {
         let store_path = Self::exact_generation_closure(generation)?;
-        Ok(NixOSCommand::ActivateSystemClosure { store_path, action })
+        Ok(NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(store_path.clone()),
+            store_path,
+            action,
+        })
     }
 
     /// Resolve the newest generation older than the current one.
@@ -394,6 +398,9 @@ mod tests {
     fn test_exact_generation_activation_command_uses_immutable_store_path() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         let (bin, args) = command.to_command();
