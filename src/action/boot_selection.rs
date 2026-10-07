@@ -97,7 +97,7 @@ pub fn parse_bls_entry(entry_id: &str, text: &str) -> Result<BlsEntry, String> {
             continue;
         }
 
-        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+        let Some((key, value)) = line.split_once(|c: char| c.is_ascii_whitespace()) else {
             continue;
         };
         let value = value.trim();
@@ -225,7 +225,7 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
                 return None;
             }
             let (key, value) = line.split_once('=')?;
-            Some((key.trim().to_string(), value.trim_matches(['\'', '"']).to_string()))
+            Some((key.trim().to_string(), value.trim_matches(|c: char| c == '\'' || c == '"').to_string()))
         })
         .collect()
 }
@@ -392,6 +392,17 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parsed.boot_count_state, BootCountState::Indeterminate);
     }
 
+    #[test]
+    fn exact_candidate_binding_comes_from_init_option_not_kernel_artifact() {
+        let parsed = entry(
+            "candidate.conf",
+            "linux /EFI/nixos/kernel.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet\n",
+        );
+        assert_eq!(
+            super::exact_store_path_from_entry(&parsed).as_deref(),
+            Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate"),
+        );
+    }
     #[test]
     fn boot_count_zero_is_bad() {
         let parsed = entry(
