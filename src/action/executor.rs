@@ -40,6 +40,11 @@ pub enum NixOSCommand {
     /// Activate one already-realized immutable NixOS system closure.
     ActivateSystemClosure {
         store_path: String,
+        /// Exact system profile closure selected by this transaction.
+        /// Primary activation uses the candidate store path; recovery may
+        /// restore a prior profile while activating a prior runtime closure.
+        #[serde(default)]
+        profile_store_path: Option<String>,
         action: SystemActivation,
     },
     /// nix-env -i (user package install)
@@ -628,6 +633,10 @@ impl ExecutionAuthorization {
         ) {
             (Some(store_path), Some(action)) => Some(NixOSCommand::ActivateSystemClosure {
                 store_path: store_path.to_string(),
+                profile_store_path: plan
+                    .rollback()
+                    .prior_system_profile_closure()
+                    .map(ToOwned::to_owned),
                 action,
             }),
             (None, None) => None,
@@ -1504,6 +1513,9 @@ mod tests {
     fn exact_activation_authorization_requires_exact_recovery_binding() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         let plan = ChangePlan::command_only_with_system_recovery(
