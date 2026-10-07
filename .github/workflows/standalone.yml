@@ -86,6 +86,9 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Verify workflow authority boundary
+        run: python3 scripts/verify-workflow-boundary.py
+
       - name: Verify standalone filesystem boundary
         run: python3 scripts/verify-standalone-boundary.py
 
