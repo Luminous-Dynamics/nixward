@@ -371,9 +371,18 @@ Recovery evidence records the exact closure targeted for recovery and the exact
 post-recovery closure observed by Nixward.
 
 The exact system-profile transition is now part of the privileged activation
-primitive. Bootloader-specific next-boot selection remains a separate evidence
-boundary tracked in Issue #8 and must not be silently folded into the runtime or
-profile claims.
+primitive. After the authorized profile is set, Nixward acquires the same
+Nix-managed `/nix/var/nix/profiles/system.lock` used for profile mutations,
+re-verifies the exact selected closure under that interlock, and holds it while
+invoking the exact immutable `switch-to-configuration` action. This closes the
+Nix-client concurrency window during activation; a profile change that wins the
+small handoff window before the interlock is acquired is detected and fails
+closed. This does not authorize or claim to prevent arbitrary direct filesystem
+mutation that bypasses Nix's locking protocol.
+
+Bootloader-specific next-boot selection remains a separate evidence boundary
+tracked in Issue #8 and must not be silently folded into the runtime or profile
+claims.
 
 If no bounded recovery path exists, the action should either be classified as
 non-reversible and require stronger explicit treatment, or be refused.
