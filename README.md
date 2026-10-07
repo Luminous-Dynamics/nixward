@@ -50,10 +50,10 @@ baseline. The preferred path is **assimilate → declare → evaluate → author
 ```
 Observation ──> Encoding ──> Cognition ──> Action
    │              │             │            │
-   │ systemd      │ HDC         │ Active     │ Phi-gated
-   │ journal      │ 16384-dim   │ Inference  │ execution
-   │ store        │ vectors     │ Causal     │ with rollback
-   │ hardware     │             │ graph       │ verification
+   │ systemd      │ HDC         │ Active     │ Evidence-
+   │ journal      │ 16384-dim   │ Inference  │ bound
+   │ store        │ vectors     │ Causal     │ execution
+   │ hardware     │             │ graph       │
    └──────────────┴─────────────┴────────────┘
 ```
 
@@ -145,12 +145,12 @@ Add to your `flake.nix`:
 
 ```nix
 {
-  inputs.symthaea.url = "github:luminous-dynamics/symthaea";
+  inputs.nixward.url = "github:Luminous-Dynamics/nixward";
 
-  outputs = { self, nixpkgs, symthaea, ... }: {
+  outputs = { self, nixpkgs, nixward, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
-        symthaea.nixosModules.nixward
+        nixward.nixosModules.nixward
         {
           services.nixward = {
             enable = true;
@@ -218,8 +218,9 @@ cargo test -p nixward --features cli --test cli_integration
 cargo test -p nixward --test e2e_consciousness_loop
 cargo test -p nixward --test proptest_hdc
 
-# Standalone boundary
+# Standalone boundaries
 python3 scripts/verify-standalone-boundary.py
+python3 scripts/verify-workflow-boundary.py
 
 # Benchmarks
 cargo bench -p nixward --bench hdc_benchmarks
