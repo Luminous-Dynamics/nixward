@@ -1691,6 +1691,7 @@ mod tests {
             super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
             command,
             "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
             SystemActivation::Switch,
             60_000,
         )
