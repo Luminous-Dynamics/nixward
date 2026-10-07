@@ -653,10 +653,14 @@ fn cmd_closure_prepare(
 
         let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
         let prior_system_closure = GenerationManager::current_runtime_system_closure()
-            .map_err(|error| format!("failed to capture exact pre-state system closure: {error}"))?;
+            .map_err(|error| format!("failed to capture exact pre-state running system closure: {error}"))?;
+        let prior_system_profile_closure = GenerationManager::current_system_profile_closure()
+            .map_err(|error| format!("failed to capture exact pre-state system-profile closure: {error}"))?;
         let machine = MachineBinding::new(bundle.execution_target_identity())?;
+        let candidate_store_path = bundle.expected_out_path().to_string();
         let command = NixOSCommand::ActivateSystemClosure {
-            store_path: bundle.expected_out_path().to_string(),
+            store_path: candidate_store_path.clone(),
+            profile_store_path: Some(candidate_store_path),
             action: action.to_system_activation(),
         };
         // Recovery must preserve the same activation semantics as the
@@ -666,6 +670,7 @@ fn cmd_closure_prepare(
             machine,
             command,
             prior_system_closure.clone(),
+            prior_system_profile_closure.clone(),
             recovery_action,
             ttl_ms,
         )?;
@@ -683,9 +688,11 @@ fn cmd_closure_prepare(
         write_private_json(&challenge_out, &challenge)?;
 
         println!("  Exact realization verified.");
-        println!("  Pre-state closure: {}", prior_system_closure);
+        println!("  Pre-state running closure: {}", prior_system_closure);
+        println!("  Pre-state profile closure: {}", prior_system_profile_closure);
         println!("  Store closure: {}", bundle.expected_out_path());
-        println!("  Recovery closure: {}", prior_system_closure);
+        println!("  Recovery running closure: {}", prior_system_closure);
+        println!("  Recovery profile closure: {}", prior_system_profile_closure);
         println!("  Recovery action: {:?}", recovery_action);
         println!("  Plan digest: {}", hex32(&plan.digest()));
         println!("  Authority challenge: {}", challenge.digest().map_err(|e| e.to_string())?);
@@ -738,8 +745,10 @@ fn cmd_closure_activate(
         match command {
             NixOSCommand::ActivateSystemClosure {
                 store_path,
+                profile_store_path: Some(profile_store_path),
                 action: _,
             } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path()
                 && plan.machine().machine_id() == bundle.execution_target_identity() => {}
             NixOSCommand::ActivateSystemClosure { .. } => {
                 return Err(
