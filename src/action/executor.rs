@@ -1027,6 +1027,96 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    async fn set_exact_system_profile(profile_store_path: &str) -> Result<(), String> {
+        if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
+            return Err("system profile target is not a canonical Nix store path".into());
+        }
+
+        let output = Command::new("nix-env")
+            .args([
+                "-p",
+                "/nix/var/nix/profiles/system",
+                "--set",
+                profile_store_path,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|error| format!("failed to set exact system profile: {error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "exact system profile transition failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let observed = GenerationManager::current_system_profile_closure().map_err(|error| {
+            format!("failed to verify exact system profile transition: {error}")
+        })?;
+        if observed != profile_store_path {
+            return Err(format!(
+                "system profile transition resolved to {}, expected {}",
+                observed, profile_store_path
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn verify_exact_activation_post_state(
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+    ) -> Result<(), String> {
+        let NixOSCommand::ActivateSystemClosure {
+            store_path: candidate,
+            profile_store_path: Some(profile_store_path),
+            action,
+        } = command
+        else {
+            return Ok(());
+        };
+
+        let observed_profile = GenerationManager::current_system_profile_closure().map_err(|error| {
+            format!("failed to observe selected system profile after activation: {error}")
+        })?;
+        if observed_profile != *profile_store_path {
+            return Err(format!(
+                "post-activation system profile is {} rather than {}",
+                observed_profile, profile_store_path
+            ));
+        }
+
+        let observed_runtime = GenerationManager::current_runtime_system_closure().map_err(|error| {
+            format!("failed to observe running system closure after activation: {error}")
+        })?;
+
+        let expected_runtime = match action {
+            SystemActivation::Switch | SystemActivation::Test => candidate.as_str(),
+            SystemActivation::Boot => match authorization.recovery_command.as_ref() {
+                Some(NixOSCommand::ActivateSystemClosure {
+                    store_path: prior,
+                    ..
+                }) => prior.as_str(),
+                _ => {
+                    return Err(
+                        "boot activation is missing exact prior runtime recovery binding".into()
+                    )
+                }
+            },
+        };
+
+        if observed_runtime != expected_runtime {
+            return Err(format!(
+                "post-activation running closure is {} rather than expected {}",
+                observed_runtime, expected_runtime
+            ));
+        }
+
+        Ok(())
+    }
+
     fn validate_exact_recovery_observation(
         observed: &str,
         candidate: &str,
@@ -1171,23 +1261,52 @@ impl NixOSExecutor {
         }
 
         let start = std::time::Instant::now();
-        let result = Command::new(&cmd)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
+        let result = if let NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = &command
+        {
+            match Self::set_exact_system_profile(profile_store_path).await {
+                Ok(()) => Command::new(&cmd)
+                    .args(&args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await,
+                Err(error) => Err(std::io::Error::other(error)),
+            }
+        } else {
+            Command::new(&cmd)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+        };
         let elapsed = start.elapsed().as_millis() as u64;
 
         match result {
             Ok(output) if output.status.success() => {
-                let exec_result = ExecutionResult::Success {
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    execution_time_ms: elapsed,
-                };
-                self.record_execution(&command, decision_quality, &authorization, &exec_result);
-                exec_result
+                if let Err(error) =
+                    Self::verify_exact_activation_post_state(&command, &authorization).await
+                {
+                    let exec_result = ExecutionResult::FailedNoRollback {
+                        error: "exact activation process exited successfully".into(),
+                        rollback_error: Some(format!(
+                            "post-state verification failed: {error}"
+                        )),
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &exec_result);
+                    exec_result
+                } else {
+                    let exec_result = ExecutionResult::Success {
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                        execution_time_ms: elapsed,
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &exec_result);
+                    exec_result
+                }
             }
             Ok(output) => {
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1540,6 +1659,16 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn exact_activation_requires_exact_profile_target() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: None,
+            action: SystemActivation::Switch,
+        };
+        assert!(!command.host_execution_policy().is_allowed());
     }
 
     #[test]
