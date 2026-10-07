@@ -166,11 +166,13 @@ carry an explicit recovery strategy or be blocked.
 
 Only the already-authorized exact command/patch/capability may execute.
 
-For an exact NixOS system closure activation, the authorized profile target is
-set first and verified, then the exact closure's `switch-to-configuration`
-action is invoked. The executor must not reinterpret the approved request,
-substitute an ambient generation selector, or silently redirect the profile
-target.
+For an exact NixOS system closure activation, Nixward first takes its
+cross-process transaction interlock before the final pre-state validation. The
+authorized profile target is then set and verified, after which Nixward acquires
+the Nix-managed system-profile lock, re-verifies the selected closure under
+that lock, and invokes the exact closure's `switch-to-configuration` action.
+The executor must not reinterpret the approved request, substitute an ambient
+generation selector, or silently redirect the profile target.
 
 ### 7. Verify
 
