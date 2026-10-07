@@ -1016,6 +1016,9 @@ mod tests {
     fn exact_system_activation_without_recovery_binding_is_rejected() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         assert!(ChangePlan::command_only(
