@@ -255,7 +255,10 @@ fn exact_store_path_from_entry(entry: &BlsEntry) -> Option<String> {
     ]
     .into_iter()
     .flatten()
-    .find(|value| super::execution_intent::is_valid_nix_store_path(value))
+    .find(|value| {
+        super::execution_intent::is_valid_nix_store_path(value)
+            && value.contains("-nixos-system-")
+    })
     .map(str::to_string)
 }
 
@@ -322,12 +325,12 @@ mod tests {
     fn parses_type1_entry_and_boot_count() {
         let parsed = entry(
             "nixos-6.12+03-01.conf",
-            "title NixOS
+            r#"title NixOS
 version 6.12
 machine-id 0123456789abcdef0123456789abcdef
-linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-kernel
+linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate
 initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
-",
+"#,
         );
 
         assert_eq!(parsed.title.as_deref(), Some("NixOS"));
@@ -340,8 +343,7 @@ initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
     fn boot_count_zero_is_bad() {
         let parsed = entry(
             "nixos+00-04.efi",
-            "uki /EFI/Linux/nixos.efi
-",
+            "uki /EFI/Linux/nixos.efi\n",
         );
         assert_eq!(parsed.boot_count_state, BootCountState::Bad);
     }
@@ -353,16 +355,14 @@ initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
             "candidate.conf".into(),
             entry(
                 "candidate.conf",
-                "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate
-",
+                "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
             ),
         );
         entries.insert(
             "old.conf".into(),
             entry(
                 "old.conf",
-                "linux /nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old
-",
+                "linux /nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old\n",
             ),
         );
 
@@ -401,8 +401,7 @@ initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
             "candidate".into(),
             entry(
                 "candidate",
-                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate
-",
+                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
             ),
         )]);
 
