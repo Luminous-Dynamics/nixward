@@ -1027,6 +1027,25 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
+        if let NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = command
+        {
+            Self::set_exact_system_profile(profile_store_path).await?;
+        }
+
+        let (cmd, args) = command.to_command();
+        Command::new(&cmd)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|error| format!("failed to execute command {cmd}: {error}"))
+    }
+
     async fn set_exact_system_profile(profile_store_path: &str) -> Result<(), String> {
         if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
             return Err("system profile target is not a canonical Nix store path".into());
@@ -1268,28 +1287,7 @@ impl NixOSExecutor {
         }
 
         let start = std::time::Instant::now();
-        let result = if let NixOSCommand::ActivateSystemClosure {
-            profile_store_path: Some(profile_store_path),
-            ..
-        } = &command
-        {
-            match Self::set_exact_system_profile(profile_store_path).await {
-                Ok(()) => Command::new(&cmd)
-                    .args(&args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .await,
-                Err(error) => Err(std::io::Error::other(error)),
-            }
-        } else {
-            Command::new(&cmd)
-                .args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output()
-                .await
-        };
+        let result = Self::run_bound_command(&command).await;
         let elapsed = start.elapsed().as_millis() as u64;
 
         match result {
