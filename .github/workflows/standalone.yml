@@ -108,10 +108,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          validated_commit="$(git rev-parse HEAD)"
+          trigger_commit="${GITHUB_SHA}"
           cat > qualification-receipt.json <<JSON
           {
             "schema": "luminous-nixward-standalone-qualification-v1",
-            "commit": "${GITHUB_SHA}",
+            "validated_commit": "$validated_commit",
+            "trigger_commit": "$trigger_commit",
             "rustc": "$(rustc --version)",
             "cargo": "$(cargo --version)",
             "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
