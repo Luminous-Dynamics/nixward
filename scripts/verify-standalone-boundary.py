@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import json
 import sys
 import tomllib
 
@@ -84,6 +85,32 @@ for nix_file in ROOT.rglob("*.nix"):
     if re.search(r"(^|[\s=(])\.\./", text):
         errors.append(f"{nix_file.relative_to(ROOT)}: contains parent-relative path reference")
 
+
+flake_lock = ROOT / "flake.lock"
+if not flake_lock.is_file():
+    errors.append("flake.lock is missing")
+else:
+    try:
+        with flake_lock.open("r", encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"flake.lock: cannot parse JSON: {exc}")
+    else:
+        for node_name, node in lock.get("nodes", {}).items():
+            locked = node.get("locked")
+            if not isinstance(locked, dict):
+                continue
+            source_type = locked.get("type")
+            if source_type in {"github", "git"}:
+                rev = locked.get("rev")
+                if not isinstance(rev, str) or not HEX40.fullmatch(rev):
+                    errors.append(
+                        f"flake.lock:{node_name}: {source_type} input requires a 40-hex locked rev"
+                    )
+                if not isinstance(locked.get("narHash"), str) or not locked["narHash"]:
+                    errors.append(
+                        f"flake.lock:{node_name}: locked {source_type} input is missing narHash"
+                    )
 
 readme = ROOT / "README.md"
 if readme.is_file():
