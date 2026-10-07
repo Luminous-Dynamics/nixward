@@ -1144,14 +1144,37 @@ impl NixOSExecutor {
     }
 
     fn validate_exact_recovery_observation(
-        observed: &str,
-        candidate: &str,
-        prior: &str,
+        observed_runtime: &str,
+        observed_profile: &str,
+        candidate_runtime: &str,
+        candidate_profile: &str,
+        prior_runtime: &str,
+        prior_profile: &str,
+        action: SystemActivation,
     ) -> Result<(), String> {
-        if observed != candidate && observed != prior {
+        let valid = match action {
+            SystemActivation::Boot => {
+                observed_runtime == prior_runtime
+                    && (observed_profile == prior_profile || observed_profile == candidate_profile)
+            }
+            SystemActivation::Switch | SystemActivation::Test => {
+                (observed_runtime == prior_runtime && observed_profile == prior_profile)
+                    || (observed_runtime == prior_runtime && observed_profile == candidate_profile)
+                    || (observed_runtime == candidate_runtime
+                        && observed_profile == candidate_profile)
+            }
+        };
+
+        if !valid {
             return Err(format!(
-                "recovery refused because system state changed outside the transaction: expected {} or {}, observed {}",
-                prior, candidate, observed
+                "recovery refused because system state changed outside the transaction: expected runtime in {{{}, {}}} and profile in {{{}, {}}} with action {:?}, observed runtime {} profile {}",
+                prior_runtime,
+                candidate_runtime,
+                prior_profile,
+                candidate_profile,
+                action,
+                observed_runtime,
+                observed_profile
             ));
         }
         Ok(())
@@ -1182,16 +1205,24 @@ impl NixOSExecutor {
         let observed = GenerationManager::current_runtime_system_closure().map_err(|error| {
             format!("failed to observe current running system closure before recovery: {error}")
         })?;
-        Self::validate_exact_recovery_observation(&observed, candidate, prior)?;
         let observed_profile = GenerationManager::current_system_profile_closure().map_err(|error| {
             format!("failed to observe current system-profile closure before recovery: {error}")
         })?;
-        if observed_profile != *prior_profile && observed_profile != *candidate {
-            return Err(format!(
-                "recovery refused because selected system profile changed outside the transaction: expected {} or {}, observed {}",
-                prior_profile, candidate, observed_profile
-            ));
-        }
+        let action = match original_command {
+            NixOSCommand::ActivateSystemClosure { action, .. } => *action,
+            _ => unreachable!(),
+        };
+        Self::validate_exact_recovery_observation(
+            &observed,
+            &observed_profile,
+            candidate,
+            // The primary candidate profile is required to equal its runtime
+            // closure by the authority boundary.
+            candidate,
+            prior,
+            prior_profile,
+            action,
+        )?;
         Ok(observed)
     }
 
@@ -1642,28 +1673,38 @@ mod tests {
 
     #[test]
     fn exact_recovery_observation_accepts_only_transaction_states() {
-        assert!(NixOSExecutor::validate_exact_recovery_observation(
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-        )
-        .is_ok());
+        let prior = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        let candidate = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new";
 
         assert!(NixOSExecutor::validate_exact_recovery_observation(
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-        )
-        .is_ok());
+            prior, prior, candidate, candidate, prior, prior, SystemActivation::Switch,
+        ).is_ok());
 
-        assert!(
-            NixOSExecutor::validate_exact_recovery_observation(
-                "/nix/store/11111111111111111111111111111111-nixos-system-other",
-                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-            )
-            .is_err()
-        );
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            prior, candidate, candidate, candidate, prior, prior, SystemActivation::Switch,
+        ).is_ok());
+
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            candidate, candidate, candidate, candidate, prior, prior, SystemActivation::Switch,
+        ).is_ok());
+
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            prior, candidate, candidate, candidate, prior, prior, SystemActivation::Boot,
+        ).is_ok());
+
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            candidate, candidate, candidate, candidate, prior, prior, SystemActivation::Boot,
+        ).is_err());
+
+        assert!(NixOSExecutor::validate_exact_recovery_observation(
+            candidate,
+            prior,
+            candidate,
+            candidate,
+            prior,
+            prior,
+            SystemActivation::Switch,
+        ).is_err());
     }
 
     #[test]
