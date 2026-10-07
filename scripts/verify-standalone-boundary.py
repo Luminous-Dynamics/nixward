@@ -28,9 +28,13 @@ def walk_manifest(value: object, source: pathlib.Path, path: str = "Cargo.toml")
         if isinstance(value.get("path"), str):
             candidate = repo_relative(value["path"], source)
             if candidate.exists() and not candidate.is_file() and not candidate.is_dir():
-                errors.append(f"{source.relative_to(ROOT)}: path is neither file nor directory: {value['path']}")
+                errors.append(
+                    f"{source.relative_to(ROOT)}: path is neither file nor directory: {value['path']}"
+                )
             elif not candidate.exists():
-                errors.append(f"{source.relative_to(ROOT)}: path does not exist: {value['path']}")
+                errors.append(
+                    f"{source.relative_to(ROOT)}: path does not exist: {value['path']}"
+                )
 
         if isinstance(value.get("git"), str):
             rev = value.get("rev")
@@ -51,7 +55,8 @@ def walk_manifest(value: object, source: pathlib.Path, path: str = "Cargo.toml")
 
 
 manifest_paths = sorted(
-    p for p in ROOT.rglob("Cargo.toml")
+    p
+    for p in ROOT.rglob("Cargo.toml")
     if not any(part in {".git", "target", "result"} for part in p.parts)
 )
 
@@ -80,6 +85,21 @@ for nix_file in ROOT.rglob("*.nix"):
         errors.append(f"{nix_file.relative_to(ROOT)}: contains parent-relative path reference")
 
 
+readme = ROOT / "README.md"
+if readme.is_file():
+    try:
+        readme_text = readme.read_text(encoding="utf-8")
+        if "symthaea.nixosModules.nixward" in readme_text:
+            errors.append(
+                "README.md: standalone module example still imports nixward through symthaea"
+            )
+        if 'inputs.nixward.url = "github:Luminous-Dynamics/nixward";' not in readme_text:
+            errors.append(
+                "README.md: standalone module example must declare the nixward flake input"
+            )
+    except OSError as exc:
+        errors.append(f"README.md: cannot read documentation: {exc}")
+
 if errors:
     print("standalone boundary: FAIL")
     for error in errors:
@@ -88,5 +108,5 @@ if errors:
 
 print(
     "standalone boundary: PASS "
-    f"({len(manifest_paths)} Cargo manifest(s), immutable git revisions)"
+    f"({len(manifest_paths)} Cargo manifest(s), immutable git revisions, self-contained docs)"
 )
