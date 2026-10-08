@@ -248,8 +248,11 @@ fn resolve_bls_entry_key(selected: &str, entries: &BTreeMap<String, BlsEntry>) -
 fn parse_systemd_loader_default(text: &str) -> Option<String> {
     text.lines().find_map(|raw_line| {
         let line = raw_line.trim();
-        let value = line.strip_prefix("default")?.trim_start();
-        Some(value.to_string())
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("default") {
+            return None;
+        }
+        parts.next().map(str::to_string)
     })
 }
 
@@ -636,20 +639,29 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
 /// within this one observed config and duplicate titles fail closed.
 pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry>, String> {
     let mut entries = BTreeMap::new();
-    let mut current: Option<(String, String, Vec<String>)> = None;
+    let mut submenu_stack: Vec<String> = Vec::new();
+    let mut current: Option<(String, String, String, Vec<String>)> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
-        if line.starts_with("menuentry ") {
-            if current.is_some() {
-                return Err("nested GRUB menuentry encountered; refusing ambiguous parse".into());
-            }
-            let title = parse_grub_menuentry_title(line)?;
-            current = Some((title, String::new(), Vec::new()));
+        if current.is_none() && line.starts_with("submenu ") {
+            let title = parse_grub_menuentry_title(line.strip_prefix("submenu ").unwrap_or(line))?;
+            submenu_stack.push(title);
             continue;
         }
 
-        if let Some((title, linux_line, initrds)) = current.as_mut() {
+        if current.is_none() && line.starts_with("menuentry ") {
+            let title = parse_grub_menuentry_title(line)?;
+            let entry_id = if submenu_stack.is_empty() {
+                title.clone()
+            } else {
+                format!("{} > {}", submenu_stack.join(" > "), title)
+            };
+            current = Some((entry_id, title, String::new(), Vec::new()));
+            continue;
+        }
+
+        if let Some((entry_id, title, linux_line, initrds)) = current.as_mut() {
             if line.starts_with("linux ") || line.starts_with("linuxefi ") || line.starts_with("multiboot ") {
                 *linux_line = line.to_string();
             } else if line.starts_with("initrd ") || line.starts_with("initrdefi ") {
@@ -657,11 +669,11 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
             }
 
             if line == "}" {
-                let (title, linux_line, initrds) = current.take().expect("entry state");
+                let (entry_id, title, linux_line, initrds) = current.take().expect("entry state");
                 let (linux, options) = parse_grub_linux_line(&linux_line)?;
                 let entry = BlsEntry {
-                    entry_id: title.clone(),
-                    title: Some(title.clone()),
+                    entry_id: entry_id.clone(),
+                    title: Some(title),
                     version: None,
                     machine_id: None,
                     linux,
@@ -673,22 +685,26 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
                     tries_left: None,
                     tries_done: None,
                 };
-                if entries.insert(title.clone(), entry).is_some() {
-                    return Err(format!("duplicate GRUB menuentry title {title}"));
+                if entries.insert(entry_id, entry).is_some() {
+                    return Err("duplicate exact GRUB menu entry identity".into());
                 }
             }
+        } else if line == "}" && !submenu_stack.is_empty() {
+            submenu_stack.pop();
         }
     }
 
     if current.is_some() {
         return Err("unterminated GRUB menuentry".into());
     }
+    if !submenu_stack.is_empty() {
+        return Err("unterminated GRUB submenu".into());
+    }
     if entries.is_empty() {
         return Err("no GRUB menuentry blocks found".into());
     }
     Ok(entries)
 }
-
 fn parse_grub_menuentry_title(line: &str) -> Result<String, String> {
     let rest = line.strip_prefix("menuentry ").unwrap_or("").trim_start();
     if !rest.starts_with('"') {
@@ -732,16 +748,37 @@ pub fn parse_grub_config_default(text: &str) -> Option<String> {
 /// A numeric generated default is intentionally rejected: menu position is not
 /// an identity. Literal entry identifiers are accepted only when the caller's
 /// menu parser supplies an exact matching entry.
+fn resolve_grub_entry<'a>(
+    selector: &str,
+    menu_entries: &'a BTreeMap<String, BlsEntry>,
+) -> Result<&'a BlsEntry, UnknownBootSelection> {
+    if let Some(entry) = menu_entries.get(selector) {
+        return Ok(entry);
+    }
+    let matches: Vec<&BlsEntry> = menu_entries
+        .values()
+        .filter(|entry| entry.title.as_deref() == Some(selector))
+        .collect();
+    match matches.as_slice() {
+        [entry] => Ok(entry),
+        [] => Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("GRUB selector {selector} is not mapped to an exact menu entry"),
+        }),
+        _ => Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("GRUB selector {selector} matches multiple menu entries; refusing ambiguous selection"),
+        }),
+    }
+}
+
 pub fn resolve_grub_selection(
     environment: &BTreeMap<String, String>,
     generated_default: Option<&str>,
     menu_entries: &BTreeMap<String, BlsEntry>,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     if let Some(next_entry) = environment.get("next_entry").filter(|v| !v.is_empty()) {
-        let entry = menu_entries.get(next_entry).ok_or_else(|| UnknownBootSelection {
-            bootloader_family: BootloaderFamily::Grub,
-            reason: format!("GRUB next_entry {next_entry} is not mapped to an exact menu entry"),
-        })?;
+        let entry = resolve_grub_entry(next_entry, menu_entries)?;
         return Ok(BootSelectionEvidence {
             bootloader_family: BootloaderFamily::Grub,
             selection_kind: SelectionKind::OneShot,
@@ -781,10 +818,7 @@ pub fn resolve_grub_selection(
         });
     }
 
-    let entry = menu_entries.get(default).ok_or_else(|| UnknownBootSelection {
-        bootloader_family: BootloaderFamily::Grub,
-        reason: format!("GRUB default {default} is not mapped to an exact menu entry"),
-    })?;
+    let entry = resolve_grub_entry(default, menu_entries)?;
 
     Ok(BootSelectionEvidence {
         bootloader_family: BootloaderFamily::Grub,
@@ -1032,12 +1066,26 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         .expect("GRUB fixture parses");
 
         let entry = entries.get("NixOS - Configuration 42").expect("entry");
+        assert_eq!(entry.title.as_deref(), Some("NixOS - Configuration 42"));
         assert_eq!(
             super::exact_store_path_from_entry(entry).as_deref(),
             Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
         );
     }
 
+    #[test]
+    fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
+        let entries = parse_grub_config_entries(
+            "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
+        )
+        .expect("nested GRUB fixture parses");
+        assert!(entries.contains_key("A > Same"));
+        assert!(entries.contains_key("B > Same"));
+        let env = BTreeMap::new();
+        let ambiguous = resolve_grub_selection(&env, Some("Same"), &entries)
+            .expect_err("ambiguous title must fail closed");
+        assert!(ambiguous.reason.contains("multiple menu entries"));
+    }
     #[test]
     fn saved_grub_default_requires_exact_saved_entry() {
         let environment = parse_grub_environment("saved_entry=candidate\n");
