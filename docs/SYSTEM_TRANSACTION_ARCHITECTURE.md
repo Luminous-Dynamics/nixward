@@ -465,3 +465,25 @@ System activation consumes the exact immutable store-path command only after the
 system-profile transition has separately succeeded and been observed. The
 Nix-generated activation artifact remains Nix-owned; Nixward supplies exact
 identity, authorization, coordination, and observation.
+
+## Frozen-source realization and retention hardening (2026-10-08)
+
+`FrozenConfigSource` is now explicitly separated from the Nix store identity it
+protects. The semantic source digest is never treated as a substitute for a Nix
+store path or NAR identity.
+
+`NixSourceRealizer` revalidates the complete frozen source immediately before
+materialization, invokes an immutable Nix executable by exact store identity with
+a minimal explicit environment, parses only a canonical `/nix/store/...` result,
+and compares the realized tree against the frozen manifest before accepting it.
+
+The resulting store path is retained by a transaction-scoped GC root under
+`/nix/var/nix/gcroots/nixward/<transaction-id>`. Root creation is descriptor-bound
+to the GC-root namespace, synchronized durably, and followed by independent
+read-back verification. A journaled `Rooted` state therefore means that the live
+root was observed, not merely that a serialized record claimed it.
+
+This is an input-retention boundary, not yet a complete candidate-build binding:
+the next privileged build step must consume the exact retained source store path
+and bind its resulting system closure to the same transaction without resolving
+the source from the mutable working tree.
