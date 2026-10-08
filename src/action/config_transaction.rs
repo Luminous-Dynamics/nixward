@@ -34,6 +34,7 @@ pub enum ConfigTransactionPhase {
     IndeterminateProfileTransition,
     ActivationStarted,
     Activated,
+    BootSelected,
     FailedBeforeActivation,
     IndeterminateActivation,
     RecoveryObservation,
@@ -2002,6 +2003,7 @@ impl ConfigTransaction {
         process_exit_status: Option<i32>,
         runtime_closure: Option<String>,
         profile_closure: Option<String>,
+        expected_runtime_closure: &str,
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
@@ -2019,10 +2021,14 @@ impl ConfigTransaction {
         let Some(candidate) = self.candidate_store_path() else {
             return Err("activation post-state requires a bound candidate build receipt".into());
         };
-        if runtime_closure.as_deref() == Some(candidate)
+        if runtime_closure.as_deref() == Some(expected_runtime_closure)
             && profile_closure.as_deref() == Some(candidate)
         {
-            self.phase = ConfigTransactionPhase::Activated;
+            self.phase = if expected_runtime_closure == candidate {
+                ConfigTransactionPhase::Activated
+            } else {
+                ConfigTransactionPhase::BootSelected
+            };
         } else {
             self.phase = ConfigTransactionPhase::IndeterminateActivation;
         }
@@ -2078,6 +2084,7 @@ impl ConfigTransaction {
         if !matches!(
             self.phase,
             ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::RecoveryMutationStarted
                 | ConfigTransactionPhase::RecoveryObservation
                 | ConfigTransactionPhase::IndeterminateActivation
                 | ConfigTransactionPhase::IndeterminateProfileTransition,
@@ -2249,6 +2256,7 @@ impl ConfigTransaction {
                 | ConfigTransactionPhase::IndeterminateActivation
                 | ConfigTransactionPhase::RecoveryObservation
                 | ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::RecoveryMutationStarted
         ) {
             return Err("source realization lease cannot be released while execution/recovery authority is live".into());
         }
@@ -2367,7 +2375,7 @@ impl ConfigTransaction {
 
     /// Release candidate retention only after activation/recovery is terminal.    #[cfg(feature = "native")]
     pub fn release_candidate_retention(&self) -> Result<(), String> {
-        if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) {
+        if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) {
             return Err("candidate retention cannot be released before a terminal transaction phase".into());
         }
         self.candidate_build
