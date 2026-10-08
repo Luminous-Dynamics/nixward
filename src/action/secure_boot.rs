@@ -845,6 +845,13 @@ pub fn verify_image_against_db_certificates(
         }
     }
 
+    if dbx.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
+        evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"unsupported dbx signature rule").as_bytes();
+        return Ok(evidence);
+    }
+
     for record in dbx.iter().filter(|record| {
         matches!(
             record.kind,
@@ -877,13 +884,6 @@ pub fn verify_image_against_db_certificates(
             b"dbx certificate rule cannot be correlated to an image signing chain",
         )
         .as_bytes();
-        return Ok(evidence);
-    }
-
-    if dbx.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
-        evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
-        evidence.stderr_blake3 =
-            *blake3::hash(b"unsupported dbx signature rule").as_bytes();
         return Ok(evidence);
     }
 
