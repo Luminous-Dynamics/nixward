@@ -1556,6 +1556,21 @@ impl NixOSExecutor {
             }
         }
 
+        // Freshness is checked once more after the one-shot replay key is
+        // consumed. This closes the last authorization time-of-check/time-of-use
+        // window between approval validation and privileged process spawn.
+        if !authorization.automatic_read_only
+            && !authorization.rollback_only
+            && Self::now_ms() > authorization.expires_at_ms
+        {
+            let blocked = ExecutionResult::Blocked {
+                reason: "authority-backed authorization expired before command spawn".into(),
+                safety_level: safety,
+            };
+            self.record_execution(&command, decision_quality, &authorization, &blocked);
+            return blocked;
+        }
+
         let start = std::time::Instant::now();
         let result = Self::run_bound_command(&command).await;
         let elapsed = start.elapsed().as_millis() as u64;
