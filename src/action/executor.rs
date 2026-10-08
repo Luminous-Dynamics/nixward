@@ -19,7 +19,9 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Stdio;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, OpenOptionsExt};
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
