@@ -172,6 +172,90 @@ pub fn require_signature_table_image(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureVerificationState {
+    Verified,
+    Failed,
+    ToolUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureVerificationEvidence {
+    pub image_blake3: [u8; 32],
+    pub certificate_blake3: [u8; 32],
+    pub verifier: String,
+    pub state: SignatureVerificationState,
+    pub stdout_blake3: [u8; 32],
+    pub stderr_blake3: [u8; 32],
+}
+
+#[cfg(feature = "native")]
+pub fn verify_pe_signature_with_certificate(
+    image_path: &std::path::Path,
+    certificate_path: &std::path::Path,
+) -> Result<SignatureVerificationEvidence, String> {
+    let image_metadata = std::fs::symlink_metadata(image_path)
+        .map_err(|error| format!("failed to inspect signature image {}: {error}", image_path.display()))?;
+    let certificate_metadata = std::fs::symlink_metadata(certificate_path)
+        .map_err(|error| format!("failed to inspect verification certificate {}: {error}", certificate_path.display()))?;
+    if image_metadata.file_type().is_symlink() || !image_metadata.file_type().is_file() {
+        return Err(format!("signature image {} is not a regular non-symlink file", image_path.display()));
+    }
+    if certificate_metadata.file_type().is_symlink() || !certificate_metadata.file_type().is_file() {
+        return Err(format!("verification certificate {} is not a regular non-symlink file", certificate_path.display()));
+    }
+    let image = std::fs::read(image_path)
+        .map_err(|error| format!("failed to read signature image {}: {error}", image_path.display()))?;
+    let certificate = std::fs::read(certificate_path)
+        .map_err(|error| format!("failed to read verification certificate {}: {error}", certificate_path.display()))?;
+    let output = std::process::Command::new("sbverify")
+        .args(["--cert"])
+        .arg(certificate_path)
+        .arg(image_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SignatureVerificationEvidence {
+                image_blake3: *blake3::hash(&image).as_bytes(),
+                certificate_blake3: *blake3::hash(&certificate).as_bytes(),
+                verifier: "sbverify".into(),
+                state: SignatureVerificationState::ToolUnavailable,
+                stdout_blake3: *blake3::hash(&[]).as_bytes(),
+                stderr_blake3: *blake3::hash(error.to_string().as_bytes()).as_bytes(),
+            })
+        }
+        Err(error) => return Err(format!("failed to execute sbverify: {error}")),
+    };
+    Ok(SignatureVerificationEvidence {
+        image_blake3: *blake3::hash(&image).as_bytes(),
+        certificate_blake3: *blake3::hash(&certificate).as_bytes(),
+        verifier: "sbverify".into(),
+        state: if output.status.success() {
+            SignatureVerificationState::Verified
+        } else {
+            SignatureVerificationState::Failed
+        },
+        stdout_blake3: *blake3::hash(&output.stdout).as_bytes(),
+        stderr_blake3: *blake3::hash(&output.stderr).as_bytes(),
+    })
+}
+
+pub fn require_verified_signature_image(
+    evidence: &SignatureVerificationEvidence,
+    expected_image_blake3: &[u8; 32],
+) -> Result<(), String> {
+    if &evidence.image_blake3 != expected_image_blake3 {
+        return Err("signature verification evidence is bound to a different image digest".into());
+    }
+    if evidence.state != SignatureVerificationState::Verified {
+        return Err(format!("signature verification state is {:?}, not Verified", evidence.state));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "native")]
 pub fn inspect_pe_signature_file(path: &std::path::Path) -> Result<PeSignatureTableEvidence, String> {
     let metadata = std::fs::symlink_metadata(path)
@@ -259,6 +343,32 @@ mod tests {
         assert!(inspect_pe_signature_table(&image).is_err());
     }
 
+    #[test]
+    fn verification_binding_rejects_other_image() {
+        let evidence = SignatureVerificationEvidence {
+            image_blake3: [1; 32],
+            certificate_blake3: [2; 32],
+            verifier: "sbverify".into(),
+            state: SignatureVerificationState::Verified,
+            stdout_blake3: [3; 32],
+            stderr_blake3: [4; 32],
+        };
+        assert!(require_verified_signature_image(&evidence, &[9; 32]).is_err());
+        assert!(require_verified_signature_image(&evidence, &[1; 32]).is_ok());
+    }
+
+    #[test]
+    fn failed_verification_is_not_a_pass() {
+        let evidence = SignatureVerificationEvidence {
+            image_blake3: [1; 32],
+            certificate_blake3: [2; 32],
+            verifier: "sbverify".into(),
+            state: SignatureVerificationState::Failed,
+            stdout_blake3: [3; 32],
+            stderr_blake3: [4; 32],
+        };
+        assert!(require_verified_signature_image(&evidence, &[1; 32]).is_err());
+    }
     #[test]
     fn signature_table_binding_rejects_other_image() {
         let image = pe_with_certificate(0x0002, b"signed-payload");
