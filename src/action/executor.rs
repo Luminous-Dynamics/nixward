@@ -1988,6 +1988,12 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
         let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "transaction recovery is a host mutation and cannot run in dry-run mode".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction recovery is restricted to exact system closure activation".into(),
@@ -2449,6 +2455,12 @@ impl NixOSExecutor {
         transaction_id: impl AsRef<str>,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "transaction-bound exact activation does not support dry-run; no host mutation was performed".into(),
+                safety_level: command.safety_level(),
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction-aware execution is restricted to exact system closure activation".into(),
@@ -2775,7 +2787,7 @@ impl NixOSExecutor {
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
-        if !self.dry_run && matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+        if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             let blocked = ExecutionResult::Blocked {
                 reason: "exact system activation requires the durable ConfigTransaction execution boundary".into(),
                 safety_level: command.safety_level(),
