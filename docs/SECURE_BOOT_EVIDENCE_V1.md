@@ -62,6 +62,15 @@ the exact image. `Verified` is emitted only when the verifier exits successfully
 and the image/certificate bytes are unchanged across the verification call. Tool
 absence or verifier failure is never converted into a pass.
 
+For UEFI `EFI_CERT_SHA256_GUID` database records, the image subject is the PE/COFF
+Authenticode SHA-256, not the flat file SHA-256. The implementation therefore
+uses the exact Authenticode hash procedure for `db`/`dbx` image-hash comparisons. citeturn927442search0turn927442search1
+
+X.509 TBS hash records in `dbx` carry a revocation time. An exact TBS match is
+therefore recorded as a potential revocation until the signed-image timestamp and
+certificate-chain semantics are evaluated; it is not collapsed into an immediate
+veto.
+
 ## Separate signature subject
 
 Signature verification is intentionally not included in this state observer. A
