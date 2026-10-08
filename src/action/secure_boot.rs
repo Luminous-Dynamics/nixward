@@ -13,6 +13,35 @@ const EFI_IMAGE_SECURITY_DATABASE_GUID: &str = "d719b2cb-3d3a-4596-a3bc-dad00e67
 const EFI_VARS_DIR: &str = "/sys/firmware/efi/efivars";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureListKind {
+    Sha256ImageHash,
+    X509Certificate,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureDatabaseRecord {
+    pub kind: SignatureListKind,
+    pub signature_size: u32,
+    pub signature_data_blake3: [u8; 32],
+    pub owner: [u8; 16],
+    pub image_sha256: Option<[u8; 32]>,
+    pub certificate_der_blake3: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureDatabaseMatchEvidence {
+    pub db_records: Vec<SignatureDatabaseRecord>,
+    pub dbx_records: Vec<SignatureDatabaseRecord>,
+    pub image_sha256: [u8; 32],
+    pub direct_db_image_hash_match: bool,
+    pub direct_dbx_image_hash_match: bool,
+    pub exact_certificate_in_db: bool,
+    pub exact_certificate_in_dbx: bool,
+    pub certificate_chain_authorization: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecureBootDatabaseState {
     Present,
     Absent,
@@ -94,6 +123,105 @@ pub fn build_secure_boot_evidence(
         observed_at_ms: None,
         evidence_digest: None,
     }
+}
+
+const EFI_CERT_SHA256_GUID: [u8; 16] = [
+    0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28,
+];
+const EFI_CERT_X509_GUID: [u8; 16] = [
+    0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72,
+];
+
+pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseRecord>, String> {
+    let mut records = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < payload.len() {
+        if payload.len() - cursor < 28 {
+            return Err("EFI signature database contains a truncated SignatureList header".into());
+        }
+        let list_size = read_u32_le(payload, cursor + 16)? as usize;
+        let header_size = read_u32_le(payload, cursor + 20)? as usize;
+        let signature_size = read_u32_le(payload, cursor + 24)? as usize;
+        if list_size < 28 || header_size > list_size - 28 || signature_size == 0 {
+            return Err("EFI signature database contains invalid SignatureList dimensions".into());
+        }
+        let list_end = cursor.checked_add(list_size).ok_or_else(|| "SignatureList size overflows".to_string())?;
+        if list_end > payload.len() {
+            return Err("EFI SignatureList extends past database payload".into());
+        }
+        let records_bytes = list_size - 28 - header_size;
+        if records_bytes == 0 || records_bytes % signature_size != 0 {
+            return Err("EFI SignatureList records do not divide evenly by SignatureSize".into());
+        }
+        let sig_start = cursor + 28 + header_size;
+        let kind = if payload[cursor..cursor + 16] == EFI_CERT_SHA256_GUID {
+            SignatureListKind::Sha256ImageHash
+        } else if payload[cursor..cursor + 16] == EFI_CERT_X509_GUID {
+            SignatureListKind::X509Certificate
+        } else {
+            SignatureListKind::Unsupported
+        };
+        let count = records_bytes / signature_size;
+        for index in 0..count {
+            let start = sig_start + index * signature_size;
+            let end = start + signature_size;
+            let data = &payload[start..end];
+            if data.len() < 16 {
+                return Err("EFI signature record is missing SignatureOwner".into());
+            }
+            let mut owner = [0u8; 16];
+            owner.copy_from_slice(&data[..16]);
+            let (image_sha256, certificate_der_blake3) = match kind {
+                SignatureListKind::Sha256ImageHash if data.len() == 48 => {
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&data[16..48]);
+                    (Some(hash), None)
+                }
+                SignatureListKind::X509Certificate => (None, Some(*blake3::hash(&data[16..]).as_bytes())),
+                SignatureListKind::Unsupported => (None, None),
+                SignatureListKind::Sha256ImageHash => {
+                    return Err("EFI SHA256 signature record has an invalid SignatureSize".into())
+                }
+            };
+            records.push(SignatureDatabaseRecord {
+                kind,
+                signature_size: signature_size as u32,
+                signature_data_blake3: *blake3::hash(data).as_bytes(),
+                owner,
+                image_sha256,
+                certificate_der_blake3,
+            });
+        }
+        cursor = list_end;
+    }
+    Ok(records)
+}
+
+pub fn match_secure_boot_databases(
+    db_payload: &[u8],
+    dbx_payload: &[u8],
+    image_sha256: [u8; 32],
+    signer_certificate_der: Option<&[u8]>,
+) -> Result<SignatureDatabaseMatchEvidence, String> {
+    let db_records = parse_signature_database(db_payload)?;
+    let dbx_records = parse_signature_database(dbx_payload)?;
+    let signer_digest = signer_certificate_der.map(|bytes| *blake3::hash(bytes).as_bytes());
+    Ok(SignatureDatabaseMatchEvidence {
+        direct_db_image_hash_match: db_records.iter().any(|record| record.image_sha256 == Some(image_sha256)),
+        direct_dbx_image_hash_match: dbx_records.iter().any(|record| record.image_sha256 == Some(image_sha256)),
+        exact_certificate_in_db: signer_digest.is_some_and(|digest| db_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
+        exact_certificate_in_dbx: signer_digest.is_some_and(|digest| dbx_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
+        db_records,
+        dbx_records,
+        image_sha256,
+        certificate_chain_authorization: None,
+    })
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let end = offset.checked_add(4).ok_or_else(|| "u32 read overflows".to_string())?;
+    let slice = bytes.get(offset..end).ok_or_else(|| "EFI signature database is truncated".to_string())?;
+    Ok(u32::from_le_bytes(slice.try_into().expect("4-byte slice")))
 }
 
 pub fn build_secure_boot_database_evidence(
@@ -193,6 +321,43 @@ fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parses_sha256_signature_database_records() {
+        let mut payload = vec![0u8; 28 + 48];
+        payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
+        payload[20..24].copy_from_slice(&0u32.to_le_bytes());
+        payload[24..28].copy_from_slice(&48u32.to_le_bytes());
+        for (index, byte) in payload[28..44].iter_mut().enumerate() { *byte = index as u8; }
+        for (index, byte) in payload[44..76].iter_mut().enumerate() { *byte = (index + 1) as u8; }
+        let records = parse_signature_database(&payload).expect("SHA256 signature list");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, SignatureListKind::Sha256ImageHash);
+        assert_eq!(records[0].image_sha256, Some([1u8; 32]));
+    }
+
+    #[test]
+    fn direct_dbx_image_hash_match_is_observed_separately() {
+        let image_hash = [7u8; 32];
+        let mut payload = vec![0u8; 28 + 48];
+        payload[..16].copy_from_slice(&EFI_CERT_SHA256_GUID);
+        payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
+        payload[24..28].copy_from_slice(&48u32.to_le_bytes());
+        payload[44..76].copy_from_slice(&image_hash);
+        let evidence = match_secure_boot_databases(&payload, &payload, image_hash, None).expect("database matcher");
+        assert!(evidence.direct_db_image_hash_match);
+        assert!(evidence.direct_dbx_image_hash_match);
+        assert_eq!(evidence.certificate_chain_authorization, None);
+    }
+
+    #[test]
+    fn unsupported_signature_list_type_is_retained_not_authorized() {
+        let mut payload = vec![0u8; 28 + 16];
+        payload[16..20].copy_from_slice(&(44u32).to_le_bytes());
+        payload[24..28].copy_from_slice(&16u32.to_le_bytes());
+        let records = parse_signature_database(&payload).expect("unsupported signature list");
+        assert_eq!(records[0].kind, SignatureListKind::Unsupported);
+        assert_eq!(records[0].image_sha256, None);
+    }
     #[test]
     fn database_evidence_hashes_exact_payloads() {
         let db = b"authorized";
