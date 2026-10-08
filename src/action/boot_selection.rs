@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use super::uki_evidence::{inspect_uki_file, resolve_boot_artifact_path};
 #[cfg(feature = "native")]
 use std::process::Command;
 
@@ -66,6 +67,10 @@ pub struct BootSelectionEvidence {
     pub selected_entry_source: String,
     pub candidate_closure: Option<String>,
     pub boot_count_state: BootCountState,
+    /// Exact selected EFI image path when the boot subject is a Type #2 UKI.
+    pub selected_image_path: Option<String>,
+    /// Exact BLAKE3 identity of the selected EFI image when observed.
+    pub selected_image_blake3: Option<[u8; 32]>,
     /// Host observation timestamp in Unix milliseconds. Pure resolvers leave this
     /// unset; host observers attach it at the authoritative observation boundary.
     pub observed_at_ms: Option<u64>,
@@ -83,6 +88,8 @@ impl BootSelectionEvidence {
             &self.selected_entry_source,
             &self.candidate_closure,
             self.boot_count_state,
+            &self.selected_image_path,
+            &self.selected_image_blake3,
             observed_at_ms,
         ))
         .map_err(|error| format!("failed to serialize boot selection evidence: {error}"))?;
@@ -354,12 +361,29 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         }
     };
 
-    let evidence = resolve_systemd_boot_selection_with_source(
+    let (selected, selection_kind, selection_source) = systemd_effective_selector(
+        one_shot.as_deref(),
+        persistent_default.as_deref(),
+        persistent_source,
+    )?;
+
+    let evidence = match resolve_systemd_boot_selection_with_source(
         one_shot.as_deref(),
         persistent_default.as_deref(),
         &entries,
         persistent_source,
-    )?;
+    ) {
+        Ok(evidence) => evidence,
+        Err(selection_error) if is_uki_selector(selected) => {
+            observe_systemd_uki_from_selection(
+                &boot_path,
+                selected,
+                selection_kind,
+                selection_source,
+            )?
+        }
+        Err(selection_error) => return Err(selection_error),
+    };
     if evidence.boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -546,6 +570,79 @@ fn run_grub_read_only(env_path: &Path) -> Result<String, String> {
         return Err(format!("grub-editenv list failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
     String::from_utf8(output.stdout).map_err(|error| format!("grub-editenv produced invalid UTF-8: {error}"))
+}
+
+fn systemd_effective_selector(
+    one_shot_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    persistent_source: &str,
+) -> Result<(&str, SelectionKind, &str), UnknownBootSelection> {
+    match one_shot_entry {
+        Some(id) if !id.is_empty() => Ok((id, SelectionKind::OneShot, "efi:LoaderEntryOneShot")),
+        _ => match persistent_default {
+            Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
+                Ok((id, SelectionKind::PersistentDefault, persistent_source))
+            }
+            Some(_) => Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason: "persistent default is a pattern or otherwise non-exact selector".into(),
+            }),
+            None => Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason: "no exact systemd-boot default selector is observable".into(),
+            }),
+        },
+    }
+}
+
+fn is_uki_selector(selector: &str) -> bool {
+    selector.ends_with(".efi")
+        && !selector.contains('/')
+        && !selector.contains('\\')
+        && !selector.contains("..")
+}
+
+#[cfg(feature = "native")]
+fn observe_systemd_uki_from_selection(
+    boot_path: &Path,
+    selected: &str,
+    selection_kind: SelectionKind,
+    selection_source: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let uki_path = resolve_boot_artifact_path(
+        boot_path,
+        &format!("/EFI/Linux/{selected}"),
+    )
+    .map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    let uki = inspect_uki_file(&uki_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    let (boot_count_state, _, _) = parse_boot_count(selected).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    if boot_count_state == BootCountState::Bad {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "selected UKI is marked bad by boot-counting state".into(),
+        });
+    }
+    Ok(BootSelectionEvidence {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        selection_kind,
+        selected_entry_id: Some(selected.to_string()),
+        selected_entry_source: selection_source.to_string(),
+        candidate_closure: uki.system_closure,
+        boot_count_state,
+        selected_image_path: Some(uki_path.display().to_string()),
+        selected_image_blake3: Some(uki.image_blake3),
+        observed_at_ms: None,
+        evidence_digest: None,
+    })
 }
 
 /// Observe systemd-boot selection and require an exact authorized candidate binding.
@@ -847,6 +944,8 @@ pub fn resolve_grub_selection(
             selected_entry_source: "grubenv:next_entry".into(),
             candidate_closure: exact_store_path_from_entry(entry),
             boot_count_state: entry.boot_count_state,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         });
@@ -1080,6 +1179,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn uki_selector_is_detected_only_for_plain_efi_ids() {
+        assert!(is_uki_selector("nixos.efi"));
+        assert!(!is_uki_selector("nixos.conf"));
+        assert!(!is_uki_selector("../nixos.efi"));
+        assert!(!is_uki_selector("EFI/nixos.efi"));
+    }
     #[test]
     fn systemd_loader_conf_default_is_parsed_without_inference() {
         let exact = parse_systemd_loader_default("timeout 5\ndefault candidate\n");
