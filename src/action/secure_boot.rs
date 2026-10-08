@@ -624,6 +624,7 @@ pub struct DbCertificateVerificationEvidence {
     pub verifying_dbx_certificate: Option<[u8; 32]>,
     pub dbx_chain_identity_match: Option<[u8; 32]>,
     pub dbx_chain_tbs_hash_match: Option<[u8; 32]>,
+    pub dbx_chain_tbs_revocation_times: Vec<[u8; 16]>,
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_payload_blake3: Option<[u8; 32]>,
     pub database_stability: Option<bool>,
@@ -649,6 +650,7 @@ impl DbCertificateVerificationEvidence {
             self.verifying_dbx_certificate,
             self.dbx_chain_identity_match,
             self.dbx_chain_tbs_hash_match,
+            &self.dbx_chain_tbs_revocation_times,
             self.db_payload_blake3,
             self.dbx_payload_blake3,
             self.database_stability,
@@ -761,6 +763,7 @@ fn db_certificate_verification_base_evidence(
         verifying_dbx_certificate: None,
         dbx_chain_identity_match: None,
         dbx_chain_tbs_hash_match: None,
+        dbx_chain_tbs_revocation_times: Vec::new(),
         db_payload_blake3: Some(*blake3::hash(db_payload).as_bytes()),
         dbx_payload_blake3: Some(*blake3::hash(dbx_payload).as_bytes()),
         database_stability: None,
@@ -1035,6 +1038,10 @@ pub fn verify_image_against_db_certificates(
             classify_dbx_tbs_revocation_records(matched_tbs_records.iter().copied());
         debug_assert!(always_revoked || potential_revocation);
         evidence.dbx_chain_tbs_hash_match = Some(matched_certificate);
+        evidence.dbx_chain_tbs_revocation_times = matched_tbs_records
+            .iter()
+            .filter_map(|record| record.revocation_time)
+            .collect();
         evidence.state = if always_revoked {
             DbCertificateVerificationState::ForbiddenByDbxTbsRevocation
         } else {
@@ -1134,6 +1141,10 @@ pub fn verify_image_against_db_certificates(
                     if always_revoked {
                         evidence.verifying_dbx_certificate = None;
                         evidence.dbx_chain_tbs_hash_match = Some(certificate_digest);
+                        evidence.dbx_chain_tbs_revocation_times = matched_anchor_tbs_records
+                            .iter()
+                            .filter_map(|record| record.revocation_time)
+                            .collect();
                         evidence.state =
                             DbCertificateVerificationState::ForbiddenByDbxTbsRevocation;
                         evidence.stderr_blake3 = *blake3::hash(
@@ -1242,6 +1253,7 @@ pub fn verify_image_against_live_secure_boot_databases(
             verifying_dbx_certificate: None,
             dbx_chain_identity_match: None,
             dbx_chain_tbs_hash_match: None,
+        dbx_chain_tbs_revocation_times: Vec::new(),
             db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             database_stability: None,
@@ -1720,6 +1732,38 @@ mod tests {
         assert!(!dbx_tbs_record_is_always_revoked(&record));
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn evidence_digest_binds_all_dbx_tbs_revocation_times() {
+        let mut first = db_certificate_verification_base_evidence(
+            [1; 32],
+            [2; 32],
+            b"db",
+            b"dbx",
+            &[],
+            &[],
+        );
+        first.dbx_chain_tbs_revocation_times = vec![[1; 16], [2; 16]];
+        let first = first
+            .with_observation_metadata(100)
+            .expect("first evidence");
+
+        let mut second = db_certificate_verification_base_evidence(
+            [1; 32],
+            [2; 32],
+            b"db",
+            b"dbx",
+            &[],
+            &[],
+        );
+        second.dbx_chain_tbs_revocation_times = vec![[1; 16], [3; 16]];
+        let second = second
+            .with_observation_metadata(100)
+            .expect("second evidence");
+
+        assert_ne!(first.evidence_digest, second.evidence_digest);
+    }
+
     #[cfg(all(feature = "native", unix))]
     #[test]
     fn efivar_reader_rejects_symlinks_and_non_regular_files() {
@@ -1778,6 +1822,7 @@ mod tests {
             verifying_dbx_certificate: None,
             dbx_chain_identity_match: Some([7; 32]),
             dbx_chain_tbs_hash_match: None,
+        dbx_chain_tbs_revocation_times: Vec::new(),
             db_payload_blake3: Some([8; 32]),
             dbx_payload_blake3: Some([9; 32]),
             database_stability: Some(true),
