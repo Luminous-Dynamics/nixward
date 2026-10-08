@@ -507,55 +507,93 @@ pub fn observe_secure_boot() -> Result<SecureBootEvidence, String> {
 }
 
 #[cfg(feature = "native")]
-fn read_efi_database(name: &str) -> Result<Option<Vec<u8>>, String> {
-    let path = std::path::PathBuf::from(format!("{}/{}-{}", EFI_VARS_DIR, name, EFI_IMAGE_SECURITY_DATABASE_GUID));
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(format!("EFI database {} is a symlink", path.display()));
+fn read_efi_regular_file_no_follow(
+    path: &std::path::Path,
+) -> Result<Option<Vec<u8>>, String> {
+    use nix::errno::Errno;
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::{fstat, Mode, SFlag};
+    use nix::unistd::{close, read};
+
+    let fd = match open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to securely open EFI variable {} without symlink following: {error}",
+                path.display()
+            ))
         }
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(format!("EFI database {} is not a regular file", path.display()));
+    };
+
+    let read_result: Result<Vec<u8>, String> = (|| {
+        let metadata = fstat(fd)
+            .map_err(|error| format!("failed to inspect EFI variable {}: {error}", path.display()))?;
+        if !SFlag::from_bits_truncate(metadata.st_mode).contains(SFlag::S_IFREG) {
+            return Err(format!(
+                "EFI variable {} is not a regular file",
+                path.display()
+            ));
         }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("failed to inspect EFI database {}: {error}", path.display())),
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match read(fd, &mut buffer) {
+                Ok(0) => break,
+                Ok(read_len) => bytes.extend_from_slice(&buffer[..read_len]),
+                Err(Errno::EINTR) => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "failed to read EFI variable {}: {error}",
+                        path.display()
+                    ))
+                }
+            }
+        }
+        Ok(bytes)
+    })();
+
+    let close_result = close(fd);
+    match (read_result, close_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(format!(
+            "failed to close EFI variable {} after read: {error}",
+            path.display()
+        )),
+        (Ok(bytes), Ok(())) => Ok(Some(bytes)),
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|error| format!("failed to read EFI database {}: {error}", path.display()))?;
+}
+
+#[cfg(feature = "native")]
+fn read_efi_database(name: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = std::path::PathBuf::from(format!(
+        "{}/{}-{}",
+        EFI_VARS_DIR, name, EFI_IMAGE_SECURITY_DATABASE_GUID
+    ));
+    let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
+        return Ok(None);
+    };
     if bytes.len() < 4 {
-        return Err(format!("EFI database {} is missing its attribute header", path.display()));
+        return Err(format!(
+            "EFI database {} is missing its attribute header",
+            path.display()
+        ));
     }
     Ok(Some(bytes[4..].to_vec()))
 }
 
 #[cfg(feature = "native")]
 fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
-    let prefix = format!("{name}-{EFI_GLOBAL_GUID}");
-    let mut matches = Vec::new();
-    for item in std::fs::read_dir(EFI_VARS_DIR)
-        .map_err(|error| format!("failed to read EFI variable directory: {error}"))?
-    {
-        let item = item.map_err(|error| format!("failed to enumerate EFI variables: {error}"))?;
-        let file_name = item.file_name();
-        let Some(file_name) = file_name.to_str() else { continue; };
-        if file_name == prefix {
-            matches.push(item.path());
-        }
-    }
-    match matches.as_slice() {
-        [] => Ok(None),
-        [path] => {
-            let metadata = std::fs::symlink_metadata(path)
-                .map_err(|error| format!("failed to inspect EFI variable {}: {error}", path.display()))?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                return Err(format!("EFI variable {} is not a regular non-symlink file", path.display()));
-            }
-            let bytes = std::fs::read(path)
-                .map_err(|error| format!("failed to read EFI variable {}: {error}", path.display()))?;
-            parse_efi_boolean_payload(&bytes).map(Some)
-        }
-        _ => Err(format!("EFI variable {name} has multiple global-GUID instances")),
-    }
+    let path = std::path::PathBuf::from(format!("{}/{}-{}", EFI_VARS_DIR, name, EFI_GLOBAL_GUID));
+    let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
+        return Ok(None);
+    };
+    parse_efi_boolean_payload(&bytes).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1680,6 +1718,34 @@ mod tests {
             revocation_time: Some([1; 16]),
         };
         assert!(!dbx_tbs_record_is_always_revoked(&record));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn efivar_reader_rejects_symlinks_and_non_regular_files() {
+        let temp = tempfile::tempdir().expect("temporary EFI variable directory");
+        let regular = temp.path().join("regular");
+        let directory = temp.path().join("directory");
+        let symlink = temp.path().join("symlink");
+
+        std::fs::write(&regular, [0, 0, 0, 7, 1]).expect("regular EFI variable fixture");
+        std::fs::create_dir(&directory).expect("directory fixture");
+        std::os::unix::fs::symlink(&regular, &symlink).expect("symlink fixture");
+
+        assert_eq!(
+            read_efi_regular_file_no_follow(&regular).expect("regular file read"),
+            Some(vec![0, 0, 0, 7, 1])
+        );
+        assert!(
+            read_efi_regular_file_no_follow(&directory)
+                .expect_err("directory must be rejected")
+                .contains("not a regular file")
+        );
+        assert!(
+            read_efi_regular_file_no_follow(&symlink)
+                .expect_err("symlink must be rejected")
+                .contains("without symlink following")
+        );
     }
 
     #[test]
