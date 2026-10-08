@@ -1163,6 +1163,7 @@ mod tests {
         let machine = MachineBinding::new("transaction-test-machine").unwrap();
         let mut writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(false)
             .with_dry_run(false)
             .with_machine_binding(machine.clone());
@@ -1197,6 +1198,7 @@ mod tests {
         let machine = MachineBinding::new("transaction-test-machine").unwrap();
         let mut writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(false)
             .with_dry_run(false)
             .with_machine_binding(machine.clone());
@@ -1277,6 +1279,10 @@ mod tests {
         assert!(result.changed);
         assert_eq!(result.commit_state, WriteCommitState::Committed);
 
+        assert!(
+            !dir.path().join("config-write.lock").exists(),
+            "transaction coordination state must not be created in the frozen source root"
+        );
         let on_disk = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
         assert!(
             on_disk.contains("pkgs.htop"),
