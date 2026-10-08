@@ -1286,6 +1286,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert!(entries.contains_key("Nested"));
     }
     #[test]
+    fn nested_shell_block_does_not_end_grub_menuentry() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("nested menuentry parses");
+        assert!(entries.contains_key("Nested"));
+    }
+    #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
         let entries = parse_grub_config_entries(
             "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
