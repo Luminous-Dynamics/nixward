@@ -49,6 +49,8 @@ pub use config_transaction::{
 };
 #[cfg(feature = "native")]
 pub use config_transaction::NixSourceRealizer;
+#[cfg(feature = "native")]
+pub use config_transaction::NixCandidateBuilder;
 
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
