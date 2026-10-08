@@ -154,6 +154,15 @@ pub fn require_uki_candidate_binding(
 /// Parent traversal and redirected final files are rejected. Canonicalization
 /// must remain inside the supplied boot root.
 pub fn resolve_boot_artifact_path(boot_root: &Path, efi_path: &str) -> Result<PathBuf, String> {
+    let root_metadata = fs::symlink_metadata(boot_root).map_err(|error| {
+        format!("failed to inspect boot root {}: {error}", boot_root.display())
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err(format!(
+            "boot root {} is not a regular non-symlink directory",
+            boot_root.display()
+        ));
+    }
     let relative = efi_path
         .strip_prefix('/')
         .ok_or_else(|| "BLS EFI path must be absolute within the boot partition".to_string())?;
