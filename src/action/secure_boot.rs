@@ -1682,6 +1682,70 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[test]
+    fn live_verification_requirement_rejects_disabled_secure_boot() {
+        let evidence = DbCertificateVerificationEvidence {
+            image_blake3: [1; 32],
+            image_authenticode_sha256: [2; 32],
+            image_chain_certificate_digests: Vec::new(),
+            image_signer_certificate_digests: Vec::new(),
+            verified_db_anchor_certificate_digests: vec![[3; 32]],
+            db_certificate_digests: vec![[4; 32]],
+            dbx_certificate_digests: vec![[5; 32]],
+            verifying_db_certificate: Some([6; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: None,
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([7; 32]),
+            dbx_payload_blake3: Some([8; 32]),
+            secure_boot_state: Some(SecureBootState::Disabled),
+            database_stability: Some(true),
+            secure_boot_state_stability: Some(true),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [9; 32],
+            stderr_blake3: [10; 32],
+            observed_at_ms: Some(1),
+            evidence_digest: Some([11; 32]),
+        };
+
+        assert!(
+            require_live_db_certificate_verification(&evidence, &[1; 32]).is_err()
+        );
+    }
+
+    #[test]
+    fn live_verification_requirement_rejects_unstable_policy() {
+        let evidence = DbCertificateVerificationEvidence {
+            image_blake3: [1; 32],
+            image_authenticode_sha256: [2; 32],
+            image_chain_certificate_digests: Vec::new(),
+            image_signer_certificate_digests: Vec::new(),
+            verified_db_anchor_certificate_digests: vec![[3; 32]],
+            db_certificate_digests: vec![[4; 32]],
+            dbx_certificate_digests: vec![[5; 32]],
+            verifying_db_certificate: Some([6; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: None,
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([7; 32]),
+            dbx_payload_blake3: Some([8; 32]),
+            secure_boot_state: Some(SecureBootState::Enabled),
+            database_stability: Some(true),
+            secure_boot_state_stability: Some(false),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [9; 32],
+            stderr_blake3: [10; 32],
+            observed_at_ms: Some(1),
+            evidence_digest: Some([11; 32]),
+        };
+
+        assert!(
+            require_live_db_certificate_verification(&evidence, &[1; 32]).is_err()
+        );
+    }
+
+    #[test]
     fn final_image_recheck_invalidates_stale_chain_evidence() {
         let temp = tempfile::NamedTempFile::new().expect("temporary UKI path");
         std::fs::write(temp.path(), b"initial-image").expect("initial image");
