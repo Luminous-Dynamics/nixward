@@ -1421,6 +1421,51 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[test]
+    fn final_image_recheck_invalidates_stale_chain_evidence() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary UKI path");
+        std::fs::write(temp.path(), b"initial-image").expect("initial image");
+
+        let initial_hash = *blake3::hash(b"initial-image").as_bytes();
+        let mut evidence = DbCertificateVerificationEvidence {
+            image_blake3: initial_hash,
+            image_authenticode_sha256: [7; 32],
+            image_chain_certificate_digests: vec![[1; 32]],
+            image_signer_certificate_digests: vec![[2; 32]],
+            db_certificate_digests: vec![[3; 32]],
+            dbx_certificate_digests: vec![[4; 32]],
+            verifying_db_certificate: Some([5; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: Some([6; 32]),
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([8; 32]),
+            dbx_payload_blake3: Some([9; 32]),
+            database_stability: Some(true),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [10; 32],
+            stderr_blake3: [11; 32],
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+
+        std::fs::write(temp.path(), b"replacement-image").expect("replacement image");
+
+        evidence = finalize_image_bound_verification(temp.path(), evidence)
+            .expect("final image recheck");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::ImageChangedDuringVerification
+        );
+        assert_eq!(evidence.database_stability, Some(false));
+        assert!(evidence.image_chain_certificate_digests.is_empty());
+        assert!(evidence.image_signer_certificate_digests.is_empty());
+        assert_eq!(evidence.verifying_db_certificate, None);
+        assert_eq!(evidence.dbx_chain_identity_match, None);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
     fn dbx_tbs_revocation_only_matches_exact_chain_member() {
         let evidence = super::secure_boot_signature::X509ChainCertificateEvidence {
             signature_index: 0,
