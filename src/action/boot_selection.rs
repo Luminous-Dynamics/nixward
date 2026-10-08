@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use super::uki_evidence::{inspect_uki_file, resolve_boot_artifact_path};
 #[cfg(feature = "native")]
 use std::process::Command;
 
@@ -66,6 +67,10 @@ pub struct BootSelectionEvidence {
     pub selected_entry_source: String,
     pub candidate_closure: Option<String>,
     pub boot_count_state: BootCountState,
+    /// Exact selected EFI image path when the boot subject is a Type #2 UKI.
+    pub selected_image_path: Option<String>,
+    /// Exact BLAKE3 identity of the selected EFI image when observed.
+    pub selected_image_blake3: Option<[u8; 32]>,
     /// Host observation timestamp in Unix milliseconds. Pure resolvers leave this
     /// unset; host observers attach it at the authoritative observation boundary.
     pub observed_at_ms: Option<u64>,
@@ -83,6 +88,8 @@ impl BootSelectionEvidence {
             &self.selected_entry_source,
             &self.candidate_closure,
             self.boot_count_state,
+            &self.selected_image_path,
+            &self.selected_image_blake3,
             observed_at_ms,
         ))
         .map_err(|error| format!("failed to serialize boot selection evidence: {error}"))?;
@@ -223,6 +230,8 @@ fn resolve_systemd_boot_selection_with_source(
         selected_entry_source: source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        selected_image_path: None,
+        selected_image_blake3: None,
         observed_at_ms: None,
         evidence_digest: None,
     })
@@ -354,12 +363,29 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         }
     };
 
-    let evidence = resolve_systemd_boot_selection_with_source(
+    let (selected, selection_kind, selection_source) = systemd_effective_selector(
+        one_shot.as_deref(),
+        persistent_default.as_deref(),
+        persistent_source,
+    )?;
+
+    let evidence = match resolve_systemd_boot_selection_with_source(
         one_shot.as_deref(),
         persistent_default.as_deref(),
         &entries,
         persistent_source,
-    )?;
+    ) {
+        Ok(evidence) => evidence,
+        Err(_selection_error) if is_uki_selector(selected) => {
+            observe_systemd_uki_from_selection(
+                &boot_path,
+                selected,
+                selection_kind,
+                selection_source,
+            )?
+        }
+        Err(selection_error) => return Err(selection_error),
+    };
     if evidence.boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -548,6 +574,97 @@ fn run_grub_read_only(env_path: &Path) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|error| format!("grub-editenv produced invalid UTF-8: {error}"))
 }
 
+fn systemd_effective_selector(
+    one_shot_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    persistent_source: &str,
+) -> Result<(&str, SelectionKind, &str), UnknownBootSelection> {
+    match one_shot_entry {
+        Some(id) if !id.is_empty() => Ok((id, SelectionKind::OneShot, "efi:LoaderEntryOneShot")),
+        _ => match persistent_default {
+            Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
+                Ok((id, SelectionKind::PersistentDefault, persistent_source))
+            }
+            Some(_) => Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason: "persistent default is a pattern or otherwise non-exact selector".into(),
+            }),
+            None => Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason: "no exact systemd-boot default selector is observable".into(),
+            }),
+        },
+    }
+}
+
+fn is_uki_selector(selector: &str) -> bool {
+    selector.ends_with(".efi")
+        && !selector.contains('/')
+        && !selector.contains('\\')
+        && !selector.contains("..")
+}
+
+#[cfg(feature = "native")]
+fn observe_systemd_uki_from_selection(
+    boot_path: &Path,
+    selected: &str,
+    selection_kind: SelectionKind,
+    selection_source: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let uki_path = resolve_boot_artifact_path(
+        boot_path,
+        &format!("/EFI/Linux/{selected}"),
+    )
+    .map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    let uki = inspect_uki_file(&uki_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    let (boot_count_state, _, _) = parse_boot_count(selected).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+    build_uki_selection_evidence(
+        selected,
+        selection_kind,
+        selection_source,
+        &uki_path,
+        &uki,
+        boot_count_state,
+    )
+}
+
+fn build_uki_selection_evidence(
+    selected: &str,
+    selection_kind: SelectionKind,
+    selection_source: &str,
+    image_path: &Path,
+    uki: &super::uki_evidence::UkiSystemClosureEvidence,
+    boot_count_state: BootCountState,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    if boot_count_state == BootCountState::Bad {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "selected UKI is marked bad by boot-counting state".into(),
+        });
+    }
+    Ok(BootSelectionEvidence {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        selection_kind,
+        selected_entry_id: Some(selected.to_string()),
+        selected_entry_source: selection_source.to_string(),
+        candidate_closure: uki.system_closure.clone(),
+        boot_count_state,
+        selected_image_path: Some(image_path.display().to_string()),
+        selected_image_blake3: Some(uki.image_blake3),
+        observed_at_ms: None,
+        evidence_digest: None,
+    })
+}
+
 /// Observe systemd-boot selection and require an exact authorized candidate binding.
 #[cfg(feature = "native")]
 pub fn observe_systemd_boot_for_candidate(
@@ -694,7 +811,7 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
 pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry>, String> {
     let mut entries = BTreeMap::new();
     let mut submenu_stack: Vec<String> = Vec::new();
-    let mut current: Option<(String, String, String, Vec<String>)> = None;
+    let mut current: Option<(String, String, String, Vec<String>, usize)> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -711,19 +828,33 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
             } else {
                 format!("{} > {}", submenu_stack.join(" > "), title)
             };
-            current = Some((entry_id, title, String::new(), Vec::new()));
+            let depth = line.matches('{').count().saturating_sub(line.matches('}').count());
+            if depth == 0 {
+                return Err("GRUB menuentry has no opening block".into());
+            }
+            current = Some((entry_id, title, String::new(), Vec::new(), depth));
             continue;
         }
 
-        if let Some((entry_id, title, linux_line, initrds)) = current.as_mut() {
+        if let Some((entry_id, title, linux_line, initrds, depth)) = current.as_mut() {
             if line.starts_with("linux ") || line.starts_with("linuxefi ") || line.starts_with("multiboot ") {
                 *linux_line = line.to_string();
             } else if line.starts_with("initrd ") || line.starts_with("initrdefi ") {
                 initrds.push(line.to_string());
             }
 
-            if line == "}" {
-                let (entry_id, title, linux_line, initrds) = current.take().expect("entry state");
+            let opened = line.matches('{').count();
+            let closed = line.matches('}').count();
+            *depth = depth
+                .checked_add(opened)
+                .ok_or_else(|| "GRUB menuentry nesting depth overflowed".to_string())?;
+            if closed > *depth {
+                return Err("GRUB menuentry has unbalanced closing braces".into());
+            }
+            *depth -= closed;
+
+            if *depth == 0 {
+                let (entry_id, title, linux_line, initrds, _) = current.take().expect("entry state");
                 let (linux, options) = if linux_line.is_empty() {
                     (None, String::new())
                 } else {
@@ -847,6 +978,8 @@ pub fn resolve_grub_selection(
             selected_entry_source: "grubenv:next_entry".into(),
             candidate_closure: exact_store_path_from_entry(entry),
             boot_count_state: entry.boot_count_state,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         });
@@ -888,6 +1021,8 @@ pub fn resolve_grub_selection(
         selected_entry_source: default_source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        selected_image_path: None,
+        selected_image_blake3: None,
         observed_at_ms: None,
         evidence_digest: None,
     })
@@ -1035,6 +1170,8 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             selected_entry_source: "efi:LoaderEntryOneShot".into(),
             candidate_closure: Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate".into()),
             boot_count_state: BootCountState::NotTracked,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         };
@@ -1080,6 +1217,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn uki_selector_is_detected_only_for_plain_efi_ids() {
+        assert!(is_uki_selector("nixos.efi"));
+        assert!(!is_uki_selector("nixos.conf"));
+        assert!(!is_uki_selector("../nixos.efi"));
+        assert!(!is_uki_selector("EFI/nixos.efi"));
+    }
     #[test]
     fn systemd_loader_conf_default_is_parsed_without_inference() {
         let exact = parse_systemd_loader_default("timeout 5\ndefault candidate\n");
@@ -1100,6 +1245,29 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parse_systemd_loader_default("default candidate extra\n"), None);
         assert_eq!(parse_systemd_loader_default("default candidate\n"), Some("candidate".into()));
     }
+    #[test]
+    fn uki_selection_evidence_retains_image_identity_and_closure_binding() {
+        let uki = super::super::uki_evidence::UkiSystemClosureEvidence {
+            image_path: "candidate.efi".into(),
+            image_blake3: [7; 32],
+            cmdline: "init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init".into(),
+            system_closure: Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate".into()),
+        };
+        let evidence = build_uki_selection_evidence(
+            "candidate.efi",
+            SelectionKind::PersistentDefault,
+            "efi:LoaderEntryDefault",
+            Path::new("/boot/EFI/Linux/candidate.efi"),
+            &uki,
+            BootCountState::NotTracked,
+        )
+        .expect("UKI evidence");
+        assert_eq!(evidence.candidate_closure.as_deref(), Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"));
+        assert_eq!(evidence.selected_image_path.as_deref(), Some("/boot/EFI/Linux/candidate.efi"));
+        assert_eq!(evidence.selected_image_blake3, Some([7; 32]));
+    }
+    }
+
     #[test]
     fn systemd_loader_entry_suffix_is_normalized_exactly() {
         let mut entries = BTreeMap::new();
@@ -1157,6 +1325,22 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     }
 
     #[test]
+    fn nested_grub_block_does_not_end_menuentry_early() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("nested shell block should parse");
+        assert!(entries.contains_key("Nested"));
+    }
+    #[test]
+    fn nested_shell_block_does_not_end_grub_menuentry() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("nested menuentry parses");
+        assert!(entries.contains_key("Nested"));
+    }
+    #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
         let entries = parse_grub_config_entries(
             "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
@@ -1205,12 +1389,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
         assert_eq!(
-            parse_grub_config_default(r#"if [ "${next_entry}" ]; then
-set default="${next_entry}"
-else
-set default="${saved_entry}"
-fi
-"#),
+            parse_grub_config_default("if [ \"${next_entry}\" ]; then\\nset default=\"${next_entry}\"\\nelse\\nset default=\"${saved_entry}\"\\nfi\\n"),
             Some("${saved_entry}".into()),
         );
         assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
@@ -1263,6 +1442,8 @@ fi
                 "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other".into(),
             ),
             boot_count_state: BootCountState::NotTracked,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         };

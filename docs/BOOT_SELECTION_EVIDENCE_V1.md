@@ -26,6 +26,8 @@ No predicate may be satisfied by evidence belonging to a different predicate.
 | selected_entry_id | exact loader/menu entry identity |
 | selected_entry_source | authoritative EFI variable, loader state, GRUB environment, or generated configuration source |
 | candidate_closure | exact /nix/store/...-nixos-system-* path, or absent when no exact binding is possible |
+| selected_image_path | exact selected EFI image path for Type #2 UKI observations, otherwise absent |
+| selected_image_blake3 | exact BLAKE3 identity of the selected EFI image, otherwise absent |
 | boot_count_state | good, indeterminate, bad, not-tracked, or unknown |
 | observed_at | observation timestamp |
 | evidence_digest | digest over the complete observation |
@@ -40,9 +42,11 @@ $BOOT/loader/entries/<id>.conf file. For NixOS entries, the exact system closure
 may be exposed by the entry's kernel command-line options through an
 init=/nix/store/...-nixos-system-.../init binding; this binding is preferred
 over kernel/initrd artifact paths, which identify boot artifacts rather than the
-whole system closure. For UKIs, resolve the selected EFI image identity
-separately and require a separate exact image-to-system binding before claiming
-the candidate closure.
+whole system closure. Type #2 UKIs require a separate exact image observation and image-to-system
+binding. The evidence record carries the selected EFI path and BLAKE3 image
+identity separately from the embedded `init=/nix/store/...-nixos-system-.../init`
+system-closure binding. A valid image digest or Secure Boot signature alone does
+not establish the system-closure subject.
 
 The effective selection is:
 
@@ -90,7 +94,9 @@ Unknown is evidence of insufficiency, not evidence of success.
 ## Current implementation boundary
 
 src/action/boot_selection.rs contains deterministic parsers and selection
-resolvers plus read-only systemd-boot and UEFI-GRUB host observers. The observers
+resolvers plus read-only systemd-boot and UEFI-GRUB host observers. Type #2 UKI
+identity/binding is implemented in `src/action/uki_evidence.rs` and composes with
+the systemd-boot selector when an exact `.efi` subject is selected. The observers
 obtain only bootloader selection/configuration state and feed the pure resolvers.
 The systemd-boot observer reads UEFI selection variables and the authoritative BLS
 root; the GRUB observer reads NixOS-generated grub.cfg and the GRUB environment
