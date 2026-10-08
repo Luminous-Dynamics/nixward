@@ -2808,6 +2808,30 @@ mod tests {
     }
 
     #[test]
+    fn recovery_authorization_rejects_general_approval_for_exact_activation() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
+            action: SystemActivation::Switch,
+        };
+        let plan = ChangePlan::command_only_with_system_recovery(
+            super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
+            command.clone(),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            SystemActivation::Switch,
+            60_000,
+        )
+        .unwrap();
+        let approval =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
+        let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
+        assert!(auth.validate_for_recovery(&command).is_err());
+    }
+
+    #[test]
     fn exact_activation_authorization_requires_exact_recovery_binding() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
