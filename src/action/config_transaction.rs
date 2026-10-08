@@ -1460,6 +1460,9 @@ impl NixCandidateBuilder {
         transaction_id: &str,
         realization_plan_digest: &str,
     ) -> Result<CandidateBuildReceipt, String> {
+        if decode_digest(transaction_id).is_err() {
+            return Err("candidate build transaction id is invalid".into());
+        }
         if !lease.is_rooted() {
             return Err("candidate build requires a rooted source realization".into());
         }
@@ -1506,19 +1509,8 @@ impl NixCandidateBuilder {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let candidate_store_path = NixSourceRealizer::parse_store_path(&stdout)?;
-        let transaction_id = transaction_id.to_string();
-        if decode_digest(&transaction_id).is_err() {
-            return Err("candidate build transaction id is invalid".into());
-        }
-        let candidate_gc_root = format!(
-            "/nix/var/nix/gcroots/nixward/{}-candidate",
-            transaction_id
-        );
-        #[cfg(unix)]
-        establish_candidate_gc_root(&candidate_store_path, &candidate_gc_root)?;
-        #[cfg(not(unix))]
-        return Err("candidate retention is unsupported on this platform".into());
 
+        // Reject an unauthorized output before creating any persistent GC root.
         if candidate_store_path != expected_out_path {
             return Err(format!(
                 "nix build output differs from authorized expected path: observed {candidate_store_path}, expected {expected_out_path}"
@@ -1528,20 +1520,42 @@ impl NixCandidateBuilder {
         source.verify_realization_at(&lease.store_path)?;
         lease.verify_rooted()?;
 
-        let metadata = std::fs::symlink_metadata(&candidate_store_path)
+        let candidate_path = std::path::Path::new(&candidate_store_path);
+        let metadata = std::fs::symlink_metadata(candidate_path)
             .map_err(|error| format!("failed to inspect candidate store path: {error}"))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err("candidate output must be a canonical immutable directory".into());
         }
+        let canonical_candidate = candidate_path
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize candidate store path: {error}"))?;
+        if canonical_candidate != candidate_path {
+            return Err("candidate output is not the declared canonical store path".into());
+        }
 
-        CandidateBuildReceipt::new(
+        let transaction_id = transaction_id.to_string();
+        let candidate_gc_root = format!(
+            "/nix/var/nix/gcroots/nixward/{}-candidate",
+            transaction_id
+        );
+        // Construct and validate the structural receipt before acquiring retention,
+        // so validation failure cannot leave an unintended permanent GC root.
+        let receipt = CandidateBuildReceipt::new(
             source,
             lease.store_path.clone(),
             installable_selector,
-            candidate_store_path,
-            candidate_gc_root,
+            candidate_store_path.clone(),
+            candidate_gc_root.clone(),
             realization_plan_digest.to_string(),
-        )
+        )?;
+
+        #[cfg(unix)]
+        establish_candidate_gc_root(&candidate_store_path, &candidate_gc_root)?;
+        #[cfg(not(unix))]
+        return Err("candidate retention is unsupported on this platform".into());
+
+        receipt.verify_retention()?;
+        Ok(receipt)
     }
 
     #[cfg(test)]
