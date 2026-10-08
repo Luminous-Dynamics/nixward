@@ -760,12 +760,41 @@ impl FrozenConfigSource {
         }
 
         let observed = Self::capture(realized_root, Path::new(&self.entrypoint))?;
-        if observed.root_digest != self.root_digest
-            || observed.entrypoint != self.entrypoint
-            || observed.manifest != self.manifest
+        if observed.entrypoint != self.entrypoint
+            || observed.manifest.len() != self.manifest.len()
         {
-            return Err("realized Nix store tree does not exactly match frozen source".into());
+            return Err("realized Nix store tree does not match frozen source shape".into());
         }
+
+        for (expected, actual) in self.manifest.iter().zip(observed.manifest.iter()) {
+            if expected.relative_path != actual.relative_path
+                || expected.kind != actual.kind
+                || expected.size != actual.size
+                || expected.digest != actual.digest
+            {
+                return Err(format!(
+                    "realized Nix store entry differs from frozen source: {}",
+                    expected.relative_path
+                ));
+            }
+
+            #[cfg(unix)]
+            {
+                let expected_mode = match expected.kind {
+                    SourceEntryKind::Directory => 0o555,
+                    SourceEntryKind::File => {
+                        if expected.mode & 0o111 != 0 { 0o555 } else { 0o444 }
+                    }
+                };
+                if actual.mode != expected_mode {
+                    return Err(format!(
+                        "realized Nix store entry {} has unexpected normalized mode {:04o}; expected {:04o}",
+                        expected.relative_path, actual.mode, expected_mode
+                    ));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -2432,6 +2461,47 @@ mod tests {
             .verify_realization_at(alias_dir.path().join("store-alias"))
             .expect_err("store symlink alias must fail closed")
             .contains("must not be a symlink alias"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_accepts_nix_normalized_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source_dir = tempfile::tempdir().unwrap();
+        let realized_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source_dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            realized_dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+
+        std::fs::set_permissions(
+            source_dir.path().join("configuration.nix"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            realized_dir.path().join("configuration.nix"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            realized_dir.path(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        let source =
+            FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
+        source
+            .verify_realization_at(realized_dir.path())
+            .expect("Nix-normalized permissions must be accepted");
     }
 
     #[test]
