@@ -719,6 +719,7 @@ impl FrozenConfigSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceRealizationLeaseState {
+    Pending,
     Rooted,
     Released,
 }
@@ -751,17 +752,34 @@ impl SourceRealizationLease {
             source_digest: source.root_digest.clone(),
             store_path,
             gc_root_path,
-            state: SourceRealizationLeaseState::Rooted,
+            state: SourceRealizationLeaseState::Pending,
         })
     }
 
+    /// Mark the retention lease rooted only after independent observation proves
+    /// that the GC-root path resolves to exactly the bound immutable source store path.
+    pub fn prove_rooted(&mut self, observed_store_path: &str) -> Result<(), String> {
+        if self.state != SourceRealizationLeaseState::Pending {
+            return Err("source realization lease is not pending root proof".into());
+        }
+        if observed_store_path != self.store_path {
+            return Err("observed source GC root does not resolve to the bound store path".into());
+        }
+        self.state = SourceRealizationLeaseState::Rooted;
+        Ok(())
+    }
     pub fn release(&mut self) -> Result<(), String> {
         match self.state {
+            SourceRealizationLeaseState::Pending => {
+                Err("cannot release an unrooted source realization lease".into())
+            }
             SourceRealizationLeaseState::Rooted => {
                 self.state = SourceRealizationLeaseState::Released;
                 Ok(())
             }
-            SourceRealizationLeaseState::Released => Err("source realization lease already released".into()),
+            SourceRealizationLeaseState::Released => {
+                Err("source realization lease already released".into())
+            }
         }
     }
 
@@ -1576,13 +1594,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
         let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
-        let lease = SourceRealizationLease::new(
+        let mut lease = SourceRealizationLease::new(
             &source,
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
             "/nix/var/nix/gcroots/nixward/txn-001",
         )
         .unwrap();
         assert_eq!(lease.source_digest, source.root_digest);
+        assert!(!lease.is_rooted());
+        lease.prove_rooted("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config").unwrap();
         assert!(lease.is_rooted());
     }
 
