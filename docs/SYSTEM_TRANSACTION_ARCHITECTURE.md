@@ -513,32 +513,16 @@ silently qualify an older validation mirror.
 
 ## Journal-bound pidfd worker identity (2026-10-09)
 
-The transaction journal is versioned to v5 because both source-entrypoint identity and worker/process evidence change its
-recovery contract. The source digest now commits to the selected entrypoint as well as the
-serialized manifest; journal load recomputes that digest and rejects a mutated entrypoint.
-Profile transitions, candidate activation, and recovery activation use one supervised worker path.
-Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent` containing the transaction,
-worker purpose, immutable executable identity, and executable+argv digest. After spawn, it captures
-the child PID through `pidfd_open`, verifies a stable `/proc/<pid>/stat` start-time and boot ID,
+The transaction journal is versioned to v5 because source-entrypoint identity and worker/process evidence both affect recovery authority. The frozen-source digest now commits to the selected entrypoint as well as the sorted manifest; journal load recomputes that digest and rejects an entrypoint swap even when the alternate file exists in the same tree.
 
-A pidfd is a live kernel handle, not a serialized token. After process restart, Nixward
-does not trust the recorded PID alone: it rechecks the boot ID and process start time, opens
-a fresh pidfd, and polls that handle. A recorded worker that may still be alive blocks
-recovery mutation. An unresolved `WorkerLaunchIntent` is also evidence of ambiguity: the process may have persisted but its worker receipt is
-missing, recovery also fails closed; it does not infer that the process was never launched.
+Profile transitions, candidate activation, and recovery activation use one supervised worker path. Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent` containing transaction ID, worker purpose, immutable executable identity, and a length-prefixed digest of the exact executable plus its arguments. After spawn, it captures the PID through `pidfd_open`, verifies stable `/proc/<pid>/stat` start-time and boot ID around pidfd acquisition, and atomically replaces the intent with an append-only worker receipt before waiting for completion.
 
-`RecoveryMutationStarted` is persisted before a recovery profile or activation process can
-be spawned. A restart in that phase without a recovery worker receipt is ambiguous and
-cannot automatically launch a second recovery worker. Completed worker identities remain
-append-only journal history, and every recovery attempt gets a distinct receipt.
+A pidfd is a live kernel handle, not a serialized token. After process restart, Nixward does not trust the recorded PID alone: it rechecks boot ID and process start time, opens a fresh pidfd, and polls that handle. A recorded worker that may still be alive blocks recovery mutation.
 
-`BootSelected` is a terminal state distinct from `Activated`: a `boot` action may correctly
-select the candidate system profile while `/run/current-system` still resolves to the
-predecessor until reboot. That state can be reported as success only when both the candidate
-profile and expected predecessor runtime are independently proven. Candidate/source roots
-are released only after the terminal journal state is durably persisted; a cleanup failure
-leaves roots in place rather than deleting evidence.
+An unresolved `WorkerLaunchIntent` is evidence of ambiguity: the process might have spawned before its pidfd receipt became durable. Recovery does not clear that intent by inference; it blocks another mutation until an explicit reconciliation path establishes what happened. If a mutation-start boundary has no matching receipt, recovery likewise refuses to guess that the process never launched.
 
-Exact activation and recovery are explicitly refused in dry-run mode, and the legacy
-executor API cannot launch `ActivateSystemClosure`. Cognitive confidence, a child exit code,
-and a serialized worker PID never substitute for exact authorization plus observed post-state.
+`RecoveryMutationStarted` is persisted before a recovery profile or activation process can spawn. A restart in that phase without a recovery worker receipt is ambiguous and cannot automatically launch a second recovery worker. Completed worker identities remain append-only journal history, and every recovery attempt gets a distinct receipt.
+
+`BootSelected` is a terminal state distinct from `Activated`: a `boot` action may correctly select the candidate system profile while `/run/current-system` still resolves to the predecessor until reboot. That state can be reported as success only when both candidate profile and expected predecessor runtime are independently proven. Candidate/source roots are released only after the terminal journal state is durably persisted; a cleanup failure leaves roots in place rather than deleting evidence.
+
+Exact activation and recovery are explicitly refused in dry-run mode, and the legacy executor API cannot launch `ActivateSystemClosure`. Cognitive confidence, child exit status, and a serialized worker PID never substitute for exact authorization plus observed post-state.
