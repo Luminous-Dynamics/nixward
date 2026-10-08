@@ -351,6 +351,7 @@ fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), Str
 }
 
 #[cfg(feature = "native")]
+#[cfg(unix)]
 fn remove_gc_root_path(gc_root_path: &str) -> Result<(), String> {
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
@@ -1767,7 +1768,8 @@ impl CandidateBuildReceipt {
     pub fn verify_retention(&self) -> Result<(), String> {
         verify_gc_root_target(&self.candidate_store_path, &self.gc_root_path)
     }
-    /// Release the candidate GC root after the transaction has reached a terminal phase.    #[cfg(feature = "native")]
+    /// Release the candidate GC root after the transaction has reached a terminal phase.
+    #[cfg(feature = "native")]
     pub fn release_retention(&self) -> Result<(), String> {
         self.verify_retention()?;
         remove_gc_root_path(&self.gc_root_path)
@@ -2403,7 +2405,8 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Release candidate retention only after activation/recovery is terminal.    #[cfg(feature = "native")]
+    /// Release candidate retention only after activation/recovery is terminal.
+    #[cfg(feature = "native")]
     pub fn release_candidate_retention(&self) -> Result<(), String> {
         if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) {
             return Err("candidate retention cannot be released before a terminal transaction phase".into());
