@@ -1970,8 +1970,8 @@ impl ConfigTransaction {
             (ConfigTransactionPhase::ProfileCommitted, ConfigTransactionPhase::ActivationStarted) => true,
             (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::Activated) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
             (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::IndeterminateActivation) => true,
-            (ConfigTransactionPhase::IndeterminateProfileTransition, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
-            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::IndeterminateProfileTransition, ConfigTransactionPhase::RecoveryObservation) => true,
+            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => true,
             (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::RecoveryRequired) => true,
             (ConfigTransactionPhase::RecoveryRequired, ConfigTransactionPhase::RecoveryMutationStarted) => true,
             (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::Recovered) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
@@ -2627,7 +2627,7 @@ impl ConfigTransaction {
                 ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
-                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
             }
