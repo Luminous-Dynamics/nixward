@@ -1112,7 +1112,7 @@ impl NixOSExecutor {
     }
 
     async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
-        let (_declared_cmd, args) = command.to_command();
+        let (declared_cmd, args) = command.to_command();
         let executable = Self::trusted_bound_executable(command)?;
         Command::new(&executable)
             .args(&args)
