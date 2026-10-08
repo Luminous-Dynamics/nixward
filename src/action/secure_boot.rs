@@ -736,7 +736,6 @@ impl DbCertificateVerificationEvidence {
         append_json!(self.stderr_blake3);
         append_json!(observed_at_ms);
         preimage.push(b']');
-        .map_err(|error| format!("failed to serialize DB certificate verification evidence: {error}"))?;
         self.observed_at_ms = Some(observed_at_ms);
         self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
         Ok(self)
