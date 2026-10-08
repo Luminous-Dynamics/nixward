@@ -71,11 +71,11 @@ For UEFI `EFI_CERT_SHA256_GUID` database records, the image subject is the PE/CO
 Authenticode SHA-256, not the flat file SHA-256. The implementation therefore
 uses the exact Authenticode hash procedure for `db`/`dbx` image-hash comparisons. citeturn927442search0turn927442search1
 
-X.509 TBS hash records in `dbx` carry a revocation time. An exact TBS match is
-therefore recorded as a potential revocation until the signed-image timestamp and
-certificate-chain semantics are evaluated; it is not collapsed into an immediate
-veto. The current implementation deliberately leaves this as a separate
-`PotentialDbxTbsRevocation` state.
+X.509 TBS hash records in `dbx` carry a revocation time. An exact match with
+an all-zero EFI_TIME is an explicit `ForbiddenByDbxTbsRevocation` state because
+UEFI defines zero revocation time as always revoked. An exact match with a
+nonzero EFI_TIME remains `PotentialDbxTbsRevocation` until signed-image
+timestamp/RFC 3161 semantics are evaluated.
 
 ## Certificate-chain trust boundary
 
