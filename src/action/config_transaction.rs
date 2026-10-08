@@ -14,9 +14,9 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
+const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v4\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v5\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -280,10 +280,15 @@ fn validate_manifest_relative_path(value: &str) -> Result<(), String> {
 }
 
 fn compute_frozen_source_root_digest(
+    entrypoint: &str,
     manifest: &[SourceManifestEntry],
 ) -> Result<String, String> {
+    validate_manifest_relative_path(entrypoint)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(SOURCE_DOMAIN);
+    hasher.update(b"entrypoint\0");
+    hasher.update(entrypoint.as_bytes());
+    hasher.update(&[0]);
     for entry in manifest {
         hasher.update(entry.relative_path.as_bytes());
         hasher.update(&[0]);
@@ -490,11 +495,12 @@ impl FrozenConfigSource {
             return Err("config entrypoint is not a regular file in the frozen source tree".into());
         }
 
-        let root_digest = compute_frozen_source_root_digest(&manifest)?;
+        let entrypoint = manifest_relative_path(relative_entrypoint)?;
+        let root_digest = compute_frozen_source_root_digest(&entrypoint, &manifest)?;
 
         let source = Self {
             root_digest,
-            entrypoint: manifest_relative_path(relative_entrypoint)?,
+            entrypoint,
             manifest,
         };
         source.validate_identity()?;
@@ -880,6 +886,55 @@ impl FrozenConfigSource {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Recompute the canonical source identity from serialized evidence.
+    /// The selected entrypoint is included in the digest and must name a file
+    /// in the manifest; swapping to another in-tree file is therefore detected.
+    pub fn validate_identity(&self) -> Result<(), String> {
+        decode_digest(&self.root_digest)?;
+        validate_manifest_relative_path(&self.entrypoint)?;
+        if self.manifest.is_empty() {
+            return Err("frozen source manifest must not be empty".into());
+        }
+        let mut previous: Option<&str> = None;
+        let mut paths = std::collections::BTreeMap::new();
+        for entry in &self.manifest {
+            validate_manifest_relative_path(&entry.relative_path)?;
+            decode_digest(&entry.digest)?;
+            if let Some(previous) = previous {
+                if previous >= entry.relative_path.as_str() {
+                    return Err("frozen source manifest paths are not strictly sorted and unique".into());
+                }
+            }
+            previous = Some(&entry.relative_path);
+            if matches!(entry.kind, SourceEntryKind::Directory) && entry.size != 0 {
+                return Err(format!("frozen source directory {} has nonzero size", entry.relative_path));
+            }
+            paths.insert(entry.relative_path.as_str(), &entry.kind);
+        }
+        let Some(kind) = paths.get(self.entrypoint.as_str()) else {
+            return Err("frozen source entrypoint is absent from its manifest".into());
+        };
+        if !matches!(kind, SourceEntryKind::File) {
+            return Err("frozen source entrypoint does not name a regular file".into());
+        }
+        for entry in &self.manifest {
+            let path = Path::new(&entry.relative_path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let parent = manifest_relative_path(parent)?;
+                    if !matches!(paths.get(parent.as_str()), Some(SourceEntryKind::Directory)) {
+                        return Err(format!("frozen source path {} has no directory parent {}", entry.relative_path, parent));
+                    }
+                }
+            }
+        }
+        let recomputed = compute_frozen_source_root_digest(&self.entrypoint, &self.manifest)?;
+        if recomputed != self.root_digest {
+            return Err("frozen source manifest does not match its root digest".into());
+        }
         Ok(())
     }
 
@@ -1927,8 +1982,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v4";
-    pub const VERSION: u16 = 4;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v5";
+    pub const VERSION: u16 = 5;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
