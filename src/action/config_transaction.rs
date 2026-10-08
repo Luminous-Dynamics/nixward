@@ -1206,6 +1206,64 @@ impl SourceRealizationLease {
         matches!(self.state, SourceRealizationLeaseState::Rooted)
     }
 }
+/// Exact receipt for building one immutable system candidate from one
+/// retained Nix source realization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateBuildReceipt {
+    pub source_digest: String,
+    pub source_store_path: String,
+    pub candidate_store_path: String,
+    pub realization_plan_digest: String,
+}
+
+impl CandidateBuildReceipt {
+    pub fn new(
+        source: &FrozenConfigSource,
+        source_store_path: impl Into<String>,
+        candidate_store_path: impl Into<String>,
+        realization_plan_digest: impl Into<String>,
+    ) -> Result<Self, String> {
+        let source_store_path = source_store_path.into();
+        let candidate_store_path = candidate_store_path.into();
+        let realization_plan_digest = realization_plan_digest.into();
+        if !super::execution_intent::is_valid_nix_store_path(&source_store_path) {
+            return Err("candidate build source is not a canonical immutable Nix store path".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(&candidate_store_path) {
+            return Err("candidate build output is not a canonical immutable Nix store path".into());
+        }
+        if decode_digest(&realization_plan_digest).is_err() {
+            return Err("candidate build realization-plan digest is invalid".into());
+        }
+        if source.root_digest != source.root_digest {
+            return Err("unreachable source identity check".into());
+        }
+        Ok(Self {
+            source_digest: source.root_digest.clone(),
+            source_store_path,
+            candidate_store_path,
+            realization_plan_digest,
+        })
+    }
+
+    fn validate_identity(&self) -> Result<(), String> {
+        if decode_digest(&self.source_digest).is_err() {
+            return Err("candidate build source digest is invalid".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(&self.source_store_path) {
+            return Err("candidate build source store path is invalid".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(&self.candidate_store_path) {
+            return Err("candidate build output store path is invalid".into());
+        }
+        if decode_digest(&self.realization_plan_digest).is_err() {
+            return Err("candidate build realization-plan digest is invalid".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTransaction {
@@ -1215,7 +1273,10 @@ pub struct ConfigTransaction {
     plan_digest: String,
     nonce: String,
     source_digest: String,
+    #[serde(default)]
     candidate_store_path: Option<String>,
+    #[serde(default)]
+    candidate_build: Option<CandidateBuildReceipt>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -1252,6 +1313,7 @@ impl ConfigTransaction {
             nonce: digest_hex(&nonce),
             source_digest: digest_hex(&source_digest),
             candidate_store_path: None,
+            candidate_build: None,
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -1289,7 +1351,7 @@ impl ConfigTransaction {
                 true
             },
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
-            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_store_path.is_some(),
+            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_build.is_some(),
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::FailedBeforeActivation) => true,
             (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ProfileTransitionStarted) => self.candidate_store_path.is_some(),
             (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::FailedBeforeActivation) => true,
@@ -1461,22 +1523,50 @@ impl ConfigTransaction {
             realization.release()
         }
     }
-    pub fn set_candidate_store_path(&mut self, candidate_store_path: impl Into<String>) -> Result<(), String> {
-        let path = candidate_store_path.into();
-        if !super::execution_intent::is_valid_nix_store_path(&path) {
-            return Err("candidate store path is not a canonical immutable Nix store path".into());
+    /// Bind the exact immutable source realization, candidate output, and
+    /// realization-plan identity to this transaction.
+    pub fn bind_candidate_build(
+        &mut self,
+        receipt: CandidateBuildReceipt,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt
+        ) {
+            return Err("candidate build receipt can only be bound before source commit".into());
         }
-        if !matches!(self.phase, ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt) {
-            return Err("candidate store path can only be bound before source commit".into());
+        receipt.validate_identity()?;
+        if receipt.source_digest != self.source_digest {
+            return Err("candidate build source digest does not match transaction source digest".into());
         }
-        if let Some(existing) = &self.candidate_store_path {
-            if existing != &path {
-                return Err("candidate store identity is immutable once bound; refusing replacement".into());
+        let realization = self
+            .source_realization
+            .as_ref()
+            .ok_or_else(|| "candidate build requires a retained source realization".to_string())?;
+        if !realization.is_rooted() {
+            return Err("candidate build requires a rooted source realization".into());
+        }
+        if receipt.source_store_path != realization.store_path {
+            return Err("candidate build source store path does not match the retained source realization".into());
+        }
+        if let Some(existing) = &self.candidate_build {
+            if existing != &receipt {
+                return Err("candidate build receipt is immutable once bound; refusing replacement".into());
             }
             return Ok(());
         }
-        self.candidate_store_path = Some(path);
+        if let Some(existing) = &self.candidate_store_path {
+            if existing != &receipt.candidate_store_path {
+                return Err("candidate build output does not match the legacy candidate identity".into());
+            }
+        }
+        self.candidate_store_path = Some(receipt.candidate_store_path.clone());
+        self.candidate_build = Some(receipt);
         Ok(())
+    }
+
+    pub fn candidate_build(&self) -> Option<&CandidateBuildReceipt> {
+        self.candidate_build.as_ref()
     }
 
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
@@ -1666,6 +1756,23 @@ impl ConfigTransaction {
         if transaction.transaction_id != recomputed_id {
             return Err("transaction journal transaction id does not match its persisted preimage".into());
         }
+        if let Some(receipt) = transaction.candidate_build.as_ref() {
+            receipt.validate_identity()?;
+            if receipt.source_digest != transaction.source_digest {
+                return Err("transaction journal candidate build source digest mismatch".into());
+            }
+            if let Some(realization) = transaction.source_realization.as_ref() {
+                if receipt.source_store_path != realization.store_path {
+                    return Err("transaction journal candidate build source store mismatch".into());
+                }
+            }
+            if let Some(candidate) = transaction.candidate_store_path.as_deref() {
+                if candidate != receipt.candidate_store_path {
+                    return Err("transaction journal candidate identities disagree".into());
+                }
+            }
+        }
+
         if let Some(candidate) = transaction.candidate_store_path.as_deref() {
             if !super::execution_intent::is_valid_nix_store_path(candidate) {
                 return Err("transaction journal has an invalid candidate store path".into());
