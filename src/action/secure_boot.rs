@@ -39,6 +39,28 @@ pub struct SignatureDatabaseMatchEvidence {
     pub exact_certificate_in_db: bool,
     pub exact_certificate_in_dbx: bool,
     pub certificate_chain_authorization: Option<bool>,
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl SignatureDatabaseMatchEvidence {
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            &self.db_records,
+            &self.dbx_records,
+            self.image_sha256,
+            self.direct_db_image_hash_match,
+            self.direct_dbx_image_hash_match,
+            self.exact_certificate_in_db,
+            self.exact_certificate_in_dbx,
+            self.certificate_chain_authorization,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize signature-database evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +76,16 @@ pub struct SecureBootDatabaseEvidence {
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_state: SecureBootDatabaseState,
     pub dbx_payload_blake3: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DirectTrustDisposition {
+    ForbiddenByImageHash,
+    AuthorizedByImageHash,
+    ExactCertificateInDbx,
+    ExactCertificateInDb,
+    NoDirectMatch,
+    UnknownUnsupportedRecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,7 +247,34 @@ pub fn match_secure_boot_databases(
         dbx_records,
         image_sha256,
         certificate_chain_authorization: None,
+        observed_at_ms: None,
+        evidence_digest: None,
     })
+}
+
+pub fn derive_direct_trust_disposition(
+    evidence: &SignatureDatabaseMatchEvidence,
+) -> DirectTrustDisposition {
+    // UEFI validation gives dbx veto semantics precedence over db authorization.
+    // Certificate-chain authorization cannot be inferred from a raw DER match.
+    if evidence.direct_dbx_image_hash_match {
+        return DirectTrustDisposition::ForbiddenByImageHash;
+    }
+    if evidence.direct_db_image_hash_match {
+        return DirectTrustDisposition::AuthorizedByImageHash;
+    }
+    if evidence.exact_certificate_in_dbx {
+        return DirectTrustDisposition::ExactCertificateInDbx;
+    }
+    if evidence.exact_certificate_in_db {
+        return DirectTrustDisposition::ExactCertificateInDb;
+    }
+    if evidence.db_records.iter().chain(evidence.dbx_records.iter()).any(|record| {
+        record.kind == SignatureListKind::Unsupported
+    }) {
+        return DirectTrustDisposition::UnknownUnsupportedRecord;
+    }
+    DirectTrustDisposition::NoDirectMatch
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
@@ -248,7 +307,8 @@ pub fn build_secure_boot_database_evidence(
 pub fn observe_secure_boot_databases() -> Result<SecureBootDatabaseEvidence, String> {
     let db = read_efi_database("db")?;
     let dbx = read_efi_database("dbx")?;
-    Ok(build_secure_boot_database_evidence(db.as_deref(), dbx.as_deref()))
+    let evidence = build_secure_boot_database_evidence(db.as_deref(), dbx.as_deref());
+    Ok(evidence)
 }
 
 #[cfg(feature = "native")]
@@ -321,6 +381,14 @@ fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
 mod tests {
     use super::*;
 
+    fn make_sha256_signature_list(image_hash: [u8; 32]) -> Vec<u8> {
+        let mut payload = vec![0u8; 28 + 48];
+        payload[..16].copy_from_slice(&EFI_CERT_SHA256_GUID);
+        payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
+        payload[24..28].copy_from_slice(&48u32.to_le_bytes());
+        payload[44..76].copy_from_slice(&image_hash);
+        payload
+    }
     #[test]
     fn parses_sha256_signature_database_records() {
         let mut payload = vec![0u8; 28 + 48];
@@ -357,6 +425,30 @@ mod tests {
         let records = parse_signature_database(&payload).expect("unsupported signature list");
         assert_eq!(records[0].kind, SignatureListKind::Unsupported);
         assert_eq!(records[0].image_sha256, None);
+    }
+    #[test]
+    fn dbx_image_hash_veto_has_precedence_over_db_authorization() {
+        let image_hash = [7u8; 32];
+        let db = make_sha256_signature_list(image_hash);
+        let dbx = make_sha256_signature_list(image_hash);
+        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None)
+            .expect("database matcher");
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::ForbiddenByImageHash
+        );
+    }
+
+    #[test]
+    fn db_image_hash_is_authorizing_only_without_dbx_veto() {
+        let image_hash = [8u8; 32];
+        let db = make_sha256_signature_list(image_hash);
+        let evidence = match_secure_boot_databases(&db, &[], image_hash, None)
+            .expect("database matcher");
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::AuthorizedByImageHash
+        );
     }
     #[test]
     fn database_evidence_hashes_exact_payloads() {
