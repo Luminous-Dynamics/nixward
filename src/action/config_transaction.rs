@@ -362,10 +362,8 @@ impl FrozenConfigSource {
                 });
                 Self::walk_portable(root, &path, manifest)?;
             } else if metadata.is_file() {
-                let bytes = super::secure_boot_signature::read_regular_file_no_follow_stable(
-                    &path,
-                    &metadata,
-                )?;
+                let bytes = std::fs::read(&path)
+                    .map_err(|error| format!("failed to read source file {}: {error}", path.display()))?;
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(ENTRY_DOMAIN);
                 hasher.update(relative_path.as_bytes());
@@ -1113,6 +1111,30 @@ mod tests {
         )
         .unwrap();
         assert!(FrozenConfigSource::capture(dir.path(), "configuration.nix").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_rejects_symlink_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/allowed.nix"), "{}\n").unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("nested"),
+            dir.path().join("linked-dir"),
+        )
+        .unwrap();
+
+        assert!(
+            FrozenConfigSource::capture(dir.path(), "configuration.nix")
+                .expect_err("directory symlink must fail closed")
+                .contains("symbolic link")
+        );
     }
 
     #[test]
