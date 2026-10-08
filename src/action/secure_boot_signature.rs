@@ -403,30 +403,44 @@ mod tests {
 
     fn pe_with_certificate(certificate_type: u16, payload: &[u8]) -> Vec<u8> {
         let pe_offset = 0x40usize;
-        let optional_size = 112usize + 5 * 8;
-        let section_table = pe_offset + 24 + optional_size;
-        let table_offset = section_table;
-        let length = (8 + payload.len()) as u32;
-        let aligned = (length as usize + 7) & !7usize;
-        let mut image = vec![0u8; table_offset + aligned];
+        let optional_size = 240usize;
+        let optional = pe_offset + 24;
+        let section_table = optional + optional_size;
+        let size_of_headers = 0x200usize;
+        let raw_offset = size_of_headers;
+        let raw_size = 0x100usize;
+        let cert_offset = raw_offset + raw_size;
+        let cert_length = 8usize + payload.len();
+        let cert_padded = (cert_length + 7) & !7usize;
+        let mut image = vec![0u8; cert_offset + cert_padded];
+
         image[0..2].copy_from_slice(b"MZ");
         image[0x3c..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
         image[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
-        image[pe_offset + 6..pe_offset + 8].copy_from_slice(&0u16.to_le_bytes());
-        image[pe_offset + 20..pe_offset + 22].copy_from_slice(&(optional_size as u16).to_le_bytes());
-        let optional = pe_offset + 24;
+        let coff = pe_offset + 4;
+        image[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes());
+        image[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes());
+        image[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
         image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
-        image[optional + 108..optional + 112].copy_from_slice(&5u32.to_le_bytes());
-        let directory = optional + 112 + 4 * 8;
-        image[directory..directory + 4].copy_from_slice(&(table_offset as u32).to_le_bytes());
-        image[directory + 4..directory + 8].copy_from_slice(&(aligned as u32).to_le_bytes());
-        image[table_offset..table_offset + 4].copy_from_slice(&length.to_le_bytes());
-        image[table_offset + 4..table_offset + 6].copy_from_slice(&0x0200u16.to_le_bytes());
-        image[table_offset + 6..table_offset + 8].copy_from_slice(&certificate_type.to_le_bytes());
-        image[table_offset + 8..table_offset + 8 + payload.len()].copy_from_slice(payload);
+        image[optional + 60..optional + 64].copy_from_slice(&(size_of_headers as u32).to_le_bytes());
+        image[optional + 64..optional + 68].copy_from_slice(&0x12345678u32.to_le_bytes());
+        let cert_dir = optional + 144;
+        image[cert_dir..cert_dir + 4].copy_from_slice(&(cert_offset as u32).to_le_bytes());
+        image[cert_dir + 4..cert_dir + 8].copy_from_slice(&(cert_padded as u32).to_le_bytes());
+
+        image[section_table..section_table + 8].copy_from_slice(b".text\0\0\0");
+        image[section_table + 8..section_table + 12].copy_from_slice(&(raw_size as u32).to_le_bytes());
+        image[section_table + 12..section_table + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        image[section_table + 16..section_table + 20].copy_from_slice(&(raw_size as u32).to_le_bytes());
+        image[section_table + 20..section_table + 24].copy_from_slice(&(raw_offset as u32).to_le_bytes());
+        image[raw_offset..raw_offset + raw_size].fill(0x41);
+
+        image[cert_offset..cert_offset + 4].copy_from_slice(&(cert_length as u32).to_le_bytes());
+        image[cert_offset + 4..cert_offset + 6].copy_from_slice(&0x0200u16.to_le_bytes());
+        image[cert_offset + 6..cert_offset + 8].copy_from_slice(&certificate_type.to_le_bytes());
+        image[cert_offset + 8..cert_offset + 8 + payload.len()].copy_from_slice(payload);
         image
     }
-
     #[test]
     fn authenticode_hash_excludes_checksum_and_certificate_table() {
         let mut image = pe_with_certificate(0x0002, b"signed-payload");
@@ -435,7 +449,7 @@ mod tests {
         image[checksum_offset..checksum_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         let after_checksum = authenticode_sha256(&image).expect("authenticode hash");
         assert_eq!(before, after_checksum);
-        let cert_offset = 0x40 + 24 + 112 + 40;
+        let cert_offset = 0x300;
         image[cert_offset + 8] ^= 0xff;
         let after_certificate = authenticode_sha256(&image).expect("authenticode hash");
         assert_eq!(before, after_certificate);
@@ -443,17 +457,7 @@ mod tests {
 
     #[test]
     fn authenticode_hash_changes_when_hashed_section_bytes_change() {
-        let mut image = vec![0u8; 0x400];
-        image[0..2].copy_from_slice(b"MZ");
-        image[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
-        image[0x40..0x44].copy_from_slice(b"PE\0\0");
-        image[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
-        image[0x54..0x56].copy_from_slice(&224u16.to_le_bytes());
-        image[0x58..0x5a].copy_from_slice(&0x20bu16.to_le_bytes());
-        image[0x94..0x98].copy_from_slice(&0x200u32.to_le_bytes());
-        image[0x138..0x13c].copy_from_slice(&0x100u32.to_le_bytes());
-        image[0x13c..0x140].copy_from_slice(&0x200u32.to_le_bytes());
-        for byte in &mut image[0x200..0x300] { *byte = 0x41; }
+        let mut image = pe_with_certificate(0x0002, b"signed-payload");
         let first = authenticode_sha256(&image).expect("authenticode hash");
         image[0x250] ^= 0x01;
         let second = authenticode_sha256(&image).expect("authenticode hash");
