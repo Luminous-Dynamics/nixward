@@ -1753,6 +1753,12 @@ impl CandidateBuildReceipt {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationWorkerPurpose {
+    Activation,
+    Recovery,
+}
 /// Durable audit identity for the exact process that was spawned for activation.
 /// This record is descriptive after restart; only a fresh pidfd + boot/start-time
 /// check can establish whether that same worker is still live.
@@ -1760,6 +1766,7 @@ impl CandidateBuildReceipt {
 #[serde(deny_unknown_fields)]
 pub struct ActivationWorkerIdentity {
     pub transaction_id: String,
+    pub purpose: ActivationWorkerPurpose,
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
@@ -1825,7 +1832,7 @@ pub struct ConfigTransaction {
     #[serde(default)]
     candidate_build: Option<CandidateBuildReceipt>,
     #[serde(default)]
-    activation_worker: Option<ActivationWorkerIdentity>,
+    activation_workers: Vec<ActivationWorkerIdentity>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -1864,7 +1871,7 @@ impl ConfigTransaction {
             frozen_source: None,
             candidate_store_path: None,
             candidate_build: None,
-            activation_worker: None,
+            activation_workers: Vec::new(),
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -2281,31 +2288,38 @@ impl ConfigTransaction {
         self.candidate_build.as_ref()
     }
 
-    /// Persist one immutable worker identity only after the process has been
-    /// captured by pidfd and before waiting for activation to finish.
+    /// Persist one worker identity after it has been captured by pidfd and
+    /// before awaiting completion. Receipts are append-only history.
     pub fn bind_activation_worker_identity(
         &mut self,
         identity: ActivationWorkerIdentity,
     ) -> Result<(), String> {
-        if self.phase != ConfigTransactionPhase::ActivationStarted {
-            return Err("activation worker identity can only be bound after durable ActivationStarted".into());
-        }
         identity.validate_identity()?;
         if identity.transaction_id != self.transaction_id {
             return Err("activation worker identity belongs to a different transaction".into());
         }
-        if let Some(existing) = &self.activation_worker {
-            if existing != &identity {
-                return Err("activation worker identity is immutable once bound".into());
+        match identity.purpose {
+            ActivationWorkerPurpose::Activation if self.phase != ConfigTransactionPhase::ActivationStarted => {
+                return Err("activation worker identity requires durable ActivationStarted".into());
             }
-            return Ok(());
+            ActivationWorkerPurpose::Recovery if self.phase != ConfigTransactionPhase::RecoveryRequired => {
+                return Err("recovery worker identity requires durable RecoveryRequired".into());
+            }
+            _ => {}
         }
-        self.activation_worker = Some(identity);
+        if self.activation_workers.iter().any(|existing| {
+            existing.purpose == identity.purpose
+                && existing.pid == identity.pid
+                && existing.start_time_ticks == identity.start_time_ticks
+        }) {
+            return Err("activation worker identity was already recorded".into());
+        }
+        self.activation_workers.push(identity);
         Ok(())
     }
 
-    pub fn activation_worker_identity(&self) -> Option<&ActivationWorkerIdentity> {
-        self.activation_worker.as_ref()
+    pub fn activation_worker_identities(&self) -> &[ActivationWorkerIdentity] {
+        &self.activation_workers
     }
 
     /// Legacy journal compatibility setter. This field is deliberately not
@@ -2539,13 +2553,19 @@ impl ConfigTransaction {
             }
         }
 
-        if let Some(worker) = transaction.activation_worker.as_ref() {
+        for worker in &transaction.activation_workers {
             worker.validate_identity()?;
             if worker.transaction_id != transaction.transaction_id {
                 return Err("transaction journal activation worker belongs to a different transaction".into());
             }
-            if matches!(transaction.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt | ConfigTransactionPhase::SourceCommitted | ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition) {
-                return Err("transaction journal has activation worker identity before activation began".into());
+            match worker.purpose {
+                ActivationWorkerPurpose::Activation if matches!(transaction.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt | ConfigTransactionPhase::SourceCommitted | ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition) => {
+                    return Err("transaction journal has activation worker identity before activation began".into());
+                }
+                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) => {
+                    return Err("transaction journal has recovery worker identity outside recovery phases".into());
+                }
+                _ => {}
             }
         }
         if let Some(receipt) = transaction.candidate_build.as_ref() {
