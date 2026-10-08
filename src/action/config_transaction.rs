@@ -315,6 +315,41 @@ fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(feature = "native")]
+fn remove_gc_root_path(gc_root_path: &str) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    validate_gc_root_path(gc_root_path)?;
+    let gc_root = std::path::Path::new(gc_root_path);
+    let namespace = gc_root
+        .parent()
+        .ok_or_else(|| "GC root has no namespace parent".to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    let namespace_dir = options.open(namespace)
+        .map_err(|error| format!("failed to securely open GC-root namespace for removal: {error}"))?;
+    let name = gc_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "GC root filename is not valid UTF-8".to_string())?;
+    let name = CString::new(name)
+        .map_err(|_| "GC root filename contains NUL".to_string())?;
+    let result = unsafe { nix::libc::unlinkat(namespace_dir.as_raw_fd(), name.as_ptr(), 0) };
+    if result != 0 {
+        return Err(format!("failed to remove GC root: {}", std::io::Error::last_os_error()));
+    }
+    namespace_dir
+        .sync_all()
+        .map_err(|error| format!("failed to persist GC-root removal: {error}"))?;
+    match std::fs::symlink_metadata(gc_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err("GC root still exists after removal".into()),
+        Err(error) => Err(format!("failed to verify GC-root removal: {error}")),
+    }
+}
+
 fn installable_selector_is_valid(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix(".#") else {
         return false;
@@ -1576,6 +1611,11 @@ impl CandidateBuildReceipt {
     pub fn verify_retention(&self) -> Result<(), String> {
         verify_gc_root_target(&self.candidate_store_path, &self.gc_root_path)
     }
+    /// Release the candidate GC root after the transaction has reached a terminal phase.    #[cfg(feature = "native")]
+    pub fn release_retention(&self) -> Result<(), String> {
+        self.verify_retention()?;
+        remove_gc_root_path(&self.gc_root_path)
+    }
 
     fn validate_identity(&self) -> Result<(), String> {
         if !installable_selector_is_valid(&self.installable) {
@@ -2085,6 +2125,17 @@ impl ConfigTransaction {
         }
         self.candidate_store_path = Some(candidate_store_path);
         Ok(())
+    }
+
+    /// Release candidate retention only after activation/recovery is terminal.    #[cfg(feature = "native")]
+    pub fn release_candidate_retention(&self) -> Result<(), String> {
+        if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) {
+            return Err("candidate retention cannot be released before a terminal transaction phase".into());
+        }
+        self.candidate_build
+            .as_ref()
+            .ok_or_else(|| "transaction has no candidate-build receipt".to_string())?
+            .release_retention()
     }
 
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
