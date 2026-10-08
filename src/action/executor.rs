@@ -3266,6 +3266,37 @@ mod tests {
         assert!(auth.validate_for_recovery(&command).is_err());
     }
 
+    #[tokio::test]
+    async fn legacy_exact_activation_is_blocked_even_in_dry_run() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
+            action: SystemActivation::Switch,
+        };
+        let plan = ChangePlan::command_only_with_system_recovery(
+            super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
+            command.clone(),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            SystemActivation::Switch,
+            60_000,
+        )
+        .unwrap();
+        let approval =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
+        let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let result = executor.execute_authorized(command, auth, Some(1.0)).await;
+        match result {
+            ExecutionResult::Blocked { reason, .. } => {
+                assert!(reason.contains("durable ConfigTransaction"));
+            }
+            _ => panic!("legacy exact activation must be blocked even in dry-run"),
+        }
+    }
+
     #[test]
     fn exact_activation_authorization_requires_exact_recovery_binding() {
         let command = NixOSCommand::ActivateSystemClosure {
