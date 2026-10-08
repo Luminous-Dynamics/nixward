@@ -2540,6 +2540,26 @@ mod tests {
             std::fs::write(root.join("nested/value.nix"), "value = 1;\n").unwrap();
         }
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                realized_dir.path().join("configuration.nix"),
+                std::fs::Permissions::from_mode(0o444),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested"),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested/value.nix"),
+                std::fs::Permissions::from_mode(0o444),
+            )
+            .unwrap();
+        }
+
         let source = FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
         source.verify_realization_at(realized_dir.path()).unwrap();
 
