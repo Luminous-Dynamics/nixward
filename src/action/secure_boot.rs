@@ -1744,6 +1744,47 @@ mod tests {
     }
 
     #[cfg(feature = "native")]
+    #[cfg(feature = "native")]
+    #[test]
+    fn policy_rejection_precedes_database_presence() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary image");
+        std::fs::write(temp.path(), b"policy-only-fixture").expect("fixture image");
+
+        let evidence = build_live_policy_rejection_evidence(
+            temp.path(),
+            SecureBootState::Disabled,
+        )
+        .expect("policy rejection evidence");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::SecureBootPolicyDisabled
+        );
+        assert_eq!(evidence.secure_boot_state, Some(SecureBootState::Disabled));
+        assert_eq!(evidence.database_stability, None);
+        assert_eq!(evidence.db_payload_blake3, None);
+        assert_eq!(evidence.dbx_payload_blake3, None);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn policy_rejection_preserves_unknown_state() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary image");
+        std::fs::write(temp.path(), b"unknown-policy-fixture").expect("fixture image");
+
+        let evidence = build_live_policy_rejection_evidence(
+            temp.path(),
+            SecureBootState::Unknown,
+        )
+        .expect("policy rejection evidence");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::SecureBootPolicyUnknown
+        );
+        assert_eq!(evidence.secure_boot_state, Some(SecureBootState::Unknown));
+    }
+
     #[test]
     fn live_verification_requirement_rejects_disabled_secure_boot() {
         let evidence = DbCertificateVerificationEvidence {
