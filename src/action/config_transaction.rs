@@ -16,7 +16,7 @@ use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v5\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -283,6 +283,7 @@ fn compute_frozen_source_root_digest(
     entrypoint: &str,
     manifest: &[SourceManifestEntry],
 ) -> Result<String, String> {
+    validate_manifest_relative_path(entrypoint)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(SOURCE_DOMAIN);
     hasher.update(entrypoint.as_bytes());
@@ -354,6 +355,7 @@ fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), Str
 }
 
 #[cfg(feature = "native")]
+#[cfg(unix)]
 fn remove_gc_root_path(gc_root_path: &str) -> Result<(), String> {
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
@@ -468,7 +470,6 @@ impl FrozenConfigSource {
             .strip_prefix(&root)
             .map_err(|_| "config entrypoint escapes source root".to_string())?;
 
-        let entrypoint_string = manifest_relative_path(relative_entrypoint)?;
         let mut manifest = Vec::new();
         #[cfg(unix)]
         {
@@ -485,7 +486,7 @@ impl FrozenConfigSource {
         }
         manifest.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-        let relative_entrypoint_string = entrypoint_string.clone();
+        let relative_entrypoint_string = manifest_relative_path(relative_entrypoint)?;
         if !manifest.iter().any(|entry| {
             entry.relative_path == relative_entrypoint_string
                 && matches!(entry.kind, SourceEntryKind::File)
@@ -493,11 +494,12 @@ impl FrozenConfigSource {
             return Err("config entrypoint is not a regular file in the frozen source tree".into());
         }
 
-        let root_digest = compute_frozen_source_root_digest(&entrypoint_string, &manifest)?;
+        let entrypoint = manifest_relative_path(relative_entrypoint)?;
+        let root_digest = compute_frozen_source_root_digest(&entrypoint, &manifest)?;
 
         let source = Self {
             root_digest,
-            entrypoint: entrypoint_string,
+            entrypoint,
             manifest,
         };
         source.validate_identity()?;
@@ -883,6 +885,55 @@ impl FrozenConfigSource {
             ));
         }
 
+        Ok(())
+    }
+
+    /// Recompute the canonical source identity from serialized evidence.
+    /// The selected entrypoint is included in the digest and must name a file
+    /// in the manifest; swapping to another in-tree file is therefore detected.
+    pub fn validate_identity(&self) -> Result<(), String> {
+        decode_digest(&self.root_digest)?;
+        validate_manifest_relative_path(&self.entrypoint)?;
+        if self.manifest.is_empty() {
+            return Err("frozen source manifest must not be empty".into());
+        }
+        let mut previous: Option<&str> = None;
+        let mut paths: std::collections::BTreeMap<&str, SourceEntryKind> = std::collections::BTreeMap::new();
+        for entry in &self.manifest {
+            validate_manifest_relative_path(&entry.relative_path)?;
+            decode_digest(&entry.digest)?;
+            if let Some(previous) = previous {
+                if previous >= entry.relative_path.as_str() {
+                    return Err("frozen source manifest paths are not strictly sorted and unique".into());
+                }
+            }
+            previous = Some(&entry.relative_path);
+            if matches!(entry.kind, SourceEntryKind::Directory) && entry.size != 0 {
+                return Err(format!("frozen source directory {} has nonzero size", entry.relative_path));
+            }
+            paths.insert(entry.relative_path.as_str(), entry.kind.clone());
+        }
+        let Some(kind) = paths.get(self.entrypoint.as_str()) else {
+            return Err("frozen source entrypoint is absent from its manifest".into());
+        };
+        if !matches!(kind, SourceEntryKind::File) {
+            return Err("frozen source entrypoint does not name a regular file".into());
+        }
+        for entry in &self.manifest {
+            let path = Path::new(&entry.relative_path);
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let parent = manifest_relative_path(parent)?;
+                    if !matches!(paths.get(parent.as_str()), Some(SourceEntryKind::Directory)) {
+                        return Err(format!("frozen source path {} has no directory parent {}", entry.relative_path, parent));
+                    }
+                }
+            }
+        }
+        let recomputed = compute_frozen_source_root_digest(&self.entrypoint, &self.manifest)?;
+        if recomputed != self.root_digest {
+            return Err("frozen source manifest does not match its root digest".into());
+        }
         Ok(())
     }
 
@@ -1771,7 +1822,8 @@ impl CandidateBuildReceipt {
     pub fn verify_retention(&self) -> Result<(), String> {
         verify_gc_root_target(&self.candidate_store_path, &self.gc_root_path)
     }
-    /// Release the candidate GC root after the transaction has reached a terminal phase.    #[cfg(feature = "native")]
+    /// Release the candidate GC root after the transaction has reached a terminal phase.
+    #[cfg(feature = "native")]
     pub fn release_retention(&self) -> Result<(), String> {
         self.verify_retention()?;
         remove_gc_root_path(&self.gc_root_path)
@@ -1804,6 +1856,60 @@ pub enum ActivationWorkerPurpose {
     ProfileTransition,
     Activation,
     Recovery,
+}
+fn validate_worker_executable_path(value: &str, label: &str) -> Result<(), String> {
+    const STORE_PREFIX: &str = "/nix/store/";
+    let path = Path::new(value);
+    if !path.is_absolute() || !value.starts_with(STORE_PREFIX) {
+        return Err(format!("{label} is not an absolute Nix store path"));
+    }
+    let relative = value
+        .strip_prefix(STORE_PREFIX)
+        .ok_or_else(|| format!("{label} escaped the Nix store"))?;
+    let mut components = relative.split('/');
+    let store_component = components
+        .next()
+        .ok_or_else(|| format!("{label} has no store object component"))?;
+    let store_path = format!("{STORE_PREFIX}{store_component}");
+    if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+        return Err(format!("{label} has an invalid Nix store object identity"));
+    }
+    let suffix = components.collect::<Vec<_>>();
+    if suffix.is_empty()
+        || suffix.iter().any(|component| {
+            component.is_empty()
+                || *component == "."
+                || *component == ".."
+                || component.chars().any(char::is_control)
+        })
+    {
+        return Err(format!("{label} contains empty, traversal, or control path components"));
+    }
+    let canonical = format!("{STORE_PREFIX}{store_component}/{}", suffix.join("/"));
+    if canonical != value {
+        return Err(format!("{label} is not in canonical lexical form"));
+    }
+    Ok(())
+}
+/// Durable pre-spawn intent. If present after restart, process creation may have
+/// occurred without a persisted pidfd identity; that uncertainty blocks new mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerLaunchIntent {
+    pub transaction_id: String,
+    pub purpose: ActivationWorkerPurpose,
+    pub executable: String,
+    pub argv_digest: String,
+}
+
+impl WorkerLaunchIntent {
+    pub fn validate_identity(&self) -> Result<(), String> {
+        if decode_digest(&self.transaction_id).is_err() || decode_digest(&self.argv_digest).is_err() {
+            return Err("worker launch intent contains an invalid digest".into());
+        }
+        validate_worker_executable_path(&self.executable, "worker launch executable")?;
+        Ok(())
+    }
 }
 /// Durable audit identity for the exact process that was spawned for activation.
 /// This record is descriptive after restart; only a fresh pidfd + boot/start-time
@@ -1841,42 +1947,7 @@ impl ActivationWorkerIdentity {
         if decode_digest(&self.argv_digest).is_err() {
             return Err("activation worker argv digest is invalid".into());
         }
-        const STORE_PREFIX: &str = "/nix/store/";
-        let executable = std::path::Path::new(&self.executable);
-        if !executable.is_absolute() || !self.executable.starts_with(STORE_PREFIX) {
-            return Err("activation worker executable is not an absolute Nix store path".into());
-        }
-
-        // Validate the complete lexical path. Checking only the first component
-        // would accept traversal such as /nix/store/<object>/../../tmp/evil.
-        let relative = self
-            .executable
-            .strip_prefix(STORE_PREFIX)
-            .ok_or_else(|| "activation worker executable escaped the Nix store".to_string())?;
-        let mut components = relative.split('/');
-        let store_component = components
-            .next()
-            .ok_or_else(|| "activation worker executable has no store object component".to_string())?;
-        let store_path = format!("{STORE_PREFIX}{store_component}");
-        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
-            return Err("activation worker executable has an invalid Nix store identity".into());
-        }
-
-        let suffix = components.collect::<Vec<_>>();
-        if suffix.is_empty()
-            || suffix.iter().any(|component| {
-                component.is_empty()
-                    || *component == "."
-                    || *component == ".."
-                    || component.chars().any(char::is_control)
-            })
-        {
-            return Err("activation worker executable path has empty, traversal, or control components".into());
-        }
-        let canonical = format!("{STORE_PREFIX}{store_component}/{}", suffix.join("/"));
-        if canonical != self.executable {
-            return Err("activation worker executable path is not in canonical lexical form".into());
-        }
+        validate_worker_executable_path(&self.executable, "activation worker executable")?;
         Ok(())
     }
 }
@@ -1897,6 +1968,8 @@ pub struct ConfigTransaction {
     candidate_build: Option<CandidateBuildReceipt>,
     #[serde(default)]
     activation_workers: Vec<ActivationWorkerIdentity>,
+    #[serde(default)]
+    pending_worker_launch: Option<WorkerLaunchIntent>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -1908,8 +1981,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v3";
-    pub const VERSION: u16 = 3;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v5";
+    pub const VERSION: u16 = 5;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -1936,6 +2009,7 @@ impl ConfigTransaction {
             candidate_store_path: None,
             candidate_build: None,
             activation_workers: Vec::new(),
+            pending_worker_launch: None,
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -1992,8 +2066,8 @@ impl ConfigTransaction {
             (ConfigTransactionPhase::ProfileCommitted, ConfigTransactionPhase::ActivationStarted) => true,
             (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::Activated) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
             (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::IndeterminateActivation) => true,
-            (ConfigTransactionPhase::IndeterminateProfileTransition, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
-            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::IndeterminateProfileTransition, ConfigTransactionPhase::RecoveryObservation) => true,
+            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => true,
             (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::RecoveryRequired) => true,
             (ConfigTransactionPhase::RecoveryRequired, ConfigTransactionPhase::RecoveryMutationStarted) => true,
             (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::Recovered) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
@@ -2051,6 +2125,7 @@ impl ConfigTransaction {
         runtime_closure: Option<String>,
         profile_closure: Option<String>,
         expected_runtime_closure: &str,
+        worker_completion_proven: bool,
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
@@ -2068,7 +2143,8 @@ impl ConfigTransaction {
         let Some(candidate) = self.candidate_store_path() else {
             return Err("activation post-state requires a bound candidate build receipt".into());
         };
-        if runtime_closure.as_deref() == Some(expected_runtime_closure)
+        if worker_completion_proven
+            && runtime_closure.as_deref() == Some(expected_runtime_closure)
             && profile_closure.as_deref() == Some(candidate)
         {
             self.phase = if expected_runtime_closure == candidate {
@@ -2127,6 +2203,7 @@ impl ConfigTransaction {
         process_exit_status: Option<i32>,
         observed_runtime_closure: Option<String>,
         observed_profile_closure: Option<String>,
+        worker_completion_proven: bool,
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
@@ -2141,7 +2218,8 @@ impl ConfigTransaction {
         self.process_exit_status = process_exit_status;
         self.observed_runtime_closure = observed_runtime_closure.clone();
         self.observed_profile_closure = observed_profile_closure.clone();
-        if observed_runtime_closure.as_deref() == Some(expected_runtime_closure)
+        if worker_completion_proven
+            && observed_runtime_closure.as_deref() == Some(expected_runtime_closure)
             && observed_profile_closure.as_deref() == Some(expected_profile_closure)
         {
             self.phase = ConfigTransactionPhase::Recovered;
@@ -2364,6 +2442,49 @@ impl ConfigTransaction {
         self.candidate_build.as_ref()
     }
 
+    /// Durably record a launch intent before calling spawn().
+    pub fn prepare_worker_launch(&mut self, intent: WorkerLaunchIntent) -> Result<(), String> {
+        intent.validate_identity()?;
+        if intent.transaction_id != self.transaction_id {
+            return Err("worker launch intent belongs to a different transaction".into());
+        }
+        if self.pending_worker_launch.is_some() {
+            return Err("transaction already has an unresolved worker launch intent".into());
+        }
+        let phase_is_valid = match intent.purpose {
+            ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
+            ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
+            ActivationWorkerPurpose::Recovery => self.phase == ConfigTransactionPhase::RecoveryMutationStarted,
+        };
+        if !phase_is_valid {
+            return Err("worker launch intent does not match the durable transaction phase".into());
+        }
+        self.pending_worker_launch = Some(intent);
+        Ok(())
+    }
+
+    /// Cancel only an intent whose spawn syscall returned an error, proving no
+    /// child was created by that invocation. If persistence fails, the durable
+    /// journal retains the intent and recovery remains blocked.
+    pub fn cancel_worker_launch_after_spawn_error(
+        &mut self,
+        purpose: ActivationWorkerPurpose,
+        executable: &str,
+        argv_digest: &str,
+    ) -> Result<(), String> {
+        let pending = self.pending_worker_launch.as_ref()
+            .ok_or_else(|| "no pending worker launch intent exists".to_string())?;
+        if pending.purpose != purpose || pending.executable != executable || pending.argv_digest != argv_digest {
+            return Err("spawn failure does not match the pending worker launch intent".into());
+        }
+        self.pending_worker_launch = None;
+        Ok(())
+    }
+
+    pub fn pending_worker_launch(&self) -> Option<&WorkerLaunchIntent> {
+        self.pending_worker_launch.as_ref()
+    }
+
     /// Persist one worker identity after it has been captured by pidfd and
     /// before awaiting completion. Receipts are append-only history.
     pub fn bind_activation_worker_identity(
@@ -2373,6 +2494,15 @@ impl ConfigTransaction {
         identity.validate_identity()?;
         if identity.transaction_id != self.transaction_id {
             return Err("activation worker identity belongs to a different transaction".into());
+        }
+        let pending = self.pending_worker_launch.as_ref()
+            .ok_or_else(|| "activation worker identity has no durable pre-spawn intent".to_string())?;
+        if pending.transaction_id != identity.transaction_id
+            || pending.purpose != identity.purpose
+            || pending.executable != identity.executable
+            || pending.argv_digest != identity.argv_digest
+        {
+            return Err("activation worker identity does not match the durable pre-spawn intent".into());
         }
         match identity.purpose {
             ActivationWorkerPurpose::ProfileTransition if self.phase != ConfigTransactionPhase::ProfileTransitionStarted => {
@@ -2393,6 +2523,7 @@ impl ConfigTransaction {
         }) {
             return Err("activation worker identity was already recorded".into());
         }
+        self.pending_worker_launch = None;
         self.activation_workers.push(identity);
         Ok(())
     }
@@ -2421,7 +2552,8 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Release candidate retention only after activation/recovery is terminal.    #[cfg(feature = "native")]
+    /// Release candidate retention only after activation/recovery is terminal.
+    #[cfg(feature = "native")]
     pub fn release_candidate_retention(&self) -> Result<(), String> {
         if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) {
             return Err("candidate retention cannot be released before a terminal transaction phase".into());
@@ -2633,19 +2765,33 @@ impl ConfigTransaction {
             }
         }
 
+        if let Some(intent) = transaction.pending_worker_launch.as_ref() {
+            intent.validate_identity()?;
+            if intent.transaction_id != transaction.transaction_id {
+                return Err("transaction journal pending worker intent belongs to a different transaction".into());
+            }
+            let phase_matches = match intent.purpose {
+                ActivationWorkerPurpose::ProfileTransition => transaction.phase == ConfigTransactionPhase::ProfileTransitionStarted,
+                ActivationWorkerPurpose::Activation => transaction.phase == ConfigTransactionPhase::ActivationStarted,
+                ActivationWorkerPurpose::Recovery => transaction.phase == ConfigTransactionPhase::RecoveryMutationStarted,
+            };
+            if !phase_matches {
+                return Err("transaction journal pending worker intent has an incompatible transaction phase".into());
+            }
+        }
         for worker in &transaction.activation_workers {
             worker.validate_identity()?;
             if worker.transaction_id != transaction.transaction_id {
                 return Err("transaction journal activation worker belongs to a different transaction".into());
             }
             match worker.purpose {
-                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
                 }
-                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
-                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
             }
@@ -2726,52 +2872,6 @@ mod tests {
     const CANDIDATE_PROFILE: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-profile";
     const PREDECESSOR: &str = "/nix/store/cccccccccccccccccccccccccccccccc-prior";
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
-
-    fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
-        ActivationWorkerIdentity {
-            transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            purpose: ActivationWorkerPurpose::Activation,
-            pid: 123,
-            boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
-            start_time_ticks: 42,
-            executable: executable.into(),
-            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-        }
-    }
-
-    #[test]
-    fn activation_worker_executable_accepts_canonical_store_path() {
-        let identity = worker_identity_for_test(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/bin/nixos-rebuild",
-        );
-        assert!(identity.validate_identity().is_ok());
-    }
-
-    #[test]
-    fn activation_worker_executable_rejects_store_path_traversal() {
-        let identity = worker_identity_for_test(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/../../tmp/evil",
-        );
-        assert!(
-            identity
-                .validate_identity()
-                .expect_err("store path traversal must fail closed")
-                .contains("traversal")
-        );
-    }
-
-    #[test]
-    fn activation_worker_executable_rejects_noncanonical_components() {
-        let duplicate_separator = worker_identity_for_test(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild//bin/nixos-rebuild",
-        );
-        assert!(duplicate_separator.validate_identity().is_err());
-
-        let dot_component = worker_identity_for_test(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/./bin/nixos-rebuild",
-        );
-        assert!(dot_component.validate_identity().is_err());
-    }
 
     #[test]
     fn source_rollback_is_forbidden_after_activation() {
@@ -3246,15 +3346,6 @@ mod tests {
                 .expect_err("manifest mutation must not retain the old digest")
                 .contains("manifest does not match its root digest")
         );
-
-        let mut entrypoint_tampered = source.clone();
-        entrypoint_tampered.entrypoint = "other.nix".into();
-        assert!(
-            entrypoint_tampered
-                .validate_identity()
-                .expect_err("entrypoint mutation must not retain the old digest")
-                .contains("manifest does not match its root digest")
-        );
     }
 
     #[test]
@@ -3365,6 +3456,195 @@ mod tests {
         transaction.candidate_build = Some(test_candidate_receipt());
     }
 
+    fn worker_identity_for_test(transaction_id: &str) -> ActivationWorkerIdentity {
+        ActivationWorkerIdentity {
+            transaction_id: transaction_id.to_string(),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid: 12345,
+            boot_id: "12345678-1234-1234-1234-123456789abc".into(),
+            start_time_ticks: 17,
+            executable: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/bin/switch-to-configuration".into(),
+            argv_digest: digest_hex(&[5; 32]),
+        }
+    }
+
+    #[test]
+    fn activation_worker_identity_is_transaction_and_process_bound() {
+        let tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let identity = worker_identity_for_test(tx.transaction_id());
+        identity.validate_identity().unwrap();
+
+        let mut wrong_pid = identity.clone();
+        wrong_pid.pid = 1;
+        assert!(wrong_pid.validate_identity().is_err());
+
+        let mut wrong_boot = identity.clone();
+        wrong_boot.boot_id = "not-a-boot-id".into();
+        assert!(wrong_boot.validate_identity().is_err());
+
+        let mut wrong_executable = identity.clone();
+        wrong_executable.executable = "/usr/bin/switch-to-configuration".into();
+        assert!(wrong_executable.validate_identity().is_err());
+
+        let mut traversing_executable = identity.clone();
+        traversing_executable.executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/../../tmp/evil".into();
+        assert!(traversing_executable.validate_identity().is_err());
+
+        let mut traversing_intent = worker_launch_intent_for_test(
+            &tx.transaction_id,
+            ActivationWorkerPurpose::Activation,
+        );
+        traversing_intent.executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/../../tmp/evil".into();
+        assert!(traversing_intent.validate_identity().is_err());
+
+        let mut wrong_digest = identity;
+        wrong_digest.argv_digest = "invalid".into();
+        assert!(wrong_digest.validate_identity().is_err());
+    }
+
+    #[test]
+    fn activation_worker_receipt_requires_durable_start_boundary() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let identity = worker_identity_for_test(tx.transaction_id());
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_err());
+
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        tx.bind_activation_worker_identity(identity.clone()).unwrap();
+        assert_eq!(tx.activation_worker_identities(), &[identity.clone()]);
+        assert!(tx.bind_activation_worker_identity(identity).is_err());
+    }
+
+    #[test]
+    fn recovery_worker_receipt_requires_persisted_recovery_mutation_boundary() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryRequired;
+        let mut identity = worker_identity_for_test(tx.transaction_id());
+        identity.purpose = ActivationWorkerPurpose::Recovery;
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_err());
+
+        tx.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        tx.bind_activation_worker_identity(identity.clone()).unwrap();
+        assert_eq!(tx.activation_worker_identities(), &[identity]);
+    }
+
+    #[test]
+    fn boot_activation_is_terminal_without_claiming_runtime_switch() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        bind_test_candidate(&mut tx);
+        let candidate = tx.candidate_store_path().unwrap().to_string();
+        let predecessor = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        tx.record_activation_post_state(
+            Some(0),
+            Some(predecessor.to_string()),
+            Some(candidate.clone()),
+            predecessor,
+            true,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::BootSelected);
+        assert!(!tx.permits_source_rollback());
+    }
+
+    #[test]
+    fn matching_post_state_does_not_close_while_worker_completion_is_unknown() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        bind_test_candidate(&mut tx);
+        let candidate = tx.candidate_store_path().unwrap().to_string();
+        tx.record_activation_post_state(
+            Some(0),
+            Some(candidate.clone()),
+            Some(candidate.clone()),
+            &candidate,
+            false,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::IndeterminateActivation);
+    }
+
+    #[test]
+    fn recovery_post_state_requires_worker_completion_proof() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        let predecessor = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        tx.record_recovery_post_state(
+            predecessor,
+            predecessor,
+            Some(0),
+            Some(predecessor.to_string()),
+            Some(predecessor.to_string()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::RecoveryRequired);
+    }
+
+    fn worker_launch_intent_for_test(transaction_id: &str, purpose: ActivationWorkerPurpose) -> WorkerLaunchIntent {
+        WorkerLaunchIntent {
+            transaction_id: transaction_id.to_string(),
+            purpose,
+            executable: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/bin/switch-to-configuration".into(),
+            argv_digest: digest_hex(&[6; 32]),
+        }
+    }
+
+    #[test]
+    fn worker_launch_intent_must_be_durable_before_identity() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        assert_eq!(tx.pending_worker_launch(), Some(&intent));
+        assert!(tx.prepare_worker_launch(intent.clone()).is_err());
+
+        let mut identity = worker_identity_for_test(tx.transaction_id());
+        identity.purpose = ActivationWorkerPurpose::Activation;
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_ok());
+        assert!(tx.pending_worker_launch().is_none());
+        assert_eq!(tx.activation_worker_identities(), &[identity]);
+    }
+
+    #[test]
+    fn worker_spawn_error_can_cancel_only_the_matching_intent() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        assert!(tx.cancel_worker_launch_after_spawn_error(
+            ActivationWorkerPurpose::Recovery,
+            &intent.executable,
+            &intent.argv_digest,
+        ).is_err());
+        assert_eq!(tx.pending_worker_launch(), Some(&intent));
+        tx.cancel_worker_launch_after_spawn_error(
+            ActivationWorkerPurpose::Activation,
+            &intent.executable,
+            &intent.argv_digest,
+        ).unwrap();
+        assert!(tx.pending_worker_launch().is_none());
+    }
+
+    #[test]
+    fn journal_restart_preserves_unresolved_worker_launch_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let source_digest = decode_digest(&source.root_digest).unwrap();
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], source_digest);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        tx.frozen_source = Some(source);
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        let journal = dir.path().join("transaction.json");
+        tx.persist_atomic(&journal).unwrap();
+        let loaded = ConfigTransaction::load(&journal).unwrap();
+        assert_eq!(loaded.pending_worker_launch(), Some(&intent));
+        assert!(loaded.activation_worker_identities().is_empty());
+    }
+
     #[test]
     fn transaction_graph_rejects_phase_skip() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
@@ -3446,6 +3726,31 @@ mod tests {
         let loaded = ConfigTransaction::load(&path).unwrap();
         assert_eq!(loaded.transaction_id(), transaction.transaction_id());
         assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
+    }
+
+    #[test]
+    fn transaction_load_rejects_entrypoint_swap_under_old_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        std::fs::write(source_root.join("other.nix"), "{ other = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let source_digest = decode_digest(&source.root_digest).unwrap();
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], source_digest);
+        transaction.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        transaction.bind_frozen_source(&source).unwrap();
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+
+        let encoded = std::fs::read(&journal).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["frozen_source"]["entrypoint"] = serde_json::Value::String("other.nix".into());
+        std::fs::write(&journal, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert!(ConfigTransaction::load(&journal)
+            .expect_err("entrypoint swap must fail closed")
+            .contains("frozen source manifest does not match its root digest"));
     }
 
     #[test]
@@ -3580,39 +3885,6 @@ mod tests {
         assert!(
             ConfigTransaction::load(&path)
                 .expect_err("tampered frozen source manifest must fail closed")
-                .contains("manifest does not match its root digest")
-        );
-    }
-
-    #[test]
-    fn transaction_load_rejects_entrypoint_swap_under_old_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("configuration.nix"),
-            "{ config = {}; }\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("other.nix"), "{ other = {}; }\n").unwrap();
-        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
-        let mut transaction = ConfigTransaction::new(
-            [1; 32],
-            [2; 32],
-            decode_digest(&source.root_digest).unwrap(),
-        );
-        transaction.advance(ConfigTransactionPhase::InputFrozen).unwrap();
-        transaction.bind_frozen_source(&source).unwrap();
-
-        let path = dir.path().join("transaction.json");
-        transaction.persist_atomic(&path).unwrap();
-        let encoded = std::fs::read(&path).unwrap();
-        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["frozen_source"]["entrypoint"] =
-            serde_json::Value::String("other.nix".into());
-        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-
-        assert!(
-            ConfigTransaction::load(&path)
-                .expect_err("entrypoint swap must fail closed")
                 .contains("manifest does not match its root digest")
         );
     }
