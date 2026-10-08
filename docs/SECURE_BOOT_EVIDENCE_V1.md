@@ -126,3 +126,6 @@ closure provenance or physical boot success.
 Secure Boot state observation is available through the read-only CLI observation
 surface. Signature verification, signer authorization, UKI provenance, boot
 selection, physical boot, and post-boot health remain separate evidence layers.
+
+
+The live timestamp-database snapshot is evidence-only and remains non-authorizing until timestamp signature and revocation-time semantics are independently verified.
