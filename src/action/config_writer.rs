@@ -15,8 +15,18 @@
 //! capability-authorized executor under the same covenant.
 
 use super::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
+use super::config_transaction::ConfigTransactionPhase;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Result of a config write operation.
 #[derive(Debug, Clone)]
@@ -84,8 +94,6 @@ impl ConfigPatch {
 pub struct ConfigWriter {
     /// Root directory for NixOS config (default: /etc/nixos).
     config_root: PathBuf,
-    /// Whether to create git backups before writes.
-    git_backup: bool,
     /// Whether to validate syntax before writing.
     validate: bool,
     /// Dry-run mode: produce patches without writing.
@@ -100,7 +108,6 @@ impl ConfigWriter {
     pub fn new() -> Self {
         Self {
             config_root: PathBuf::from("/etc/nixos"),
-            git_backup: true,
             validate: true,
             dry_run: false,
             machine_binding_override: None,
@@ -113,9 +120,13 @@ impl ConfigWriter {
         self
     }
 
-    /// Enable or disable git backup.
-    pub fn with_git_backup(mut self, enabled: bool) -> Self {
-        self.git_backup = enabled;
+    /// Legacy compatibility no-op.
+    ///
+    /// Git commits are deliberately outside the authoritative source mutation
+    /// primitive. A git backup is an independent history mechanism and cannot
+    /// participate in the NixOS activation transaction.
+    #[deprecated(note = "git backups are no longer part of the authoritative config transaction")]
+    pub fn with_git_backup(self, _enabled: bool) -> Self {
         self
     }
 
@@ -349,17 +360,23 @@ impl ConfigWriter {
         Ok(result)
     }
 
-    /// Restore the exact pre-state covered by the same ChangePlan.
+    /// Restore the exact pre-state only while the transaction is still before activation.
     ///
-    /// Restoration is allowed only while the file still equals the plan's
-    /// authorized post-state, preventing rollback from clobbering a concurrent
-    /// operator change.
-    pub fn restore_patch_original_authorized(
+    /// Once NixOS activation begins, changing the durable source file cannot
+    /// roll back the running system and is therefore rejected at this API boundary.
+    pub fn restore_patch_original_pre_activation_authorized(
         &self,
         patch: &ConfigPatch,
         plan: &ChangePlan,
         authorization: &ChangeAuthorization,
+        phase: ConfigTransactionPhase,
     ) -> Result<(), std::io::Error> {
+        if !phase.permits_source_rollback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "source rollback is forbidden once NixOS activation has started",
+            ));
+        }
         authorization
             .validate_plan_binding(plan)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
@@ -381,23 +398,7 @@ impl ConfigWriter {
             return Ok(());
         }
 
-        let current = std::fs::read_to_string(&patch.target)?;
-        if current != patch.modified {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "configuration changed after authorized write; refusing rollback overwrite",
-            ));
-        }
-
-        let temp_path = patch.target.with_extension("nix.rollback.tmp");
-        std::fs::write(&temp_path, &patch.original)?;
-        std::fs::rename(&temp_path, &patch.target)?;
-        let restored = std::fs::read_to_string(&patch.target)?;
-        if restored != patch.original {
-            return Err(std::io::Error::other(
-                "configuration rollback post-state verification failed",
-            ));
-        }
+        self.atomic_replace_config(&patch.target, &patch.modified, &patch.original)?;
         Ok(())
     }
 
@@ -445,29 +446,124 @@ impl ConfigWriter {
             });
         }
 
-        // Validate syntax
         if self.validate {
             Self::validate_nix_syntax(&patch.modified)?;
         }
 
-        // Create git backup
-        let backup_path = if self.git_backup {
-            self.git_commit_backup(&patch.target, &patch.description)?
-        } else {
-            None
-        };
-
-        // Atomic write: write to temp file, then rename
-        let temp_path = patch.target.with_extension("nix.tmp");
-        std::fs::write(&temp_path, &patch.modified)?;
-        std::fs::rename(&temp_path, &patch.target)?;
+        // The file mutation primitive has no git, shell, or NixOS activation
+        // side effects. Those belong to separate transactional domains.
+        self.atomic_replace_config(&patch.target, &patch.original, &patch.modified)?;
 
         Ok(WriteResult {
             path: patch.target.clone(),
-            backup_path,
+            backup_path: None,
             changed: true,
             diff: patch.diff(),
         })
+    }
+
+    /// Replace one configuration file using an exclusive same-directory
+    /// candidate, no-follow target access, durable candidate data, atomic
+    /// replacement, parent-directory synchronization, and read-back verification.
+    ///
+    /// The compare-and-set remains advisory against writers that bypass
+    /// Nixward's own coordination lock; that external-writer gap stays explicit.
+    fn atomic_replace_config(
+        &self,
+        target: &Path,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<(), std::io::Error> {
+        let parent = target.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration target has no parent",
+            )
+        })?;
+        let name = target.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration target has no filename",
+            )
+        })?;
+
+        let lock_path = self.config_root.join(".nixward-config-write.lock");
+        let lock = {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create(true);
+            #[cfg(unix)]
+            options
+                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+                .mode(0o600);
+            options.open(&lock_path)?
+        };
+
+        #[cfg(unix)]
+        nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|error| {
+                std::io::Error::other(format!("failed to acquire config mutation lock: {error}"))
+            })?;
+
+        let mut target_options = OpenOptions::new();
+        target_options.read(true);
+        #[cfg(unix)]
+        target_options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        let mut target_file = target_options.open(target)?;
+        let metadata = target_file.metadata()?;
+        let mut current = String::new();
+        target_file.read_to_string(&mut current)?;
+        if current != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "configuration changed during transaction; refusing stale replacement",
+            ));
+        }
+
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(
+            ".nixward-config-{}-{}-{}.tmp",
+            std::process::id(),
+            counter,
+            name.to_string_lossy()
+        );
+        let temp_path = parent.join(&temp_name);
+
+        let mut temp_options = OpenOptions::new();
+        temp_options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        temp_options
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+            .mode(0o600);
+        let mut temp = temp_options.open(&temp_path)?;
+        temp.write_all(replacement.as_bytes())?;
+        temp.flush()?;
+        temp.sync_all()?;
+        temp.set_permissions(metadata.permissions())?;
+        temp.sync_all()?;
+        drop(temp);
+
+        if let Err(error) = std::fs::rename(&temp_path, target) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(error);
+        }
+
+        let parent_file = File::open(parent)?;
+        parent_file.sync_all()?;
+
+        let mut verify_options = OpenOptions::new();
+        verify_options.read(true);
+        #[cfg(unix)]
+        verify_options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        let mut verify = verify_options.open(target)?;
+        let mut observed = String::new();
+        verify.read_to_string(&mut observed)?;
+        if observed != replacement {
+            return Err(std::io::Error::other(
+                "configuration post-state does not match atomic replacement",
+            ));
+        }
+
+        Ok(())
     }
 
     /// Validate Nix syntax using nix-instantiate --parse.
@@ -499,66 +595,7 @@ impl ConfigWriter {
         Ok(())
     }
 
-    /// Create a git commit backup of the config directory.
-    fn git_commit_backup(
-        &self,
-        path: &Path,
-        message: &str,
-    ) -> Result<Option<PathBuf>, std::io::Error> {
-        // Check if config root is a git repo
-        let git_dir = self.config_root.join(".git");
-        if !git_dir.exists() {
-            // Initialize git repo
-            let status = Command::new("git")
-                .args(["init"])
-                .current_dir(&self.config_root)
-                .status()?;
-            if !status.success() {
-                return Ok(None);
-            }
-        }
 
-        // Stage the file
-        let rel_path = path.strip_prefix(&self.config_root).unwrap_or(path);
-
-        let _ = Command::new("git")
-            .args(["add", &rel_path.display().to_string()])
-            .current_dir(&self.config_root)
-            .status();
-
-        // Commit
-        let commit_msg = format!("nixward backup: {message}");
-        let _ = Command::new("git")
-            .args(["commit", "-m", &commit_msg, "--allow-empty"])
-            .current_dir(&self.config_root)
-            .status();
-
-        Ok(Some(self.config_root.join(".git")))
-    }
-
-    /// Restore from the last git backup.
-    ///
-    /// `git_commit_backup` commits the file's BEFORE-state immediately
-    /// before each write, so the most recent backup commit (`HEAD`) already
-    /// holds the content to restore to — not `HEAD~1`, which skips one
-    /// change too far back and, on the very first restore (only one backup
-    /// commit exists yet, no parent), fails outright with "unknown revision
-    /// HEAD~1". Found via a real integration test against the non-dry-run
-    /// write path — see SYMTHAEA_NIXOS_MANAGEMENT_IMPROVEMENT_PLAN_2026-07-26.md
-    /// Phase 2.
-    fn restore_last_backup(&self) -> Result<(), std::io::Error> {
-        let status = Command::new("git")
-            .args(["checkout", "HEAD", "--", "."])
-            .current_dir(&self.config_root)
-            .status()?;
-
-        if !status.success() {
-            return Err(std::io::Error::other("git restore failed"));
-        }
-
-        Ok(())
-    }
-}
 
 impl Default for ConfigWriter {
     fn default() -> Self {

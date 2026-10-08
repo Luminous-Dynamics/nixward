@@ -432,3 +432,36 @@ windows, policy-overlong TTLs, and zero nonces. This protects against a valid
 but not-yet-effective plan becoming executable before its declared issuance
 time.
 
+
+
+## Configuration/activation split hardening (2026-10-08)
+
+The configuration writer and NixOS activation are separate transactional domains.
+The Rust configuration primitive may atomically commit durable source bytes, but
+that commit is never interpreted as proof that a running generation changed.
+Conversely, once activation begins, the source file is not an automatic rollback
+subject because restoring source bytes cannot undo an already-running generation.
+
+The native transaction vocabulary is defined in src/action/config_transaction.rs:
+
+`Prepared -> InputFrozen -> CandidateBuilt -> SourceCommitted -> ActivationStarted`
+
+with terminal/exception states for `Activated`, `FailedBeforeActivation`,
+`IndeterminateActivation`, `RecoveryRequired`, and `Recovered`.
+Post-attempt runtime evidence is represented separately from child exit status.
+
+`FrozenConfigSource` snapshots the complete intended source tree, including
+imported files, through a deterministic manifest digest. Symbolic links are not
+admissible inside the snapshot. The snapshot can be revalidated before realization
+to detect source drift.
+
+The config writer's authoritative replacement primitive now uses an exclusive
+same-directory candidate, durable candidate data, no-follow target opens, a
+Nixward writer lock, atomic replacement, parent-directory synchronization, and
+post-replacement read-back verification. Git commits are outside this primitive
+and remain only as a compatibility no-op on the writer API.
+
+System activation consumes the exact immutable store-path command only after the
+system-profile transition has separately succeeded and been observed. The
+Nix-generated activation artifact remains Nix-owned; Nixward supplies exact
+identity, authorization, coordination, and observation.

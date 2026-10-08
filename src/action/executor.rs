@@ -1106,20 +1106,6 @@ impl NixOSExecutor {
     }
 
     async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
-        if let NixOSCommand::ActivateSystemClosure {
-            profile_store_path: Some(profile_store_path),
-            ..
-        } = command
-        {
-            // nix-env --set owns the profile lock for the duration of the
-            // profile mutation. Verify the exact requested result before the
-            // immutable closure action is spawned. We intentionally do not
-            // hold the profile lock across switch-to-configuration because
-            // that child has its own activation lock and must acquire it
-            // independently.
-            Self::set_exact_system_profile(profile_store_path).await?;
-        }
-
         let (cmd, args) = command.to_command();
         Command::new(&cmd)
             .args(&args)
@@ -1369,6 +1355,23 @@ impl NixOSExecutor {
             return Some(exec_result);
         }
 
+        // Recovery repeats the exact profile transition as a separate domain before
+        // invoking the exact immutable predecessor activation artifact.
+        if let NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = &rollback_cmd
+        {
+            if let Err(reason) = Self::set_exact_system_profile(profile_store_path).await {
+                let exec_result = ExecutionResult::FailedNoRollback {
+                    error,
+                    rollback_error: Some(format!("exact recovery profile transaction failed: {reason}")),
+                };
+                self.record_execution(command, decision_quality, authorization, &exec_result);
+                return Some(exec_result);
+            }
+        }
+
         let rb_result = Self::run_bound_command(&rollback_cmd).await;
 
         let exec_result = match rb_result {
@@ -1571,6 +1574,27 @@ impl NixOSExecutor {
             return blocked;
         }
 
+        // The system-profile transaction is completed and independently observed
+        // before the activation child starts. Profile state and running-generation
+        // state are therefore no longer conflated in one command result.
+        if let NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = &command
+        {
+            if let Err(reason) = Self::set_exact_system_profile(profile_store_path).await {
+                let failed = ExecutionResult::FailedNoRollback {
+                    error: format!("system-profile transaction failed before activation: {reason}"),
+                    rollback_error: None,
+                };
+                self.record_execution(&command, decision_quality, &authorization, &failed);
+                return failed;
+            }
+        }
+
+        // Semantic activation boundary: after this point source-file rollback is
+        // forbidden because durable source and runtime generation are distinct domains.
+        let _activation_started = matches!(command, NixOSCommand::ActivateSystemClosure { .. });
         let start = std::time::Instant::now();
         let result = Self::run_bound_command(&command).await;
         let elapsed = start.elapsed().as_millis() as u64;

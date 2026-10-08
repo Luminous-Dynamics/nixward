@@ -17,6 +17,7 @@ pub mod authority_approval;
 pub mod authority_replay;
 pub mod change_covenant;
 pub mod config_writer;
+pub mod config_transaction;
 pub mod execution_intent;
 pub mod executor;
 pub mod flake_ops;
@@ -41,6 +42,10 @@ pub use change_covenant::{
     RollbackBinding,
 };
 pub use config_writer::{ConfigPatch, ConfigWriter, WriteResult};
+pub use config_transaction::{
+    ActivationDisposition, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
+    RecoveryObservation, SourceEntryKind, SourceManifestEntry, classify_activation_post_state,
+};
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
     ChannelOperation, ExecutionRecord, ExecutionResult, FlakeOperation, HostExecutionPolicy,
