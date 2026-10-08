@@ -896,6 +896,7 @@ impl ExecutionAuthorization {
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
                 || self.execution_intent_digest.is_none()
                 || self.realization_plan_digest.is_none()
+                || self.realization_installable.is_none()
                 || self.authority_replay_key.is_none())
         {
             return Err("system closure activation requires cryptographically verified execution-intent authority".into());
