@@ -869,6 +869,25 @@ fn dbx_tbs_record_is_always_revoked(record: &SignatureDatabaseRecord) -> bool {
 }
 
 #[cfg(feature = "native")]
+fn classify_dbx_tbs_revocation_records<'a, I>(
+    records: I,
+) -> (bool, bool)
+where
+    I: IntoIterator<Item = &'a SignatureDatabaseRecord>,
+{
+    let mut always_revoked = false;
+    let mut potential_revocation = false;
+    for record in records {
+        if dbx_tbs_record_is_always_revoked(record) {
+            always_revoked = true;
+        } else {
+            potential_revocation = true;
+        }
+    }
+    (always_revoked, potential_revocation)
+}
+
+#[cfg(feature = "native")]
 fn dbx_tbs_record_matches_chain(
     record: &SignatureDatabaseRecord,
     chain: &[super::secure_boot_signature::X509ChainCertificateEvidence],
@@ -956,6 +975,8 @@ pub fn verify_image_against_db_certificates(
         return finalize_image_bound_verification(image_path, evidence);
     }
 
+    let mut matched_tbs_records = Vec::new();
+    let mut first_chain_tbs_match = None;
     for record in dbx.iter().filter(|record| {
         matches!(
             record.kind,
@@ -965,22 +986,31 @@ pub fn verify_image_against_db_certificates(
         )
     }) {
         if let Some(matched_certificate) = dbx_tbs_record_matches_chain(record, &chain) {
-            evidence.dbx_chain_tbs_hash_match = Some(matched_certificate);
-            evidence.state = if dbx_tbs_record_is_always_revoked(record) {
-                DbCertificateVerificationState::ForbiddenByDbxTbsRevocation
-            } else {
-                DbCertificateVerificationState::PotentialDbxTbsRevocation
-            };
-            evidence.stderr_blake3 = *blake3::hash(
-                if dbx_tbs_record_is_always_revoked(record) {
-                    b"dbx X509 TBS chain match with zero EFI_TIME: always revoked" as &[u8]
-                } else {
-                    b"dbx X509 TBS chain match requires timestamp evaluation"
-                },
-            )
-            .as_bytes();
-            return finalize_image_bound_verification(image_path, evidence);
+            if first_chain_tbs_match.is_none() {
+                first_chain_tbs_match = Some(matched_certificate);
+            }
+            matched_tbs_records.push(record);
         }
+    }
+    if let Some(matched_certificate) = first_chain_tbs_match {
+        let (always_revoked, potential_revocation) =
+            classify_dbx_tbs_revocation_records(matched_tbs_records.iter().copied());
+        debug_assert!(always_revoked || potential_revocation);
+        evidence.dbx_chain_tbs_hash_match = Some(matched_certificate);
+        evidence.state = if always_revoked {
+            DbCertificateVerificationState::ForbiddenByDbxTbsRevocation
+        } else {
+            DbCertificateVerificationState::PotentialDbxTbsRevocation
+        };
+        evidence.stderr_blake3 = *blake3::hash(
+            if always_revoked {
+                b"dbx X509 TBS chain match with zero EFI_TIME: always revoked" as &[u8]
+            } else {
+                b"dbx X509 TBS chain match requires timestamp evaluation"
+            },
+        )
+        .as_bytes();
+        return finalize_image_bound_verification(image_path, evidence);
     }
 
     if dbx.iter().any(|record| {
@@ -1043,6 +1073,7 @@ pub fn verify_image_against_db_certificates(
                     continue;
                 }
 
+                let mut matched_anchor_tbs_records = Vec::new();
                 for record in dbx.iter().filter(|record| {
                     matches!(
                         record.kind,
@@ -1052,26 +1083,38 @@ pub fn verify_image_against_db_certificates(
                     )
                 }) {
                     if dbx_tbs_record_matches_certificate(record, certificate)? {
-                        if dbx_tbs_record_is_always_revoked(record) {
-                            evidence.verifying_dbx_certificate = None;
-                            evidence.dbx_chain_tbs_hash_match = Some(certificate_digest);
-                            evidence.state =
-                                DbCertificateVerificationState::ForbiddenByDbxTbsRevocation;
-                            evidence.stderr_blake3 = *blake3::hash(
-                                b"verified db trust anchor has zero-time dbx TBS revocation",
-                            )
-                            .as_bytes();
-                            return finalize_image_bound_verification(image_path, evidence);
-                        }
-                        potential_db_anchor = Some(certificate_digest);
-                        break;
+                        matched_anchor_tbs_records.push(record);
                     }
                 }
 
-                if potential_db_anchor.is_some() {
-                    last_stdout = run.stdout_blake3.to_vec();
-                    last_stderr = run.stderr_blake3.to_vec();
-                    continue;
+                if !matched_anchor_tbs_records.is_empty() {
+                    let (always_revoked, potential_revocation) =
+                        classify_dbx_tbs_revocation_records(
+                            matched_anchor_tbs_records.iter().copied(),
+                        );
+                    debug_assert!(always_revoked || potential_revocation);
+                    if always_revoked {
+                        evidence.verifying_dbx_certificate = None;
+                        evidence.dbx_chain_tbs_hash_match = Some(certificate_digest);
+                        evidence.state =
+                            DbCertificateVerificationState::ForbiddenByDbxTbsRevocation;
+                        evidence.stderr_blake3 = *blake3::hash(
+                            b"verified db trust anchor has zero-time dbx TBS revocation",
+                        )
+                        .as_bytes();
+                        return finalize_image_bound_verification(image_path, evidence);
+                    }
+
+                    // A timestamped revocation match is unresolved without
+                    // signature-time evidence. Preserve it, but do not let
+                    // one potentially revoked db anchor suppress a different
+                    // later anchor that verifies cleanly.
+                    if potential_revocation {
+                        potential_db_anchor.get_or_insert(certificate_digest);
+                        last_stdout = run.stdout_blake3.to_vec();
+                        last_stderr = run.stderr_blake3.to_vec();
+                        continue;
+                    }
                 }
 
                 evidence.verifying_db_certificate = Some(certificate_digest);
@@ -1576,6 +1619,34 @@ mod tests {
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
             DirectTrustDisposition::UnknownUnsupportedRecord
+        );
+    }
+
+    #[test]
+    fn dbx_tbs_zero_time_match_dominates_timestamped_match_ordering() {
+        let timestamped = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509TbsSha256,
+            signature_size: 64,
+            signature_data_blake3: [0; 32],
+            owner: [0; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: Some(vec![3; 32]),
+            revocation_time: Some([1; 16]),
+        };
+        let always_revoked = SignatureDatabaseRecord {
+            revocation_time: Some([0; 16]),
+            ..timestamped.clone()
+        };
+
+        assert_eq!(
+            classify_dbx_tbs_revocation_records([&timestamped, &always_revoked]),
+            (true, true)
+        );
+        assert_eq!(
+            classify_dbx_tbs_revocation_records([&always_revoked, &timestamped]),
+            (true, true)
         );
     }
 
