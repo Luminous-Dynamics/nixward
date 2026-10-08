@@ -1110,6 +1110,73 @@ impl SourceRealizationLease {
         self.observe_root_target()
     }
 
+    /// Remove the transaction-scoped GC root through the exact namespace
+    /// descriptor, synchronize the namespace, and only then mark the lease released.
+    #[cfg(feature = "native")]
+    pub fn release_root(&mut self) -> Result<(), String> {
+        if self.state != SourceRealizationLeaseState::Rooted {
+            return Err("source realization lease must be rooted before release".into());
+        }
+        self.observe_root_target()?;
+
+        let gc_root = std::path::Path::new(&self.gc_root_path);
+        let namespace = gc_root
+            .parent()
+            .ok_or_else(|| "source GC root has no namespace parent".to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let namespace_dir = options.open(namespace).map_err(|error| {
+                format!(
+                    "failed to securely open source GC-root namespace {}: {error}",
+                    namespace.display()
+                )
+            })?;
+            let name = gc_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "source GC root filename is not valid UTF-8".to_string())?;
+            let name = CString::new(name)
+                .map_err(|_| "source GC root filename contains NUL".to_string())?;
+
+            let result = unsafe {
+                nix::libc::unlinkat(
+                    namespace_dir.as_raw_fd(),
+                    name.as_ptr(),
+                    0,
+                )
+            };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!("failed to remove source GC root: {error}"));
+                }
+            } else {
+                namespace_dir
+                    .sync_all()
+                    .map_err(|error| format!("failed to persist source GC-root removal: {error}"))?;
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            return Err("source GC-root release is unsupported on this platform".into());
+        }
+
+        self.release()
+    }
+
     /// Mark the lease released only after independent observation that the GC root is gone.
     pub fn release(&mut self) -> Result<(), String> {
         match self.state {
@@ -1373,10 +1440,26 @@ impl ConfigTransaction {
             .source_realization
             .as_mut()
             .ok_or_else(|| "transaction has no source realization lease".to_string())?;
-        if matches!(self.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Recovered) {
-            return Err("source realization lease cannot be released while activation/recovery authority is live".into());
+        if matches!(
+            self.phase,
+            ConfigTransactionPhase::ProfileTransitionStarted
+                | ConfigTransactionPhase::ProfileCommitted
+                | ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+        ) {
+            return Err("source realization lease cannot be released while execution/recovery authority is live".into());
         }
-        realization.release()
+        #[cfg(feature = "native")]
+        {
+            realization.release_root()
+        }
+        #[cfg(not(feature = "native"))]
+        {
+            realization.release()
+        }
     }
     pub fn set_candidate_store_path(&mut self, candidate_store_path: impl Into<String>) -> Result<(), String> {
         let path = candidate_store_path.into();
