@@ -829,7 +829,8 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
             } else {
                 format!("{} > {}", submenu_stack.join(" > "), title)
             };
-            let depth = line.matches('{').count().saturating_sub(line.matches('}').count());
+            let (opened, closed) = grub_brace_counts(line);
+            let depth = opened.saturating_sub(closed);
             if depth == 0 {
                 return Err("GRUB menuentry has no opening block".into());
             }
@@ -844,8 +845,7 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
                 initrds.push(line.to_string());
             }
 
-            let opened = line.matches('{').count();
-            let closed = line.matches('}').count();
+            let (opened, closed) = grub_brace_counts(line);
             *depth = depth
                 .checked_add(opened)
                 .ok_or_else(|| "GRUB menuentry nesting depth overflowed".to_string())?;
@@ -895,6 +895,45 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
     }
     Ok(entries)
 }
+fn grub_brace_counts(line: &str) -> (usize, usize) {
+    let mut opened = 0usize;
+    let mut closed = 0usize;
+    let mut chars = line.chars().peekable();
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if double_quote && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if !double_quote && ch == '\'' {
+            single_quote = !single_quote;
+            continue;
+        }
+        if !single_quote && ch == '"' {
+            double_quote = !double_quote;
+            continue;
+        }
+        if single_quote || double_quote {
+            continue;
+        }
+        if ch == '#' {
+            break;
+        }
+        match ch {
+            '{' => opened += 1,
+            '}' => closed += 1,
+            _ => {}
+        }
+    }
+    (opened, closed)
+}
+
 fn parse_grub_menuentry_title(line: &str) -> Result<String, String> {
     let rest = line.strip_prefix("menuentry ").unwrap_or("").trim_start();
     if !rest.starts_with('"') {
@@ -1332,6 +1371,17 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         )
         .expect("nested shell block should parse");
         assert!(entries.contains_key("Nested"));
+    }
+    #[test]
+    fn quoted_or_commented_braces_do_not_change_grub_nesting() {
+        assert_eq!(grub_brace_counts("echo \"}\" # { ignored"), (0, 0));
+        assert_eq!(grub_brace_counts("menuentry \"X\" {"), (1, 0));
+        assert_eq!(grub_brace_counts("  echo '{' }"), (0, 1));
+        let entries = parse_grub_config_entries(
+            "menuentry \"Safe\" {\n echo \"}\"\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-safe/init\n}\n",
+        )
+        .expect("quoted brace fixture");
+        assert!(entries.contains_key("Safe"));
     }
     #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
