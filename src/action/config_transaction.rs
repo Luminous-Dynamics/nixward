@@ -1208,8 +1208,16 @@ impl ConfigTransaction {
         let allowed = match (self.phase, next) {
             (ConfigTransactionPhase::Prepared, ConfigTransactionPhase::InputFrozen) => true,
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => {
-                self.candidate_store_path.is_some()
-                    && self.source_realization.as_ref().is_some_and(SourceRealizationLease::is_rooted)
+                let Some(lease) = self.source_realization.as_ref() else {
+                    return Err("candidate realization requires a retained source realization".into());
+                };
+                if self.candidate_store_path.is_none() {
+                    return Err("candidate realization requires an immutable store path".into());
+                }
+                lease.verify_rooted().map_err(|error| {
+                    format!("candidate realization requires live source GC-root evidence: {error}")
+                })?;
+                true
             },
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_store_path.is_some(),
@@ -1296,6 +1304,7 @@ impl ConfigTransaction {
     /// trusted from the journal record itself.
     pub fn confirm_recovery_observation(
         &mut self,
+        source: &FrozenConfigSource,
         expected_phase: ConfigTransactionPhase,
         observed_source_store_path: Option<&str>,
         observation: &RecoveryObservation,
@@ -1315,6 +1324,7 @@ impl ConfigTransaction {
             }
             let observed = observed_source_store_path
                 .ok_or_else(|| "fresh source GC-root observation is required".to_string())?;
+            realization.verify_source_realization(source)?;
             match realization.state {
                 SourceRealizationLeaseState::Pending => realization.prove_rooted()?,
                 SourceRealizationLeaseState::Rooted => realization.verify_rooted()?,
@@ -1346,6 +1356,7 @@ impl ConfigTransaction {
         if !realization.is_rooted() {
             return Err("source realization lease must be rooted before binding".into());
         }
+        realization.verify_rooted()?;
         realization.verify_source_realization(source)?;
         self.source_realization = Some(realization);
         Ok(())
@@ -2147,6 +2158,23 @@ mod tests {
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
             "/tmp/nixward-root",
         ).is_err());
+    }
+
+    #[test]
+    fn candidate_built_rejects_stale_source_gc_root() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        tx.set_candidate_store_path(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test",
+        )
+        .unwrap();
+        tx.source_realization = Some(SourceRealizationLease {
+            source_digest: "0000000000000000000000000000000000000000000000000000000000000003".into(),
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config".into(),
+            gc_root_path: "/nix/var/nix/gcroots/nixward/txn-001".into(),
+            state: SourceRealizationLeaseState::Rooted,
+        });
+        assert!(tx.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
     }
 
     #[test]
