@@ -14,7 +14,7 @@ use std::io::Write;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
+const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
 const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v2\0";
 
@@ -280,10 +280,13 @@ fn validate_manifest_relative_path(value: &str) -> Result<(), String> {
 }
 
 fn compute_frozen_source_root_digest(
+    entrypoint: &str,
     manifest: &[SourceManifestEntry],
 ) -> Result<String, String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(SOURCE_DOMAIN);
+    hasher.update(entrypoint.as_bytes());
+    hasher.update(&[0]);
     for entry in manifest {
         hasher.update(entry.relative_path.as_bytes());
         hasher.update(&[0]);
@@ -465,6 +468,7 @@ impl FrozenConfigSource {
             .strip_prefix(&root)
             .map_err(|_| "config entrypoint escapes source root".to_string())?;
 
+        let entrypoint_string = manifest_relative_path(relative_entrypoint)?;
         let mut manifest = Vec::new();
         #[cfg(unix)]
         {
@@ -481,7 +485,7 @@ impl FrozenConfigSource {
         }
         manifest.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-        let relative_entrypoint_string = manifest_relative_path(relative_entrypoint)?;
+        let relative_entrypoint_string = entrypoint_string.clone();
         if !manifest.iter().any(|entry| {
             entry.relative_path == relative_entrypoint_string
                 && matches!(entry.kind, SourceEntryKind::File)
@@ -1904,8 +1908,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v2";
-    pub const VERSION: u16 = 2;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v3";
+    pub const VERSION: u16 = 3;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -3240,6 +3244,15 @@ mod tests {
             tampered
                 .validate_identity()
                 .expect_err("manifest mutation must not retain the old digest")
+                .contains("manifest does not match its root digest")
+        );
+
+        let mut entrypoint_tampered = source.clone();
+        entrypoint_tampered.entrypoint = "other.nix".into();
+        assert!(
+            entrypoint_tampered
+                .validate_identity()
+                .expect_err("entrypoint mutation must not retain the old digest")
                 .contains("manifest does not match its root digest")
         );
     }
