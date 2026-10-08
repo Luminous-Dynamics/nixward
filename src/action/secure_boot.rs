@@ -1262,6 +1262,7 @@ pub fn verify_image_against_live_secure_boot_databases(
 ) -> Result<DbCertificateVerificationEvidence, String> {
     let db_before = read_efi_database("db")?;
     let dbx_before = read_efi_database("dbx")?;
+    let dbt_before = read_efi_timestamp_database()?;
 
     if db_before.is_none() || dbx_before.is_none() {
         let image = std::fs::read(image_path)
@@ -1297,8 +1298,8 @@ pub fn verify_image_against_live_secure_boot_databases(
         dbx_chain_tbs_revocation_times: Vec::new(),
             db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
-            dbt_certificate_digests: Vec::new(),
-            dbt_payload_blake3: None,
+            dbt_certificate_digests: timestamp_database_certificate_digests(dbt_before.as_deref())?,
+            dbt_payload_blake3: dbt_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             timestamp_database_stability: None,
             database_stability: None,
             state: DbCertificateVerificationState::MissingSecureBootDatabase,
@@ -1315,9 +1316,13 @@ pub fn verify_image_against_live_secure_boot_databases(
         db_before.as_deref().expect("db presence checked"),
         dbx_before.as_deref().expect("dbx presence checked"),
     )?;
+    evidence.dbt_certificate_digests = timestamp_database_certificate_digests(dbt_before.as_deref())?;
+    evidence.dbt_payload_blake3 =
+        dbt_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes());
 
     let db_after = read_efi_database("db")?;
     let dbx_after = read_efi_database("dbx")?;
+    let dbt_after = read_efi_timestamp_database()?;
     let stable = db_after
         .as_deref()
         .map(|bytes| *blake3::hash(bytes).as_bytes())
@@ -1331,7 +1336,14 @@ pub fn verify_image_against_live_secure_boot_databases(
                 .as_deref()
                 .map(|bytes| *blake3::hash(bytes).as_bytes());
 
+    let timestamp_stable = dbt_after
+        .as_deref()
+        .map(|bytes| *blake3::hash(bytes).as_bytes())
+        == dbt_before
+            .as_deref()
+            .map(|bytes| *blake3::hash(bytes).as_bytes());
     evidence.database_stability = Some(stable);
+    evidence.timestamp_database_stability = Some(timestamp_stable);
     if !stable {
         evidence.verifying_db_certificate = None;
         evidence.verifying_dbx_certificate = None;
