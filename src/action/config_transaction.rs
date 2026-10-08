@@ -16,7 +16,7 @@ use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v2\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1886,8 +1886,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v2";
-    pub const VERSION: u16 = 2;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v3";
+    pub const VERSION: u16 = 3;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2617,13 +2617,13 @@ impl ConfigTransaction {
                 return Err("transaction journal activation worker belongs to a different transaction".into());
             }
             match worker.purpose {
-                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
                 }
                 ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
-                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
             }
