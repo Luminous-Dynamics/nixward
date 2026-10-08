@@ -94,6 +94,13 @@ applies the same `dbx` Issuer + Serial + TBS matching rules to that exact
 verified anchor. This prevents a revoked trusted anchor from becoming an
 authorization pass merely because the anchor was external to the image.
 
+For the live verification surface, firmware policy is checked first. If SecureBoot is
+Disabled, SetupMode is active, or either policy variable is unavailable/inconsistent,
+the evidence terminates in an explicit policy state before database evidence can
+mask the blocking condition. A certificate cryptographically verifying against
+`db` therefore cannot produce a live Secure Boot authorization result while
+firmware itself reports that Secure Boot is not enabled.
+
 For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is checked for byte stability during verifier invocation and is re-read once more before any terminal trust result is returned. A final image-digest mismatch clears the derived chain and matching fields and produces `ImageChangedDuringVerification`, preventing a receipt from combining chain evidence from one image instance with signature evidence from another. X.509 revocation is correlated against actual signing-chain members rather than merely asking whether a dbx certificate can independently verify the image.
 
 This closes more of the chain-anchor evidence boundary without pretending to reproduce the firmware's complete certificate-policy engine. Same-Issuer/Serial/TBS matching is now implemented for X.509 `dbx` records. Timestamp-aware TBS revocation evaluation remains explicit next-stage work because UEFI associates those records with an EFI_TIME and may require RFC 3161 timestamp validation.
