@@ -22,7 +22,7 @@ No predicate may be satisfied by evidence belonging to a different predicate.
 | Field | Meaning |
 | --- | --- |
 | bootloader_family | systemd-boot, grub, or unknown |
-| selection_kind | one-shot, persistent default, generated default, or unknown |
+| selection_kind | one-shot, preferred default, persistent default, generated default, or unknown |
 | selected_entry_id | exact loader/menu entry identity |
 | selected_entry_source | authoritative EFI variable, loader state, GRUB environment, or generated configuration source |
 | candidate_closure | exact /nix/store/...-nixos-system-* path, or absent when no exact binding is possible |
@@ -51,8 +51,14 @@ not establish the system-closure subject.
 The effective selection is:
 
 1. an observed one-shot selection, when present;
-2. otherwise an exact persistent default;
-3. otherwise Unknown.
+2. otherwise an exact LoaderEntryPreferred selection when present;
+3. otherwise an exact persistent default;
+4. otherwise Unknown.
+
+LoaderEntryPreferred is not interchangeable with LoaderEntryDefault: systemd-boot
+uses the preferred entry with boot assessment applied, while the default entry
+ignores boot-assessment failures. The observer therefore records the source
+separately as PreferredDefault rather than hiding the policy distinction.
 
 Pattern defaults such as nixos-* are selection rules, not exact observed entry
 identity and therefore require further resolution before qualification.
@@ -60,6 +66,21 @@ identity and therefore require further resolution before qualification.
 Boot-counting metadata is retained independently. +tries-left and optional
 -tries-done state must not be collapsed into a generic selected boolean. An entry
 without boot-counting metadata is `not-tracked`, not `good`.
+
+## Current-boot witness
+
+For systemd-boot, LoaderEntrySelected is the authoritative identifier written by
+the boot loader for the entry used for the current boot. Nixward's post-reboot
+witness correlates that value with the exact selected-entry NixOS closure, the
+read-only /run/current-system closure, the kernel's
+init=/nix/store/...-nixos-system-.../init binding from /proc/cmdline, and the
+kernel boot ID. Only an exact agreement across those subjects produces
+BootWitnessState::Verified.
+
+This is stronger than observing that a future boot selection exists: it is
+current boot identity evidence. It still does not prove service health,
+application correctness, or long-term stability. GRUB remains separate because
+it does not provide the same current-entry witness in the systemd-boot UAPI.
 
 ## GRUB
 
@@ -105,7 +126,8 @@ through read-only grub-editenv. BIOS-only GRUB remains explicit Unknown.
 ## Test fixtures
 
 The parser suite covers exact Type #1 parsing, boot-count state, one-shot
-precedence, pattern-default rejection, numeric GRUB default rejection, and
-exact menu-entry mapping. Subsequent host adapters should add fixtures for
-missing loader state, conflicting selection state, UKI identity mismatch, and
-boot-count exhaustion.
+precedence, preferred-entry precedence, pattern-default rejection, numeric GRUB
+default rejection, and exact menu-entry mapping. The current-boot witness also
+has deterministic parsing coverage for exact kernel init bindings. Subsequent
+host qualification should exercise real reboots and correlate a pre-reboot
+expected entry/closure with the post-reboot witness.

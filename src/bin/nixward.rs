@@ -115,6 +115,13 @@ fn main() {
             cmd_verify_secure_boot(&image, cli.format);
         }
 
+        Command::VerifyBootWitness {
+            expected_entry,
+            expected_closure,
+        } => {
+            cmd_verify_boot_witness(&expected_entry, &expected_closure, cli.format);
+        }
+
         Command::Rollback { generation } => {
             let cmd = if let Some(g) = generation {
                 GenerationManager::switch_to(g)
@@ -1018,6 +1025,62 @@ fn cmd_verify_secure_boot(image: &Path, format: OutputFormat) {
         }
         Err(error) => {
             eprintln!("  Secure Boot image verification failed closed: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+
+fn cmd_verify_boot_witness(
+    expected_entry: &str,
+    expected_closure: &str,
+    format: OutputFormat,
+) {
+    match nixward::action::boot_selection::observe_current_systemd_boot_witness(
+        expected_entry,
+        expected_closure,
+    ) {
+        Ok(evidence) => {
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                    );
+                }
+                OutputFormat::Minimal => println!("{:?}", evidence.state),
+                _ => {
+                    println!("  Current boot witness: {:?}", evidence.state);
+                    println!("  Expected entry: {}", evidence.expected_entry_id);
+                    println!(
+                        "  Selected entry: {}",
+                        evidence.selected_entry_id.as_deref().unwrap_or("Unknown")
+                    );
+                    println!(
+                        "  Selected-entry closure: {}",
+                        evidence.selected_entry_closure.as_deref().unwrap_or("Unknown")
+                    );
+                    println!(
+                        "  Running closure: {}",
+                        evidence.running_closure.as_deref().unwrap_or("Unknown")
+                    );
+                    println!(
+                        "  Cmdline closure: {}",
+                        evidence.cmdline_closure.as_deref().unwrap_or("Unknown")
+                    );
+                    println!("  Boot ID: {}", evidence.boot_id.as_deref().unwrap_or("Unknown"));
+                    println!("  Observed at: {:?}", evidence.observed_at_ms);
+                    println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                    println!("  Qualification: current-boot identity evidence only; service health remains separate.");
+                }
+            }
+
+            if evidence.state != nixward::action::boot_selection::BootWitnessState::Verified {
+                std::process::exit(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("  Current boot witness failed closed: {}", error.reason);
             std::process::exit(2);
         }
     }
