@@ -43,7 +43,7 @@ else:
     else:
         body = lockfile_artifact.group(0)
         required = [
-            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
+            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'validation/full-stack-qualification-2026-10-08'",
             "persist-credentials: false",
             "ref: ${{ github.event.pull_request.head.sha }}",
             "Prepare exact-head Cargo.lock",
@@ -75,8 +75,8 @@ else:
                 errors.append(f"{job_name} job must explicitly reject fork pull requests")
             if "test \"${{ github.event.pull_request.head.repo.full_name }}\" = \"${{ github.repository }}\"" not in body:
                 errors.append(f"{job_name} job must contain an exact PR-head repository equality test")
-            if "github.event_name == 'pull_request' || github.ref == 'refs/heads/main'" not in body:
-                errors.append(f"{job_name} job must not perform qualification on hardening-branch pushes")
+            if "always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'validation/full-stack-qualification-2026-10-08') || github.ref == 'refs/heads/main')" not in body:
+                errors.append(f"{job_name} job must qualify only on the dedicated validation PR or main")
 
     for marker in [
         "nixward-cargo-lock-${{ github.event.pull_request.head.sha }}",
