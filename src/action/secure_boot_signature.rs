@@ -130,7 +130,7 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     sections.sort_unstable_by_key(|(virtual_address, _, _, _)| *virtual_address);
 
     let mut previous_virtual_end = 0u64;
-    let mut previous_section_end = size_of_headers;
+    let mut raw_ranges = Vec::new();
     for (virtual_address, virtual_end, ptr_to_raw, size_of_raw) in sections {
         if virtual_address < previous_virtual_end {
             return Err("PE section virtual address ranges overlap or are out of order".into());
@@ -138,10 +138,6 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
         if ptr_to_raw < size_of_headers {
             return Err("PE section raw data overlaps PE headers".into());
         }
-        if ptr_to_raw < previous_section_end {
-            return Err("PE section raw-data ranges overlap or are out of order".into());
-        }
-
         let end = ptr_to_raw
             .checked_add(size_of_raw)
             .ok_or_else(|| "PE section raw-data range overflows".to_string())?;
@@ -156,9 +152,16 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
             }
         }
 
+        raw_ranges.push((ptr_to_raw, end));
         hasher.update(&image[ptr_to_raw..end]);
         previous_virtual_end = virtual_end;
-        previous_section_end = end;
+    }
+
+    raw_ranges.sort_unstable();
+    for pair in raw_ranges.windows(2) {
+        if pair[1].0 < pair[0].1 {
+            return Err("PE section raw-data ranges overlap".into());
+        }
     }
 
     // Authenticode hashes the bytes belonging to the PE headers and the
@@ -800,6 +803,23 @@ mod tests {
         let second_header = 0x170usize;
         image[second_header + 12..second_header + 16].copy_from_slice(&0x0800u32.to_le_bytes());
         assert!(authenticode_sha256(&image).is_err());
+    }
+
+    #[test]
+    fn authenticode_hash_allows_nonmonotonic_raw_offsets_when_rvas_are_ordered() {
+        let mut image = pe_with_two_sections_and_overlay();
+        let first_header = 0x130usize;
+        let second_header = 0x158usize;
+
+        image[second_header + 20..second_header + 24]
+            .copy_from_slice(&0x200u32.to_le_bytes());
+        image[first_header + 20..first_header + 24]
+            .copy_from_slice(&0x400u32.to_le_bytes());
+
+        image[0x200..0x300].fill(0x42);
+        image[0x400..0x500].fill(0x41);
+
+        assert!(authenticode_sha256(&image).is_ok());
     }
 
     #[test]
