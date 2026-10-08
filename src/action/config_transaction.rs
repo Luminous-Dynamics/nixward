@@ -898,7 +898,7 @@ impl FrozenConfigSource {
             return Err("frozen source manifest must not be empty".into());
         }
         let mut previous: Option<&str> = None;
-        let mut paths = std::collections::BTreeMap::new();
+        let mut paths: std::collections::BTreeMap<&str, SourceEntryKind> = std::collections::BTreeMap::new();
         for entry in &self.manifest {
             validate_manifest_relative_path(&entry.relative_path)?;
             decode_digest(&entry.digest)?;
@@ -911,7 +911,7 @@ impl FrozenConfigSource {
             if matches!(entry.kind, SourceEntryKind::Directory) && entry.size != 0 {
                 return Err(format!("frozen source directory {} has nonzero size", entry.relative_path));
             }
-            paths.insert(entry.relative_path.as_str(), &entry.kind);
+            paths.insert(entry.relative_path.as_str(), entry.kind.clone());
         }
         let Some(kind) = paths.get(self.entrypoint.as_str()) else {
             return Err("frozen source entrypoint is absent from its manifest".into());
