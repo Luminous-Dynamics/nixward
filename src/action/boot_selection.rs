@@ -1266,8 +1266,10 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(evidence.selected_image_path.as_deref(), Some("/boot/EFI/Linux/candidate.efi"));
         assert_eq!(evidence.selected_image_blake3, Some([7; 32]));
     }
-/// Observe systemd-boot selection and require an exact authorized candidate binding.
+    }
 
+    #[test]
+    fn systemd_loader_entry_suffix_is_normalized_exactly() {
         let mut entries = BTreeMap::new();
         entries.insert(
             "candidate.conf".into(),
