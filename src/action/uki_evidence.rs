@@ -158,9 +158,12 @@ pub fn resolve_boot_artifact_path(boot_root: &Path, efi_path: &str) -> Result<Pa
         .strip_prefix('/')
         .ok_or_else(|| "BLS EFI path must be absolute within the boot partition".to_string())?;
     let relative_path = Path::new(relative);
+    if relative_path.is_absolute() {
+        return Err("BLS EFI path remains absolute after prefix normalization".into());
+    }
     for component in relative_path.components() {
-        if matches!(component, Component::ParentDir | Component::CurDir) {
-            return Err("BLS EFI path contains traversal components".into());
+        if matches!(component, Component::RootDir | Component::Prefix(_) | Component::ParentDir | Component::CurDir) {
+            return Err("BLS EFI path contains traversal or root components".into());
         }
     }
     let root = fs::canonicalize(boot_root).map_err(|error| {
@@ -290,6 +293,12 @@ mod tests {
         ).is_err());
     }
 
+    #[test]
+    fn boot_artifact_path_rejects_double_root_escape() {
+        let error = resolve_boot_artifact_path(Path::new("/boot"), "//EFI/Linux/candidate.efi")
+            .expect_err("double-root path must fail closed");
+        assert!(error.contains("absolute") || error.contains("root"));
+    }
     #[test]
     fn boot_artifact_path_rejects_traversal() {
         let error = resolve_boot_artifact_path(Path::new("/boot"), "/EFI/Linux/../evil.efi")
