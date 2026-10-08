@@ -129,6 +129,18 @@ pub enum Command {
         image: PathBuf,
     },
 
+    /// Verify that a specific systemd-boot entry produced the current running OS.
+    ///
+    /// This is read-only and intended for post-reboot qualification evidence.
+    VerifyBootWitness {
+        /// Exact LoaderEntrySelected identifier expected for this boot.
+        #[arg(long)]
+        expected_entry: String,
+        /// Exact NixOS system closure expected to be running.
+        #[arg(long)]
+        expected_closure: String,
+    },
+
     /// Observe the current system state.
     Observe {
         /// Show specific domain only.
@@ -472,6 +484,24 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::VerifySecureBoot { image }) if image == PathBuf::from("/boot/EFI/Linux/nixos.efi")
+        ));
+    }
+
+    #[test]
+    fn test_parse_boot_witness() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "verify-boot-witness",
+            "--expected-entry",
+            "nixos-candidate.conf",
+            "--expected-closure",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::VerifyBootWitness { expected_entry, expected_closure })
+                if expected_entry == "nixos-candidate.conf"
+                    && expected_closure == "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
         ));
     }
 
