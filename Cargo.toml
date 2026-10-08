@@ -63,6 +63,7 @@ dashmap = "5.5"
 nix = { version = "0.27", optional = true, features = ["fs"] }
 openssl = { version = "0.10.81", optional = true }
 x509-parser = { version = "0.18.1", optional = true }
+tempfile = { version = "3.10", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rnix = "0.11"
 ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc", "rand_core"] }
@@ -98,7 +99,7 @@ harness = false
 
 [features]
 default = ["native"]
-native = ["nix", "rusqlite", "tree-sitter", "tree-sitter-nix", "tokio", "openssl", "x509-parser"]
+native = ["nix", "rusqlite", "tree-sitter", "tree-sitter-nix", "tokio", "openssl", "x509-parser", "tempfile"]
 cli = ["clap", "clap_complete", "native"]
 tui = ["crossterm", "ratatui", "cli"]
 daemon = ["tokio/full", "native"]
