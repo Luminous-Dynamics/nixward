@@ -14,7 +14,7 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | activation | exact candidate closure + action | exact `<store>/bin/switch-to-configuration <action>` | Implemented |
 | recovery | exact prior runtime + profile + action | bound recovery command + post-recovery exact state | Implemented |
 | Nixward transaction serialization | Nixward-owned activation transaction | native cross-process interlock | Implemented |
-| next-boot selection | exact boot entry | read-only systemd-boot/GRUB selection observation | Implemented; overall qualification remains open |
+| next-boot selection | exact boot entry | read-only systemd-boot/GRUB selection observation, including PreferredDefault precedence | Implemented; overall qualification remains open |
 | Type #1 NixOS binding | exact system closure | BLS `init=/nix/store/...-nixos-system-.../init` | Implemented |
 | Type #2 UKI binding | exact EFI image + system closure | UKI BLAKE3 + `.cmdline` + exact `init=` binding | Implemented |
 | Secure Boot firmware state | exact UEFI policy variables | `SecureBoot` + `SetupMode` raw observations | Implemented |
@@ -24,6 +24,7 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | Secure Boot signer authorization | exact signer + firmware policy | `db` chain-anchor verification + `dbx` chain-veto evidence; TBS/time semantics still separate | Partially implemented — Issue #17 |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
+| physical boot identity | exact current boot | systemd-boot LoaderEntrySelected + selected-entry closure + /run/current-system + kernel init= + boot ID | Implemented for systemd-boot; real-host qualification open — Issue #8 |
 | physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
 | hosted compiler/tests | exact Git commit | completed workflow with qualification receipt | Pending; no qualification claim |
 
@@ -39,6 +40,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 8. Unknown or unsupported evidence must remain explicit Unknown rather than being coerced into Pass.
 9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
 10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
+11. LoaderEntrySelected establishes current systemd-boot entry identity; it does not establish post-boot health.
+12. A verified current-boot witness remains non-qualified until the expected pre-reboot state and the exact post-reboot witness are captured on the target host.
 
 ## Current qualification gate
 
