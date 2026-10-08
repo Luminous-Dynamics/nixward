@@ -1092,6 +1092,10 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(super::exact_store_path_from_entry(&parsed), None);
     }
     #[test]
+    fn systemd_default_parser_returns_first_selector_token() {
+        assert_eq!(parse_systemd_loader_default("default candidate extra\n"), Some("candidate".into()));
+    }
+    #[test]
     fn systemd_loader_entry_suffix_is_normalized_exactly() {
         let mut entries = BTreeMap::new();
         entries.insert(
@@ -1178,9 +1182,27 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert!(evidence.selected_entry_source.contains("saved_entry"));
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn grub_root_preference_stays_first() {
+        let preferred = PathBuf::from("/boot-custom");
+        let candidates = candidate_grub_roots(Some(&preferred));
+        assert_eq!(candidates.first(), Some(&preferred));
+        assert_eq!(candidates.iter().filter(|p| *p == &preferred).count(), 1);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn malformed_efi_string_without_nul_is_rejected() {
+        assert!(decode_efivar_string(&[0, 0, 0, 7, 0x41, 0x00]).is_err());
+    }
     #[test]
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
+        assert_eq!(
+            parse_grub_config_default("if [ \"${next_entry}\" ]; then\\nset default=\"${next_entry}\"\\nelse\\nset default=\"${saved_entry}\"\\nfi\\n"),
+            Some("${saved_entry}".into()),
+        );
         assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
