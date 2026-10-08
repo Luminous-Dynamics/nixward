@@ -1,3 +1,4 @@
+pub mod secure_boot_signature;
 pub mod secure_boot;
 pub mod uki_evidence;
 pub mod boot_selection;
