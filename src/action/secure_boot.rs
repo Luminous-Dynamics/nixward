@@ -569,6 +569,10 @@ pub enum DbCertificateVerificationState {
     UnknownDbxCertificateRules,
     MissingSecureBootDatabase,
     DatabaseChangedDuringVerification,
+    SecureBootPolicyDisabled,
+    SecureBootPolicySetupMode,
+    SecureBootPolicyUnknown,
+    SecureBootPolicyChangedDuringVerification,
     ToolUnavailable,
     ImageChangedDuringVerification,
 }
@@ -588,7 +592,9 @@ pub struct DbCertificateVerificationEvidence {
     pub dbx_chain_tbs_hash_match: Option<[u8; 32]>,
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_payload_blake3: Option<[u8; 32]>,
+    pub secure_boot_state: Option<SecureBootState>,
     pub database_stability: Option<bool>,
+    pub secure_boot_state_stability: Option<bool>,
     pub state: DbCertificateVerificationState,
     pub verifier: String,
     pub stdout_blake3: [u8; 32],
@@ -613,7 +619,9 @@ impl DbCertificateVerificationEvidence {
             self.dbx_chain_tbs_hash_match,
             self.db_payload_blake3,
             self.dbx_payload_blake3,
+            self.secure_boot_state,
             self.database_stability,
+            self.secure_boot_state_stability,
             self.state,
             &self.verifier,
             self.stdout_blake3,
@@ -725,7 +733,9 @@ fn db_certificate_verification_base_evidence(
         dbx_chain_tbs_hash_match: None,
         db_payload_blake3: Some(*blake3::hash(db_payload).as_bytes()),
         dbx_payload_blake3: Some(*blake3::hash(dbx_payload).as_bytes()),
+        secure_boot_state: None,
         database_stability: None,
+        secure_boot_state_stability: None,
         state: DbCertificateVerificationState::NoMatchingDbCertificate,
         verifier: "sbverify".into(),
         stdout_blake3: *blake3::hash(&[]).as_bytes(),
@@ -1124,9 +1134,76 @@ pub fn verify_image_against_db_certificates(
 }
 
 #[cfg(feature = "native")]
+fn build_live_policy_rejection_evidence(
+    image_path: &std::path::Path,
+    state: SecureBootState,
+) -> Result<DbCertificateVerificationEvidence, String> {
+    let image = std::fs::read(image_path)
+        .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
+    let image_blake3 = *blake3::hash(&image).as_bytes();
+    let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
+
+    let (verifier_state, message) = match state {
+        SecureBootState::Disabled => (
+            DbCertificateVerificationState::SecureBootPolicyDisabled,
+            b"firmware reports SecureBoot disabled" as &[u8],
+        ),
+        SecureBootState::SetupMode => (
+            DbCertificateVerificationState::SecureBootPolicySetupMode,
+            b"firmware reports SetupMode" as &[u8],
+        ),
+        SecureBootState::Unknown => (
+            DbCertificateVerificationState::SecureBootPolicyUnknown,
+            b"Secure Boot firmware policy state is unknown" as &[u8],
+        ),
+        SecureBootState::Enabled => unreachable!("policy rejection helper called for Enabled"),
+    };
+
+    let evidence = DbCertificateVerificationEvidence {
+        image_blake3,
+        image_authenticode_sha256,
+        image_chain_certificate_digests: Vec::new(),
+        image_signer_certificate_digests: Vec::new(),
+        verified_db_anchor_certificate_digests: Vec::new(),
+        db_certificate_digests: Vec::new(),
+        dbx_certificate_digests: Vec::new(),
+        verifying_db_certificate: None,
+        verifying_dbx_certificate: None,
+        dbx_chain_identity_match: None,
+        dbx_chain_tbs_hash_match: None,
+        db_payload_blake3: None,
+        dbx_payload_blake3: None,
+        secure_boot_state: Some(state),
+        database_stability: None,
+        secure_boot_state_stability: Some(true),
+        state: verifier_state,
+        verifier: "sbverify".into(),
+        stdout_blake3: *blake3::hash(&[]).as_bytes(),
+        stderr_blake3: *blake3::hash(message).as_bytes(),
+        observed_at_ms: None,
+        evidence_digest: None,
+    };
+
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
+        .as_millis() as u64;
+
+    evidence.with_observation_metadata(observed_at_ms)
+}
+
+#[cfg(feature = "native")]
 pub fn verify_image_against_live_secure_boot_databases(
     image_path: &std::path::Path,
 ) -> Result<DbCertificateVerificationEvidence, String> {
+    let secure_boot_before = read_global_efi_bool("SecureBoot")?;
+    let setup_mode_before = read_global_efi_bool("SetupMode")?;
+    let state_before = derive_secure_boot_state(secure_boot_before, setup_mode_before);
+
+    if state_before != SecureBootState::Enabled {
+        return build_live_policy_rejection_evidence(image_path, state_before);
+    }
+
     let db_before = read_efi_database("db")?;
     let dbx_before = read_efi_database("dbx")?;
 
@@ -1163,7 +1240,9 @@ pub fn verify_image_against_live_secure_boot_databases(
             dbx_chain_tbs_hash_match: None,
             db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+            secure_boot_state: Some(state_before),
             database_stability: None,
+            secure_boot_state_stability: None,
             state: DbCertificateVerificationState::MissingSecureBootDatabase,
             verifier: "sbverify".into(),
             stdout_blake3: *blake3::hash(&[]).as_bytes(),
@@ -1178,10 +1257,16 @@ pub fn verify_image_against_live_secure_boot_databases(
         db_before.as_deref().expect("db presence checked"),
         dbx_before.as_deref().expect("dbx presence checked"),
     )?;
+    evidence.secure_boot_state = Some(state_before);
+
+    let secure_boot_after = read_global_efi_bool("SecureBoot")?;
+    let setup_mode_after = read_global_efi_bool("SetupMode")?;
+    let state_after = derive_secure_boot_state(secure_boot_after, setup_mode_after);
 
     let db_after = read_efi_database("db")?;
     let dbx_after = read_efi_database("dbx")?;
-    let stable = db_after
+
+    let database_stable = db_after
         .as_deref()
         .map(|bytes| *blake3::hash(bytes).as_bytes())
         == db_before
@@ -1194,18 +1279,48 @@ pub fn verify_image_against_live_secure_boot_databases(
                 .as_deref()
                 .map(|bytes| *blake3::hash(bytes).as_bytes());
 
-    evidence.database_stability = Some(stable);
-    if !stable {
+    let secure_boot_stable =
+        secure_boot_after == secure_boot_before && setup_mode_after == setup_mode_before;
+
+    evidence.database_stability = Some(database_stable);
+    evidence.secure_boot_state_stability = Some(secure_boot_stable);
+
+    if !secure_boot_stable {
+        evidence.verifying_db_certificate = None;
+        evidence.verifying_dbx_certificate = None;
+        evidence.dbx_chain_identity_match = None;
+        evidence.dbx_chain_tbs_hash_match = None;
+        evidence.state = DbCertificateVerificationState::SecureBootPolicyChangedDuringVerification;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"Secure Boot/SetupMode state changed during verification").as_bytes();
+    } else if state_before == SecureBootState::Disabled {
+        evidence.verifying_db_certificate = None;
+        evidence.state = DbCertificateVerificationState::SecureBootPolicyDisabled;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"firmware reports SecureBoot disabled").as_bytes();
+    } else if state_before == SecureBootState::SetupMode {
+        evidence.verifying_db_certificate = None;
+        evidence.state = DbCertificateVerificationState::SecureBootPolicySetupMode;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"firmware reports SetupMode").as_bytes();
+    } else if state_before == SecureBootState::Unknown {
+        evidence.verifying_db_certificate = None;
+        evidence.state = DbCertificateVerificationState::SecureBootPolicyUnknown;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"Secure Boot firmware policy state is unknown").as_bytes();
+    } else if !database_stable {
         evidence.verifying_db_certificate = None;
         evidence.verifying_dbx_certificate = None;
         evidence.state = DbCertificateVerificationState::DatabaseChangedDuringVerification;
-        evidence.stderr_blake3 = *blake3::hash(b"db/dbx changed during verification").as_bytes();
+        evidence.stderr_blake3 =
+            *blake3::hash(b"db/dbx changed during verification").as_bytes();
     }
 
     let observed_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
         .as_millis() as u64;
+
     evidence.with_observation_metadata(observed_at_ms)
 }
 
@@ -1227,8 +1342,14 @@ pub fn require_live_db_certificate_verification(
     expected_image_blake3: &[u8; 32],
 ) -> Result<(), String> {
     require_db_certificate_verification(evidence, expected_image_blake3)?;
+    if evidence.secure_boot_state != Some(SecureBootState::Enabled) {
+        return Err("firmware Secure Boot policy was not Enabled during verification".into());
+    }
     if evidence.database_stability != Some(true) {
         return Err("live Secure Boot database evidence was not stable across verification".into());
+    }
+    if evidence.secure_boot_state_stability != Some(true) {
+        return Err("Secure Boot firmware policy state was not stable across verification".into());
     }
     Ok(())
 }
@@ -1623,6 +1744,111 @@ mod tests {
     }
 
     #[cfg(feature = "native")]
+    #[cfg(feature = "native")]
+    #[test]
+    fn policy_rejection_precedes_database_presence() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary image");
+        std::fs::write(temp.path(), b"policy-only-fixture").expect("fixture image");
+
+        let evidence = build_live_policy_rejection_evidence(
+            temp.path(),
+            SecureBootState::Disabled,
+        )
+        .expect("policy rejection evidence");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::SecureBootPolicyDisabled
+        );
+        assert_eq!(evidence.secure_boot_state, Some(SecureBootState::Disabled));
+        assert_eq!(evidence.database_stability, None);
+        assert_eq!(evidence.db_payload_blake3, None);
+        assert_eq!(evidence.dbx_payload_blake3, None);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn policy_rejection_preserves_unknown_state() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary image");
+        std::fs::write(temp.path(), b"unknown-policy-fixture").expect("fixture image");
+
+        let evidence = build_live_policy_rejection_evidence(
+            temp.path(),
+            SecureBootState::Unknown,
+        )
+        .expect("policy rejection evidence");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::SecureBootPolicyUnknown
+        );
+        assert_eq!(evidence.secure_boot_state, Some(SecureBootState::Unknown));
+    }
+
+    #[test]
+    fn live_verification_requirement_rejects_disabled_secure_boot() {
+        let evidence = DbCertificateVerificationEvidence {
+            image_blake3: [1; 32],
+            image_authenticode_sha256: [2; 32],
+            image_chain_certificate_digests: Vec::new(),
+            image_signer_certificate_digests: Vec::new(),
+            verified_db_anchor_certificate_digests: vec![[3; 32]],
+            db_certificate_digests: vec![[4; 32]],
+            dbx_certificate_digests: vec![[5; 32]],
+            verifying_db_certificate: Some([6; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: None,
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([7; 32]),
+            dbx_payload_blake3: Some([8; 32]),
+            secure_boot_state: Some(SecureBootState::Disabled),
+            database_stability: Some(true),
+            secure_boot_state_stability: Some(true),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [9; 32],
+            stderr_blake3: [10; 32],
+            observed_at_ms: Some(1),
+            evidence_digest: Some([11; 32]),
+        };
+
+        assert!(
+            require_live_db_certificate_verification(&evidence, &[1; 32]).is_err()
+        );
+    }
+
+    #[test]
+    fn live_verification_requirement_rejects_unstable_policy() {
+        let evidence = DbCertificateVerificationEvidence {
+            image_blake3: [1; 32],
+            image_authenticode_sha256: [2; 32],
+            image_chain_certificate_digests: Vec::new(),
+            image_signer_certificate_digests: Vec::new(),
+            verified_db_anchor_certificate_digests: vec![[3; 32]],
+            db_certificate_digests: vec![[4; 32]],
+            dbx_certificate_digests: vec![[5; 32]],
+            verifying_db_certificate: Some([6; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: None,
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([7; 32]),
+            dbx_payload_blake3: Some([8; 32]),
+            secure_boot_state: Some(SecureBootState::Enabled),
+            database_stability: Some(true),
+            secure_boot_state_stability: Some(false),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [9; 32],
+            stderr_blake3: [10; 32],
+            observed_at_ms: Some(1),
+            evidence_digest: Some([11; 32]),
+        };
+
+        assert!(
+            require_live_db_certificate_verification(&evidence, &[1; 32]).is_err()
+        );
+    }
+
     #[test]
     fn final_image_recheck_invalidates_stale_chain_evidence() {
         let temp = tempfile::NamedTempFile::new().expect("temporary UKI path");
