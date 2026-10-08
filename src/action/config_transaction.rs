@@ -2029,6 +2029,7 @@ impl ConfigTransaction {
         runtime_closure: Option<String>,
         profile_closure: Option<String>,
         expected_runtime_closure: &str,
+        worker_completion_proven: bool,
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
@@ -2046,7 +2047,8 @@ impl ConfigTransaction {
         let Some(candidate) = self.candidate_store_path() else {
             return Err("activation post-state requires a bound candidate build receipt".into());
         };
-        if runtime_closure.as_deref() == Some(expected_runtime_closure)
+        if worker_completion_proven
+            && runtime_closure.as_deref() == Some(expected_runtime_closure)
             && profile_closure.as_deref() == Some(candidate)
         {
             self.phase = if expected_runtime_closure == candidate {
@@ -2105,6 +2107,7 @@ impl ConfigTransaction {
         process_exit_status: Option<i32>,
         observed_runtime_closure: Option<String>,
         observed_profile_closure: Option<String>,
+        worker_completion_proven: bool,
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
@@ -2119,7 +2122,8 @@ impl ConfigTransaction {
         self.process_exit_status = process_exit_status;
         self.observed_runtime_closure = observed_runtime_closure.clone();
         self.observed_profile_closure = observed_profile_closure.clone();
-        if observed_runtime_closure.as_deref() == Some(expected_runtime_closure)
+        if worker_completion_proven
+            && observed_runtime_closure.as_deref() == Some(expected_runtime_closure)
             && observed_profile_closure.as_deref() == Some(expected_profile_closure)
         {
             self.phase = ConfigTransactionPhase::Recovered;
