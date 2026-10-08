@@ -350,6 +350,20 @@ fn remove_gc_root_path(gc_root_path: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "native")]
+fn cleanup_gc_root_if_target_matches(
+    gc_root_path: &str,
+    expected_store_path: &str,
+) -> Result<(), String> {
+    let gc_root = std::path::Path::new(gc_root_path);
+    let target = std::fs::read_link(gc_root)
+        .map_err(|error| format!("failed to inspect GC root for cleanup: {error}"))?;
+    if target != std::path::Path::new(expected_store_path) {
+        return Err("refusing to remove GC root because its target no longer matches the owned store path".into());
+    }
+    remove_gc_root_path(gc_root_path)
+}
+
 fn installable_selector_is_valid(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix(".#") else {
         return false;
@@ -1029,14 +1043,28 @@ impl NixSourceRealizer {
             "/nix/var/nix/gcroots/nixward/{transaction_id}",
         );
         let mut lease = SourceRealizationLease::new(source, store_path, gc_root_path)?;
-        if let Err(error) = lease.establish_root() {
-            return Err(error);
-        }
+
+        // Nix store add does not root its result. Verify the object before
+        // creating the GC root, then verify both content and retention again.
+        lease.verify_source_realization(source)?;
+        lease.establish_root()?;
+
         if let Err(error) = lease.verify_source_realization(source) {
-            let _ = lease.release_root();
-            return Err(error);
+            return match lease.release_root() {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "source realization verification failed: {error}; root cleanup also failed: {cleanup_error}"
+                )),
+            };
         }
-        lease.verify_rooted()?;
+        if let Err(error) = lease.verify_rooted() {
+            return match lease.release_root() {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "source root re-verification failed: {error}; root cleanup also failed: {cleanup_error}"
+                )),
+            };
+        }
         Ok(lease)
     }
 }
@@ -1243,7 +1271,8 @@ impl SourceRealizationLease {
                     name.as_ptr(),
                 )
             };
-            if result != 0 {
+            let created = result == 0;
+            if !created {
                 let error = std::io::Error::last_os_error();
                 if error.kind() != std::io::ErrorKind::AlreadyExists {
                     return Err(format!("failed to create source GC root atomically: {error}"));
@@ -1251,21 +1280,32 @@ impl SourceRealizationLease {
                 // Existing roots are not accepted on creation alone; the exact
                 // target is independently re-observed below. This permits crash
                 // recovery without turning a journal record into authority.
-            } else {
-                namespace_dir
-                    .sync_all()
-                    .map_err(|error| format!("failed to persist source GC root: {error}"))?;
+            } else if let Err(sync_error) = namespace_dir.sync_all() {
+                let cleanup = cleanup_gc_root_if_target_matches(&self.gc_root_path, &self.store_path);
+                return Err(match cleanup {
+                    Ok(()) => format!("failed to persist source GC root; newly created root was removed: {sync_error}"),
+                    Err(cleanup_error) => format!("failed to persist source GC root: {sync_error}; cleanup also failed: {cleanup_error}"),
+                });
             }
+
+            if let Err(observation_error) = self.observe_root_target() {
+                if created {
+                    let cleanup = cleanup_gc_root_if_target_matches(&self.gc_root_path, &self.store_path);
+                    return Err(match cleanup {
+                        Ok(()) => format!("source GC-root observation failed; newly created root was removed: {observation_error}"),
+                        Err(cleanup_error) => format!("source GC-root observation failed: {observation_error}; cleanup also failed: {cleanup_error}"),
+                    });
+                }
+                return Err(observation_error);
+            }
+            self.state = SourceRealizationLeaseState::Rooted;
+            return Ok(());
         }
 
         #[cfg(not(unix))]
         {
-            return Err("source GC-root establishment is unsupported on this platform".into());
+            Err("source GC-root establishment is unsupported on this platform".into())
         }
-
-        self.observe_root_target()?;
-        self.state = SourceRealizationLeaseState::Rooted;
-        Ok(())
     }
     /// Prove the lease is rooted from live GC-root filesystem evidence.
     pub fn prove_rooted(&mut self) -> Result<(), String> {
@@ -1410,15 +1450,30 @@ fn establish_candidate_gc_root(store_path: &str, gc_root_path: &str) -> Result<(
     let name = CString::new(name).map_err(|_| "candidate GC root filename contains NUL".to_string())?;
     let target = CString::new(store_path).map_err(|_| "candidate store path contains NUL".to_string())?;
     let result = unsafe { nix::libc::symlinkat(target.as_ptr(), namespace_dir.as_raw_fd(), name.as_ptr()) };
-    if result != 0 {
+    let created = result == 0;
+    if !created {
         let error = std::io::Error::last_os_error();
         if error.kind() != std::io::ErrorKind::AlreadyExists {
             return Err(format!("failed to create candidate GC root: {error}"));
         }
-    } else {
-        namespace_dir.sync_all().map_err(|error| format!("failed to persist candidate GC root: {error}"))?;
+    } else if let Err(sync_error) = namespace_dir.sync_all() {
+        let cleanup = cleanup_gc_root_if_target_matches(gc_root_path, store_path);
+        return Err(match cleanup {
+            Ok(()) => format!("failed to persist candidate GC root; newly created root was removed: {sync_error}"),
+            Err(cleanup_error) => format!("failed to persist candidate GC root: {sync_error}; cleanup also failed: {cleanup_error}"),
+        });
     }
-    verify_gc_root_target(store_path, gc_root_path)?;
+
+    if let Err(verify_error) = verify_gc_root_target(store_path, gc_root_path) {
+        if created {
+            let cleanup = cleanup_gc_root_if_target_matches(gc_root_path, store_path);
+            return Err(match cleanup {
+                Ok(()) => format!("candidate GC-root verification failed; newly created root was removed: {verify_error}"),
+                Err(cleanup_error) => format!("candidate GC-root verification failed: {verify_error}; cleanup also failed: {cleanup_error}"),
+            });
+        }
+        return Err(verify_error);
+    }
     Ok(())
 }
 
