@@ -1,7 +1,3 @@
-pub mod secure_boot_signature;
-pub mod secure_boot;
-pub mod uki_evidence;
-pub mod boot_selection;
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
@@ -11,6 +7,11 @@ pub mod boot_selection;
 //! mutations require an explicit ChangePlan plus approval evidence bound to
 //! the exact machine/config/command intent; execution capabilities remain
 //! exact-command scoped and rollback-bound.
+
+pub mod secure_boot_signature;
+pub mod secure_boot;
+pub mod uki_evidence;
+pub mod boot_selection;
 
 pub mod authority_approval;
 pub mod authority_replay;
