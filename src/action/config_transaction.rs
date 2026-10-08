@@ -1797,9 +1797,6 @@ impl ConfigTransaction {
         &mut self,
         observation: &RecoveryObservation,
     ) -> Result<(), String> {
-        if matches!(observation, RecoveryObservation::MixedOrUnknown { .. }) {
-            return Err("mixed or unknown observation cannot enter recovery".into());
-        }
         if !matches!(
             self.phase,
             ConfigTransactionPhase::ProfileTransitionStarted
