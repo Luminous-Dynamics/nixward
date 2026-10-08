@@ -1837,23 +1837,41 @@ impl ActivationWorkerIdentity {
         if decode_digest(&self.argv_digest).is_err() {
             return Err("activation worker argv digest is invalid".into());
         }
+        const STORE_PREFIX: &str = "/nix/store/";
         let executable = std::path::Path::new(&self.executable);
-        if !executable.is_absolute() || !executable.starts_with("/nix/store/") {
+        if !executable.is_absolute() || !self.executable.starts_with(STORE_PREFIX) {
             return Err("activation worker executable is not an absolute Nix store path".into());
         }
-        let store_component = executable
-            .strip_prefix("/nix/store/")
-            .map_err(|_| "activation worker executable escaped the Nix store".to_string())?
-            .components()
+
+        // Validate the complete lexical path. Checking only the first component
+        // would accept traversal such as /nix/store/<object>/../../tmp/evil.
+        let relative = self
+            .executable
+            .strip_prefix(STORE_PREFIX)
+            .ok_or_else(|| "activation worker executable escaped the Nix store".to_string())?;
+        let mut components = relative.split('/');
+        let store_component = components
             .next()
-            .and_then(|component| match component {
-                std::path::Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
             .ok_or_else(|| "activation worker executable has no store object component".to_string())?;
-        let store_path = format!("/nix/store/{store_component}");
+        let store_path = format!("{STORE_PREFIX}{store_component}");
         if !super::execution_intent::is_valid_nix_store_path(&store_path) {
             return Err("activation worker executable has an invalid Nix store identity".into());
+        }
+
+        let suffix = components.collect::<Vec<_>>();
+        if suffix.is_empty()
+            || suffix.iter().any(|component| {
+                component.is_empty()
+                    || *component == "."
+                    || *component == ".."
+                    || component.chars().any(char::is_control)
+            })
+        {
+            return Err("activation worker executable path has empty, traversal, or control components".into());
+        }
+        let canonical = format!("{STORE_PREFIX}{store_component}/{}", suffix.join("/"));
+        if canonical != self.executable {
+            return Err("activation worker executable path is not in canonical lexical form".into());
         }
         Ok(())
     }
@@ -2704,6 +2722,52 @@ mod tests {
     const CANDIDATE_PROFILE: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-profile";
     const PREDECESSOR: &str = "/nix/store/cccccccccccccccccccccccccccccccc-prior";
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
+
+    fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
+        ActivationWorkerIdentity {
+            transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid: 123,
+            boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            start_time_ticks: 42,
+            executable: executable.into(),
+            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        }
+    }
+
+    #[test]
+    fn activation_worker_executable_accepts_canonical_store_path() {
+        let identity = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/bin/nixos-rebuild",
+        );
+        assert!(identity.validate_identity().is_ok());
+    }
+
+    #[test]
+    fn activation_worker_executable_rejects_store_path_traversal() {
+        let identity = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/../../tmp/evil",
+        );
+        assert!(
+            identity
+                .validate_identity()
+                .expect_err("store path traversal must fail closed")
+                .contains("traversal")
+        );
+    }
+
+    #[test]
+    fn activation_worker_executable_rejects_noncanonical_components() {
+        let duplicate_separator = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild//bin/nixos-rebuild",
+        );
+        assert!(duplicate_separator.validate_identity().is_err());
+
+        let dot_component = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/./bin/nixos-rebuild",
+        );
+        assert!(dot_component.validate_identity().is_err());
+    }
 
     #[test]
     fn source_rollback_is_forbidden_after_activation() {
