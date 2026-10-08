@@ -252,7 +252,11 @@ fn parse_systemd_loader_default(text: &str) -> Option<String> {
         if parts.next() != Some("default") {
             return None;
         }
-        parts.next().map(str::to_string)
+        let selector = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(selector.to_string())
     })
 }
 
@@ -1092,8 +1096,9 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(super::exact_store_path_from_entry(&parsed), None);
     }
     #[test]
-    fn systemd_default_parser_returns_first_selector_token() {
-        assert_eq!(parse_systemd_loader_default("default candidate extra\n"), Some("candidate".into()));
+    fn systemd_default_parser_rejects_extra_selector_tokens() {
+        assert_eq!(parse_systemd_loader_default("default candidate extra\n"), None);
+        assert_eq!(parse_systemd_loader_default("default candidate\n"), Some("candidate".into()));
     }
     #[test]
     fn systemd_loader_entry_suffix_is_normalized_exactly() {
