@@ -26,7 +26,7 @@ No predicate may be satisfied by evidence belonging to a different predicate.
 | selected_entry_id | exact loader/menu entry identity |
 | selected_entry_source | authoritative EFI variable, loader state, GRUB environment, or generated configuration source |
 | candidate_closure | exact /nix/store/...-nixos-system-* path, or absent when no exact binding is possible |
-| boot_count_state | good, indeterminate, bad, or unknown |
+| boot_count_state | good, indeterminate, bad, not-tracked, or unknown |
 | observed_at | observation timestamp |
 | evidence_digest | digest over the complete observation |
 
@@ -54,7 +54,8 @@ Pattern defaults such as nixos-* are selection rules, not exact observed entry
 identity and therefore require further resolution before qualification.
 
 Boot-counting metadata is retained independently. +tries-left and optional
--tries-done state must not be collapsed into a generic selected boolean.
+-tries-done state must not be collapsed into a generic selected boolean. An entry
+without boot-counting metadata is `not-tracked`, not `good`.
 
 ## GRUB
 
