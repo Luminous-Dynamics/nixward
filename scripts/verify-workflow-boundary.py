@@ -132,6 +132,10 @@ else:
             "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
             "expected_commit=\"${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}\"",
             "test \"$actual_commit\" = \"$expected_commit\"",
+            "Assert validation subject mirrors hardening head",
+            "git fetch --no-tags origin hardening/full-stack-qualification-2026-10-08",
+            "hardening_sha=\"$(git rev-parse FETCH_HEAD)\"",
+            "test \"$hardening_sha\" = \"${{ github.event.pull_request.head.sha }}\"",
         ]:
             if marker not in validate_body:
                 errors.append(f"validation job missing exact-subject marker: {marker}")
@@ -143,6 +147,10 @@ else:
         for marker in [
             "nix flake check --no-update-lock-file --no-write-lock-file",
             "nix build .#nixward --no-update-lock-file --no-write-lock-file",
+            "Assert validation subject mirrors hardening head",
+            "git fetch --no-tags origin hardening/full-stack-qualification-2026-10-08",
+            "hardening_sha=\"$(git rev-parse FETCH_HEAD)\"",
+            "test \"$hardening_sha\" = \"${{ github.event.pull_request.head.sha }}\"",
             "persist-credentials: false",
         ]:
             if marker not in nix_body:
