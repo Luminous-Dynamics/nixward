@@ -16,6 +16,9 @@ const EFI_VARS_DIR: &str = "/sys/firmware/efi/efivars";
 pub enum SignatureListKind {
     Sha256ImageHash,
     X509Certificate,
+    X509TbsSha256,
+    X509TbsSha384,
+    X509TbsSha512,
     Unsupported,
 }
 
@@ -27,6 +30,8 @@ pub struct SignatureDatabaseRecord {
     pub owner: [u8; 16],
     pub image_sha256: Option<[u8; 32]>,
     pub certificate_der_blake3: Option<[u8; 32]>,
+    pub certificate_tbs_hash: Option<Vec<u8>>,
+    pub revocation_time: Option<[u8; 16]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +43,8 @@ pub struct SignatureDatabaseMatchEvidence {
     pub direct_dbx_image_hash_match: bool,
     pub exact_certificate_in_db: bool,
     pub exact_certificate_in_dbx: bool,
+    pub exact_certificate_tbs_hash_in_db: bool,
+    pub exact_certificate_tbs_hash_in_dbx: bool,
     pub certificate_chain_authorization: Option<bool>,
     pub observed_at_ms: Option<u64>,
     pub evidence_digest: Option<[u8; 32]>,
@@ -53,6 +60,8 @@ impl SignatureDatabaseMatchEvidence {
             self.direct_dbx_image_hash_match,
             self.exact_certificate_in_db,
             self.exact_certificate_in_dbx,
+            self.exact_certificate_tbs_hash_in_db,
+            self.exact_certificate_tbs_hash_in_dbx,
             self.certificate_chain_authorization,
             observed_at_ms,
         ))
@@ -163,6 +172,15 @@ const EFI_CERT_SHA256_GUID: [u8; 16] = [
 const EFI_CERT_X509_GUID: [u8; 16] = [
     0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72,
 ];
+const EFI_CERT_X509_SHA256_GUID: [u8; 16] = [
+    0x92, 0xa4, 0xd2, 0x3b, 0xc0, 0x96, 0x79, 0x40, 0xb4, 0x20, 0xfc, 0xf9, 0x8e, 0xf1, 0x03, 0xed,
+];
+const EFI_CERT_X509_SHA384_GUID: [u8; 16] = [
+    0x6e, 0x87, 0x76, 0x70, 0xc2, 0x80, 0xe6, 0x4e, 0xaa, 0xd2, 0x28, 0xb3, 0x49, 0xa6, 0x86, 0x5b,
+];
+const EFI_CERT_X509_SHA512_GUID: [u8; 16] = [
+    0x63, 0xbf, 0x6d, 0x44, 0x02, 0x25, 0xda, 0x4c, 0xbc, 0xfa, 0x24, 0x65, 0xd2, 0xb0, 0xfe, 0x9d,
+];
 
 pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseRecord>, String> {
     let mut records = Vec::new();
@@ -190,6 +208,12 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
             SignatureListKind::Sha256ImageHash
         } else if payload[cursor..cursor + 16] == EFI_CERT_X509_GUID {
             SignatureListKind::X509Certificate
+        } else if payload[cursor..cursor + 16] == EFI_CERT_X509_SHA256_GUID {
+            SignatureListKind::X509TbsSha256
+        } else if payload[cursor..cursor + 16] == EFI_CERT_X509_SHA384_GUID {
+            SignatureListKind::X509TbsSha384
+        } else if payload[cursor..cursor + 16] == EFI_CERT_X509_SHA512_GUID {
+            SignatureListKind::X509TbsSha512
         } else {
             SignatureListKind::Unsupported
         };
@@ -203,16 +227,40 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
             }
             let mut owner = [0u8; 16];
             owner.copy_from_slice(&data[..16]);
-            let (image_sha256, certificate_der_blake3) = match kind {
+            let (image_sha256, certificate_der_blake3, certificate_tbs_hash, revocation_time) = match kind {
                 SignatureListKind::Sha256ImageHash if data.len() == 48 => {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&data[16..48]);
-                    (Some(hash), None)
+                    (Some(hash), None, None, None)
                 }
-                SignatureListKind::X509Certificate => (None, Some(*blake3::hash(&data[16..]).as_bytes())),
-                SignatureListKind::Unsupported => (None, None),
-                SignatureListKind::Sha256ImageHash => {
-                    return Err("EFI SHA256 signature record has an invalid SignatureSize".into())
+                SignatureListKind::X509Certificate if data.len() >= 17 => {
+                    (None, Some(*blake3::hash(&data[16..]).as_bytes()), None, None)
+                }
+                SignatureListKind::X509TbsSha256 if data.len() == 64 => {
+                    let mut hash = Vec::from(&data[16..48]);
+                    let mut time = [0u8; 16];
+                    time.copy_from_slice(&data[48..64]);
+                    (None, None, Some(std::mem::take(&mut hash)), Some(time))
+                }
+                SignatureListKind::X509TbsSha384 if data.len() == 80 => {
+                    let hash = data[16..64].to_vec();
+                    let mut time = [0u8; 16];
+                    time.copy_from_slice(&data[64..80]);
+                    (None, None, Some(hash), Some(time))
+                }
+                SignatureListKind::X509TbsSha512 if data.len() == 96 => {
+                    let hash = data[16..80].to_vec();
+                    let mut time = [0u8; 16];
+                    time.copy_from_slice(&data[80..96]);
+                    (None, None, Some(hash), Some(time))
+                }
+                SignatureListKind::Unsupported => (None, None, None, None),
+                SignatureListKind::Sha256ImageHash
+                | SignatureListKind::X509Certificate
+                | SignatureListKind::X509TbsSha256
+                | SignatureListKind::X509TbsSha384
+                | SignatureListKind::X509TbsSha512 => {
+                    return Err("EFI signature record has an invalid SignatureSize".into())
                 }
             };
             records.push(SignatureDatabaseRecord {
@@ -222,6 +270,8 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
                 owner,
                 image_sha256,
                 certificate_der_blake3,
+                certificate_tbs_hash,
+                revocation_time,
             });
         }
         cursor = list_end;
@@ -234,6 +284,7 @@ pub fn match_secure_boot_databases(
     dbx_payload: &[u8],
     image_sha256: [u8; 32],
     signer_certificate_der: Option<&[u8]>,
+    signer_certificate_tbs_hashes: &[Vec<u8>],
 ) -> Result<SignatureDatabaseMatchEvidence, String> {
     let db_records = parse_signature_database(db_payload)?;
     let dbx_records = parse_signature_database(dbx_payload)?;
@@ -243,6 +294,12 @@ pub fn match_secure_boot_databases(
         direct_dbx_image_hash_match: dbx_records.iter().any(|record| record.image_sha256 == Some(image_sha256)),
         exact_certificate_in_db: signer_digest.is_some_and(|digest| db_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
         exact_certificate_in_dbx: signer_digest.is_some_and(|digest| dbx_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
+        exact_certificate_tbs_hash_in_db: db_records.iter().any(|record| {
+            record.certificate_tbs_hash.as_ref().is_some_and(|hash| signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash))
+        }),
+        exact_certificate_tbs_hash_in_dbx: dbx_records.iter().any(|record| {
+            record.certificate_tbs_hash.as_ref().is_some_and(|hash| signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash))
+        }),
         db_records,
         dbx_records,
         image_sha256,
@@ -267,10 +324,10 @@ pub fn derive_direct_trust_disposition(
     if evidence.direct_db_image_hash_match {
         return DirectTrustDisposition::AuthorizedByImageHash;
     }
-    if evidence.exact_certificate_in_dbx {
+    if evidence.exact_certificate_in_dbx || evidence.exact_certificate_tbs_hash_in_dbx {
         return DirectTrustDisposition::ExactCertificateInDbx;
     }
-    if evidence.exact_certificate_in_db {
+    if evidence.exact_certificate_in_db || evidence.exact_certificate_tbs_hash_in_db {
         return DirectTrustDisposition::ExactCertificateInDb;
     }
     if evidence.db_records.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
@@ -413,7 +470,7 @@ mod tests {
         payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
         payload[24..28].copy_from_slice(&48u32.to_le_bytes());
         payload[44..76].copy_from_slice(&image_hash);
-        let evidence = match_secure_boot_databases(&payload, &payload, image_hash, None).expect("database matcher");
+        let evidence = match_secure_boot_databases(&payload, &payload, image_hash, None, &[]).expect("database matcher");
         assert!(evidence.direct_db_image_hash_match);
         assert!(evidence.direct_dbx_image_hash_match);
         assert_eq!(evidence.certificate_chain_authorization, None);
@@ -433,7 +490,7 @@ mod tests {
         let image_hash = [7u8; 32];
         let db = make_sha256_signature_list(image_hash);
         let dbx = make_sha256_signature_list(image_hash);
-        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None)
+        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
@@ -449,7 +506,7 @@ mod tests {
         let mut dbx = vec![0u8; 28 + 16];
         dbx[16..20].copy_from_slice(&(44u32).to_le_bytes());
         dbx[24..28].copy_from_slice(&16u32.to_le_bytes());
-        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None)
+        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
@@ -459,7 +516,7 @@ mod tests {
     fn db_image_hash_is_authorizing_only_without_dbx_veto() {
         let image_hash = [8u8; 32];
         let db = make_sha256_signature_list(image_hash);
-        let evidence = match_secure_boot_databases(&db, &[], image_hash, None)
+        let evidence = match_secure_boot_databases(&db, &[], image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
