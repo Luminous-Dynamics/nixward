@@ -179,6 +179,7 @@ impl HostExecutionPolicy {
 /// observation through profile mutation, activation, verification, and any
 /// bound recovery. It is separate from Nix's own profile lock because Nix
 /// releases its profile lock before the immutable closure is invoked.
+#[derive(Debug)]
 struct NixwardTransactionInterlock {
     file: File,
 }
