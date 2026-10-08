@@ -15,7 +15,7 @@ use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v1\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v2\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -270,8 +270,28 @@ impl FrozenConfigSource {
             .map_err(|_| "config entrypoint escapes source root".to_string())?;
 
         let mut manifest = Vec::new();
-        Self::walk(&root, &root, &mut manifest)?;
+        #[cfg(unix)]
+        {
+            let mut root_dir = Self::open_source_root(&root)?;
+            Self::walk_descriptor_bound(&mut root_dir, Path::new(""), &mut manifest)?;
+            let after_root = Self::fstat_directory(&root_dir, &root)?;
+            if !Self::directory_stat_stable(&root_dir.1, &after_root) {
+                return Err("config source root changed while being snapshotted".into());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self::walk_portable(&root, &root, &mut manifest)?;
+        }
         manifest.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+
+        let relative_entrypoint_string = relative_entrypoint.to_string_lossy().replace('\\', "/");
+        if !manifest.iter().any(|entry| {
+            entry.relative_path == relative_entrypoint_string
+                && matches!(entry.kind, SourceEntryKind::File)
+        }) {
+            return Err("config entrypoint is not a regular file in the frozen source tree".into());
+        }
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(SOURCE_DOMAIN);
@@ -294,7 +314,12 @@ impl FrozenConfigSource {
         })
     }
 
-    fn walk(root: &Path, current: &Path, manifest: &mut Vec<SourceManifestEntry>) -> Result<(), String> {
+    #[cfg(not(unix))]
+    fn walk_portable(
+        root: &Path,
+        current: &Path,
+        manifest: &mut Vec<SourceManifestEntry>,
+    ) -> Result<(), String> {
         let entries = std::fs::read_dir(current)
             .map_err(|error| format!("failed to enumerate {}: {error}", current.display()))?;
 
@@ -335,7 +360,7 @@ impl FrozenConfigSource {
                     size: 0,
                     digest: digest_hex(&digest),
                 });
-                Self::walk(root, &path, manifest)?;
+                Self::walk_portable(root, &path, manifest)?;
             } else if metadata.is_file() {
                 let bytes = super::secure_boot_signature::read_regular_file_no_follow_stable(
                     &path,
@@ -359,6 +384,324 @@ impl FrozenConfigSource {
                 return Err(format!("unsupported filesystem object {} in source tree", path.display()));
             }
         }
+        Ok(())
+    }
+
+
+    #[cfg(unix)]
+    fn source_directory_names(
+        dir: &mut nix::dir::Dir,
+    ) -> Result<Vec<std::ffi::CString>, String> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut names = Vec::new();
+        for result in dir.iter() {
+            let entry = result.map_err(|error| format!("failed to read source directory entry: {error}"))?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let name = CString::new(bytes)
+                .map_err(|_| "source directory entry contains an embedded NUL".to_string())?;
+            names.push(name);
+        }
+        names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        Ok(names)
+    }
+
+    #[cfg(unix)]
+    fn same_stat(before: &nix::sys::stat::FileStat, after: &nix::sys::stat::FileStat) -> bool {
+        before.st_dev == after.st_dev
+            && before.st_ino == after.st_ino
+            && before.st_mode == after.st_mode
+            && before.st_size == after.st_size
+            && before.st_mtime == after.st_mtime
+            && before.st_mtime_nsec == after.st_mtime_nsec
+            && before.st_ctime == after.st_ctime
+            && before.st_ctime_nsec == after.st_ctime_nsec
+    }
+
+    #[cfg(unix)]
+    fn directory_stat_stable(
+        before: &nix::sys::stat::FileStat,
+        after: &nix::sys::stat::FileStat,
+    ) -> bool {
+        Self::same_stat(before, after)
+    }
+
+    #[cfg(unix)]
+    fn fstat_directory(
+        dir: &nix::dir::Dir,
+        display: &Path,
+    ) -> Result<nix::sys::stat::FileStat, String> {
+        use std::os::fd::AsRawFd;
+        nix::sys::stat::fstat(dir.as_raw_fd())
+            .map_err(|error| format!("failed to inspect source directory {}: {error}", display.display()))
+    }
+
+    #[cfg(unix)]
+    fn open_source_root(
+        root: &Path,
+    ) -> Result<(nix::dir::Dir, nix::sys::stat::FileStat), String> {
+        use std::os::fd::AsRawFd;
+
+        let expected = std::fs::symlink_metadata(root)
+            .map_err(|error| format!("failed to inspect config source root: {error}"))?;
+        if !expected.is_dir() {
+            return Err("config source root must be a directory".into());
+        }
+
+        let dir = nix::dir::Dir::open(
+            root,
+            nix::fcntl::OFlag::O_RDONLY
+                | nix::fcntl::OFlag::O_DIRECTORY
+                | nix::fcntl::OFlag::O_NOFOLLOW
+                | nix::fcntl::OFlag::O_CLOEXEC,
+            nix::sys::stat::Mode::empty(),
+        )
+        .map_err(|error| format!("failed to securely open config source root: {error}"))?;
+        let observed = nix::sys::stat::fstat(dir.as_raw_fd())
+            .map_err(|error| format!("failed to inspect opened config source root: {error}"))?;
+
+        let expected_mode = expected.mode();
+        if expected.dev() != observed.st_dev
+            || expected.ino() != observed.st_ino
+            || expected_mode != (observed.st_mode & 0o7777) as u32
+        {
+            return Err("config source root changed during descriptor acquisition".into());
+        }
+
+        Ok((dir, observed))
+    }
+
+    #[cfg(unix)]
+    fn walk_descriptor_bound(
+        dir: &mut nix::dir::Dir,
+        relative: &Path,
+        manifest: &mut Vec<SourceManifestEntry>,
+    ) -> Result<(), String> {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        use nix::dir::Dir;
+        use nix::errno::Errno;
+        use nix::fcntl::{openat, OFlag};
+        use nix::sys::stat::{fstat, Mode, SFlag};
+        use nix::unistd::{close, read};
+
+        let names = Self::source_directory_names(dir)?;
+
+        for name in &names {
+            let filename = OsStr::from_bytes(name.as_bytes());
+            let child_relative = relative.join(filename);
+            let display_path = Path::new(name.as_c_str().to_string_lossy().as_ref());
+
+            match Dir::openat(
+                dir.as_raw_fd(),
+                name.as_c_str(),
+                OFlag::O_RDONLY
+                    | OFlag::O_DIRECTORY
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(mut child_dir) => {
+                    let before = fstat(child_dir.as_raw_fd()).map_err(|error| {
+                        format!("failed to inspect source directory {}: {error}", child_relative.display())
+                    })?;
+                    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR) {
+                        return Err(format!("source directory {} is not a directory", child_relative.display()));
+                    }
+
+                    let relative_path = child_relative.to_string_lossy().replace('\\', "/");
+                    let mode = (before.st_mode & 0o7777) as u32;
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(ENTRY_DOMAIN);
+                    hasher.update(b"dir\0");
+                    hasher.update(relative_path.as_bytes());
+                    hasher.update(&mode.to_le_bytes());
+                    let digest = *hasher.finalize().as_bytes();
+                    manifest.push(SourceManifestEntry {
+                        relative_path,
+                        kind: SourceEntryKind::Directory,
+                        mode,
+                        size: 0,
+                        digest: digest_hex(&digest),
+                    });
+
+                    Self::walk_descriptor_bound(&mut child_dir, &child_relative, manifest)?;
+
+                    let after = fstat(child_dir.as_raw_fd()).map_err(|error| {
+                        format!("failed to re-inspect source directory {}: {error}", child_relative.display())
+                    })?;
+                    if !Self::directory_stat_stable(&before, &after) {
+                        return Err(format!(
+                            "source directory {} changed while being snapshotted",
+                            child_relative.display()
+                        ));
+                    }
+
+                    let current_names = Self::source_directory_names(&mut child_dir)?;
+                    let expected_names = Self::source_directory_names(&mut child_dir)?;
+                    if current_names != expected_names {
+                        return Err(format!(
+                            "source directory {} changed during enumeration",
+                            child_relative.display()
+                        ));
+                    }
+
+                    let reopened = Dir::openat(
+                        dir.as_raw_fd(),
+                        name.as_c_str(),
+                        OFlag::O_RDONLY
+                            | OFlag::O_DIRECTORY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "source directory {} disappeared or changed after traversal: {error}",
+                            child_relative.display()
+                        )
+                    })?;
+                    let reopened_stat = fstat(reopened.as_raw_fd()).map_err(|error| {
+                        format!("failed to inspect reopened source directory {}: {error}", child_relative.display())
+                    })?;
+                    if !Self::same_stat(&before, &reopened_stat) {
+                        return Err(format!(
+                            "source directory {} was replaced during snapshot",
+                            child_relative.display()
+                        ));
+                    }
+                }
+                Err(Errno::ENOTDIR) => {
+                    let fd = openat(
+                        dir.as_raw_fd(),
+                        name.as_c_str(),
+                        OFlag::O_RDONLY
+                            | OFlag::O_NONBLOCK
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| {
+                        format!("failed to securely open source file {}: {error}", child_relative.display())
+                    })?;
+                    let before = fstat(fd).map_err(|error| {
+                        let _ = close(fd);
+                        format!("failed to inspect source file {}: {error}", child_relative.display())
+                    })?;
+                    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFREG) {
+                        let _ = close(fd);
+                        return Err(format!("unsupported filesystem object {} in source tree", child_relative.display()));
+                    }
+
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 8192];
+                    loop {
+                        match read(fd, &mut buffer) {
+                            Ok(0) => break,
+                            Ok(len) => bytes.extend_from_slice(&buffer[..len]),
+                            Err(Errno::EINTR) => continue,
+                            Err(error) => {
+                                let _ = close(fd);
+                                return Err(format!("failed to read source file {}: {error}", child_relative.display()));
+                            }
+                        }
+                    }
+                    let after = fstat(fd).map_err(|error| {
+                        let _ = close(fd);
+                        format!("failed to re-inspect source file {}: {error}", child_relative.display())
+                    })?;
+                    let close_result = close(fd);
+                    if !Self::same_stat(&before, &after) {
+                        return Err(format!(
+                            "source file {} changed while being snapshotted",
+                            child_relative.display()
+                        ));
+                    }
+                    close_result.map_err(|error| {
+                        format!("failed to close source file {} after snapshot: {error}", child_relative.display())
+                    })?;
+
+                    let relative_path = child_relative.to_string_lossy().replace('\\', "/");
+                    let mode = (before.st_mode & 0o7777) as u32;
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(ENTRY_DOMAIN);
+                    hasher.update(relative_path.as_bytes());
+                    hasher.update(&[0]);
+                    hasher.update(&mode.to_le_bytes());
+                    hasher.update(&(bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                    manifest.push(SourceManifestEntry {
+                        relative_path,
+                        kind: SourceEntryKind::File,
+                        mode,
+                        size: bytes.len() as u64,
+                        digest: digest_hex(&hasher.finalize().as_bytes()),
+                    });
+
+                    let reopened = openat(
+                        dir.as_raw_fd(),
+                        name.as_c_str(),
+                        OFlag::O_RDONLY
+                            | OFlag::O_NONBLOCK
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "source file {} disappeared or changed after traversal: {error}",
+                            child_relative.display()
+                        )
+                    })?;
+                    let reopened_stat = fstat(reopened).map_err(|error| {
+                        let _ = close(reopened);
+                        format!("failed to inspect reopened source file {}: {error}", child_relative.display())
+                    })?;
+                    let close_reopened = close(reopened);
+                    if !Self::same_stat(&before, &reopened_stat) {
+                        return Err(format!(
+                            "source file {} was replaced during snapshot",
+                            child_relative.display()
+                        ));
+                    }
+                    close_reopened.map_err(|error| {
+                        format!("failed to close reopened source file {}: {error}", child_relative.display())
+                    })?;
+                }
+                Err(Errno::ELOOP) => {
+                    return Err(format!(
+                        "symbolic link {} is not admissible in a frozen source tree",
+                        child_relative.display()
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "failed to inspect source entry {}: {error}",
+                        child_relative.display()
+                    ));
+                }
+            }
+        }
+
+        let after_names = Self::source_directory_names(dir)?;
+        if names != after_names {
+            return Err(format!(
+                "source directory {} changed while being snapshotted",
+                if relative.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    relative
+                }
+                .display()
+            ));
+        }
+
         Ok(())
     }
 
