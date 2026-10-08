@@ -810,8 +810,7 @@ impl ConfigWriter {
 
         Ok(())
     }
-
-
+}
 
 impl Default for ConfigWriter {
     fn default() -> Self {
