@@ -62,6 +62,12 @@ pub enum RecoveryObservation {
         runtime_closure: String,
         profile_closure: String,
     },
+    /// For `boot`, the selected system profile is proven while the current
+    /// running closure is expected to remain the predecessor until reboot.
+    BootCandidateProven {
+        runtime_closure: String,
+        profile_closure: String,
+    },
     MixedOrUnknown {
         runtime_closure: Option<String>,
         profile_closure: Option<String>,
@@ -103,37 +109,34 @@ pub fn classify_activation_post_state(
     action: SystemActivation,
 ) -> ActivationDisposition {
     let observation = match (observed_runtime, observed_profile) {
-        (Some(runtime), Some(profile)) => {
-            let candidate = runtime == candidate_runtime && profile == candidate_profile;
-            let predecessor = match action {
-                SystemActivation::Boot => {
-                    runtime == predecessor_runtime
-                        && (profile == predecessor_profile || profile == candidate_profile)
-                }
-                SystemActivation::Switch | SystemActivation::Test => {
-                    runtime == predecessor_runtime
-                        && (profile == predecessor_profile || profile == candidate_profile)
-                }
-            };
-
-            if candidate {
-                RecoveryObservation::CandidateProvenActive {
-                    runtime_closure: runtime.to_string(),
-                    profile_closure: profile.to_string(),
-                }
-            } else if predecessor {
-                RecoveryObservation::PredecessorProvenActive {
-                    runtime_closure: runtime.to_string(),
-                    profile_closure: profile.to_string(),
-                }
-            } else {
-                RecoveryObservation::MixedOrUnknown {
-                    runtime_closure: Some(runtime.to_string()),
-                    profile_closure: Some(profile.to_string()),
-                    reason: "observed runtime/profile pair is outside the transaction state set".into(),
+        (Some(runtime), Some(profile)) => match action {
+            SystemActivation::Switch | SystemActivation::Test => {
+                if runtime == candidate_runtime && profile == candidate_profile {
+                    RecoveryObservation::CandidateProvenActive { runtime_closure: runtime.to_string(), profile_closure: profile.to_string() }
+                } else if runtime == predecessor_runtime && (profile == predecessor_profile || profile == candidate_profile) {
+                    RecoveryObservation::PredecessorProvenActive { runtime_closure: runtime.to_string(), profile_closure: profile.to_string() }
+                } else {
+                    RecoveryObservation::MixedOrUnknown {
+                        runtime_closure: Some(runtime.to_string()),
+                        profile_closure: Some(profile.to_string()),
+                        reason: "observed runtime/profile pair is outside the transaction state set".into(),
+                    }
                 }
             }
-        }
+            SystemActivation::Boot => {
+                if runtime == predecessor_runtime && profile == candidate_profile {
+                    RecoveryObservation::BootCandidateProven { runtime_closure: runtime.to_string(), profile_closure: profile.to_string() }
+                } else if runtime == predecessor_runtime && profile == predecessor_profile {
+                    RecoveryObservation::PredecessorProvenActive { runtime_closure: runtime.to_string(), profile_closure: profile.to_string() }
+                } else {
+                    RecoveryObservation::MixedOrUnknown {
+                        runtime_closure: Some(runtime.to_string()),
+                        profile_closure: Some(profile.to_string()),
+                        reason: "boot activation observed an unexpected runtime/profile pair".into(),
+                    }
+                }
+            }
+        },
         (runtime, profile) => RecoveryObservation::MixedOrUnknown {
             runtime_closure: runtime.map(str::to_string),
             profile_closure: profile.map(str::to_string),
@@ -142,36 +145,16 @@ pub fn classify_activation_post_state(
     };
 
     match (&observation, activation_started) {
-        (RecoveryObservation::CandidateProvenActive { .. }, _) => {
-            ActivationDisposition::Activated {
-                process_exit_status,
-                observation,
-            }
-        }
-        (RecoveryObservation::PredecessorProvenActive { .. }, false) => {
-            ActivationDisposition::FailedBeforeActivation {
-                process_exit_status,
-                reason: "activation did not begin and predecessor state remains proven active".into(),
-            }
-        }
-        (RecoveryObservation::PredecessorProvenActive { .. }, true) => {
-            ActivationDisposition::IndeterminateActivation {
-                process_exit_status,
-                observation,
-            }
-        }
-        (RecoveryObservation::MixedOrUnknown { .. }, false) => {
-            ActivationDisposition::FailedBeforeActivation {
-                process_exit_status,
-                reason: "activation was not started".into(),
-            }
-        }
-        (RecoveryObservation::MixedOrUnknown { .. }, true) => {
-            ActivationDisposition::RecoveryRequired {
-                process_exit_status,
-                observation,
-            }
-        }
+        (RecoveryObservation::CandidateProvenActive { .. } | RecoveryObservation::BootCandidateProven { .. }, _) =>
+            ActivationDisposition::Activated { process_exit_status, observation },
+        (RecoveryObservation::PredecessorProvenActive { .. }, false) =>
+            ActivationDisposition::FailedBeforeActivation { process_exit_status, reason: "activation did not begin and predecessor state remains proven active".into() },
+        (RecoveryObservation::PredecessorProvenActive { .. }, true) =>
+            ActivationDisposition::IndeterminateActivation { process_exit_status, observation },
+        (RecoveryObservation::MixedOrUnknown { .. }, false) =>
+            ActivationDisposition::FailedBeforeActivation { process_exit_status, reason: "activation was not started".into() },
+        (RecoveryObservation::MixedOrUnknown { .. }, true) =>
+            ActivationDisposition::RecoveryRequired { process_exit_status, observation },
     }
 }
 
@@ -568,6 +551,28 @@ mod tests {
             result,
             ActivationDisposition::IndeterminateActivation {
                 observation: RecoveryObservation::PredecessorProvenActive { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn boot_candidate_is_profile_proven_not_runtime_candidate() {
+        let result = classify_activation_post_state(
+            true,
+            Some(1),
+            Some(PREDECESSOR),
+            Some(CANDIDATE_PROFILE),
+            CANDIDATE,
+            CANDIDATE_PROFILE,
+            PREDECESSOR,
+            PREDECESSOR_PROFILE,
+            SystemActivation::Boot,
+        );
+        assert!(matches!(
+            result,
+            ActivationDisposition::Activated {
+                observation: RecoveryObservation::BootCandidateProven { .. },
                 ..
             }
         ));
