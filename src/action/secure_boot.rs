@@ -48,6 +48,9 @@ pub struct SignatureDatabaseMatchEvidence {
     pub exact_certificate_in_dbx: bool,
     pub exact_certificate_tbs_hash_in_db: bool,
     pub exact_certificate_tbs_hash_in_dbx: bool,
+    /// Exact dbx TBS revocation time associated with the matched signer-chain
+    /// TBS hash, when such a match was established.
+    pub matched_dbx_tbs_revocation_time: Option<[u8; 16]>,
     pub certificate_chain_authorization: Option<bool>,
     pub observed_at_ms: Option<u64>,
     pub evidence_digest: Option<[u8; 32]>,
@@ -65,6 +68,7 @@ impl SignatureDatabaseMatchEvidence {
             self.exact_certificate_in_dbx,
             self.exact_certificate_tbs_hash_in_db,
             self.exact_certificate_tbs_hash_in_dbx,
+            self.matched_dbx_tbs_revocation_time,
             self.certificate_chain_authorization,
             observed_at_ms,
         ))
@@ -349,6 +353,14 @@ pub fn match_secure_boot_databases(
     let db_records = parse_signature_database(db_payload)?;
     let dbx_records = parse_signature_database(dbx_payload)?;
     let signer_digest = signer_certificate_der.map(|bytes| *blake3::hash(bytes).as_bytes());
+    let matched_dbx_tbs_revocation_time = dbx_records.iter().find_map(|record| {
+        let hash = record.certificate_tbs_hash.as_ref()?;
+        if signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash) {
+            record.revocation_time
+        } else {
+            None
+        }
+    });
     Ok(SignatureDatabaseMatchEvidence {
         direct_db_authenticode_hash_match: db_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
         direct_dbx_authenticode_hash_match: dbx_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
@@ -357,9 +369,11 @@ pub fn match_secure_boot_databases(
         exact_certificate_tbs_hash_in_db: db_records.iter().any(|record| {
             record.certificate_tbs_hash.as_ref().is_some_and(|hash| signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash))
         }),
-        exact_certificate_tbs_hash_in_dbx: dbx_records.iter().any(|record| {
-            record.certificate_tbs_hash.as_ref().is_some_and(|hash| signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash))
-        }),
+        exact_certificate_tbs_hash_in_dbx: matched_dbx_tbs_revocation_time.is_some()
+            || dbx_records.iter().any(|record| {
+                record.certificate_tbs_hash.as_ref().is_some_and(|hash| signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash))
+            }),
+        matched_dbx_tbs_revocation_time,
         db_records,
         dbx_records,
         image_authenticode_sha256,
@@ -405,6 +419,9 @@ pub fn derive_direct_trust_disposition(
         return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     if evidence.exact_certificate_tbs_hash_in_dbx {
+        if evidence.matched_dbx_tbs_revocation_time == Some([0; 16]) {
+            return DirectTrustDisposition::ForbiddenByDbxTbsRevocation;
+        }
         return DirectTrustDisposition::PotentialX509TbsRevocation;
     }
     if evidence.direct_db_authenticode_hash_match {
