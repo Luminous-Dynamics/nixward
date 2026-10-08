@@ -28,6 +28,9 @@ pub enum ConfigTransactionPhase {
     InputFrozen,
     CandidateBuilt,
     SourceCommitted,
+    ProfileTransitionStarted,
+    ProfileCommitted,
+    IndeterminateProfileTransition,
     ActivationStarted,
     Activated,
     FailedBeforeActivation,
@@ -406,70 +409,108 @@ impl ConfigTransaction {
         }
     }
 
-    pub fn phase(&self) -> ConfigTransactionPhase {
-        self.phase
-    }
+    pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
+    pub fn source_digest(&self) -> &str { &self.source_digest }
+    pub fn transaction_id(&self) -> &str { &self.transaction_id }
+    pub fn candidate_store_path(&self) -> Option<&str> { self.candidate_store_path.as_deref() }
 
-    pub fn source_digest(&self) -> &str {
-        &self.source_digest
-    }
+    pub fn permits_source_rollback(&self) -> bool { self.phase.permits_source_rollback() }
 
-    pub fn transaction_id(&self) -> &str {
-        &self.transaction_id
-    }
-
-    pub fn candidate_store_path(&self) -> Option<&str> {
-        self.candidate_store_path.as_deref()
-    }
-
-    /// Advance only along the transaction's declared state graph.
     pub fn advance(&mut self, next: ConfigTransactionPhase) -> Result<(), String> {
         let allowed = match (self.phase, next) {
             (ConfigTransactionPhase::Prepared, ConfigTransactionPhase::InputFrozen) => true,
-            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => true,
-            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => true,
-            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ActivationStarted) => true,
-            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::Activated) => true,
-            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::FailedBeforeActivation) => false,
-            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::IndeterminateActivation) => true,
-            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => true,
-            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::RecoveryRequired) => true,
-            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::Recovered) => true,
-            (ConfigTransactionPhase::RecoveryRequired, ConfigTransactionPhase::Recovered) => true,
+            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => self.candidate_store_path.is_some(),
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_store_path.is_some(),
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ProfileTransitionStarted) => self.candidate_store_path.is_some(),
             (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            (ConfigTransactionPhase::ProfileTransitionStarted, ConfigTransactionPhase::ProfileCommitted) => true,
+            (ConfigTransactionPhase::ProfileTransitionStarted, ConfigTransactionPhase::IndeterminateProfileTransition) => true,
+            (ConfigTransactionPhase::ProfileCommitted, ConfigTransactionPhase::ActivationStarted) => true,
+            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::Activated) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::IndeterminateActivation) => true,
+            (ConfigTransactionPhase::IndeterminateProfileTransition, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => self.observed_runtime_closure.is_some() || self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::RecoveryRequired) => true,
+            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::Recovered) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
+            (ConfigTransactionPhase::RecoveryRequired, ConfigTransactionPhase::Recovered) => self.observed_runtime_closure.is_some() && self.observed_profile_closure.is_some(),
             _ => false,
         };
         if !allowed {
-            return Err(format!(
-                "illegal config transaction transition: {:?} -> {:?}",
-                self.phase, next
-            ));
+            return Err(format!("illegal config transaction transition: {:?} -> {:?}", self.phase, next));
         }
         self.phase = next;
         Ok(())
     }
 
-    pub fn set_candidate_store_path(
+    pub fn record_process_exit_status(&mut self, status: Option<i32>) -> Result<(), String> {
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::Recovered
+        ) {
+            return Err("activation process status cannot be recorded outside activation/recovery".into());
+        }
+        self.process_exit_status = status;
+        Ok(())
+    }
+
+    pub fn record_observation(
         &mut self,
-        candidate_store_path: impl Into<String>,
+        runtime_closure: Option<String>,
+        profile_closure: Option<String>,
     ) -> Result<(), String> {
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::Recovered
+        ) {
+            return Err("runtime/profile observation belongs to an indeterminate activation or recovery phase".into());
+        }
+        self.observed_runtime_closure = runtime_closure;
+        self.observed_profile_closure = profile_closure;
+        Ok(())
+    }
+
+    pub fn record_profile_transition(
+        &mut self,
+        disposition: &ProfileTransitionDisposition,
+    ) -> Result<(), String> {
+        if self.phase != ConfigTransactionPhase::ProfileTransitionStarted {
+            return Err("profile transition evidence must be recorded from ProfileTransitionStarted".into());
+        }
+        match disposition {
+            ProfileTransitionDisposition::Committed { process_exit_status, observed_profile } => {
+                self.process_exit_status = *process_exit_status;
+                self.observed_profile_closure = Some(observed_profile.clone());
+                self.advance(ConfigTransactionPhase::ProfileCommitted)
+            }
+            ProfileTransitionDisposition::Indeterminate { process_exit_status, observed_profile, .. } => {
+                self.process_exit_status = *process_exit_status;
+                self.observed_profile_closure = observed_profile.clone();
+                self.advance(ConfigTransactionPhase::IndeterminateProfileTransition)
+            }
+        }
+    }
+
+    pub fn set_candidate_store_path(&mut self, candidate_store_path: impl Into<String>) -> Result<(), String> {
         let path = candidate_store_path.into();
         if !super::execution_intent::is_valid_nix_store_path(&path) {
             return Err("candidate store path is not a canonical immutable Nix store path".into());
         }
-        if !matches!(
-            self.phase,
-            ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt
-        ) {
+        if !matches!(self.phase, ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt) {
             return Err("candidate store path can only be bound before source commit".into());
         }
         if let Some(existing) = &self.candidate_store_path {
             if existing != &path {
-                return Err(
-                    "candidate store identity is immutable once bound; refusing replacement".into(),
-                );
+                return Err("candidate store identity is immutable once bound; refusing replacement".into());
             }
             return Ok(());
         }
@@ -477,30 +518,13 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Persist the journal record without exposing a partially written JSON object.
-    ///
-    /// The journal is evidence of transaction intent/state, not an authorization
-    /// capability. A crash-restarted daemon must re-observe live state before
-    /// taking any recovery action.
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let parent = path
-            .parent()
-            .ok_or_else(|| "transaction journal path has no parent".to_string())?;
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create transaction journal directory: {error}"))?;
-
-        let encoded = serde_json::to_vec_pretty(self)
-            .map_err(|error| format!("failed to serialize transaction journal: {error}"))?;
-        let temp_name = format!(
-            ".{}.tmp-{}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| "transaction journal filename is invalid UTF-8".to_string())?,
-            std::process::id()
-        );
-        let temp_path = parent.join(temp_name);
-
+        let parent = path.parent().ok_or_else(|| "transaction journal path has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("failed to create transaction journal directory: {error}"))?;
+        let encoded = serde_json::to_vec_pretty(self).map_err(|error| format!("failed to serialize transaction journal: {error}"))?;
+        let filename = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| "transaction journal filename is invalid UTF-8".to_string())?;
+        let temp_path = parent.join(format!(".{filename}.tmp-{}", std::process::id()));
         {
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
@@ -509,37 +533,27 @@ impl ConfigTransaction {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            let mut file = options.open(&temp_path)
-                .map_err(|error| format!("failed to create transaction journal candidate: {error}"))?;
-            file.write_all(&encoded)
-                .map_err(|error| format!("failed to write transaction journal candidate: {error}"))?;
-            file.sync_all()
-                .map_err(|error| format!("failed to sync transaction journal candidate: {error}"))?;
+            let mut file = options.open(&temp_path).map_err(|error| format!("failed to create transaction journal candidate: {error}"))?;
+            file.write_all(&encoded).map_err(|error| format!("failed to write transaction journal candidate: {error}"))?;
+            file.sync_all().map_err(|error| format!("failed to sync transaction journal candidate: {error}"))?;
         }
-
-        std::fs::rename(&temp_path, path)
-            .map_err(|error| format!("failed to commit transaction journal: {error}"))?;
-        let parent_dir = std::fs::File::open(parent)
-            .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
-        parent_dir
-            .sync_all()
-            .map_err(|error| format!("failed to sync transaction journal directory: {error}"))?;
+        if let Err(error) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(format!("failed to commit transaction journal: {error}"));
+        }
+        let parent_dir = std::fs::File::open(parent).map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
+        parent_dir.sync_all().map_err(|error| format!("failed to sync transaction journal directory: {error}"))?;
         Ok(())
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
-        let encoded = std::fs::read(path.as_ref())
-            .map_err(|error| format!("failed to read transaction journal: {error}"))?;
-        let transaction: Self = serde_json::from_slice(&encoded)
-            .map_err(|error| format!("invalid transaction journal: {error}"))?;
-
+        let encoded = std::fs::read(path.as_ref()).map_err(|error| format!("failed to read transaction journal: {error}"))?;
+        let transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
         if transaction.schema != Self::SCHEMA || transaction.version != Self::VERSION {
             return Err("transaction journal schema/version mismatch".into());
         }
-        decode_digest(&transaction.transaction_id)
-            .map_err(|_| "transaction journal has an invalid transaction id".to_string())?;
-        decode_digest(&transaction.source_digest)
-            .map_err(|_| "transaction journal has an invalid source digest".to_string())?;
+        decode_digest(&transaction.transaction_id).map_err(|_| "transaction journal has an invalid transaction id".to_string())?;
+        decode_digest(&transaction.source_digest).map_err(|_| "transaction journal has an invalid source digest".to_string())?;
         if let Some(candidate) = transaction.candidate_store_path.as_deref() {
             if !super::execution_intent::is_valid_nix_store_path(candidate) {
                 return Err("transaction journal has an invalid candidate store path".into());
@@ -547,7 +561,7 @@ impl ConfigTransaction {
         }
         Ok(transaction)
     }
-
+}
 fn decode_digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
         return Err("digest must be 64 lowercase hexadecimal characters".into());
@@ -766,10 +780,25 @@ mod tests {
             .advance(ConfigTransactionPhase::InputFrozen)
             .unwrap();
         transaction
+            .set_candidate_store_path(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test",
+            )
+            .unwrap();
+        transaction
             .advance(ConfigTransactionPhase::CandidateBuilt)
             .unwrap();
         transaction
             .advance(ConfigTransactionPhase::SourceCommitted)
+            .unwrap();
+        transaction
+            .advance(ConfigTransactionPhase::ProfileTransitionStarted)
+            .unwrap();
+        transaction
+            .record_profile_transition(&ProfileTransitionDisposition::Committed {
+                process_exit_status: Some(0),
+                observed_profile:
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test".into(),
+            })
             .unwrap();
         transaction
             .advance(ConfigTransactionPhase::ActivationStarted)
@@ -779,6 +808,30 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn profile_transition_is_the_source_rollback_boundary() {
+        assert!(ConfigTransactionPhase::SourceCommitted.permits_source_rollback());
+        assert!(!ConfigTransactionPhase::ProfileTransitionStarted.permits_source_rollback());
+        assert!(!ConfigTransactionPhase::ProfileCommitted.permits_source_rollback());
+        assert!(!ConfigTransactionPhase::IndeterminateProfileTransition.permits_source_rollback());
+    }
+
+    #[test]
+    fn indeterminate_profile_cannot_activate() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        tx.set_candidate_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test").unwrap();
+        tx.advance(ConfigTransactionPhase::CandidateBuilt).unwrap();
+        tx.advance(ConfigTransactionPhase::SourceCommitted).unwrap();
+        tx.advance(ConfigTransactionPhase::ProfileTransitionStarted).unwrap();
+        tx.record_profile_transition(&ProfileTransitionDisposition::Indeterminate {
+            process_exit_status: Some(1),
+            observed_profile: None,
+            reason: "observation unavailable".into(),
+        }).unwrap();
+        assert!(tx.advance(ConfigTransactionPhase::ActivationStarted).is_err());
+        assert_eq!(tx.phase(), ConfigTransactionPhase::IndeterminateProfileTransition);
+    }
     #[test]
     fn transaction_journal_round_trips_atomically() {
         let dir = tempfile::tempdir().unwrap();
