@@ -784,10 +784,12 @@ pub struct NixSourceRealizer {
 
 #[cfg(feature = "native")]
 impl NixSourceRealizer {
-    pub fn new() -> Result<Self, String> {
-        let link = std::path::Path::new("/run/current-system/sw/bin/nix");
-        let canonical = std::fs::canonicalize(link)
-            .map_err(|error| format!("failed to resolve trusted Nix executable: {error}"))?;
+    fn verify_executable_identity_for_test(&self) -> Result<(), String> {
+        let canonical = std::path::Path::new(&self.nix_executable);
+        Self::validate_nix_executable_path(canonical)
+    }
+
+    fn validate_nix_executable_path(canonical: &std::path::Path) -> Result<(), String> {
         let value = canonical
             .to_str()
             .ok_or_else(|| "trusted Nix executable path is not valid UTF-8".to_string())?;
@@ -796,6 +798,22 @@ impl NixSourceRealizer {
         {
             return Err("trusted Nix executable did not resolve to an immutable Nix store executable".into());
         }
+        let metadata = std::fs::symlink_metadata(canonical)
+            .map_err(|error| format!("failed to inspect trusted Nix executable: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("trusted Nix executable is not a regular file".into());
+        }
+        Ok(())
+    }
+
+    pub fn new() -> Result<Self, String> {
+        let link = std::path::Path::new("/run/current-system/sw/bin/nix");
+        let canonical = std::fs::canonicalize(link)
+            .map_err(|error| format!("failed to resolve trusted Nix executable: {error}"))?;
+        let value = canonical
+            .to_str()
+            .ok_or_else(|| "trusted Nix executable path is not valid UTF-8".to_string())?;
+        Self::validate_nix_executable_path(&canonical)?;
         Ok(Self {
             nix_executable: value.to_string(),
         })
@@ -1269,6 +1287,9 @@ impl NixCandidateBuilder {
         if !super::execution_intent::is_valid_nix_store_path(expected_out_path) {
             return Err("candidate build expected output is not a canonical immutable Nix store path".into());
         }
+        if expected_out_path == lease.store_path {
+            return Err("candidate build output must differ from retained source realization".into());
+        }
         if decode_digest(realization_plan_digest).is_err() {
             return Err("candidate build realization-plan digest is invalid".into());
         }
@@ -1360,6 +1381,9 @@ impl CandidateBuildReceipt {
         }
         if !super::execution_intent::is_valid_nix_store_path(&candidate_store_path) {
             return Err("candidate build output is not a canonical immutable Nix store path".into());
+        }
+        if source_store_path == candidate_store_path {
+            return Err("candidate build output must differ from retained source realization".into());
         }
         if decode_digest(&realization_plan_digest).is_err() {
             return Err("candidate build realization-plan digest is invalid".into());
@@ -2303,6 +2327,17 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[test]
+    fn nix_source_realizer_requires_regular_nix_executable() {
+        let realizer = NixSourceRealizer {
+            nix_executable: "/tmp/not-nix".into(),
+        };
+        assert!(realizer
+            .verify_executable_identity_for_test()
+            .is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
     fn nix_source_realizer_parses_only_canonical_store_output() {
         let stdout = "warning: copied source\n/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-frozen-source-test\n";
         assert_eq!(
@@ -2525,6 +2560,25 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn candidate_build_receipt_rejects_same_source_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-same";
+        assert!(CandidateBuildReceipt::new(
+            &source,
+            path,
+            path,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .is_err());
+    }
+
     fn source_realization_lease_binds_digest_store_and_root() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
