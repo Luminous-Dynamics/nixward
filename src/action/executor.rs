@@ -16,7 +16,7 @@ use crate::traits::{ActionType, ConsciousnessThresholds, PhiAwareScoring};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -1585,12 +1585,384 @@ impl NixOSExecutor {
     }
 
     /// Execute an exact command under an evidence-bound capability.
+    const TRANSACTION_JOURNAL_ROOT: &'static str = "/var/lib/nixward/transactions";
+
+    fn transaction_journal_path(transaction_id: &str) -> Result<PathBuf, String> {
+        if transaction_id.len() != 64
+            || !transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err("transaction id must be 64 lowercase hexadecimal characters".into());
+        }
+        Ok(Path::new(Self::TRANSACTION_JOURNAL_ROOT)
+            .join(transaction_id)
+            .with_extension("json"))
+    }
+
+    fn validate_transaction_for_exact_activation(
+        transaction: &super::config_transaction::ConfigTransaction,
+        transaction_id: &str,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+    ) -> Result<(), String> {
+        if transaction.transaction_id() != transaction_id {
+            return Err("loaded transaction id does not match the requested transaction".into());
+        }
+        let authorization_plan = authorization
+            .change_plan_digest()
+            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
+        if transaction.plan_digest()? != authorization_plan {
+            return Err("loaded transaction plan digest does not match execution authorization".into());
+        }
+        let NixOSCommand::ActivateSystemClosure {
+            store_path,
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = command
+        else {
+            return Err("transaction journal binding requires exact system closure activation".into());
+        };
+        let receipt = transaction
+            .candidate_build()
+            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
+        if receipt.candidate_store_path != *store_path {
+            return Err("transaction candidate does not match activation closure".into());
+        }
+        if receipt.candidate_store_path != *profile_store_path {
+            return Err("transaction candidate does not match selected system profile".into());
+        }
+        if authorization.realization_plan_digest() != Some(
+            super::config_transaction::decode_digest_for_executor(&receipt.realization_plan_digest)?,
+        ) {
+            return Err("transaction realization-plan identity does not match authorization".into());
+        }
+        Ok(())
+    }
+
+    fn persist_transaction(
+        transaction: &super::config_transaction::ConfigTransaction,
+        path: &Path,
+    ) -> Result<(), String> {
+        transaction
+            .persist_atomic(path)
+            .map_err(|error| format!("durable transaction journal update failed: {error}"))
+    }
+
+    /// Execute an exact immutable system activation only through its durable
+    /// ConfigTransaction journal.
+    ///
+    /// The legacy exact-activation executor is intentionally refused. This
+    /// entry point persists every mutation-domain transition before allowing
+    /// the next irreversible step.
+    pub async fn execute_authorized_with_transaction(
+        &mut self,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+        transaction_id: impl AsRef<str>,
+        decision_quality: Option<f32>,
+    ) -> ExecutionResult {
+        if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            return ExecutionResult::Blocked {
+                reason: "transaction-aware execution is restricted to exact system closure activation".into(),
+                safety_level: command.safety_level(),
+            };
+        }
+        let transaction_id = transaction_id.as_ref();
+        let journal_path = match Self::transaction_journal_path(transaction_id) {
+            Ok(path) => path,
+            Err(reason) => {
+                return ExecutionResult::Blocked {
+                    reason,
+                    safety_level: command.safety_level(),
+                };
+            }
+        };
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return ExecutionResult::Blocked {
+                reason,
+                safety_level: command.safety_level(),
+            };
+        }
+        if let Err(reason) = authorization.validate_for(&command) {
+            return ExecutionResult::Blocked {
+                reason,
+                safety_level: command.safety_level(),
+            };
+        }
+
+        let _transaction_interlock = if !self.dry_run {
+            match NixwardTransactionInterlock::acquire() {
+                Ok(lock) => Some(lock),
+                Err(reason) => {
+                    return ExecutionResult::Blocked {
+                        reason,
+                        safety_level: command.safety_level(),
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut transaction =
+            match super::config_transaction::ConfigTransaction::load(&journal_path) {
+                Ok(transaction) => transaction,
+                Err(reason) => {
+                    return ExecutionResult::Blocked {
+                        reason: format!("exact activation requires a valid durable transaction journal: {reason}"),
+                        safety_level: command.safety_level(),
+                    };
+                }
+            };
+        if let Err(reason) = Self::validate_transaction_for_exact_activation(
+            &transaction,
+            transaction_id,
+            &command,
+            &authorization,
+        ) {
+            return ExecutionResult::Blocked {
+                reason,
+                safety_level: command.safety_level(),
+            };
+        }
+
+        if transaction.phase() != super::config_transaction::ConfigTransactionPhase::SourceCommitted {
+            return ExecutionResult::Blocked {
+                reason: format!(
+                    "transaction journal is at {:?}; exact activation requires SourceCommitted or an explicit recovery operation",
+                    transaction.phase()
+                ),
+                safety_level: command.safety_level(),
+            };
+        }
+
+        // Journal loads deliberately lose historical Rooted authority. Re-establish
+        // significance only if the current machine still proves the exact authorized
+        // predecessor runtime/profile, not merely because the journal said so.
+        if !transaction.recovery_observation_confirmed() {
+            let runtime = match GenerationManager::current_runtime_system_closure() {
+                Ok(value) => value,
+                Err(error) => {
+                    return ExecutionResult::Blocked {
+                        reason: format!("fresh runtime recovery observation failed: {error}"),
+                        safety_level: command.safety_level(),
+                    };
+                }
+            };
+            let profile = match GenerationManager::current_system_profile_closure() {
+                Ok(value) => value,
+                Err(error) => {
+                    return ExecutionResult::Blocked {
+                        reason: format!("fresh system-profile recovery observation failed: {error}"),
+                        safety_level: command.safety_level(),
+                    };
+                }
+            };
+            let Some(recovery_command) = authorization.recovery_command.as_ref() else {
+                return ExecutionResult::Blocked {
+                    reason: "exact activation authorization has no pre-bound predecessor recovery command".into(),
+                    safety_level: command.safety_level(),
+                };
+            };
+            let NixOSCommand::ActivateSystemClosure {
+                store_path: prior_runtime,
+                profile_store_path: Some(prior_profile),
+                ..
+            } = recovery_command
+            else {
+                return ExecutionResult::Blocked {
+                    reason: "pre-bound recovery command is not an exact system closure".into(),
+                    safety_level: command.safety_level(),
+                };
+            };
+            if runtime != *prior_runtime || profile != *prior_profile {
+                return ExecutionResult::Blocked {
+                    reason: format!(
+                        "fresh recovery observation did not prove predecessor state: runtime={runtime}, profile={profile}"
+                    ),
+                    safety_level: command.safety_level(),
+                };
+            }
+            let observation =
+                super::config_transaction::RecoveryObservation::PredecessorProvenActive {
+                    runtime_closure: runtime,
+                    profile_closure: profile,
+                };
+            if let Err(reason) =
+                transaction.confirm_recovery_observation_from_journal(
+                    super::config_transaction::ConfigTransactionPhase::SourceCommitted,
+                    &observation,
+                )
+            {
+                return ExecutionResult::Blocked {
+                    reason: format!("fresh journal recovery confirmation failed: {reason}"),
+                    safety_level: command.safety_level(),
+                };
+            }
+            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                return ExecutionResult::Blocked {
+                    reason,
+                    safety_level: command.safety_level(),
+                };
+            }
+        }
+
+        if let Err(reason) = transaction.advance(
+            super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted,
+        ) {
+            return ExecutionResult::Blocked {
+                reason: format!("cannot begin journaled system-profile transition: {reason}"),
+                safety_level: command.safety_level(),
+            };
+        }
+        if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+            return ExecutionResult::Blocked {
+                reason,
+                safety_level: command.safety_level(),
+            };
+        }
+
+        let profile_store_path = match &command {
+            NixOSCommand::ActivateSystemClosure {
+                profile_store_path: Some(value),
+                ..
+            } => value.clone(),
+            _ => unreachable!("validated exact activation command"),
+        };
+        match Self::set_exact_system_profile(&profile_store_path).await {
+            Ok(disposition) => {
+                if let Err(reason) = transaction.record_profile_transition(&disposition) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("profile transition evidence could not be journaled: {reason}"),
+                        rollback_error: None,
+                    };
+                }
+            }
+            Err(reason) => {
+                return ExecutionResult::FailedNoRollback {
+                    error: format!("system-profile transaction could not start: {reason}"),
+                    rollback_error: None,
+                };
+            }
+        }
+        if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+            return ExecutionResult::FailedNoRollback {
+                error: reason,
+                rollback_error: Some(
+                    "system profile transition occurred but its durable journal result was not persisted".into(),
+                ),
+            };
+        }
+
+        if transaction.phase()
+            != super::config_transaction::ConfigTransactionPhase::ProfileCommitted
+        {
+            return ExecutionResult::FailedNoRollback {
+                error: "system-profile post-state is indeterminate; activation was not started".into(),
+                rollback_error: None,
+            };
+        }
+
+        if let Err(reason) =
+            transaction.advance(super::config_transaction::ConfigTransactionPhase::ActivationStarted)
+        {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("cannot enter activation boundary: {reason}"),
+                rollback_error: None,
+            };
+        }
+        if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+            return ExecutionResult::FailedNoRollback {
+                error: reason,
+                rollback_error: Some(
+                    "profile state was committed but activation was intentionally not spawned".into(),
+                ),
+            };
+        }
+
+        let start = std::time::Instant::now();
+        let result = Self::run_bound_command(&command).await;
+        let elapsed = start.elapsed().as_millis() as u64;
+        let status = result.as_ref().ok().and_then(|output| output.status.code());
+
+        let runtime = GenerationManager::current_runtime_system_closure().ok();
+        let profile = GenerationManager::current_system_profile_closure().ok();
+
+        if let Err(reason) = transaction.record_activation_post_state(
+            status,
+            runtime.clone(),
+            profile.clone(),
+        ) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("activation post-state could not be recorded: {reason}"),
+                rollback_error: Some(
+                    "runtime state may have changed; durable transaction evidence is incomplete".into(),
+                ),
+            };
+        }
+        if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+            return ExecutionResult::FailedNoRollback {
+                error: reason,
+                rollback_error: Some(
+                    "activation outcome was observed but the durable transaction result could not be persisted".into(),
+                ),
+            };
+        }
+
+        match transaction.phase() {
+            super::config_transaction::ConfigTransactionPhase::Activated => {
+                match result {
+                    Ok(output) => ExecutionResult::Success {
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                        execution_time_ms: elapsed,
+                    },
+                    Err(error) => ExecutionResult::Success {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "activation process outcome was unavailable, but exact candidate post-state was proven: {error}"
+                        ),
+                        execution_time_ms: elapsed,
+                    },
+                }
+            }
+            super::config_transaction::ConfigTransactionPhase::IndeterminateActivation => {
+                let _ = transaction.advance(
+                    super::config_transaction::ConfigTransactionPhase::RecoveryObservation,
+                );
+                let _ = transaction.advance(
+                    super::config_transaction::ConfigTransactionPhase::RecoveryRequired,
+                );
+                let _ = Self::persist_transaction(&transaction, &journal_path);
+                ExecutionResult::FailedNoRollback {
+                    error: format!(
+                        "exact activation did not prove the authorized candidate post-state; transaction is RecoveryRequired (runtime={runtime:?}, profile={profile:?}, process={status:?})"
+                    ),
+                    rollback_error: None,
+                }
+            }
+            _ => ExecutionResult::FailedNoRollback {
+                error: "unexpected terminal state after exact activation".into(),
+                rollback_error: None,
+            },
+        }
+    }
+
     pub async fn execute_authorized(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        if !self.dry_run && matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            let blocked = ExecutionResult::Blocked {
+                reason: "exact system activation requires the durable ConfigTransaction execution boundary".into(),
+                safety_level: command.safety_level(),
+            };
+            self.record_execution(&command, decision_quality, &authorization, &blocked);
+            return blocked;
+        }
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return ExecutionResult::Blocked {
