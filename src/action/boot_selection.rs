@@ -196,10 +196,11 @@ pub fn resolve_systemd_boot_selection(
         },
     };
 
-    let entry = entries.get(selected).ok_or_else(|| UnknownBootSelection {
+    let entry_key = resolve_bls_entry_key(selected, entries).ok_or_else(|| UnknownBootSelection {
         bootloader_family: BootloaderFamily::SystemdBoot,
-        reason: format!("selected entry {selected} is not present in the authoritative entry set"),
+        reason: format!("selected entry {selected} is not present as an exact Type #1 BLS entry"),
     })?;
+    let entry = entries.get(&entry_key).expect("resolved BLS entry key");
 
     Ok(BootSelectionEvidence {
         bootloader_family: BootloaderFamily::SystemdBoot,
@@ -211,6 +212,20 @@ pub fn resolve_systemd_boot_selection(
         observed_at_ms: None,
         evidence_digest: None,
     })
+}
+
+fn resolve_bls_entry_key(selected: &str, entries: &BTreeMap<String, BlsEntry>) -> Option<String> {
+    if let Some(entry) = entries.get(selected) {
+        return Some(entry.entry_id.clone());
+    }
+    if selected.ends_with(".conf") || selected.ends_with(".efi") {
+        return None;
+    }
+    let conf = format!("{selected}.conf");
+    match entries.get(&conf) {
+        Some(entry) => Some(entry.entry_id.clone()),
+        None => None,
+    }
 }
 
 /// Require an observed boot selection to bind to the exact authorized system closure.
@@ -928,7 +943,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
 
         let evidence =
-            resolve_systemd_boot_selection(Some("candidate.conf"), Some("old.conf"), &entries)
+            resolve_systemd_boot_selection(Some("candidate"), Some("old"), &entries)
                 .expect("selection");
         assert_eq!(evidence.selection_kind, SelectionKind::OneShot);
         assert_eq!(
