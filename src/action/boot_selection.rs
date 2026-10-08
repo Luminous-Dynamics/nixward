@@ -66,6 +66,30 @@ pub struct BootSelectionEvidence {
     pub selected_entry_source: String,
     pub candidate_closure: Option<String>,
     pub boot_count_state: BootCountState,
+    /// Host observation timestamp in Unix milliseconds. Pure resolvers leave this
+    /// unset; host observers attach it at the authoritative observation boundary.
+    pub observed_at_ms: Option<u64>,
+    /// BLAKE3 digest over the complete observation excluding this digest field.
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl BootSelectionEvidence {
+    /// Attach immutable observation metadata and derive its evidence digest.
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            self.bootloader_family,
+            self.selection_kind,
+            &self.selected_entry_id,
+            &self.selected_entry_source,
+            &self.candidate_closure,
+            self.boot_count_state,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize boot selection evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
 }
 
 /// Explicitly unqualified evidence.
@@ -184,6 +208,8 @@ pub fn resolve_systemd_boot_selection(
         selected_entry_source: source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        observed_at_ms: None,
+        evidence_digest: None,
     })
 }
 
@@ -270,7 +296,19 @@ pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSele
             reason: "selected systemd-boot entry is marked bad by boot-counting state".into(),
         });
     }
-    Ok(evidence)
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: format!("system clock could not produce an observation timestamp: {error}"),
+        })?
+        .as_millis() as u64;
+    evidence
+        .with_observation_metadata(observed_at_ms)
+        .map_err(|reason| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason,
+        })
 }
 
 #[cfg(feature = "native")]
@@ -689,6 +727,23 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parsed.boot_count_state, BootCountState::NotTracked);
     }
 
+    #[test]
+    fn evidence_digest_binds_observation_metadata() {
+        let evidence = BootSelectionEvidence {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            selection_kind: SelectionKind::OneShot,
+            selected_entry_id: Some("candidate.conf".into()),
+            selected_entry_source: "efi:LoaderEntryOneShot".into(),
+            candidate_closure: Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate".into()),
+            boot_count_state: BootCountState::NotTracked,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+        let first = evidence.clone().with_observation_metadata(100).expect("metadata");
+        let second = evidence.with_observation_metadata(101).expect("metadata");
+        assert_ne!(first.evidence_digest, second.evidence_digest);
+        assert_eq!(first.observed_at_ms, Some(100));
+    }
     #[test]
     fn boot_count_zero_is_bad() {
         let parsed = entry(
