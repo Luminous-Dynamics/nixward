@@ -470,6 +470,14 @@ fn parse_grub_linux_line(line: &str) -> Result<(Option<String>, String), String>
     Ok((Some(kernel), options))
 }
 
+/// Parse the generated GRUB default expression without interpreting it as identity.
+pub fn parse_grub_config_default(text: &str) -> Option<String> {
+    text.lines().find_map(|raw_line| {
+        let line = raw_line.trim();
+        let value = line.strip_prefix("set default=")?.trim();
+        Some(value.trim_matches(|c: char| c == '\'' || c == '"').to_string())
+    })
+}
 /// Resolve a conservative GRUB selection from exact environment/config values.
 ///
 /// A numeric generated default is intentionally rejected: menu position is not
@@ -499,8 +507,21 @@ pub fn resolve_grub_selection(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| UnknownBootSelection {
             bootloader_family: BootloaderFamily::Grub,
-            reason: "no exact GRUB generated default is available".into(),
+            reason: "no GRUB generated default is available".into(),
         })?;
+
+    let (default, default_source) = match default {
+        "saved" | "${saved_entry}" => {
+            let saved = environment.get("saved_entry").filter(|v| !v.is_empty()).ok_or_else(|| {
+                UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::Grub,
+                    reason: "GRUB default delegates to saved_entry, but no exact saved_entry is observable".into(),
+                }
+            })?;
+            (saved.as_str(), "grubenv:saved_entry+generated-grub-config:default")
+        }
+        value => (value, "generated-grub-config:default"),
+    };
 
     if default.parse::<u64>().is_ok() {
         return Err(UnknownBootSelection {
@@ -518,7 +539,7 @@ pub fn resolve_grub_selection(
         bootloader_family: BootloaderFamily::Grub,
         selection_kind: SelectionKind::GeneratedDefault,
         selected_entry_id: Some(entry.entry_id.clone()),
-        selected_entry_source: "generated-grub-config:default".into(),
+        selected_entry_source: default_source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
     })
@@ -738,6 +759,31 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             super::exact_store_path_from_entry(entry).as_deref(),
             Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
         );
+    }
+
+    #[test]
+    fn saved_grub_default_requires_exact_saved_entry() {
+        let environment = parse_grub_environment("saved_entry=candidate\n");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "candidate".into(),
+            entry(
+                "candidate",
+                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+            ),
+        );
+        let evidence = resolve_grub_selection(&environment, Some("saved"), &entries)
+            .expect("saved entry selection");
+        assert_eq!(evidence.selection_kind, SelectionKind::GeneratedDefault);
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("candidate"));
+        assert!(evidence.selected_entry_source.contains("saved_entry"));
+    }
+
+    #[test]
+    fn grub_config_default_is_parsed_read_only() {
+        assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
+        assert_eq!(parse_grub_config_default("set default="${saved_entry}"\n"), Some("${saved_entry}".into()));
+        assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
     #[test]
