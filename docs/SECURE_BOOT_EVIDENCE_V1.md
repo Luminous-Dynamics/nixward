@@ -71,11 +71,11 @@ For UEFI `EFI_CERT_SHA256_GUID` database records, the image subject is the PE/CO
 Authenticode SHA-256, not the flat file SHA-256. The implementation therefore
 uses the exact Authenticode hash procedure for `db`/`dbx` image-hash comparisons. citeturn927442search0turn927442search1
 
-X.509 TBS hash records in `dbx` carry a revocation time. An exact TBS match is
-therefore recorded as a potential revocation until the signed-image timestamp and
-certificate-chain semantics are evaluated; it is not collapsed into an immediate
-veto. The current implementation deliberately leaves this as a separate
-`PotentialDbxTbsRevocation` state.
+X.509 TBS hash records in `dbx` carry a revocation time. An exact match with
+an all-zero EFI_TIME is an explicit `ForbiddenByDbxTbsRevocation` state because
+UEFI defines zero revocation time as always revoked. An exact match with a
+nonzero EFI_TIME remains `PotentialDbxTbsRevocation` until signed-image
+timestamp/RFC 3161 semantics are evaluated.
 
 ## Certificate-chain trust boundary
 
@@ -86,6 +86,13 @@ The verification path now distinguishes five materially different outcomes:
 - `ForbiddenByDbxCertificateChain`: an X.509 certificate observed in `dbx` has the same Issuer, Serial Number, and To-Be-Signed hash as a certificate in the image's verified signing chain;
 - `PotentialDbxTbsRevocation`: an exact X.509 TBS hash in `dbx` exists but its revocation-time semantics have not been evaluated;
 - `UnknownDbxCertificateRules`: an unsupported/uninterpreted `dbx` rule prevents a trust conclusion.
+
+A `db` X.509 certificate may be the trust anchor without being embedded in the
+image's PKCS#7 certificate set. After an exact image verifies to such a `db`
+certificate, Nixward records that certificate as a `verified_db_anchor` and
+applies the same `dbx` Issuer + Serial + TBS matching rules to that exact
+verified anchor. This prevents a revoked trusted anchor from becoming an
+authorization pass merely because the anchor was external to the image.
 
 For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is checked for byte stability during verifier invocation and is re-read once more before any terminal trust result is returned. A final image-digest mismatch clears the derived chain and matching fields and produces `ImageChangedDuringVerification`, preventing a receipt from combining chain evidence from one image instance with signature evidence from another. X.509 revocation is correlated against actual signing-chain members rather than merely asking whether a dbx certificate can independently verify the image.
 
