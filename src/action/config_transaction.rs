@@ -493,11 +493,11 @@ impl FrozenConfigSource {
             return Err("config entrypoint is not a regular file in the frozen source tree".into());
         }
 
-        let root_digest = compute_frozen_source_root_digest(&manifest)?;
+        let root_digest = compute_frozen_source_root_digest(&entrypoint_string, &manifest)?;
 
         let source = Self {
             root_digest,
-            entrypoint: manifest_relative_path(relative_entrypoint)?,
+            entrypoint: entrypoint_string,
             manifest,
         };
         source.validate_identity()?;
