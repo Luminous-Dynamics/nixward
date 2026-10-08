@@ -3288,6 +3288,66 @@ mod tests {
         transaction.candidate_build = Some(test_candidate_receipt());
     }
 
+    fn worker_identity_for_test(transaction_id: &str) -> ActivationWorkerIdentity {
+        ActivationWorkerIdentity {
+            transaction_id: transaction_id.to_string(),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid: 12345,
+            boot_id: "12345678-1234-1234-1234-123456789abc".into(),
+            start_time_ticks: 17,
+            executable: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/bin/switch-to-configuration".into(),
+            argv_digest: digest_hex(&[5; 32]),
+        }
+    }
+
+    #[test]
+    fn activation_worker_identity_is_transaction_and_process_bound() {
+        let tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let identity = worker_identity_for_test(tx.transaction_id());
+        identity.validate_identity().unwrap();
+
+        let mut wrong_pid = identity.clone();
+        wrong_pid.pid = 1;
+        assert!(wrong_pid.validate_identity().is_err());
+
+        let mut wrong_boot = identity.clone();
+        wrong_boot.boot_id = "not-a-boot-id".into();
+        assert!(wrong_boot.validate_identity().is_err());
+
+        let mut wrong_executable = identity.clone();
+        wrong_executable.executable = "/usr/bin/switch-to-configuration".into();
+        assert!(wrong_executable.validate_identity().is_err());
+
+        let mut wrong_digest = identity;
+        wrong_digest.argv_digest = "invalid".into();
+        assert!(wrong_digest.validate_identity().is_err());
+    }
+
+    #[test]
+    fn activation_worker_receipt_requires_durable_start_boundary() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let identity = worker_identity_for_test(tx.transaction_id());
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_err());
+
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        tx.bind_activation_worker_identity(identity.clone()).unwrap();
+        assert_eq!(tx.activation_worker_identities(), &[identity.clone()]);
+        assert!(tx.bind_activation_worker_identity(identity).is_err());
+    }
+
+    #[test]
+    fn recovery_worker_receipt_requires_persisted_recovery_mutation_boundary() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryRequired;
+        let mut identity = worker_identity_for_test(tx.transaction_id());
+        identity.purpose = ActivationWorkerPurpose::Recovery;
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_err());
+
+        tx.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        tx.bind_activation_worker_identity(identity.clone()).unwrap();
+        assert_eq!(tx.activation_worker_identities(), &[identity]);
+    }
+
     #[test]
     fn transaction_graph_rejects_phase_skip() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
