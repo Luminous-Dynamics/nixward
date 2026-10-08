@@ -411,7 +411,7 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         persistent_source,
     ) {
         Ok(evidence) => evidence,
-        Err(_selection_error) if is_uki_selector(selected) => {
+        Err(_selection_error) if uki_selector_filename(selected).is_some() => {
             observe_systemd_uki_from_selection(
                 &boot_path,
                 selected,
