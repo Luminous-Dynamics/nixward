@@ -43,7 +43,7 @@ pub use change_covenant::{
 };
 pub use config_writer::{ConfigPatch, ConfigWriter, WriteResult};
 pub use config_transaction::{
-    ActivationDisposition, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
+    ActivationDisposition, CandidateBuildReceipt, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
     ProfileTransitionDisposition, RecoveryObservation, SourceEntryKind, SourceManifestEntry,
     SourceRealizationLease, SourceRealizationLeaseState, classify_activation_post_state,
 };
