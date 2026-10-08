@@ -1331,10 +1331,25 @@ impl NixOSExecutor {
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let mut child = Command::new(executable);
-            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-            let mut child = child.spawn()
-                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
+            let argv_digest = Self::activation_argv_digest(args);
+            let intent = super::config_transaction::WorkerLaunchIntent {
+                transaction_id: transaction_id.clone(),
+                purpose,
+                executable: executable.to_string(),
+                argv_digest: argv_digest.clone(),
+            };
+            transaction.prepare_worker_launch(intent)?;
+            Self::persist_transaction(transaction, journal_path)?;
+            let mut child_command = Command::new(executable);
+            child_command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+            let mut child = match child_command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    transaction.cancel_worker_launch_after_spawn_error(purpose, executable, &argv_digest)?;
+                    Self::persist_transaction(transaction, journal_path)?;
+                    return Err(format!("failed to spawn transaction worker {executable}: {error}"));
+                }
+            };
             let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
             let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
                 Ok(value) => value,
@@ -2056,6 +2071,15 @@ impl NixOSExecutor {
                 safety_level: safety,
             };
         }
+        if let Some(intent) = transaction.pending_worker_launch() {
+            return ExecutionResult::FailedNoRollback {
+                error: format!(
+                    "transaction has an unresolved pre-spawn worker intent ({:?}, executable {}); refusing to launch another mutator",
+                    intent.purpose, intent.executable
+                ),
+                rollback_error: None,
+            };
+        }
         if !matches!(
             transaction.phase(),
             super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
@@ -2709,7 +2733,6 @@ impl NixOSExecutor {
 
         let expected_runtime = match &command {
             NixOSCommand::ActivateSystemClosure {
-                store_path,
                 action: SystemActivation::Boot,
                 ..
             } => match authorization.recovery_command.as_ref() {
