@@ -380,6 +380,8 @@ pub struct ConfigTransaction {
     schema: String,
     version: u16,
     transaction_id: String,
+    plan_digest: String,
+    nonce: String,
     source_digest: String,
     candidate_store_path: Option<String>,
     phase: ConfigTransactionPhase,
@@ -389,19 +391,29 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v1";
-    pub const VERSION: u16 = 1;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v2";
+    pub const VERSION: u16 = 2;
 
-    pub fn new(plan_digest: [u8; 32], nonce: [u8; 32], source_digest: [u8; 32]) -> Self {
+    fn compute_transaction_id(
+        plan_digest: &[u8; 32],
+        nonce: &[u8; 32],
+        source_digest: &[u8; 32],
+    ) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(TX_DOMAIN);
-        hasher.update(&plan_digest);
-        hasher.update(&nonce);
-        hasher.update(&source_digest);
+        hasher.update(plan_digest);
+        hasher.update(nonce);
+        hasher.update(source_digest);
+        digest_hex(hasher.finalize().as_bytes())
+    }
+
+    pub fn new(plan_digest: [u8; 32], nonce: [u8; 32], source_digest: [u8; 32]) -> Self {
         Self {
             schema: Self::SCHEMA.into(),
             version: Self::VERSION,
-            transaction_id: digest_hex(hasher.finalize().as_bytes()),
+            transaction_id: Self::compute_transaction_id(&plan_digest, &nonce, &source_digest),
+            plan_digest: digest_hex(&plan_digest),
+            nonce: digest_hex(&nonce),
             source_digest: digest_hex(&source_digest),
             candidate_store_path: None,
             phase: ConfigTransactionPhase::Prepared,
@@ -555,7 +567,16 @@ impl ConfigTransaction {
             return Err("transaction journal schema/version mismatch".into());
         }
         decode_digest(&transaction.transaction_id).map_err(|_| "transaction journal has an invalid transaction id".to_string())?;
-        decode_digest(&transaction.source_digest).map_err(|_| "transaction journal has an invalid source digest".to_string())?;
+        let plan_digest = decode_digest(&transaction.plan_digest)
+            .map_err(|_| "transaction journal has an invalid plan digest".to_string())?;
+        let nonce = decode_digest(&transaction.nonce)
+            .map_err(|_| "transaction journal has an invalid nonce".to_string())?;
+        let source_digest = decode_digest(&transaction.source_digest)
+            .map_err(|_| "transaction journal has an invalid source digest".to_string())?;
+        let recomputed_id = Self::compute_transaction_id(&plan_digest, &nonce, &source_digest);
+        if transaction.transaction_id != recomputed_id {
+            return Err("transaction journal transaction id does not match its persisted preimage".into());
+        }
         if let Some(candidate) = transaction.candidate_store_path.as_deref() {
             if !super::execution_intent::is_valid_nix_store_path(candidate) {
                 return Err("transaction journal has an invalid candidate store path".into());
@@ -849,11 +870,13 @@ mod tests {
     fn transaction_load_rejects_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transaction.json");
-        std::fs::write(
-            &path,
-            r#"{"schema":"luminous-nixward-config-transaction-v1","version":1,"transaction_id":"0000000000000000000000000000000000000000000000000000000000000000","source_digest":"0000000000000000000000000000000000000000000000000000000000000000","candidate_store_path":null,"phase":"prepared","process_exit_status":null,"observed_runtime_closure":null,"observed_profile_closure":null,"unexpected":true}"#,
-        )
-        .unwrap();
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let mut value = serde_json::to_value(transaction).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), serde_json::Value::Bool(true));
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         assert!(ConfigTransaction::load(&path).is_err());
     }
 
@@ -865,6 +888,20 @@ mod tests {
         transaction.transaction_id = "BAD".into();
         transaction.persist_atomic(&path).unwrap();
         assert!(ConfigTransaction::load(&path).is_err());
+    }
+
+    #[test]
+    fn transaction_load_rejects_tampered_persisted_preimage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.source_digest = digest_hex(&[9; 32]);
+        transaction.persist_atomic(&path).unwrap();
+        assert!(
+            ConfigTransaction::load(&path)
+                .expect_err("tampered source preimage must fail closed")
+                .contains("does not match its persisted preimage")
+        );
     }
 
     #[test]
