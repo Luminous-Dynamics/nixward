@@ -644,9 +644,14 @@ impl ConfigWriter {
                     &temp_name,
                     UnlinkatFlags::NoRemoveDir,
                 );
+                let _ = close_result;
                 return Err(error);
             }
-            close_result?;
+
+            // Once renameat + parent fsync has succeeded, the source mutation
+            // is committed. A later descriptor-close error cannot truthfully
+            // downgrade the transaction to "failed" or invite a source rollback.
+            let _ = close_result;
         }
 
         #[cfg(not(unix))]

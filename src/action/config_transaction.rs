@@ -423,6 +423,14 @@ impl ConfigTransaction {
         ) {
             return Err("candidate store path can only be bound before source commit".into());
         }
+        if let Some(existing) = &self.candidate_store_path {
+            if existing != &path {
+                return Err(
+                    "candidate store identity is immutable once bound; refusing replacement".into(),
+                );
+            }
+            return Ok(());
+        }
         self.candidate_store_path = Some(path);
         Ok(())
     }
@@ -627,6 +635,17 @@ mod tests {
         assert!(transaction
             .advance(ConfigTransactionPhase::FailedBeforeActivation)
             .is_err());
+    }
+
+    #[test]
+    fn transaction_journal_round_trips_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.persist_atomic(&path).unwrap();
+        let loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.transaction_id(), transaction.transaction_id());
+        assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
     }
 
     #[test]
