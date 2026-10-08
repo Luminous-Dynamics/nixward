@@ -3353,6 +3353,59 @@ mod tests {
     }
 
     #[test]
+    fn boot_activation_is_terminal_without_claiming_runtime_switch() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        bind_test_candidate(&mut tx);
+        let candidate = tx.candidate_store_path().unwrap().to_string();
+        let predecessor = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        tx.record_activation_post_state(
+            Some(0),
+            Some(predecessor.to_string()),
+            Some(candidate.clone()),
+            predecessor,
+            true,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::BootSelected);
+        assert!(!tx.permits_source_rollback());
+    }
+
+    #[test]
+    fn matching_post_state_does_not_close_while_worker_completion_is_unknown() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        bind_test_candidate(&mut tx);
+        let candidate = tx.candidate_store_path().unwrap().to_string();
+        tx.record_activation_post_state(
+            Some(0),
+            Some(candidate.clone()),
+            Some(candidate.clone()),
+            &candidate,
+            false,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::IndeterminateActivation);
+    }
+
+    #[test]
+    fn recovery_post_state_requires_worker_completion_proof() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        let predecessor = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        tx.record_recovery_post_state(
+            predecessor,
+            predecessor,
+            Some(0),
+            Some(predecessor.to_string()),
+            Some(predecessor.to_string()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::RecoveryRequired);
+    }
+
+    #[test]
     fn transaction_graph_rejects_phase_skip() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         assert!(transaction.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
