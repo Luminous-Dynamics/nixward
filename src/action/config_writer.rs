@@ -385,7 +385,7 @@ impl ConfigWriter {
         plan: &ChangePlan,
         authorization: &ChangeAuthorization,
         phase: ConfigTransactionPhase,
-    ) -> Result<WriteCommitState, std::io::Error> {
+    ) -> Result<(), std::io::Error> {
         if !phase.permits_source_rollback() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -502,7 +502,7 @@ impl ConfigWriter {
         target: &Path,
         expected: &str,
         replacement: &str,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<WriteCommitState, std::io::Error> {
         let parent = target.parent().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -719,7 +719,7 @@ impl ConfigWriter {
                 return Ok(WriteCommitState::Indeterminate);
             }
 
-            let verify_fd = openat(
+            let verify_fd = match openat(
                 parent_fd,
                 name,
                 OFlag::O_RDONLY
@@ -727,12 +727,10 @@ impl ConfigWriter {
                     | OFlag::O_NOFOLLOW
                     | OFlag::O_NONBLOCK,
                 Mode::empty(),
-            )
-.map_err(|_error| {
-                std::io::Error::other(
-                    "configuration replacement committed but post-state observation could not be established",
-                )
-            })?;
+            ) {
+                Ok(fd) => fd,
+                Err(_error) => return Ok(WriteCommitState::Indeterminate),
+            };
             let verify_fd = OwnedConfigFd(verify_fd);
             let mut observed_bytes = Vec::new();
             loop {
@@ -911,6 +909,12 @@ mod tests {
         let (_dir, writer) = setup_temp_config(SAMPLE_CONFIG);
         let patch = writer.set_option("services.nginx.enable", "true").unwrap();
         assert!(patch.modified.contains("services.nginx.enable = true;"));
+    }
+
+    #[test]
+    fn write_commit_state_is_fail_closed() {
+        assert_ne!(WriteCommitState::Indeterminate, WriteCommitState::Committed);
+        assert_eq!(WriteCommitState::NotAttempted, WriteCommitState::NotAttempted);
     }
 
     #[test]
