@@ -263,6 +263,58 @@ fn nix_normalized_mode(kind: &SourceEntryKind, source_mode: u32) -> u32 {
     }
 }
 
+fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), String> {
+    validate_gc_root_path(gc_root_path)?;
+    if !super::execution_intent::is_valid_nix_store_path(store_path) {
+        return Err("GC root target is not a canonical Nix store path".into());
+    }
+    let gc_root = std::path::Path::new(gc_root_path);
+    let before = std::fs::symlink_metadata(gc_root)
+        .map_err(|error| format!("failed to inspect GC root: {error}"))?;
+    if !before.file_type().is_symlink() {
+        return Err("GC root exists but is not a symlink".into());
+    }
+    let target = std::fs::read_link(gc_root)
+        .map_err(|error| format!("failed to read GC root target: {error}"))?;
+    let resolved = if target.is_absolute() {
+        target.clone()
+    } else {
+        gc_root
+            .parent()
+            .ok_or_else(|| "GC root has no parent".to_string())?
+            .join(&target)
+    };
+    let resolved = resolved
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve GC root target: {error}"))?;
+    if resolved != std::path::Path::new(store_path) {
+        return Err("GC root does not target the exact declared store path".into());
+    }
+    let after = std::fs::symlink_metadata(gc_root)
+        .map_err(|error| format!("failed to re-inspect GC root: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.mode() != after.mode()
+            || before.len() != after.len()
+            || before.mtime() != after.mtime()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+        {
+            return Err("GC root changed during observation".into());
+        }
+    }
+    let final_target = std::fs::read_link(gc_root)
+        .map_err(|error| format!("failed to reread GC root target: {error}"))?;
+    if final_target != target {
+        return Err("GC root target changed during observation".into());
+    }
+    Ok(())
+}
+
 fn installable_selector_is_valid(value: &str) -> bool {
     let Some(suffix) = value.strip_prefix(".#") else {
         return false;
@@ -1331,11 +1383,7 @@ fn establish_candidate_gc_root(store_path: &str, gc_root_path: &str) -> Result<(
     } else {
         namespace_dir.sync_all().map_err(|error| format!("failed to persist candidate GC root: {error}"))?;
     }
-    let observed = std::fs::read_link(gc_root).map_err(|error| format!("failed to read candidate GC root: {error}"))?;
-    let resolved = if observed.is_absolute() { observed } else { namespace.join(observed) };
-    if resolved.canonicalize().map_err(|error| format!("failed to resolve candidate GC root: {error}"))? != std::path::Path::new(store_path) {
-        return Err("candidate GC root does not target the exact candidate store path".into());
-    }
+    verify_gc_root_target(store_path, gc_root_path)?;
     Ok(())
 }
 
@@ -1521,6 +1569,12 @@ impl CandidateBuildReceipt {
             gc_root_path,
             realization_plan_digest,
         })
+    }
+
+    /// Independently prove that the candidate retention root still points to
+    /// the exact immutable candidate store object.
+    pub fn verify_retention(&self) -> Result<(), String> {
+        verify_gc_root_target(&self.candidate_store_path, &self.gc_root_path)
     }
 
     fn validate_identity(&self) -> Result<(), String> {
@@ -1938,6 +1992,7 @@ impl ConfigTransaction {
             return Err("candidate build receipt can only be bound before source commit".into());
         }
         receipt.validate_identity()?;
+        receipt.verify_retention()?;
         if receipt.source_digest != self.source_digest {
             return Err("candidate build source digest does not match transaction source digest".into());
         }
