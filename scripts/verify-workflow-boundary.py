@@ -35,7 +35,7 @@ else:
         errors.append("no actions/checkout step found")
 
     lockfile_artifact = re.search(
-        r"(?ms)^  lockfile-artifact:.*?(?=^  [A-Za-z_][\w-]*:|\\Z)",
+        r"(?ms)^  lockfile-artifact:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
     if not lockfile_artifact:
@@ -59,7 +59,7 @@ else:
 
     for job_name in ["validate", "nix"]:
         job = re.search(
-            rf"(?ms)^  {job_name}:.*?(?=^  [A-Za-z_][\w-]*:|\\Z)",
+            rf"(?ms)^  {job_name}:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
             text,
         )
         if job and "- lockfile-artifact" not in job.group(0):
