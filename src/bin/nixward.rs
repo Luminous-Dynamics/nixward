@@ -1082,6 +1082,25 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                 }
             }
         }
+        Some(ObserveDomain::SecureBoot) => {
+            match nixward::action::secure_boot::observe_secure_boot() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => println!("{:?}", evidence.state),
+                    _ => {
+                        println!("  Secure Boot: {:?}", evidence.state);
+                        println!("  SecureBoot variable: {:?}", evidence.secure_boot_variable);
+                        println!("  SetupMode variable: {:?}", evidence.setup_mode_variable);
+                        println!("  Observed at: {}", evidence.observed_at_ms.unwrap_or_default());
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: firmware policy observation only; image signature verification is separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot is Unknown: {reason}"),
+            }
+        }
         Some(ObserveDomain::Hardware) => {
             match nixward::observe::hardware::HardwareObserver::probe() {
                 Ok(info) => match format {
