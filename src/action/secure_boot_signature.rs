@@ -208,6 +208,8 @@ pub fn verify_pe_signature_with_certificate(
         .map_err(|error| format!("failed to read signature image {}: {error}", image_path.display()))?;
     let certificate = std::fs::read(certificate_path)
         .map_err(|error| format!("failed to read verification certificate {}: {error}", certificate_path.display()))?;
+    let image_before = *blake3::hash(&image).as_bytes();
+    let certificate_before = *blake3::hash(&certificate).as_bytes();
     let output = std::process::Command::new("sbverify")
         .args(["--cert"])
         .arg(certificate_path)
@@ -220,7 +222,7 @@ pub fn verify_pe_signature_with_certificate(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SignatureVerificationEvidence {
                 image_blake3: *blake3::hash(&image).as_bytes(),
-                certificate_blake3: *blake3::hash(&certificate).as_bytes(),
+                certificate_blake3: certificate_before,
                 verifier: "sbverify".into(),
                 state: SignatureVerificationState::ToolUnavailable,
                 stdout_blake3: *blake3::hash(&[]).as_bytes(),
@@ -229,11 +231,19 @@ pub fn verify_pe_signature_with_certificate(
         }
         Err(error) => return Err(format!("failed to execute sbverify: {error}")),
     };
+    let image_after = std::fs::read(image_path)
+        .map_err(|error| format!("failed to re-read signature image {}: {error}", image_path.display()))?;
+    let certificate_after = std::fs::read(certificate_path)
+        .map_err(|error| format!("failed to re-read verification certificate {}: {error}", certificate_path.display()))?;
+    let image_after_hash = *blake3::hash(&image_after).as_bytes();
+    let certificate_after_hash = *blake3::hash(&certificate_after).as_bytes();
+    let stable = image_after_hash == image_before && certificate_after_hash == certificate_before;
+
     Ok(SignatureVerificationEvidence {
-        image_blake3: *blake3::hash(&image).as_bytes(),
+        image_blake3: image_before,
         certificate_blake3: *blake3::hash(&certificate).as_bytes(),
         verifier: "sbverify".into(),
-        state: if output.status.success() {
+        state: if output.status.success() && stable {
             SignatureVerificationState::Verified
         } else {
             SignatureVerificationState::Failed
