@@ -562,8 +562,13 @@ pub enum DbCertificateVerificationState {
     VerifiedAgainstDbCertificate,
     NoMatchingDbCertificate,
     ForbiddenByDbxImageHash,
+    ForbiddenByDbxCertificateChain,
+    PotentialDbxTbsRevocation,
     UnknownDbxCertificateRules,
+    MissingSecureBootDatabase,
+    DatabaseChangedDuringVerification,
     ToolUnavailable,
+    ImageChangedDuringVerification,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,11 +576,146 @@ pub struct DbCertificateVerificationEvidence {
     pub image_blake3: [u8; 32],
     pub image_authenticode_sha256: [u8; 32],
     pub db_certificate_digests: Vec<[u8; 32]>,
+    pub dbx_certificate_digests: Vec<[u8; 32]>,
     pub verifying_db_certificate: Option<[u8; 32]>,
+    pub verifying_dbx_certificate: Option<[u8; 32]>,
+    pub db_payload_blake3: Option<[u8; 32]>,
+    pub dbx_payload_blake3: Option<[u8; 32]>,
+    pub database_stability: Option<bool>,
     pub state: DbCertificateVerificationState,
     pub verifier: String,
     pub stdout_blake3: [u8; 32],
     pub stderr_blake3: [u8; 32],
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl DbCertificateVerificationEvidence {
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            self.image_blake3,
+            self.image_authenticode_sha256,
+            &self.db_certificate_digests,
+            &self.dbx_certificate_digests,
+            self.verifying_db_certificate,
+            self.verifying_dbx_certificate,
+            self.db_payload_blake3,
+            self.dbx_payload_blake3,
+            self.database_stability,
+            self.state,
+            &self.verifier,
+            self.stdout_blake3,
+            self.stderr_blake3,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize DB certificate verification evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
+}
+
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CertificateVerifierRunState {
+    Verified,
+    Failed,
+    ToolUnavailable,
+    ImageChanged,
+}
+
+#[cfg(feature = "native")]
+struct CertificateVerifierRun {
+    state: CertificateVerifierRunState,
+    stdout_blake3: [u8; 32],
+    stderr_blake3: [u8; 32],
+}
+
+#[cfg(feature = "native")]
+fn run_sbverify_against_certificate(
+    image_path: &std::path::Path,
+    certificate_der: &[u8],
+) -> Result<CertificateVerifierRun, String> {
+    let image_before = std::fs::read(image_path)
+        .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
+    let image_before_hash = *blake3::hash(&image_before).as_bytes();
+
+    let mut temp = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
+    use std::io::Write;
+    temp.write_all(pem_encode_certificate(certificate_der).as_bytes())
+        .map_err(|error| format!("failed to write temporary certificate file: {error}"))?;
+    temp.flush()
+        .map_err(|error| format!("failed to flush temporary certificate file: {error}"))?;
+
+    let output = match std::process::Command::new("sbverify")
+        .args(["--cert"])
+        .arg(temp.path())
+        .arg(image_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CertificateVerifierRun {
+                state: CertificateVerifierRunState::ToolUnavailable,
+                stdout_blake3: *blake3::hash(&[]).as_bytes(),
+                stderr_blake3: *blake3::hash(error.to_string().as_bytes()).as_bytes(),
+            });
+        }
+        Err(error) => return Err(format!("failed to execute sbverify: {error}")),
+    };
+
+    let image_after = std::fs::read(image_path)
+        .map_err(|error| format!("failed to re-read UKI {}: {error}", image_path.display()))?;
+    let image_after_hash = *blake3::hash(&image_after).as_bytes();
+
+    Ok(CertificateVerifierRun {
+        state: if image_after_hash != image_before_hash {
+            CertificateVerifierRunState::ImageChanged
+        } else if output.status.success() {
+            CertificateVerifierRunState::Verified
+        } else {
+            CertificateVerifierRunState::Failed
+        },
+        stdout_blake3: *blake3::hash(&output.stdout).as_bytes(),
+        stderr_blake3: *blake3::hash(&output.stderr).as_bytes(),
+    })
+}
+
+#[cfg(feature = "native")]
+fn db_certificate_verification_base_evidence(
+    image_blake3: [u8; 32],
+    image_authenticode_sha256: [u8; 32],
+    db_payload: &[u8],
+    dbx_payload: &[u8],
+    db_records: &[SignatureDatabaseRecord],
+    dbx_records: &[SignatureDatabaseRecord],
+) -> DbCertificateVerificationEvidence {
+    DbCertificateVerificationEvidence {
+        image_blake3,
+        image_authenticode_sha256,
+        db_certificate_digests: db_records
+            .iter()
+            .filter_map(|record| record.certificate_der_blake3)
+            .collect(),
+        dbx_certificate_digests: dbx_records
+            .iter()
+            .filter_map(|record| record.certificate_der_blake3)
+            .collect(),
+        verifying_db_certificate: None,
+        verifying_dbx_certificate: None,
+        db_payload_blake3: Some(*blake3::hash(db_payload).as_bytes()),
+        dbx_payload_blake3: Some(*blake3::hash(dbx_payload).as_bytes()),
+        database_stability: None,
+        state: DbCertificateVerificationState::NoMatchingDbCertificate,
+        verifier: "sbverify".into(),
+        stdout_blake3: *blake3::hash(&[]).as_bytes(),
+        stderr_blake3: *blake3::hash(&[]).as_bytes(),
+        observed_at_ms: None,
+        evidence_digest: None,
+    }
 }
 
 #[cfg(feature = "native")]
@@ -589,104 +729,184 @@ pub fn verify_image_against_db_certificates(
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return Err(format!("UKI {} is not a regular non-symlink file", image_path.display()));
     }
+
     let image = std::fs::read(image_path)
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_blake3 = *blake3::hash(&image).as_bytes();
     let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
     let db = parse_signature_database(db_payload)?;
     let dbx = parse_signature_database(dbx_payload)?;
-    if dbx.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)) {
-        return Ok(DbCertificateVerificationEvidence {
-            image_blake3,
-            image_authenticode_sha256,
-            db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
-            verifying_db_certificate: None,
-            state: DbCertificateVerificationState::ForbiddenByDbxImageHash,
-            verifier: "sbverify".into(),
-            stdout_blake3: *blake3::hash(&[]).as_bytes(),
-            stderr_blake3: *blake3::hash(b"dbx image hash veto").as_bytes(),
-        });
+    let mut evidence = db_certificate_verification_base_evidence(
+        image_blake3,
+        image_authenticode_sha256,
+        db_payload,
+        dbx_payload,
+        &db,
+        &dbx,
+    );
+
+    if dbx
+        .iter()
+        .any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256))
+    {
+        evidence.state = DbCertificateVerificationState::ForbiddenByDbxImageHash;
+        evidence.stderr_blake3 = *blake3::hash(b"dbx image hash veto").as_bytes();
+        return Ok(evidence);
     }
-    if dbx.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
+
+    for record in dbx.iter().filter(|record| {
+        record.kind == SignatureListKind::X509Certificate && record.certificate_der.is_some()
+    }) {
+        let certificate = record.certificate_der.as_deref().expect("filtered certificate");
+        let run = run_sbverify_against_certificate(image_path, certificate)?;
+        evidence.stdout_blake3 = run.stdout_blake3;
+        evidence.stderr_blake3 = run.stderr_blake3;
+        match run.state {
+            CertificateVerifierRunState::Verified => {
+                evidence.verifying_dbx_certificate = record.certificate_der_blake3;
+                evidence.state = DbCertificateVerificationState::ForbiddenByDbxCertificateChain;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::ToolUnavailable => {
+                evidence.state = DbCertificateVerificationState::ToolUnavailable;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::ImageChanged => {
+                evidence.state = DbCertificateVerificationState::ImageChangedDuringVerification;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::Failed => {}
+        }
+    }
+
+    if dbx
+        .iter()
+        .any(|record| record.kind == SignatureListKind::X509TbsSha256
+            || record.kind == SignatureListKind::X509TbsSha384
+            || record.kind == SignatureListKind::X509TbsSha512)
+    {
+        evidence.state = DbCertificateVerificationState::PotentialDbxTbsRevocation;
+        evidence.stderr_blake3 = *blake3::hash(b"unevaluated dbx X509 TBS revocation timestamp").as_bytes();
+        return Ok(evidence);
+    }
+
+    if dbx
+        .iter()
+        .any(|record| record.kind == SignatureListKind::Unsupported)
+    {
+        evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
+        evidence.stderr_blake3 = *blake3::hash(b"unsupported dbx signature rule").as_bytes();
+        return Ok(evidence);
+    }
+
+    for record in db.iter().filter(|record| {
+        record.kind == SignatureListKind::X509Certificate && record.certificate_der.is_some()
+    }) {
+        let certificate = record.certificate_der.as_deref().expect("filtered certificate");
+        let run = run_sbverify_against_certificate(image_path, certificate)?;
+        evidence.stdout_blake3 = run.stdout_blake3;
+        evidence.stderr_blake3 = run.stderr_blake3;
+        match run.state {
+            CertificateVerifierRunState::Verified => {
+                evidence.verifying_db_certificate = record.certificate_der_blake3;
+                evidence.state = DbCertificateVerificationState::VerifiedAgainstDbCertificate;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::ToolUnavailable => {
+                evidence.state = DbCertificateVerificationState::ToolUnavailable;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::ImageChanged => {
+                evidence.state = DbCertificateVerificationState::ImageChangedDuringVerification;
+                return Ok(evidence);
+            }
+            CertificateVerifierRunState::Failed => {}
+        }
+    }
+
+    evidence.state = DbCertificateVerificationState::NoMatchingDbCertificate;
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+pub fn verify_image_against_live_secure_boot_databases(
+    image_path: &std::path::Path,
+) -> Result<DbCertificateVerificationEvidence, String> {
+    let db_before = read_efi_database("db")?;
+    let dbx_before = read_efi_database("dbx")?;
+
+    if db_before.is_none() || dbx_before.is_none() {
+        let image = std::fs::read(image_path)
+            .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
+        let image_blake3 = *blake3::hash(&image).as_bytes();
+        let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
         return Ok(DbCertificateVerificationEvidence {
             image_blake3,
             image_authenticode_sha256,
-            db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
+            db_certificate_digests: db_before
+                .as_deref()
+                .map(parse_signature_database)
+                .transpose()?
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|record| record.certificate_der_blake3)
+                .collect(),
+            dbx_certificate_digests: dbx_before
+                .as_deref()
+                .map(parse_signature_database)
+                .transpose()?
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|record| record.certificate_der_blake3)
+                .collect(),
             verifying_db_certificate: None,
-            state: DbCertificateVerificationState::UnknownDbxCertificateRules,
+            verifying_dbx_certificate: None,
+            db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+            dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+            database_stability: None,
+            state: DbCertificateVerificationState::MissingSecureBootDatabase,
             verifier: "sbverify".into(),
             stdout_blake3: *blake3::hash(&[]).as_bytes(),
-            stderr_blake3: *blake3::hash(b"unevaluated dbx certificate rule").as_bytes(),
+            stderr_blake3: *blake3::hash(b"secure boot db/dbx missing").as_bytes(),
+            observed_at_ms: None,
+            evidence_digest: None,
         });
     }
 
-    let db_certificates: Vec<(&[u8], [u8; 32])> = db.iter().filter_map(|record| {
-        Some((record.certificate_der.as_deref()?, record.certificate_der_blake3?))
-    }).collect();
-    let db_certificate_digests = db_certificates.iter().map(|(_, digest)| *digest).collect::<Vec<_>>();
-    let mut last_stdout = Vec::new();
-    let mut last_stderr = Vec::new();
-    for (certificate, certificate_digest) in db_certificates {
-        let mut temp = tempfile::NamedTempFile::new()
-            .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
-        let pem = pem_encode_certificate(certificate);
-        use std::io::Write;
-        temp.write_all(pem.as_bytes())
-            .map_err(|error| format!("failed to write temporary certificate file: {error}"))?;
-        temp.flush()
-            .map_err(|error| format!("failed to flush temporary certificate file: {error}"))?;
-        let output = match std::process::Command::new("sbverify")
-            .args(["--cert"])
-            .arg(temp.path())
-            .arg(image_path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output() {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(DbCertificateVerificationEvidence {
-                    image_blake3,
-                    image_authenticode_sha256,
-                    db_certificate_digests,
-                    verifying_db_certificate: None,
-                    state: DbCertificateVerificationState::ToolUnavailable,
-                    verifier: "sbverify".into(),
-                    stdout_blake3: *blake3::hash(&last_stdout).as_bytes(),
-                    stderr_blake3: *blake3::hash(error.to_string().as_bytes()).as_bytes(),
-                });
-            }
-            Err(error) => return Err(format!("failed to execute sbverify: {error}")),
-        };
-        last_stdout = output.stdout.clone();
-        last_stderr = output.stderr.clone();
-        if output.status.success() {
-            let image_after = std::fs::read(image_path)
-                .map_err(|error| format!("failed to re-read UKI {}: {error}", image_path.display()))?;
-            let stable = *blake3::hash(&image_after).as_bytes() == image_blake3;
-            if stable {
-                return Ok(DbCertificateVerificationEvidence {
-                    image_blake3,
-                    image_authenticode_sha256,
-                    db_certificate_digests,
-                    verifying_db_certificate: Some(certificate_digest),
-                    state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
-                    verifier: "sbverify".into(),
-                    stdout_blake3: *blake3::hash(&output.stdout).as_bytes(),
-                    stderr_blake3: *blake3::hash(&output.stderr).as_bytes(),
-                });
-            }
-        }
+    let mut evidence = verify_image_against_db_certificates(
+        image_path,
+        db_before.as_deref().expect("db presence checked"),
+        dbx_before.as_deref().expect("dbx presence checked"),
+    )?;
+
+    let db_after = read_efi_database("db")?;
+    let dbx_after = read_efi_database("dbx")?;
+    let stable = db_after
+        .as_deref()
+        .map(|bytes| *blake3::hash(bytes).as_bytes())
+        == db_before
+            .as_deref()
+            .map(|bytes| *blake3::hash(bytes).as_bytes())
+        && dbx_after
+            .as_deref()
+            .map(|bytes| *blake3::hash(bytes).as_bytes())
+            == dbx_before
+                .as_deref()
+                .map(|bytes| *blake3::hash(bytes).as_bytes());
+
+    evidence.database_stability = Some(stable);
+    if !stable {
+        evidence.verifying_db_certificate = None;
+        evidence.verifying_dbx_certificate = None;
+        evidence.state = DbCertificateVerificationState::DatabaseChangedDuringVerification;
+        evidence.stderr_blake3 = *blake3::hash(b"db/dbx changed during verification").as_bytes();
     }
-    Ok(DbCertificateVerificationEvidence {
-        image_blake3,
-        image_authenticode_sha256,
-        db_certificate_digests,
-        verifying_db_certificate: None,
-        state: DbCertificateVerificationState::NoMatchingDbCertificate,
-        verifier: "sbverify".into(),
-        stdout_blake3: *blake3::hash(&last_stdout).as_bytes(),
-        stderr_blake3: *blake3::hash(&last_stderr).as_bytes(),
-    })
+
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
+        .as_millis() as u64;
+    evidence.with_observation_metadata(observed_at_ms)
 }
 
 pub fn require_db_certificate_verification(
@@ -698,6 +918,17 @@ pub fn require_db_certificate_verification(
     }
     if evidence.state != DbCertificateVerificationState::VerifiedAgainstDbCertificate {
         return Err(format!("db certificate verification state is {:?}", evidence.state));
+    }
+    Ok(())
+}
+
+pub fn require_live_db_certificate_verification(
+    evidence: &DbCertificateVerificationEvidence,
+    expected_image_blake3: &[u8; 32],
+) -> Result<(), String> {
+    require_db_certificate_verification(evidence, expected_image_blake3)?;
+    if evidence.database_stability != Some(true) {
+        return Err("live Secure Boot database evidence was not stable across verification".into());
     }
     Ok(())
 }
@@ -879,7 +1110,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn unsupported_dbx_record_prevents_authorization_conclusion() {
         let image_hash = [8u8; 32];
         let db = make_image_hash_signature_list(image_hash);
@@ -909,6 +1139,7 @@ mod tests {
             DirectTrustDisposition::UnknownUnsupportedRecord
         );
     }
+    #[test]
     fn db_image_hash_is_authorizing_only_without_dbx_veto() {
         let image_hash = [8u8; 32];
         let db = make_image_hash_signature_list(image_hash);

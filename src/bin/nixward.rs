@@ -111,6 +111,10 @@ fn main() {
             ),
         },
 
+        Command::VerifySecureBoot { image } => {
+            cmd_verify_secure_boot(&image, cli.format);
+        }
+
         Command::Rollback { generation } => {
             let cmd = if let Some(g) = generation {
                 GenerationManager::switch_to(g)
@@ -964,6 +968,57 @@ fn cmd_config(op: ConfigCommand) {
         Err(e) => {
             eprintln!("  Failed to apply authorized patch: {e}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_verify_secure_boot(image: &Path, format: OutputFormat) {
+    match nixward::action::secure_boot::verify_image_against_live_secure_boot_databases(image) {
+        Ok(evidence) => {
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                    );
+                }
+                OutputFormat::Minimal => {
+                    println!("{:?}", evidence.state);
+                }
+                _ => {
+                    println!("  Secure Boot image verification: {:?}", evidence.state);
+                    println!("  Image BLAKE3: {:?}", evidence.image_blake3);
+                    println!(
+                        "  Authenticode SHA-256: {:?}",
+                        evidence.image_authenticode_sha256
+                    );
+                    println!("  db certificate anchors: {}", evidence.db_certificate_digests.len());
+                    println!("  dbx certificate anchors: {}", evidence.dbx_certificate_digests.len());
+                    println!(
+                        "  Verifying db certificate: {:?}",
+                        evidence.verifying_db_certificate
+                    );
+                    println!(
+                        "  Verifying dbx certificate: {:?}",
+                        evidence.verifying_dbx_certificate
+                    );
+                    println!("  db/dbx stable: {:?}", evidence.database_stability);
+                    println!("  Observed at: {:?}", evidence.observed_at_ms);
+                    println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                    println!("  Qualification: evidence only; firmware acceptance, closure binding, physical boot, and health remain separate.");
+                }
+            }
+
+            if !matches!(
+                evidence.state,
+                nixward::action::secure_boot::DbCertificateVerificationState::VerifiedAgainstDbCertificate
+            ) {
+                std::process::exit(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("  Secure Boot image verification failed closed: {error}");
+            std::process::exit(2);
         }
     }
 }

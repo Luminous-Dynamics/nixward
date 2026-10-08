@@ -20,8 +20,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | Secure Boot firmware state | exact UEFI policy variables | `SecureBoot` + `SetupMode` raw observations | Implemented |
 | firmware trust databases | exact `db`/`dbx` payloads | raw EFI variable digests | Implemented; authorization mapping remains open |
 | PE signature table | exact UKI image | certificate-table offset/size/type/revision/payload digests | Implemented |
-| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, image/certificate digests, subject-stability recheck | Implemented; trust authorization remains open |
-| Secure Boot signer authorization | exact signer + firmware policy | cert-to-`db`/`dbx` relationship | Open — Issue #17 |
+| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, subject-stability recheck | Implemented |
+| Secure Boot signer authorization | exact signer + firmware policy | `db` chain-anchor verification + `dbx` chain-veto evidence; TBS/time semantics still separate | Partially implemented — Issue #17 |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
 | physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
@@ -37,6 +37,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 6. Successful `switch-to-configuration boot` is not proof of effective next-boot selection.
 7. Physical reboot success is not post-boot health.
 8. Unknown or unsupported evidence must remain explicit Unknown rather than being coerced into Pass.
+9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
+10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
 
 ## Current qualification gate
 

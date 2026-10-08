@@ -120,6 +120,15 @@ pub enum Command {
         generation: Option<u32>,
     },
 
+    /// Verify a UKI against the live Secure Boot db/dbx policy evidence.
+    ///
+    /// This is read-only: it does not modify EFI variables, firmware keys, or the image.
+    VerifySecureBoot {
+        /// Exact EFI/UKI image path to verify.
+        #[arg(long)]
+        image: PathBuf,
+    },
+
     /// Observe the current system state.
     Observe {
         /// Show specific domain only.
@@ -450,6 +459,20 @@ mod tests {
         let cli = Cli::parse_from(["nixward", "install", "firefox"]);
         assert!(cli.has_natural_input());
         assert_eq!(cli.natural_input(), "install firefox");
+    }
+
+    #[test]
+    fn test_parse_secure_boot_verification() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "verify-secure-boot",
+            "--image",
+            "/boot/EFI/Linux/nixos.efi",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::VerifySecureBoot { image }) if image == PathBuf::from("/boot/EFI/Linux/nixos.efi")
+        ));
     }
 
     #[test]
