@@ -866,6 +866,14 @@ mod tests {
     }
 
     #[test]
+    fn authenticode_hash_rejects_section_address_order_mismatch() {
+        let mut image = pe_with_two_sections_and_overlay();
+        let second_header = 0x170usize;
+        image[second_header + 12..second_header + 16].copy_from_slice(&0x0800u32.to_le_bytes());
+        assert!(authenticode_sha256(&image).is_err());
+    }
+
+    #[test]
     fn authenticode_hash_changes_when_hashed_section_bytes_change() {
         let mut image = pe_with_certificate(0x0002, b"signed-payload");
         let first = authenticode_sha256(&image).expect("authenticode hash");
