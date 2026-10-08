@@ -187,8 +187,22 @@ pub fn classify_activation_post_state(
     };
 
     match (&observation, activation_started) {
-        (RecoveryObservation::CandidateProvenActive { .. } | RecoveryObservation::BootCandidateProven { .. }, _) =>
-            ActivationDisposition::Activated { process_exit_status, observation },
+        (
+            RecoveryObservation::CandidateProvenActive { .. }
+            | RecoveryObservation::BootCandidateProven { .. },
+            true,
+        ) => ActivationDisposition::Activated {
+            process_exit_status,
+            observation,
+        },
+        (
+            RecoveryObservation::CandidateProvenActive { .. }
+            | RecoveryObservation::BootCandidateProven { .. },
+            false,
+        ) => ActivationDisposition::RecoveryRequired {
+            process_exit_status,
+            observation,
+        },
         (RecoveryObservation::PredecessorProvenActive { .. }, false) =>
             ActivationDisposition::FailedBeforeActivation { process_exit_status, reason: "activation did not begin and predecessor state remains proven active".into() },
         (RecoveryObservation::PredecessorProvenActive { .. }, true) =>
@@ -574,6 +588,38 @@ mod tests {
             SystemActivation::Switch,
         );
         assert!(matches!(result, ActivationDisposition::Activated { .. }));
+    }
+
+    #[test]
+    fn candidate_state_without_activation_start_requires_recovery() {
+        let result = classify_activation_post_state(
+            false,
+            Some(1),
+            Some(CANDIDATE),
+            Some(CANDIDATE_PROFILE),
+            CANDIDATE,
+            CANDIDATE_PROFILE,
+            PREDECESSOR,
+            PREDECESSOR_PROFILE,
+            SystemActivation::Switch,
+        );
+        assert!(matches!(result, ActivationDisposition::RecoveryRequired { .. }));
+    }
+
+    #[test]
+    fn boot_candidate_without_activation_start_requires_recovery() {
+        let result = classify_activation_post_state(
+            false,
+            Some(1),
+            Some(PREDECESSOR),
+            Some(CANDIDATE_PROFILE),
+            CANDIDATE,
+            CANDIDATE_PROFILE,
+            PREDECESSOR,
+            PREDECESSOR_PROFILE,
+            SystemActivation::Boot,
+        );
+        assert!(matches!(result, ActivationDisposition::RecoveryRequired { .. }));
     }
 
     #[test]
