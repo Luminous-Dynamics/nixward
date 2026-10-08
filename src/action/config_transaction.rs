@@ -1422,6 +1422,8 @@ pub struct ConfigTransaction {
     nonce: String,
     source_digest: String,
     #[serde(default)]
+    frozen_source: Option<FrozenConfigSource>,
+    #[serde(default)]
     candidate_store_path: Option<String>,
     #[serde(default)]
     candidate_build: Option<CandidateBuildReceipt>,
@@ -1460,6 +1462,7 @@ impl ConfigTransaction {
             plan_digest: digest_hex(&plan_digest),
             nonce: digest_hex(&nonce),
             source_digest: digest_hex(&source_digest),
+            frozen_source: None,
             candidate_store_path: None,
             candidate_build: None,
             phase: ConfigTransactionPhase::Prepared,
@@ -1586,6 +1589,28 @@ impl ConfigTransaction {
         }
     }
 
+    /// Re-establish execution significance from the source snapshot already
+    /// persisted in this journal. This is the restart-safe recovery boundary:
+    /// callers do not get to substitute a mutable working-tree snapshot.
+    pub fn confirm_recovery_observation_from_journal(
+        &mut self,
+        expected_phase: ConfigTransactionPhase,
+        observed_source_store_path: Option<&str>,
+        observation: &RecoveryObservation,
+    ) -> Result<(), String> {
+        let source = self
+            .frozen_source
+            .as_ref()
+            .ok_or_else(|| "transaction journal has no persisted frozen source snapshot".to_string())?
+            .clone();
+        self.confirm_recovery_observation(
+            &source,
+            expected_phase,
+            observed_source_store_path,
+            observation,
+        )
+    }
+
     /// Re-establish execution significance after loading a journal.
     /// The expected phase is supplied by authoritative execution context, not
     /// trusted from the journal record itself.
@@ -1626,6 +1651,30 @@ impl ConfigTransaction {
         self.recovery_observed = true;
         Ok(())
     }
+    /// Bind and durably retain the exact frozen source snapshot used by this
+    /// transaction. The snapshot is part of the journal evidence, not a
+    /// mutable working-tree reference.
+    pub fn bind_frozen_source(&mut self, source: &FrozenConfigSource) -> Result<(), String> {
+        if self.phase != ConfigTransactionPhase::InputFrozen {
+            return Err("frozen source can only be bound at InputFrozen".into());
+        }
+        if source.root_digest != self.source_digest {
+            return Err("frozen source digest does not match transaction source digest".into());
+        }
+        if let Some(existing) = &self.frozen_source {
+            if existing != source {
+                return Err("frozen source snapshot is immutable once bound".into());
+            }
+            return Ok(());
+        }
+        self.frozen_source = Some(source.clone());
+        Ok(())
+    }
+
+    pub fn frozen_source(&self) -> Option<&FrozenConfigSource> {
+        self.frozen_source.as_ref()
+    }
+
     pub fn bind_source_realization(
         &mut self,
         source: &FrozenConfigSource,
@@ -1637,9 +1686,7 @@ impl ConfigTransaction {
         if realization.source_digest != self.source_digest {
             return Err("source realization digest does not match transaction source digest".into());
         }
-        if source.root_digest != self.source_digest {
-            return Err("supplied frozen source does not match transaction source digest".into());
-        }
+        self.bind_frozen_source(source)?;
         if !realization.is_rooted() {
             return Err("source realization lease must be rooted before binding".into());
         }
@@ -1932,6 +1979,19 @@ impl ConfigTransaction {
         if transaction.transaction_id != recomputed_id {
             return Err("transaction journal transaction id does not match its persisted preimage".into());
         }
+        if !matches!(
+            transaction.phase,
+            ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen
+        ) && transaction.frozen_source.is_none()
+        {
+            return Err("transaction journal at executable phase is missing its frozen source snapshot".into());
+        }
+        if let Some(source) = transaction.frozen_source.as_ref() {
+            if source.root_digest != transaction.source_digest {
+                return Err("transaction journal frozen source digest mismatch".into());
+            }
+        }
+
         if let Some(receipt) = transaction.candidate_build.as_ref() {
             receipt.validate_identity()?;
             if receipt.source_digest != transaction.source_digest {
