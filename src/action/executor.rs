@@ -2059,6 +2059,7 @@ impl NixOSExecutor {
                 | super::config_transaction::ConfigTransactionPhase::IndeterminateActivation
                 | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
                 | super::config_transaction::ConfigTransactionPhase::RecoveryRequired
+                | super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
         ) {
             return ExecutionResult::Blocked {
                 reason: format!(
@@ -2067,6 +2068,63 @@ impl NixOSExecutor {
                 ),
                 safety_level: safety,
             };
+        }
+
+        let phase = transaction.phase();
+        let workers = transaction.activation_worker_identities();
+        let has_purpose = |purpose| workers.iter().any(|worker| worker.purpose == purpose);
+        use super::config_transaction::ActivationWorkerPurpose;
+        match phase {
+            super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
+            | super::config_transaction::ConfigTransactionPhase::ProfileCommitted
+            | super::config_transaction::ConfigTransactionPhase::IndeterminateProfileTransition
+                if !has_purpose(ActivationWorkerPurpose::ProfileTransition) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: "profile-transition worker identity is absent; refusing recovery because an unjournaled process may still be mutating profile state".into(),
+                        rollback_error: None,
+                    };
+                }
+            super::config_transaction::ConfigTransactionPhase::ActivationStarted
+            | super::config_transaction::ConfigTransactionPhase::IndeterminateActivation
+                if !has_purpose(ActivationWorkerPurpose::Activation) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: "activation worker identity is absent; refusing recovery because worker liveness cannot be proven".into(),
+                        rollback_error: None,
+                    };
+                }
+            super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
+                if !has_purpose(ActivationWorkerPurpose::Recovery) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: "recovery worker identity is absent after RecoveryMutationStarted; refusing to guess whether a recovery process is still running".into(),
+                        rollback_error: None,
+                    };
+                }
+            super::config_transaction::ConfigTransactionPhase::RecoveryRequired
+                if !has_purpose(ActivationWorkerPurpose::Activation)
+                    && !has_purpose(ActivationWorkerPurpose::ProfileTransition) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: "recovery journal has no process receipts for any prior mutation boundary".into(),
+                        rollback_error: None,
+                    };
+                }
+            _ => {}
+        }
+        for worker in workers {
+            match Self::persisted_worker_may_be_live(worker) {
+                Ok(true) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("transaction worker PID {} (start {}) may still be live; refusing concurrent recovery mutation", worker.pid, worker.start_time_ticks),
+                        rollback_error: None,
+                    };
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("cannot prove transaction worker termination: {error}"),
+                        rollback_error: None,
+                    };
+                }
+            }
         }
 
         let NixOSCommand::ActivateSystemClosure {
@@ -2231,6 +2289,14 @@ impl NixOSExecutor {
                 rollback_error: None,
             };
         }
+        if transaction.phase() == super::config_transaction::ConfigTransactionPhase::RecoveryRequired {
+            if let Err(reason) = transaction.advance(super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted) {
+                return ExecutionResult::FailedNoRollback { error: reason, rollback_error: None };
+            }
+            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                return ExecutionResult::FailedNoRollback { error: reason, rollback_error: None };
+            }
+        }
 
         let rollback_command = NixOSCommand::ActivateSystemClosure {
             store_path: prior_runtime.clone(),
@@ -2294,7 +2360,7 @@ impl NixOSExecutor {
             }
         }
 
-        let (declared, args) = rollback_command.to_command();
+        let (_, args) = rollback_command.to_command();
         let executable = match Self::trusted_bound_executable(&rollback_command) {
             Ok(value) => value,
             Err(error) => return ExecutionResult::FailedNoRollback { error, rollback_error: None },
@@ -2598,7 +2664,7 @@ impl NixOSExecutor {
         }
 
         let start = std::time::Instant::now();
-        let (declared, args) = command.to_command();
+        let (_, args) = command.to_command();
         let executable = match Self::trusted_bound_executable(&command) {
             Ok(value) => value,
             Err(error) => return ExecutionResult::FailedNoRollback { error, rollback_error: None },
