@@ -10,6 +10,53 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn serialize_fixed_48<S>(value: &[u8; 48], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_bytes(value)
+}
+
+fn deserialize_fixed_48<'de, D>(deserializer: D) -> Result<[u8; 48], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let bytes = <Vec<u8> as serde::Deserialize>::deserialize(deserializer)?;
+    if bytes.len() != 48 {
+        return Err(serde::de::Error::custom(format!(
+            "expected exactly 48 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut out = [0u8; 48];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+fn serialize_fixed_64<S>(value: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_bytes(value)
+}
+
+fn deserialize_fixed_64<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let bytes = <Vec<u8> as serde::Deserialize>::deserialize(deserializer)?;
+    if bytes.len() != 64 {
+        return Err(serde::de::Error::custom(format!(
+            "expected exactly 64 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignatureTableState {
     Present,
@@ -306,7 +353,9 @@ pub struct X509ChainCertificateEvidence {
     pub issuer_blake3: [u8; 32],
     pub serial_blake3: [u8; 32],
     pub tbs_sha256: [u8; 32],
+    #[serde(serialize_with = "serialize_fixed_48", deserialize_with = "deserialize_fixed_48")]
     pub tbs_sha384: [u8; 48],
+    #[serde(serialize_with = "serialize_fixed_64", deserialize_with = "deserialize_fixed_64")]
     pub tbs_sha512: [u8; 64],
     pub is_signer: bool,
     pub is_chain_member: bool,
@@ -364,7 +413,10 @@ pub fn inspect_x509_signature_chains(
                 .map_err(|error| format!("failed to serialize embedded X.509 certificate: {error}"))?;
             let (_, parsed) = x509_parser::parse_x509_certificate(&der)
                 .map_err(|error| format!("failed to parse embedded X.509 certificate: {error}"))?;
-            let issuer = parsed.tbs_certificate.issuer.as_ref();
+            let issuer = cert
+                .issuer_name()
+                .to_der()
+                .map_err(|error| format!("failed to serialize X.509 issuer name: {error}"))?;
             // Preserve the exact X.509 serial-number content octets.
             // Do not normalize through a library-specific integer representation:
             // Secure Boot dbx identity matching is byte-sensitive here.
