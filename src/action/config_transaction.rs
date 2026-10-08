@@ -748,18 +748,15 @@ pub struct SourceRealizationLease {
 }
 
 impl SourceRealizationLease {
-    pub fn new(source: &FrozenConfigSource, store_path: impl Into<String>, gc_root_path: impl Into<String>) -> Result<Self, String> {
-        let store_path = store_path.into();
-        let gc_root_path = gc_root_path.into();
-        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
-            return Err("source realization is not bound to a canonical immutable Nix store path".into());
-        }
-        let gc_root = std::path::Path::new(&gc_root_path);
-        let canonical_root = std::path::Path::new("/nix/var/nix/gcroots/nixward");
+    fn validate_gc_root_path(gc_root_path: &str) -> Result<(), String> {
+        let gc_root = std::path::Path::new(gc_root_path);
+        let namespace = std::path::Path::new("/nix/var/nix/gcroots/nixward");
         let relative = gc_root
-            .strip_prefix(canonical_root)
+            .strip_prefix(namespace)
             .map_err(|_| "source GC root must be under /nix/var/nix/gcroots/nixward".to_string())?;
-        if relative.as_os_str().is_empty()
+        if !gc_root.is_absolute()
+            || relative.as_os_str().is_empty()
+            || relative.components().count() != 1
             || relative.components().any(|component| {
                 matches!(
                     component,
@@ -768,16 +765,28 @@ impl SourceRealizationLease {
                         | std::path::Component::Prefix(_)
                 )
             })
-            || relative.components().count() != 1
         {
-            return Err(
-                "source GC root must be exactly one stable child of /nix/var/nix/gcroots/nixward"
-                    .into(),
-            );
+            return Err("source GC root must be exactly one stable child of /nix/var/nix/gcroots/nixward".into());
         }
-        if gc_root.file_name().and_then(|value| value.to_str()).map(|value| value.is_empty()).unwrap_or(true) {
-            return Err("source GC root must have a stable leaf name".into());
+        Ok(())
+    }
+
+    fn validate_identity(&self) -> Result<(), String> {
+        if decode_digest(&self.source_digest).is_err() {
+            return Err("source realization source digest is invalid".into());
         }
+        if !super::execution_intent::is_valid_nix_store_path(&self.store_path) {
+            return Err("source realization store path is not a canonical immutable Nix store path".into());
+        }
+        Self::validate_gc_root_path(&self.gc_root_path)
+    }
+    pub fn new(source: &FrozenConfigSource, store_path: impl Into<String>, gc_root_path: impl Into<String>) -> Result<Self, String> {
+        let store_path = store_path.into();
+        let gc_root_path = gc_root_path.into();
+        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+            return Err("source realization is not bound to a canonical immutable Nix store path".into());
+        }
+        Self::validate_gc_root_path(&gc_root_path)?;
         Ok(Self {
             source_digest: source.root_digest.clone(),
             store_path,
@@ -1289,7 +1298,7 @@ impl ConfigTransaction {
             if !super::execution_intent::is_valid_nix_store_path(&realization.store_path) {
                 return Err("transaction journal contains an invalid source realization store path".into());
             }
-            SourceRealizationLease::validate_gc_root_path(&realization.gc_root_path)?;
+            realization.validate_identity()?;
 
         }
         let mut transaction = transaction;
