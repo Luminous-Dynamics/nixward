@@ -1236,9 +1236,6 @@ impl CandidateBuildReceipt {
         if decode_digest(&realization_plan_digest).is_err() {
             return Err("candidate build realization-plan digest is invalid".into());
         }
-        if source.root_digest != source.root_digest {
-            return Err("unreachable source identity check".into());
-        }
         Ok(Self {
             source_digest: source.root_digest.clone(),
             source_store_path,
@@ -2165,6 +2162,33 @@ mod tests {
             .is_err());
     }
 
+    fn test_candidate_receipt() -> CandidateBuildReceipt {
+        CandidateBuildReceipt {
+            source_digest: digest_hex(&[3; 32]),
+            source_store_path:
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward-frozen-config".into(),
+            candidate_store_path:
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test".into(),
+            realization_plan_digest: digest_hex(&[4; 32]),
+        }
+    }
+
+    fn bind_test_candidate(transaction: &mut ConfigTransaction) {
+        transaction.source_realization = Some(SourceRealizationLease {
+            source_digest: digest_hex(&[3; 32]),
+            store_path:
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward-frozen-config".into(),
+            gc_root_path: format!(
+                "/nix/var/nix/gcroots/nixward/{}",
+                transaction.transaction_id()
+            ),
+            state: SourceRealizationLeaseState::Rooted,
+        });
+        transaction
+            .bind_candidate_build(test_candidate_receipt())
+            .unwrap();
+    }
+
     #[test]
     fn transaction_graph_rejects_phase_skip() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
@@ -2173,11 +2197,7 @@ mod tests {
         transaction
             .advance(ConfigTransactionPhase::InputFrozen)
             .unwrap();
-        transaction
-            .set_candidate_store_path(
-                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test",
-            )
-            .unwrap();
+        bind_test_candidate(&mut transaction);
         transaction
             .advance(ConfigTransactionPhase::CandidateBuilt)
             .unwrap();
@@ -2214,7 +2234,7 @@ mod tests {
     fn indeterminate_profile_cannot_activate() {
         let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
-        tx.set_candidate_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test").unwrap();
+        bind_test_candidate(&mut tx);
         tx.advance(ConfigTransactionPhase::CandidateBuilt).unwrap();
         tx.advance(ConfigTransactionPhase::SourceCommitted).unwrap();
         tx.advance(ConfigTransactionPhase::ProfileTransitionStarted).unwrap();
@@ -2366,6 +2386,7 @@ mod tests {
             gc_root_path: "/nix/var/nix/gcroots/nixward/txn-001".into(),
             state: SourceRealizationLeaseState::Rooted,
         });
+        assert!(tx.bind_candidate_build(test_candidate_receipt()).is_err());
         assert!(tx.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
     }
 
@@ -2373,7 +2394,7 @@ mod tests {
     fn candidate_built_requires_retained_source_realization() {
         let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
-        tx.set_candidate_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test").unwrap();
+        assert!(tx.bind_candidate_build(test_candidate_receipt()).is_err());
         assert!(tx.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
     }
     #[test]
