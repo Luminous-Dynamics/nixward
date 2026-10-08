@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(all(feature = "native", target_os = "linux"))]
+use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use tokio::process::Command;
@@ -1166,6 +1168,202 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn current_boot_id() -> Result<String, String> {
+        let value = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map_err(|error| format!("failed to read Linux boot identity: {error}"))?;
+        let value = value.trim().to_string();
+        if value.len() != 36 || value.bytes().filter(|byte| *byte == b'-').count() != 4
+            || !value.bytes().all(|byte| byte == b'-' || (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+        {
+            return Err("Linux boot identity is not canonical lowercase UUID text".into());
+        }
+        Ok(value)
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn proc_start_time_ticks(pid: u32) -> Result<Option<u64>, String> {
+        let path = format!("/proc/{pid}/stat");
+        let stat = match std::fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("failed to read process identity {path}: {error}")),
+        };
+        let close = stat.rfind(')')
+            .ok_or_else(|| "process stat record has no closing command delimiter".to_string())?;
+        let fields = stat[close + 1..].split_whitespace().collect::<Vec<_>>();
+        let start = fields.get(19)
+            .ok_or_else(|| "process stat record lacks start-time field".to_string())?
+            .parse::<u64>()
+            .map_err(|error| format!("process start time is invalid: {error}"))?;
+        Ok(Some(start))
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn open_pidfd(pid: u32) -> Result<OwnedFd, String> {
+        let result = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid as nix::libc::pid_t, 0u32) };
+        if result < 0 {
+            return Err(format!("pidfd_open({pid}) failed: {}", std::io::Error::last_os_error()));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(result as i32) })
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn pidfd_exited(pidfd: &OwnedFd) -> Result<bool, String> {
+        let mut pollfd = nix::libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: nix::libc::POLLIN | nix::libc::POLLHUP,
+            revents: 0,
+        };
+        let result = unsafe { nix::libc::poll(&mut pollfd, 1, 0) };
+        if result < 0 {
+            return Err(format!("pidfd poll failed: {}", std::io::Error::last_os_error()));
+        }
+        Ok(result > 0 && pollfd.revents & (nix::libc::POLLIN | nix::libc::POLLHUP | nix::libc::POLLERR) != 0)
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn signal_pidfd(pidfd: &OwnedFd, signal: i32) -> Result<(), String> {
+        let result = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                signal,
+                std::ptr::null::<nix::libc::siginfo_t>(),
+                0u32,
+            )
+        };
+        if result < 0 {
+            return Err(format!("pidfd_send_signal failed: {}", std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    fn activation_argv_digest(args: &[String]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V1\0");
+        for argument in args {
+            hasher.update(&(argument.len() as u64).to_le_bytes());
+            hasher.update(argument.as_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn capture_worker_identity(
+        pid: u32,
+        transaction_id: &str,
+        purpose: super::config_transaction::ActivationWorkerPurpose,
+        executable: &str,
+        args: &[String],
+    ) -> Result<(super::config_transaction::ActivationWorkerIdentity, OwnedFd), String> {
+        let boot_before = Self::current_boot_id()?;
+        let start_before = Self::proc_start_time_ticks(pid)?
+            .ok_or_else(|| "activation worker vanished before process identity was captured".to_string())?;
+        let pidfd = Self::open_pidfd(pid)?;
+        let start_after = Self::proc_start_time_ticks(pid)?
+            .ok_or_else(|| "activation worker vanished while process identity was captured".to_string())?;
+        let boot_after = Self::current_boot_id()?;
+        if start_before != start_after || boot_before != boot_after {
+            return Err("activation worker identity changed during pidfd acquisition".into());
+        }
+        let identity = super::config_transaction::ActivationWorkerIdentity {
+            transaction_id: transaction_id.to_string(),
+            purpose,
+            pid,
+            boot_id: boot_after,
+            start_time_ticks: start_after,
+            executable: executable.to_string(),
+            argv_digest: Self::activation_argv_digest(args),
+        };
+        identity.validate_identity()?;
+        Ok((identity, pidfd))
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn persisted_worker_may_be_live(
+        identity: &super::config_transaction::ActivationWorkerIdentity,
+    ) -> Result<bool, String> {
+        identity.validate_identity()?;
+        if Self::current_boot_id()? != identity.boot_id {
+            return Ok(false);
+        }
+        let Some(start_before) = Self::proc_start_time_ticks(identity.pid)? else {
+            return Ok(false);
+        };
+        if start_before != identity.start_time_ticks {
+            return Ok(false);
+        }
+        let pidfd = match Self::open_pidfd(identity.pid) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(format!("cannot safely reacquire pidfd for recorded worker: {error}"));
+            }
+        };
+        let Some(start_after) = Self::proc_start_time_ticks(identity.pid)? else {
+            return Ok(!Self::pidfd_exited(&pidfd)?);
+        };
+        if start_after != identity.start_time_ticks {
+            return Ok(false);
+        }
+        Ok(!Self::pidfd_exited(&pidfd)?)
+    }
+
+    #[cfg(not(all(feature = "native", target_os = "linux")))]
+    fn persisted_worker_may_be_live(
+        _identity: &super::config_transaction::ActivationWorkerIdentity,
+    ) -> Result<bool, String> {
+        Err("activation worker recovery requires Linux pidfd support".into())
+    }
+
+    async fn run_bound_process_with_worker_identity(
+        executable: &str,
+        args: &[String],
+        transaction: &mut super::config_transaction::ConfigTransaction,
+        journal_path: &Path,
+        purpose: super::config_transaction::ActivationWorkerPurpose,
+    ) -> Result<std::process::Output, String> {
+        #[cfg(not(all(feature = "native", target_os = "linux")))]
+        {
+            let _ = (executable, args, transaction, journal_path, purpose);
+            return Err("transaction worker execution requires Linux pidfd support".into());
+        }
+        #[cfg(all(feature = "native", target_os = "linux"))]
+        {
+            let transaction_id = transaction.transaction_id().to_string();
+            let mut child = Command::new(executable);
+            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+            let mut child = child.spawn()
+                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
+            let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
+            let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = transaction.bind_activation_worker_identity(identity) {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+            if let Err(error) = Self::persist_transaction(transaction, journal_path) {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!("worker identity could not be persisted; worker was killed best-effort: {error}"));
+            }
+            let output = child.wait_with_output().await
+                .map_err(|error| format!("failed waiting for transaction worker {executable}: {error}"))?;
+            if !Self::pidfd_exited(&pidfd)? {
+                return Err("transaction worker wait completed without pidfd exit evidence".into());
+            }
+            Ok(output)
+        }
+    }
     async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
         let (declared_cmd, args) = command.to_command();
         let executable = Self::trusted_bound_executable(command)?;
