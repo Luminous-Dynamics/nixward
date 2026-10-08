@@ -1116,12 +1116,33 @@ impl NixOSExecutor {
             .map_err(|error| format!("failed to execute command {cmd}: {error}"))
     }
 
+    fn trusted_system_executable(name: &str) -> Result<String, String> {
+        if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
+            return Err("trusted system executable name is invalid".into());
+        }
+        let link = Path::new("/run/current-system/sw/bin").join(name);
+        let canonical = std::fs::canonicalize(&link)
+            .map_err(|error| format!("failed to resolve trusted system executable {name}: {error}"))?;
+        let value = canonical
+            .to_str()
+            .ok_or_else(|| "trusted system executable path is not valid UTF-8".to_string())?;
+        if !value.starts_with("/nix/store/")
+            || canonical.file_name().and_then(|v| v.to_str()) != Some(name)
+        {
+            return Err(format!(
+                "system executable {name} did not resolve to an immutable Nix store executable"
+            ));
+        }
+        Ok(value.to_string())
+    }
+
     async fn set_exact_system_profile(profile_store_path: &str) -> Result<(), String> {
         if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
             return Err("system profile target is not a canonical Nix store path".into());
         }
 
-        let output = Command::new("nix-env")
+        let nix_env = Self::trusted_system_executable("nix-env")?;
+        let output = Command::new(nix_env)
             .args([
                 "-p",
                 "/nix/var/nix/profiles/system",
@@ -2498,6 +2519,12 @@ mod tests {
         let auth = ExecutionAuthorization::from_change_authorization(&plan, &change_auth).unwrap();
         let result = executor.execute_authorized(install, auth, Some(1.0)).await;
         assert!(matches!(result, ExecutionResult::Blocked { .. }));
+    }
+
+    #[test]
+    fn trusted_system_executable_rejects_path_injection() {
+        assert!(NixOSExecutor::trusted_system_executable("nix-env/sneaky").is_err());
+        assert!(NixOSExecutor::trusted_system_executable("").is_err());
     }
 
     #[test]
