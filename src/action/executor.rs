@@ -1475,6 +1475,48 @@ impl NixOSExecutor {
         Ok(value.to_string())
     }
 
+    async fn set_exact_system_profile_with_worker(
+        profile_store_path: &str,
+        transaction: &mut super::config_transaction::ConfigTransaction,
+        journal_path: &Path,
+        purpose: super::config_transaction::ActivationWorkerPurpose,
+    ) -> Result<super::config_transaction::ProfileTransitionDisposition, String> {
+        if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
+            return Err("system profile target is not a canonical Nix store path".into());
+        }
+        let nix_env = Self::trusted_system_executable("nix-env")?;
+        let args = vec![
+            "-p".to_string(),
+            "/nix/var/nix/profiles/system".to_string(),
+            "--set".to_string(),
+            profile_store_path.to_string(),
+        ];
+        let output = Self::run_bound_process_with_worker_identity(
+            &nix_env,
+            &args,
+            transaction,
+            journal_path,
+            purpose,
+        )
+        .await?;
+        let process_exit_status = output.status.code();
+        match GenerationManager::current_system_profile_closure() {
+            Ok(observed) => Ok(super::config_transaction::classify_profile_transition_post_state(
+                process_exit_status,
+                Some(&observed),
+                profile_store_path,
+            )),
+            Err(error) => Ok(super::config_transaction::ProfileTransitionDisposition::Indeterminate {
+                process_exit_status,
+                observed_profile: None,
+                reason: format!(
+                    "failed to observe exact system profile transition: {error}; child stderr: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            }),
+        }
+    }
+
     async fn set_exact_system_profile(
         profile_store_path: &str,
     ) -> Result<super::config_transaction::ProfileTransitionDisposition, String> {
@@ -2213,7 +2255,12 @@ impl NixOSExecutor {
 
         // Ensure the exact predecessor profile is selected before invoking its
         // immutable activation artifact.
-        match Self::set_exact_system_profile(prior_profile).await {
+        match Self::set_exact_system_profile_with_worker(
+            prior_profile,
+            &mut transaction,
+            &journal_path,
+            super::config_transaction::ActivationWorkerPurpose::Recovery,
+        ).await {
             Ok(disposition) => match disposition {
                 super::config_transaction::ProfileTransitionDisposition::Committed { .. } => {}
                 super::config_transaction::ProfileTransitionDisposition::Indeterminate {
@@ -2247,7 +2294,18 @@ impl NixOSExecutor {
             }
         }
 
-        let result = Self::run_bound_command(&rollback_command).await;
+        let (declared, args) = rollback_command.to_command();
+        let executable = match Self::trusted_bound_executable(&rollback_command) {
+            Ok(value) => value,
+            Err(error) => return ExecutionResult::FailedNoRollback { error, rollback_error: None },
+        };
+        let result = Self::run_bound_process_with_worker_identity(
+            &executable,
+            &args,
+            &mut transaction,
+            &journal_path,
+            super::config_transaction::ActivationWorkerPurpose::Recovery,
+        ).await;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
         let post_runtime = GenerationManager::current_runtime_system_closure().ok();
@@ -2483,7 +2541,12 @@ impl NixOSExecutor {
             } => value.clone(),
             _ => unreachable!("validated exact activation command"),
         };
-        match Self::set_exact_system_profile(&profile_store_path).await {
+        match Self::set_exact_system_profile_with_worker(
+            &profile_store_path,
+            &mut transaction,
+            &journal_path,
+            super::config_transaction::ActivationWorkerPurpose::ProfileTransition,
+        ).await {
             Ok(disposition) => {
                 if let Err(reason) = transaction.record_profile_transition(&disposition) {
                     return ExecutionResult::FailedNoRollback {
@@ -2535,7 +2598,18 @@ impl NixOSExecutor {
         }
 
         let start = std::time::Instant::now();
-        let result = Self::run_bound_command(&command).await;
+        let (declared, args) = command.to_command();
+        let executable = match Self::trusted_bound_executable(&command) {
+            Ok(value) => value,
+            Err(error) => return ExecutionResult::FailedNoRollback { error, rollback_error: None },
+        };
+        let result = Self::run_bound_process_with_worker_identity(
+            &executable,
+            &args,
+            &mut transaction,
+            &journal_path,
+            super::config_transaction::ActivationWorkerPurpose::Activation,
+        ).await;
         let elapsed = start.elapsed().as_millis() as u64;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
