@@ -173,11 +173,25 @@ pub fn resolve_systemd_boot_selection(
     persistent_default: Option<&str>,
     entries: &BTreeMap<String, BlsEntry>,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    resolve_systemd_boot_selection_with_source(
+        one_shot_entry,
+        persistent_default,
+        entries,
+        "efi:LoaderEntryDefault/loader.conf",
+    )
+}
+
+fn resolve_systemd_boot_selection_with_source(
+    one_shot_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    entries: &BTreeMap<String, BlsEntry>,
+    persistent_source: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let (selection_kind, selected, source) = match one_shot_entry {
         Some(id) if !id.is_empty() => (SelectionKind::OneShot, id, "efi:LoaderEntryOneShot"),
         _ => match persistent_default {
             Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
-                (SelectionKind::PersistentDefault, id, "efi:LoaderEntryDefault/loader.conf")
+                (SelectionKind::PersistentDefault, id, persistent_source)
             }
             Some(_) => {
                 return Err(UnknownBootSelection {
@@ -196,10 +210,11 @@ pub fn resolve_systemd_boot_selection(
         },
     };
 
-    let entry = entries.get(selected).ok_or_else(|| UnknownBootSelection {
+    let entry_key = resolve_bls_entry_key(selected, entries).ok_or_else(|| UnknownBootSelection {
         bootloader_family: BootloaderFamily::SystemdBoot,
-        reason: format!("selected entry {selected} is not present in the authoritative entry set"),
+        reason: format!("selected entry {selected} is not present as an exact Type #1 BLS entry"),
     })?;
+    let entry = entries.get(&entry_key).expect("resolved BLS entry key");
 
     Ok(BootSelectionEvidence {
         bootloader_family: BootloaderFamily::SystemdBoot,
@@ -210,6 +225,38 @@ pub fn resolve_systemd_boot_selection(
         boot_count_state: entry.boot_count_state,
         observed_at_ms: None,
         evidence_digest: None,
+    })
+}
+
+fn resolve_bls_entry_key(selected: &str, entries: &BTreeMap<String, BlsEntry>) -> Option<String> {
+    if let Some(entry) = entries.get(selected) {
+        return Some(entry.entry_id.clone());
+    }
+    if selected.ends_with(".conf") || selected.ends_with(".efi") {
+        return None;
+    }
+    let conf = format!("{selected}.conf");
+    match entries.get(&conf) {
+        Some(entry) => Some(entry.entry_id.clone()),
+        None => None,
+    }
+}
+
+/// Parse the exact `default` selector from systemd-boot's loader.conf.
+/// Patterns and magic selectors are preserved and are later rejected by the
+/// exact-selection resolver rather than being guessed.
+fn parse_systemd_loader_default(text: &str) -> Option<String> {
+    text.lines().find_map(|raw_line| {
+        let line = raw_line.trim();
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("default") {
+            return None;
+        }
+        let selector = parts.next()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(selector.to_string())
     })
 }
 
@@ -255,14 +302,19 @@ pub fn require_candidate_binding(
 #[cfg(feature = "native")]
 pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let loader_path = run_read_only(["--print-loader-path"])?;
-    let loader_name = Path::new(loader_path.trim())
+    observe_systemd_boot_from_loader(loader_path.trim())
+}
+
+#[cfg(feature = "native")]
+fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_name = Path::new(loader_path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
     if !loader_name.to_ascii_lowercase().starts_with("systemd-boot") {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::Unknown,
-            reason: format!("current EFI loader is not systemd-boot: {}", loader_path.trim()),
+            reason: format!("current EFI loader is not systemd-boot: {loader_path}"),
         });
     }
 
@@ -287,8 +339,27 @@ pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelect
         bootloader_family: BootloaderFamily::SystemdBoot,
         reason,
     })?;
+    let (persistent_default, persistent_source) = match persistent_default {
+        Some(value) => (Some(value), "efi:LoaderEntryDefault"),
+        None => {
+            let loader_conf = std::fs::read_to_string(boot_path.join("loader/loader.conf"))
+                .map_err(|error| UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::SystemdBoot,
+                    reason: format!("failed to read systemd-boot loader.conf: {error}"),
+                })?;
+            (
+                parse_systemd_loader_default(&loader_conf),
+                "loader.conf:default",
+            )
+        }
+    };
 
-    let evidence = resolve_systemd_boot_selection(one_shot.as_deref(), persistent_default.as_deref(), &entries)?;
+    let evidence = resolve_systemd_boot_selection_with_source(
+        one_shot.as_deref(),
+        persistent_default.as_deref(),
+        &entries,
+        persistent_source,
+    )?;
     if evidence.boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -308,6 +379,173 @@ pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelect
             bootloader_family: BootloaderFamily::SystemdBoot,
             reason,
         })
+}
+
+/// Observe GRUB selection and keep candidate qualification separate.
+#[cfg(feature = "native")]
+pub fn observe_grub() -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    observe_grub_from_loader(loader_path.trim())
+}
+
+#[cfg(feature = "native")]
+fn observe_grub_from_loader(loader_path: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_name = Path::new(loader_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !loader_name.contains("grub") {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("current EFI loader is not GRUB: {loader_path}"),
+        });
+    }
+
+    let preferred_root = run_read_only(["-x"])
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| path.is_absolute());
+    let root = discover_grub_root(preferred_root.as_deref()).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let config_path = root.join("grub.cfg");
+    let env_path = root.join("grubenv");
+    let config = std::fs::read_to_string(&config_path).map_err(|error| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason: format!("failed to read generated GRUB config {}: {error}", config_path.display()),
+    })?;
+    let environment_text = run_grub_read_only(&env_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let environment = parse_grub_environment(&environment_text);
+    let generated_default = parse_grub_config_default(&config);
+    let entries = parse_grub_config_entries(&config).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let evidence = resolve_grub_selection(&environment, generated_default.as_deref(), &entries)?;
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("system clock could not produce an observation timestamp: {error}"),
+        })?
+        .as_millis() as u64;
+    evidence.with_observation_metadata(observed_at_ms).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })
+}
+
+#[cfg(feature = "native")]
+pub fn observe_grub_for_candidate(
+    expected_candidate_closure: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let evidence = observe_grub()?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+pub fn observe_boot_selection() -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    let loader_path = loader_path.trim();
+    let loader_name = Path::new(loader_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if loader_name.starts_with("systemd-boot") {
+        observe_systemd_boot_from_loader(loader_path)
+    } else if loader_name.contains("grub") {
+        observe_grub_from_loader(loader_path)
+    } else {
+        Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("unsupported current EFI bootloader: {loader_path}"),
+        })
+    }
+}
+
+#[cfg(feature = "native")]
+pub fn observe_boot_selection_for_candidate(
+    expected_candidate_closure: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let evidence = observe_boot_selection()?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+fn candidate_grub_roots(preferred_root: Option<&Path>) -> Vec<PathBuf> {
+    let defaults = [
+        PathBuf::from("/boot/grub"),
+        PathBuf::from("/boot/efi/grub"),
+        PathBuf::from("/efi/grub"),
+    ];
+    let mut candidates = Vec::new();
+    if let Some(preferred) = preferred_root {
+        candidates.push(preferred.to_path_buf());
+    }
+    for candidate in defaults {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+#[cfg(feature = "native")]
+fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> {
+    let mut matches = Vec::new();
+    for root in candidate_grub_roots(preferred_root) {
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("refusing symlinked GRUB root {}", root.display()));
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => continue,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("failed to inspect GRUB root {}: {error}", root.display()));
+            }
+        }
+        let cfg = root.join("grub.cfg");
+        let env = root.join("grubenv");
+        if regular_file(&cfg)? && regular_file(&env)? {
+            matches.push(root);
+        }
+    }
+    match matches.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => Err("no supported NixOS GRUB config/environment pair was found".into()),
+        _ => Err("multiple GRUB config/environment pairs were found; refusing ambiguous observation".into()),
+    }
+}
+
+#[cfg(feature = "native")]
+fn regular_file(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!("refusing symlinked bootloader state {}", path.display())),
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect bootloader state {}: {error}", path.display())),
+    }
+}
+
+#[cfg(feature = "native")]
+fn run_grub_read_only(env_path: &Path) -> Result<String, String> {
+    let output = Command::new("grub-editenv")
+        .args([env_path.as_os_str(), std::ffi::OsStr::new("list")])
+        .output()
+        .map_err(|error| format!("failed to execute read-only grub-editenv list: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("grub-editenv list failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("grub-editenv produced invalid UTF-8: {error}"))
 }
 
 /// Observe systemd-boot selection and require an exact authorized candidate binding.
@@ -346,6 +584,14 @@ fn run_read_only<const N: usize>(args: [&str; N]) -> Result<String, UnknownBootS
 
 #[cfg(feature = "native")]
 fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, String> {
+    let root_metadata = std::fs::symlink_metadata(entries_path)
+        .map_err(|error| format!("failed to inspect BLS entry directory {}: {error}", entries_path.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err(format!(
+            "BLS entry directory {} is not a regular non-symlink directory",
+            entries_path.display()
+        ));
+    }
     let mut entries = BTreeMap::new();
     let directory = std::fs::read_dir(entries_path).map_err(|error| {
         format!("failed to read authoritative BLS entry directory {}: {error}", entries_path.display())
@@ -355,6 +601,14 @@ fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, S
         let path = item.path();
         if path.extension().and_then(|x| x.to_str()) != Some("conf") {
             continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to inspect BLS entry {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(format!(
+                "BLS entry {} is not a regular non-symlink file",
+                path.display()
+            ));
         }
         let id = path
             .file_name()
@@ -403,12 +657,17 @@ fn decode_efivar_string(bytes: &[u8]) -> Result<String, String> {
         return Err("EFI variable payload is not a valid UTF-16LE string".into());
     }
     let mut units = Vec::new();
+    let mut terminated = false;
     for chunk in bytes[4..].chunks_exact(2) {
         let value = u16::from_le_bytes([chunk[0], chunk[1]]);
         if value == 0 {
+            terminated = true;
             break;
         }
         units.push(value);
+    }
+    if !terminated {
+        return Err("EFI variable UTF-16 payload is not NUL terminated".into());
     }
     String::from_utf16(&units).map_err(|error| format!("EFI variable UTF-16 decoding failed: {error}"))
 }
@@ -434,20 +693,29 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
 /// within this one observed config and duplicate titles fail closed.
 pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry>, String> {
     let mut entries = BTreeMap::new();
-    let mut current: Option<(String, String, Vec<String>)> = None;
+    let mut submenu_stack: Vec<String> = Vec::new();
+    let mut current: Option<(String, String, String, Vec<String>)> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
-        if line.starts_with("menuentry ") {
-            if current.is_some() {
-                return Err("nested GRUB menuentry encountered; refusing ambiguous parse".into());
-            }
-            let title = parse_grub_menuentry_title(line)?;
-            current = Some((title, String::new(), Vec::new()));
+        if current.is_none() && line.starts_with("submenu ") {
+            let title = parse_grub_menuentry_title(line.strip_prefix("submenu ").unwrap_or(line))?;
+            submenu_stack.push(title);
             continue;
         }
 
-        if let Some((title, linux_line, initrds)) = current.as_mut() {
+        if current.is_none() && line.starts_with("menuentry ") {
+            let title = parse_grub_menuentry_title(line)?;
+            let entry_id = if submenu_stack.is_empty() {
+                title.clone()
+            } else {
+                format!("{} > {}", submenu_stack.join(" > "), title)
+            };
+            current = Some((entry_id, title, String::new(), Vec::new()));
+            continue;
+        }
+
+        if let Some((entry_id, title, linux_line, initrds)) = current.as_mut() {
             if line.starts_with("linux ") || line.starts_with("linuxefi ") || line.starts_with("multiboot ") {
                 *linux_line = line.to_string();
             } else if line.starts_with("initrd ") || line.starts_with("initrdefi ") {
@@ -455,11 +723,15 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
             }
 
             if line == "}" {
-                let (title, linux_line, initrds) = current.take().expect("entry state");
-                let (linux, options) = parse_grub_linux_line(&linux_line)?;
+                let (entry_id, title, linux_line, initrds) = current.take().expect("entry state");
+                let (linux, options) = if linux_line.is_empty() {
+                    (None, String::new())
+                } else {
+                    parse_grub_linux_line(&linux_line)?
+                };
                 let entry = BlsEntry {
-                    entry_id: title.clone(),
-                    title: Some(title.clone()),
+                    entry_id: entry_id.clone(),
+                    title: Some(title),
                     version: None,
                     machine_id: None,
                     linux,
@@ -471,22 +743,26 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
                     tries_left: None,
                     tries_done: None,
                 };
-                if entries.insert(title.clone(), entry).is_some() {
-                    return Err(format!("duplicate GRUB menuentry title {title}"));
+                if entries.insert(entry_id, entry).is_some() {
+                    return Err("duplicate exact GRUB menu entry identity".into());
                 }
             }
+        } else if line == "}" && !submenu_stack.is_empty() {
+            submenu_stack.pop();
         }
     }
 
     if current.is_some() {
         return Err("unterminated GRUB menuentry".into());
     }
+    if !submenu_stack.is_empty() {
+        return Err("unterminated GRUB submenu".into());
+    }
     if entries.is_empty() {
         return Err("no GRUB menuentry blocks found".into());
     }
     Ok(entries)
 }
-
 fn parse_grub_menuentry_title(line: &str) -> Result<String, String> {
     let rest = line.strip_prefix("menuentry ").unwrap_or("").trim_start();
     if !rest.starts_with('"') {
@@ -519,32 +795,56 @@ fn parse_grub_linux_line(line: &str) -> Result<(Option<String>, String), String>
 
 /// Parse the generated GRUB default expression without interpreting it as identity.
 pub fn parse_grub_config_default(text: &str) -> Option<String> {
-    text.lines().find_map(|raw_line| {
-        let line = raw_line.trim();
-        let value = line.strip_prefix("set default=")?.trim();
-        Some(value.trim_matches(|c: char| c == '\'' || c == '"').to_string())
-    })
+    text.lines()
+        .filter_map(|raw_line| {
+            let line = raw_line.trim();
+            let value = line.strip_prefix("set default=")?.trim();
+            Some(value.trim_matches(|c: char| c == '\'' || c == '"').to_string())
+        })
+        .filter(|value| !value.contains("${next_entry}"))
+        .last()
 }
 /// Resolve a conservative GRUB selection from exact environment/config values.
 ///
 /// A numeric generated default is intentionally rejected: menu position is not
 /// an identity. Literal entry identifiers are accepted only when the caller's
 /// menu parser supplies an exact matching entry.
+fn resolve_grub_entry<'a>(
+    selector: &str,
+    menu_entries: &'a BTreeMap<String, BlsEntry>,
+) -> Result<&'a BlsEntry, UnknownBootSelection> {
+    if let Some(entry) = menu_entries.get(selector) {
+        return Ok(entry);
+    }
+    let matches: Vec<&BlsEntry> = menu_entries
+        .values()
+        .filter(|entry| entry.title.as_deref() == Some(selector))
+        .collect();
+    match matches.as_slice() {
+        [entry] => Ok(entry),
+        [] => Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("GRUB selector {selector} is not mapped to an exact menu entry"),
+        }),
+        _ => Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("GRUB selector {selector} matches multiple menu entries; refusing ambiguous selection"),
+        }),
+    }
+}
+
 pub fn resolve_grub_selection(
     environment: &BTreeMap<String, String>,
     generated_default: Option<&str>,
     menu_entries: &BTreeMap<String, BlsEntry>,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     if let Some(next_entry) = environment.get("next_entry").filter(|v| !v.is_empty()) {
-        let entry = menu_entries.get(next_entry).ok_or_else(|| UnknownBootSelection {
-            bootloader_family: BootloaderFamily::Grub,
-            reason: format!("GRUB next_entry {next_entry} is not mapped to an exact menu entry"),
-        })?;
+        let entry = resolve_grub_entry(next_entry, menu_entries)?;
         return Ok(BootSelectionEvidence {
             bootloader_family: BootloaderFamily::Grub,
             selection_kind: SelectionKind::OneShot,
             selected_entry_id: Some(entry.entry_id.clone()),
-            selected_entry_source: default_source.into(),
+            selected_entry_source: "grubenv:next_entry".into(),
             candidate_closure: exact_store_path_from_entry(entry),
             boot_count_state: entry.boot_count_state,
             observed_at_ms: None,
@@ -579,10 +879,7 @@ pub fn resolve_grub_selection(
         });
     }
 
-    let entry = menu_entries.get(default).ok_or_else(|| UnknownBootSelection {
-        bootloader_family: BootloaderFamily::Grub,
-        reason: format!("GRUB default {default} is not mapped to an exact menu entry"),
-    })?;
+    let entry = resolve_grub_entry(default, menu_entries)?;
 
     Ok(BootSelectionEvidence {
         bootloader_family: BootloaderFamily::Grub,
@@ -597,33 +894,22 @@ pub fn resolve_grub_selection(
 }
 
 fn exact_store_path_from_entry(entry: &BlsEntry) -> Option<String> {
-    [
-        entry.linux.as_deref(),
-        entry.efi.as_deref(),
-        entry.uki.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|value| {
-        super::execution_intent::is_valid_nix_store_path(value)
-            && value.contains("-nixos-system-")
-    })
-    .map(str::to_string)
-    .or_else(|| {
-        entry.options.as_deref().and_then(|options| {
-            options.split_whitespace().find_map(|token| {
-                let init = token.strip_prefix("init=")?;
-                let store_path = init.strip_suffix("/init")?;
-                if super::execution_intent::is_valid_nix_store_path(store_path)
-                    && store_path.contains("-nixos-system-")
-                {
-                    Some(store_path.to_string())
-                } else {
-                    None
-                }
-            })
+    // Kernel/initrd/EFI artifact paths are not the NixOS system closure. For
+    // Type #1 entries, the system closure is bound by the kernel command's
+    // init=.../init target, which NixOS emits from the generation's init path.
+    entry.options.as_deref().and_then(|options| {
+        options.split_whitespace().find_map(|token| {
+            let init = token.strip_prefix("init=")?;
+            let store_path = init.strip_suffix("/init")?;
+            if super::execution_intent::is_valid_nix_store_path(store_path)
+                && store_path.contains("-nixos-system-")
+            {
+                Some(store_path.to_string())
+            } else {
+                None
+            }
         })
-    )
+    })
 }
 
 fn contains_selection_pattern(value: &str) -> bool {
@@ -785,7 +1071,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
 
         let evidence =
-            resolve_systemd_boot_selection(Some("candidate.conf"), Some("old.conf"), &entries)
+            resolve_systemd_boot_selection(Some("candidate"), Some("old"), &entries)
                 .expect("selection");
         assert_eq!(evidence.selection_kind, SelectionKind::OneShot);
         assert_eq!(
@@ -794,6 +1080,46 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
     }
 
+    #[test]
+    fn systemd_loader_conf_default_is_parsed_without_inference() {
+        let exact = parse_systemd_loader_default("timeout 5\ndefault candidate\n");
+        assert_eq!(exact.as_deref(), Some("candidate"));
+        let pattern = parse_systemd_loader_default("default nixos-*\n");
+        assert_eq!(pattern.as_deref(), Some("nixos-*"));
+    }
+    #[test]
+    fn boot_artifact_path_cannot_qualify_as_system_closure() {
+        let parsed = entry(
+            "candidate.conf",
+            "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-lookalike-kernel\n",
+        );
+        assert_eq!(super::exact_store_path_from_entry(&parsed), None);
+    }
+    #[test]
+    fn systemd_default_parser_rejects_extra_selector_tokens() {
+        assert_eq!(parse_systemd_loader_default("default candidate extra\n"), None);
+        assert_eq!(parse_systemd_loader_default("default candidate\n"), Some("candidate".into()));
+    }
+    #[test]
+    fn systemd_loader_entry_suffix_is_normalized_exactly() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "candidate.conf".into(),
+            entry(
+                "candidate.conf",
+                "linux /EFI/nixos/kernel.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
+            ),
+        );
+        let evidence = resolve_systemd_boot_selection(Some("candidate"), None, &entries)
+            .expect("suffix-less LoaderEntryOneShot should map to candidate.conf");
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("candidate.conf"));
+    }
+
+    #[test]
+    fn malformed_systemd_default_directive_is_ignored() {
+        assert_eq!(parse_systemd_loader_default("defaults candidate\n"), None);
+        assert_eq!(parse_systemd_loader_default("default candidate trailing\n"), None);
+    }
     #[test]
     fn systemd_pattern_default_is_unknown() {
         let entries = BTreeMap::new();
@@ -823,12 +1149,26 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         .expect("GRUB fixture parses");
 
         let entry = entries.get("NixOS - Configuration 42").expect("entry");
+        assert_eq!(entry.title.as_deref(), Some("NixOS - Configuration 42"));
         assert_eq!(
             super::exact_store_path_from_entry(entry).as_deref(),
             Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
         );
     }
 
+    #[test]
+    fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
+        let entries = parse_grub_config_entries(
+            "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
+        )
+        .expect("nested GRUB fixture parses");
+        assert!(entries.contains_key("A > Same"));
+        assert!(entries.contains_key("B > Same"));
+        let env = BTreeMap::new();
+        let ambiguous = resolve_grub_selection(&env, Some("Same"), &entries)
+            .expect_err("ambiguous title must fail closed");
+        assert!(ambiguous.reason.contains("multiple menu entries"));
+    }
     #[test]
     fn saved_grub_default_requires_exact_saved_entry() {
         let environment = parse_grub_environment("saved_entry=candidate\n");
@@ -837,7 +1177,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             "candidate".into(),
             entry(
                 "candidate",
-                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+                "efi /EFI/nixos/candidate.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
             ),
         );
         let evidence = resolve_grub_selection(&environment, Some("saved"), &entries)
@@ -847,13 +1187,63 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert!(evidence.selected_entry_source.contains("saved_entry"));
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn grub_root_preference_stays_first() {
+        let preferred = PathBuf::from("/boot-custom");
+        let candidates = candidate_grub_roots(Some(&preferred));
+        assert_eq!(candidates.first(), Some(&preferred));
+        assert_eq!(candidates.iter().filter(|p| *p == &preferred).count(), 1);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn malformed_efi_string_without_nul_is_rejected() {
+        assert!(decode_efivar_string(&[0, 0, 0, 7, 0x41, 0x00]).is_err());
+    }
     #[test]
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
+        assert_eq!(
+            parse_grub_config_default(r#"if [ "${next_entry}" ]; then
+set default="${next_entry}"
+else
+set default="${saved_entry}"
+fi
+"#),
+            Some("${saved_entry}".into()),
+        );
         assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn grub_root_preference_is_first_and_deduplicated() {
+        let preferred = PathBuf::from("/boot-custom");
+        let candidates = candidate_grub_roots(Some(&preferred));
+        assert_eq!(candidates.first(), Some(&preferred));
+        assert_eq!(candidates.iter().filter(|p| *p == &preferred).count(), 1);
+    }
+    #[test]
+    fn selected_non_nixos_grub_entry_is_unbound() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Windows\" {\n chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\nmenuentry \"NixOS\" {\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("mixed GRUB config parses");
+        let environment = BTreeMap::from([(
+            "next_entry".to_string(),
+            "Windows".to_string(),
+        )]);
+        let evidence = resolve_grub_selection(&environment, None, &entries)
+            .expect("selected non-NixOS entry should still be observable");
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("Windows"));
+        assert_eq!(evidence.candidate_closure, None);
+        assert!(require_candidate_binding(
+            &evidence,
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate",
+        ).is_err());
+    }
     #[test]
     fn duplicate_grub_titles_fail_closed() {
         let result = parse_grub_config_entries(
@@ -898,7 +1288,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             "candidate".into(),
             entry(
                 "candidate",
-                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+                "efi /EFI/nixos/candidate.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
             ),
         )]);
 

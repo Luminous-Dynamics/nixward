@@ -90,11 +90,11 @@ Unknown is evidence of insufficiency, not evidence of success.
 ## Current implementation boundary
 
 src/action/boot_selection.rs contains deterministic parsers and selection
-resolvers plus a read-only systemd-boot host observer. The observer obtains EFI
-selection variables, the authoritative BLS root, and Type #1 entries, then feeds
-the pure resolvers. Pure GRUB parsing and selection resolution are present, while
-host-side GRUB observation remains a separate adapter because its generated
-configuration and environment have different semantics.
+resolvers plus read-only systemd-boot and UEFI-GRUB host observers. The observers
+obtain only bootloader selection/configuration state and feed the pure resolvers.
+The systemd-boot observer reads UEFI selection variables and the authoritative BLS
+root; the GRUB observer reads NixOS-generated grub.cfg and the GRUB environment
+through read-only grub-editenv. BIOS-only GRUB remains explicit Unknown.
 
 ## Test fixtures
 
