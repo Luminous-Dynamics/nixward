@@ -122,6 +122,13 @@ fn main() {
             cmd_verify_boot_witness(&expected_entry, &expected_closure, cli.format);
         }
 
+        Command::VerifyBootTransition {
+            pre_boot_id,
+            expected_closure,
+        } => {
+            cmd_verify_boot_transition(&pre_boot_id, &expected_closure, cli.format);
+        }
+
         Command::Rollback { generation } => {
             let cmd = if let Some(g) = generation {
                 GenerationManager::switch_to(g)
@@ -1030,6 +1037,54 @@ fn cmd_verify_secure_boot(image: &Path, format: OutputFormat) {
     }
 }
 
+
+fn cmd_verify_boot_transition(
+    pre_boot_id: &str,
+    expected_closure: &str,
+    format: OutputFormat,
+) {
+    match nixward::action::boot_selection::observe_boot_transition(
+        pre_boot_id,
+        expected_closure,
+    ) {
+        Ok(evidence) => {
+            match format {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                ),
+                OutputFormat::Minimal => println!("{:?}", evidence.state),
+                _ => {
+                    println!("  Boot transition: {:?}", evidence.state);
+                    println!("  Pre-boot ID: {}", evidence.pre_boot_id);
+                    println!(
+                        "  Post-boot ID: {}",
+                        evidence.post_boot_id.as_deref().unwrap_or("Unknown")
+                    );
+                    println!(
+                        "  Running closure: {}",
+                        evidence.running_closure.as_deref().unwrap_or("Unknown")
+                    );
+                    println!(
+                        "  Cmdline closure: {}",
+                        evidence.cmdline_closure.as_deref().unwrap_or("Unknown")
+                    );
+                    println!("  Observed at: {:?}", evidence.observed_at_ms);
+                    println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                    println!("  Qualification: physical reboot/closure identity only; bootloader entry selection and health remain separate.");
+                }
+            }
+
+            if evidence.state != nixward::action::boot_selection::BootTransitionState::VerifiedReboot {
+                std::process::exit(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("  Boot transition failed closed: {}", error.reason);
+            std::process::exit(2);
+        }
+    }
+}
 
 fn cmd_verify_boot_witness(
     expected_entry: &str,
