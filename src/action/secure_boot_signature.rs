@@ -124,24 +124,36 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     }
     sections.sort_unstable_by_key(|(offset, _)| *offset);
 
-    let mut sum_of_bytes_hashed = size_of_headers;
+    let mut previous_section_end = size_of_headers;
     for (ptr_to_raw, size_of_raw) in sections {
-        let end = ptr_to_raw + size_of_raw;
-        hasher.update(&image[ptr_to_raw..end]);
-        sum_of_bytes_hashed = sum_of_bytes_hashed
+        if ptr_to_raw < size_of_headers {
+            return Err("PE section raw data overlaps PE headers".into());
+        }
+        if ptr_to_raw < previous_section_end {
+            return Err("PE section raw-data ranges overlap or are out of order".into());
+        }
+
+        let end = ptr_to_raw
             .checked_add(size_of_raw)
-            .ok_or_else(|| "Authenticode hashed-byte counter overflows".to_string())?;
+            .ok_or_else(|| "PE section raw-data range overflows".to_string())?;
+
+        if cert_table_size != 0 {
+            let cert_start = cert_table_offset;
+            let cert_end = cert_start
+                .checked_add(cert_table_size)
+                .ok_or_else(|| "PE certificate table range overflows".to_string())?;
+            if ptr_to_raw < cert_end && end > cert_start {
+                return Err("PE section raw data overlaps the certificate table".into());
+            }
+        }
+
+        hasher.update(&image[ptr_to_raw..end]);
+        previous_section_end = end;
     }
 
-    let tail_end = image.len()
-        .checked_sub(cert_table_size)
-        .ok_or_else(|| "Authenticode certificate exclusion exceeds image size".to_string())?;
-    if tail_end < sum_of_bytes_hashed {
-        return Err("Authenticode hashed-byte region overlaps excluded certificate table".into());
-    }
-    if tail_end > sum_of_bytes_hashed {
-        hasher.update(&image[sum_of_bytes_hashed..tail_end]);
-    }
+    // Authenticode hashes the bytes belonging to the PE headers and the
+    // declared section ranges. Bytes beyond the highest section raw-data end
+    // are not part of the image hash.
     Ok(hasher.finalize().into())
 }
 
@@ -623,6 +635,57 @@ mod tests {
         image[cert_offset + 8..cert_offset + 8 + payload.len()].copy_from_slice(payload);
         image
     }
+
+    fn pe_with_two_sections_and_overlay() -> Vec<u8> {
+        let pe_offset = 0x40usize;
+        let optional_size = 240usize;
+        let optional = pe_offset + 24;
+        let section_table = optional + optional_size;
+        let size_of_headers = 0x200usize;
+        let first_offset = 0x200usize;
+        let first_size = 0x100usize;
+        let second_offset = 0x400usize;
+        let second_size = 0x100usize;
+        let cert_offset = 0x500usize;
+        let cert_payload = b"timestamped-signature";
+        let cert_length = 8usize + cert_payload.len();
+        let cert_padded = (cert_length + 7) & !7usize;
+        let overlay_end = cert_offset + cert_padded + 0x40;
+        let mut image = vec![0u8; overlay_end];
+
+        image[0..2].copy_from_slice(b"MZ");
+        image[0x3c..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
+        image[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
+        let coff = pe_offset + 4;
+        image[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes());
+        image[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes());
+        image[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
+        image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+        image[optional + 60..optional + 64].copy_from_slice(&(size_of_headers as u32).to_le_bytes());
+        let cert_dir = optional + 144;
+        image[cert_dir..cert_dir + 4].copy_from_slice(&(cert_offset as u32).to_le_bytes());
+        image[cert_dir + 4..cert_dir + 8].copy_from_slice(&(cert_padded as u32).to_le_bytes());
+
+        let first_header = section_table;
+        image[first_header..first_header + 8].copy_from_slice(b".text\0\0\0");
+        image[first_header + 16..first_header + 20].copy_from_slice(&(first_size as u32).to_le_bytes());
+        image[first_header + 20..first_header + 24].copy_from_slice(&(first_offset as u32).to_le_bytes());
+        let second_header = section_table + 40;
+        image[second_header..second_header + 8].copy_from_slice(b".data\0\0\0");
+        image[second_header + 16..second_header + 20].copy_from_slice(&(second_size as u32).to_le_bytes());
+        image[second_header + 20..second_header + 24].copy_from_slice(&(second_offset as u32).to_le_bytes());
+
+        image[first_offset..first_offset + first_size].fill(0x41);
+        image[first_offset + first_size..second_offset].fill(0x47);
+        image[second_offset..second_offset + second_size].fill(0x42);
+        image[cert_offset..cert_offset + 4].copy_from_slice(&(cert_length as u32).to_le_bytes());
+        image[cert_offset + 4..cert_offset + 6].copy_from_slice(&0x0200u16.to_le_bytes());
+        image[cert_offset + 6..cert_offset + 8].copy_from_slice(&0x0002u16.to_le_bytes());
+        image[cert_offset + 8..cert_offset + 8 + cert_payload.len()].copy_from_slice(cert_payload);
+        image[cert_offset + cert_padded..].fill(0x4f);
+        image
+    }
+
     #[test]
     fn authenticode_hash_excludes_checksum_and_certificate_table() {
         let mut image = pe_with_certificate(0x0002, b"signed-payload");
@@ -635,6 +698,40 @@ mod tests {
         image[cert_offset + 8] ^= 0xff;
         let after_certificate = authenticode_sha256(&image).expect("authenticode hash");
         assert_eq!(before, after_certificate);
+    }
+
+    #[test]
+    fn authenticode_hash_excludes_section_gaps_and_post_section_overlay() {
+        let image = pe_with_two_sections_and_overlay();
+        let first = authenticode_sha256(&image).expect("authenticode hash");
+
+        let mut gap_changed = image.clone();
+        gap_changed[0x300] ^= 0x01;
+        assert_eq!(
+            authenticode_sha256(&gap_changed).expect("gap-mutated authenticode hash"),
+            first
+        );
+
+        let mut overlay_changed = image.clone();
+        overlay_changed[0x520] ^= 0x01;
+        assert_eq!(
+            authenticode_sha256(&overlay_changed).expect("overlay-mutated authenticode hash"),
+            first
+        );
+
+        let mut first_section_changed = image.clone();
+        first_section_changed[0x250] ^= 0x01;
+        assert_ne!(
+            authenticode_sha256(&first_section_changed).expect("first-section authenticode hash"),
+            first
+        );
+
+        let mut second_section_changed = image.clone();
+        second_section_changed[0x450] ^= 0x01;
+        assert_ne!(
+            authenticode_sha256(&second_section_changed).expect("second-section authenticode hash"),
+            first
+        );
     }
 
     #[test]
