@@ -124,6 +124,38 @@ pub enum SecureBootState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecureBootSnapshotEvidence {
+    pub state: SecureBootState,
+    pub secure_boot_variable: Option<bool>,
+    pub setup_mode_variable: Option<bool>,
+    pub db_state: SecureBootDatabaseState,
+    pub db_payload_blake3: Option<[u8; 32]>,
+    pub dbx_state: SecureBootDatabaseState,
+    pub dbx_payload_blake3: Option<[u8; 32]>,
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl SecureBootSnapshotEvidence {
+    fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            self.state,
+            self.secure_boot_variable,
+            self.setup_mode_variable,
+            self.db_state,
+            self.db_payload_blake3,
+            self.dbx_state,
+            self.dbx_payload_blake3,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize Secure Boot snapshot: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecureBootEvidence {
     pub state: SecureBootState,
     pub secure_boot_variable: Option<bool>,
@@ -400,6 +432,38 @@ pub fn observe_secure_boot_databases() -> Result<SecureBootDatabaseEvidence, Str
 }
 
 #[cfg(feature = "native")]
+pub fn observe_secure_boot_snapshot() -> Result<SecureBootSnapshotEvidence, String> {
+    let secure_boot = read_global_efi_bool("SecureBoot")?;
+    let setup_mode = read_global_efi_bool("SetupMode")?;
+    let db = read_efi_database("db")?;
+    let dbx = read_efi_database("dbx")?;
+    let evidence = SecureBootSnapshotEvidence {
+        state: derive_secure_boot_state(secure_boot, setup_mode),
+        secure_boot_variable: secure_boot,
+        setup_mode_variable: setup_mode,
+        db_state: if db.is_some() {
+            SecureBootDatabaseState::Present
+        } else {
+            SecureBootDatabaseState::Absent
+        },
+        db_payload_blake3: db.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+        dbx_state: if dbx.is_some() {
+            SecureBootDatabaseState::Present
+        } else {
+            SecureBootDatabaseState::Absent
+        },
+        dbx_payload_blake3: dbx.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+        observed_at_ms: None,
+        evidence_digest: None,
+    };
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
+        .as_millis() as u64;
+    evidence.with_observation_metadata(observed_at_ms)
+}
+
+#[cfg(feature = "native")]
 pub fn observe_secure_boot() -> Result<SecureBootEvidence, String> {
     let secure_boot = read_global_efi_bool("SecureBoot")?;
     let setup_mode = read_global_efi_bool("SetupMode")?;
@@ -643,6 +707,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn secure_boot_snapshot_digest_binds_policy_and_databases() {
+        let first = SecureBootSnapshotEvidence {
+            state: SecureBootState::Enabled,
+            secure_boot_variable: Some(true),
+            setup_mode_variable: Some(false),
+            db_state: SecureBootDatabaseState::Present,
+            db_payload_blake3: Some([1; 32]),
+            dbx_state: SecureBootDatabaseState::Present,
+            dbx_payload_blake3: Some([2; 32]),
+            observed_at_ms: None,
+            evidence_digest: None,
+        }
+        .with_observation_metadata(100)
+        .expect("snapshot evidence");
+        let second = SecureBootSnapshotEvidence {
+            dbx_payload_blake3: Some([3; 32]),
+            ..first.clone()
+        }
+        .with_observation_metadata(100)
+        .expect("snapshot evidence");
+        assert_ne!(first.evidence_digest, second.evidence_digest);
+    }
     #[test]
     fn evidence_digest_binds_secure_boot_state() {
         let first = build_secure_boot_evidence(Some(true), Some(false))
