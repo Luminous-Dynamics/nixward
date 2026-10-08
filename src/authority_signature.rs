@@ -522,10 +522,10 @@ mod tests {
         let signing = SigningKey::from_bytes(&[6u8; 32]);
         let mut trust = policy(&signing);
         trust.allowed_audiences.clear();
-        assert_eq!(
-            AuthorityVerifier::new(&trust).unwrap_err(),
-            AuthorityError::InvalidAudiencePolicy
-        );
+        assert!(matches!(
+            AuthorityVerifier::new(&trust),
+            Err(AuthorityError::InvalidAudiencePolicy)
+        ));
     }
 
     #[test]
