@@ -337,8 +337,10 @@ impl FrozenConfigSource {
                 });
                 Self::walk(root, &path, manifest)?;
             } else if metadata.is_file() {
-                let bytes = std::fs::read(&path)
-                    .map_err(|error| format!("failed to read source file {}: {error}", path.display()))?;
+                let bytes = super::secure_boot_signature::read_regular_file_no_follow_stable(
+                    &path,
+                    &metadata,
+                )?;
                 let mut hasher = blake3::Hasher::new();
                 hasher.update(ENTRY_DOMAIN);
                 hasher.update(relative_path.as_bytes());
