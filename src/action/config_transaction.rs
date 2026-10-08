@@ -1213,6 +1213,127 @@ impl SourceRealizationLease {
         matches!(self.state, SourceRealizationLeaseState::Rooted)
     }
 }
+/// Native candidate-build boundary. The build input is the immutable
+/// source store object held by a rooted SourceRealizationLease; the mutable
+/// working tree is never passed to the builder.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone)]
+pub struct NixCandidateBuilder {
+    nix_executable: String,
+}
+
+#[cfg(feature = "native")]
+impl NixCandidateBuilder {
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            nix_executable: NixSourceRealizer::new()?.nix_executable,
+        })
+    }
+
+    fn exact_installable(
+        source_store_path: &str,
+        installable: &str,
+    ) -> Result<String, String> {
+        if !super::execution_intent::is_valid_nix_store_path(source_store_path) {
+            return Err("candidate build source is not a canonical immutable Nix store path".into());
+        }
+        let suffix = installable
+            .strip_prefix(".#")
+            .ok_or_else(|| "candidate build installable must be rooted at .#".to_string())?;
+        if suffix.is_empty()
+            || installable
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+        {
+            return Err("candidate build installable contains invalid characters".into());
+        }
+        Ok(format!("{source_store_path}#{suffix}"))
+    }
+
+    /// Build exactly one candidate from an immutable source store object and
+    /// require its output to equal the expected immutable system closure.
+    pub fn build(
+        &self,
+        source: &FrozenConfigSource,
+        lease: &SourceRealizationLease,
+        installable: &str,
+        expected_out_path: &str,
+        realization_plan_digest: &str,
+    ) -> Result<CandidateBuildReceipt, String> {
+        if !lease.is_rooted() {
+            return Err("candidate build requires a rooted source realization".into());
+        }
+        lease.verify_rooted()?;
+        lease.verify_source_realization(source)?;
+
+        if !super::execution_intent::is_valid_nix_store_path(expected_out_path) {
+            return Err("candidate build expected output is not a canonical immutable Nix store path".into());
+        }
+        if decode_digest(realization_plan_digest).is_err() {
+            return Err("candidate build realization-plan digest is invalid".into());
+        }
+
+        let installable = Self::exact_installable(&lease.store_path, installable)?;
+
+        let output = std::process::Command::new(&self.nix_executable)
+            .env_clear()
+            .env("HOME", "/root")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .args([
+                "build",
+                "--no-link",
+                "--print-out-paths",
+                "--no-update-lock-file",
+            ])
+            .arg(&installable)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|error| format!("failed to execute trusted nix build: {error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "nix build failed with {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let candidate_store_path = NixSourceRealizer::parse_store_path(&stdout)?;
+        if candidate_store_path != expected_out_path {
+            return Err(format!(
+                "nix build output differs from authorized expected path: observed {candidate_store_path}, expected {expected_out_path}"
+            ));
+        }
+
+        source.verify_realization_at(&lease.store_path)?;
+        lease.verify_rooted()?;
+
+        let metadata = std::fs::symlink_metadata(&candidate_store_path)
+            .map_err(|error| format!("failed to inspect candidate store path: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("candidate output must be a canonical immutable directory".into());
+        }
+
+        CandidateBuildReceipt::new(
+            source,
+            lease.store_path.clone(),
+            candidate_store_path,
+            realization_plan_digest.to_string(),
+        )
+    }
+
+    #[cfg(test)]
+    fn parse_installable_for_test(
+        source_store_path: &str,
+        installable: &str,
+    ) -> Result<String, String> {
+        Self::exact_installable(source_store_path, installable)
+    }
+}
+
 /// Exact receipt for building one immutable system candidate from one
 /// retained Nix source realization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2198,6 +2319,23 @@ mod tests {
             .expect_err("multiple store paths must fail closed")
             .contains("multiple canonical immutable store paths")
         );
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn candidate_builder_binds_installable_to_immutable_source() {
+        let source = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-source";
+        assert_eq!(
+            NixCandidateBuilder::parse_installable_for_test(
+                source,
+                ".#nixosConfigurations.test.config.system.build.toplevel"
+            )
+            .unwrap(),
+            format!("{source}#nixosConfigurations.test.config.system.build.toplevel")
+        );
+        assert!(NixCandidateBuilder::parse_installable_for_test(source, "/tmp/escape").is_err());
+        assert!(NixCandidateBuilder::parse_installable_for_test(source, ".#bad target").is_err());
+        assert!(NixCandidateBuilder::parse_installable_for_test("/tmp/source", ".#ok").is_err());
     }
 
     #[cfg(feature = "native")]
