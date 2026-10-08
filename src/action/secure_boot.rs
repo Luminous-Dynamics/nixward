@@ -480,6 +480,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_x509_tbs_sha256_revocation_record() {
+        let mut payload = vec![0u8; 28 + 64];
+        payload[..16].copy_from_slice(&EFI_CERT_X509_SHA256_GUID);
+        payload[16..20].copy_from_slice(&(92u32).to_le_bytes());
+        payload[24..28].copy_from_slice(&64u32.to_le_bytes());
+        payload[28..44].fill(0x11);
+        payload[44..76].fill(0x22);
+        payload[76..92].fill(0x33);
+        let records = parse_signature_database(&payload).expect("x509 sha256 revocation record");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, SignatureListKind::X509TbsSha256);
+        assert_eq!(records[0].certificate_tbs_hash, Some(vec![0x22; 32]));
+        assert_eq!(records[0].revocation_time, Some([0x33; 16]));
+    }
+    #[test]
     fn unsupported_signature_list_type_is_retained_not_authorized() {
         let mut payload = vec![0u8; 28 + 16];
         payload[16..20].copy_from_slice(&(44u32).to_le_bytes());
