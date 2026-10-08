@@ -276,7 +276,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${${{ github.event.pull_request.head.repo.full_name }}}" = "${${{ github.repository }}}"
+          test "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}"
       - name: Assert exact validation subject
         shell: bash
         run: |
