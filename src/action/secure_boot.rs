@@ -588,6 +588,38 @@ fn read_efi_database(name: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 #[cfg(feature = "native")]
+fn read_efi_timestamp_database() -> Result<Option<Vec<u8>>, String> {
+    let path = std::path::PathBuf::from(format!(
+        "{}/dbt-{}",
+        EFI_VARS_DIR, EFI_IMAGE_SECURITY_DATABASE_GUID
+    ));
+    let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
+        return Ok(None);
+    };
+    if bytes.len() < 4 {
+        return Err(format!(
+            "EFI timestamp database {} is missing its attribute header",
+            path.display()
+        ));
+    }
+    Ok(Some(bytes[4..].to_vec()))
+}
+
+#[cfg(feature = "native")]
+fn timestamp_database_certificate_digests(
+    dbt_payload: Option<&[u8]>,
+) -> Result<Vec<[u8; 32]>, String> {
+    let Some(payload) = dbt_payload else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_signature_database(payload)?
+        .into_iter()
+        .filter(|record| record.kind == SignatureListKind::X509Certificate)
+        .filter_map(|record| record.certificate_der_blake3)
+        .collect())
+}
+
+#[cfg(feature = "native")]
 fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
     let path = std::path::PathBuf::from(format!("{}/{}-{}", EFI_VARS_DIR, name, EFI_GLOBAL_GUID));
     let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
@@ -627,6 +659,9 @@ pub struct DbCertificateVerificationEvidence {
     pub dbx_chain_tbs_revocation_times: Vec<[u8; 16]>,
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_payload_blake3: Option<[u8; 32]>,
+    pub dbt_certificate_digests: Vec<[u8; 32]>,
+    pub dbt_payload_blake3: Option<[u8; 32]>,
+    pub timestamp_database_stability: Option<bool>,
     pub database_stability: Option<bool>,
     pub state: DbCertificateVerificationState,
     pub verifier: String,
@@ -653,6 +688,9 @@ impl DbCertificateVerificationEvidence {
             &self.dbx_chain_tbs_revocation_times,
             self.db_payload_blake3,
             self.dbx_payload_blake3,
+            &self.dbt_certificate_digests,
+            self.dbt_payload_blake3,
+            self.timestamp_database_stability,
             self.database_stability,
             self.state,
             &self.verifier,
@@ -766,6 +804,9 @@ fn db_certificate_verification_base_evidence(
         dbx_chain_tbs_revocation_times: Vec::new(),
         db_payload_blake3: Some(*blake3::hash(db_payload).as_bytes()),
         dbx_payload_blake3: Some(*blake3::hash(dbx_payload).as_bytes()),
+        dbt_certificate_digests: Vec::new(),
+        dbt_payload_blake3: None,
+        timestamp_database_stability: None,
         database_stability: None,
         state: DbCertificateVerificationState::NoMatchingDbCertificate,
         verifier: "sbverify".into(),
@@ -1221,6 +1262,7 @@ pub fn verify_image_against_live_secure_boot_databases(
 ) -> Result<DbCertificateVerificationEvidence, String> {
     let db_before = read_efi_database("db")?;
     let dbx_before = read_efi_database("dbx")?;
+    let dbt_before = read_efi_timestamp_database()?;
 
     if db_before.is_none() || dbx_before.is_none() {
         let image = std::fs::read(image_path)
@@ -1256,6 +1298,9 @@ pub fn verify_image_against_live_secure_boot_databases(
         dbx_chain_tbs_revocation_times: Vec::new(),
             db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+            dbt_certificate_digests: timestamp_database_certificate_digests(dbt_before.as_deref())?,
+            dbt_payload_blake3: dbt_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
+            timestamp_database_stability: None,
             database_stability: None,
             state: DbCertificateVerificationState::MissingSecureBootDatabase,
             verifier: "sbverify".into(),
@@ -1271,9 +1316,13 @@ pub fn verify_image_against_live_secure_boot_databases(
         db_before.as_deref().expect("db presence checked"),
         dbx_before.as_deref().expect("dbx presence checked"),
     )?;
+    evidence.dbt_certificate_digests = timestamp_database_certificate_digests(dbt_before.as_deref())?;
+    evidence.dbt_payload_blake3 =
+        dbt_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes());
 
     let db_after = read_efi_database("db")?;
     let dbx_after = read_efi_database("dbx")?;
+    let dbt_after = read_efi_timestamp_database()?;
     let stable = db_after
         .as_deref()
         .map(|bytes| *blake3::hash(bytes).as_bytes())
@@ -1287,7 +1336,14 @@ pub fn verify_image_against_live_secure_boot_databases(
                 .as_deref()
                 .map(|bytes| *blake3::hash(bytes).as_bytes());
 
+    let timestamp_stable = dbt_after
+        .as_deref()
+        .map(|bytes| *blake3::hash(bytes).as_bytes())
+        == dbt_before
+            .as_deref()
+            .map(|bytes| *blake3::hash(bytes).as_bytes());
     evidence.database_stability = Some(stable);
+    evidence.timestamp_database_stability = Some(timestamp_stable);
     if !stable {
         evidence.verifying_db_certificate = None;
         evidence.verifying_dbx_certificate = None;
@@ -1700,6 +1756,24 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn dbt_certificate_digest_observation_is_separate_from_trust() {
+        let cert = vec![0x30, 0x01, 0x00];
+        let mut payload = vec![0u8; 28 + 16 + cert.len()];
+        payload[..16].copy_from_slice(&EFI_CERT_X509_GUID);
+        let signature_size = (16 + cert.len()) as u32;
+        let list_size = (28 + signature_size) as u32;
+        payload[16..20].copy_from_slice(&list_size.to_le_bytes());
+        payload[24..28].copy_from_slice(&signature_size.to_le_bytes());
+        payload[28..44].fill(0x11);
+        payload[44..].copy_from_slice(&cert);
+
+        let digests = timestamp_database_certificate_digests(Some(&payload))
+            .expect("dbt database parse");
+        assert_eq!(digests, vec![*blake3::hash(&cert).as_bytes()]);
+    }
+
     #[test]
     fn zero_time_dbx_tbs_record_is_always_revoked() {
         let record = SignatureDatabaseRecord {
@@ -1825,6 +1899,9 @@ mod tests {
         dbx_chain_tbs_revocation_times: Vec::new(),
             db_payload_blake3: Some([8; 32]),
             dbx_payload_blake3: Some([9; 32]),
+            dbt_certificate_digests: Vec::new(),
+            dbt_payload_blake3: None,
+            timestamp_database_stability: None,
             database_stability: Some(true),
             state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
             verifier: "fixture".into(),

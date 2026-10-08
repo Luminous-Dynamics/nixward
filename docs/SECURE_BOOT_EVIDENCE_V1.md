@@ -77,6 +77,14 @@ UEFI defines zero revocation time as always revoked. An exact match with a
 nonzero EFI_TIME remains `PotentialDbxTbsRevocation` until signed-image
 timestamp/RFC 3161 semantics are evaluated.
 
+The live verifier also snapshots the UEFI `dbt` authorized timestamp database.
+The raw `dbt` payload digest and parsed X.509 certificate digests are preserved
+in the same evidence record, and a `dbt` payload change across the verification
+boundary is observable as timestamp-database instability. This is correlation
+evidence only: a `dbt` certificate digest does not prove that an image contains
+a valid trusted timestamp. Timestamp extraction, timestamp-signature verification,
+and comparison against every matching `TimeOfRevocation` remain a separate resolver layer.
+
 ## Certificate-chain trust boundary
 
 The verification path now distinguishes five materially different outcomes:
@@ -118,3 +126,6 @@ closure provenance or physical boot success.
 Secure Boot state observation is available through the read-only CLI observation
 surface. Signature verification, signer authorization, UKI provenance, boot
 selection, physical boot, and post-boot health remain separate evidence layers.
+
+
+The live timestamp-database snapshot is evidence-only and remains non-authorizing until timestamp signature and revocation-time semantics are independently verified.
