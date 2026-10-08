@@ -491,29 +491,80 @@ pub struct SignatureVerificationEvidence {
 }
 
 #[cfg(feature = "native")]
+fn read_regular_file_no_follow(
+    path: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    use nix::errno::Errno;
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::{fstat, SFlag};
+    use nix::unistd::{close, read};
+
+    let fd = open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == Errno::ENOENT {
+            format!("file {} does not exist", path.display())
+        } else {
+            format!("failed to securely open {} without symlink following: {error}", path.display())
+        }
+    })?;
+
+    let read_result: Result<Vec<u8>, String> = (|| {
+        let metadata = fstat(fd)
+            .map_err(|error| format!("failed to inspect opened file {}: {error}", path.display()))?;
+        if !SFlag::from_bits_truncate(metadata.st_mode).contains(SFlag::S_IFREG) {
+            return Err(format!("file {} is not a regular file", path.display()));
+        }
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match read(fd, &mut buffer) {
+                Ok(0) => break,
+                Ok(len) => bytes.extend_from_slice(&buffer[..len]),
+                Err(Errno::EINTR) => continue,
+                Err(error) => {
+                    return Err(format!("failed to read {}: {error}", path.display()));
+                }
+            }
+        }
+        Ok(bytes)
+    })();
+
+    let close_result = close(fd);
+    match (read_result, close_result) {
+        (Ok(bytes), Ok(())) => Ok(bytes),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("failed to close {} after read: {error}", path.display())),
+    }
+}
+
+#[cfg(feature = "native")]
 pub fn verify_pe_signature_with_certificate(
     image_path: &std::path::Path,
     certificate_path: &std::path::Path,
 ) -> Result<SignatureVerificationEvidence, String> {
-    let image_metadata = std::fs::symlink_metadata(image_path)
-        .map_err(|error| format!("failed to inspect signature image {}: {error}", image_path.display()))?;
-    let certificate_metadata = std::fs::symlink_metadata(certificate_path)
-        .map_err(|error| format!("failed to inspect verification certificate {}: {error}", certificate_path.display()))?;
-    if image_metadata.file_type().is_symlink() || !image_metadata.file_type().is_file() {
-        return Err(format!("signature image {} is not a regular non-symlink file", image_path.display()));
-    }
-    if certificate_metadata.file_type().is_symlink() || !certificate_metadata.file_type().is_file() {
-        return Err(format!("verification certificate {} is not a regular non-symlink file", certificate_path.display()));
-    }
-    let image = std::fs::read(image_path)
-        .map_err(|error| format!("failed to read signature image {}: {error}", image_path.display()))?;
-    let certificate = std::fs::read(certificate_path)
-        .map_err(|error| format!("failed to read verification certificate {}: {error}", certificate_path.display()))?;
+    let image = read_regular_file_no_follow(image_path)?;
+    let certificate = read_regular_file_no_follow(certificate_path)?;
     let image_before = *blake3::hash(&image).as_bytes();
     let certificate_before = *blake3::hash(&certificate).as_bytes();
+
+    let mut certificate_temp = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
+    use std::io::Write;
+    certificate_temp
+        .write_all(&certificate)
+        .map_err(|error| format!("failed to write exact certificate snapshot: {error}"))?;
+    certificate_temp
+        .flush()
+        .map_err(|error| format!("failed to flush exact certificate snapshot: {error}"))?;
+
     let output = std::process::Command::new("sbverify")
         .args(["--cert"])
-        .arg(certificate_path)
+        .arg(certificate_temp.path())
         .arg(image_path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -522,7 +573,7 @@ pub fn verify_pe_signature_with_certificate(
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SignatureVerificationEvidence {
-                image_blake3: *blake3::hash(&image).as_bytes(),
+                image_blake3: image_before,
                 certificate_blake3: certificate_before,
                 verifier: "sbverify".into(),
                 state: SignatureVerificationState::ToolUnavailable,
@@ -532,17 +583,18 @@ pub fn verify_pe_signature_with_certificate(
         }
         Err(error) => return Err(format!("failed to execute sbverify: {error}")),
     };
-    let image_after = std::fs::read(image_path)
+
+    let image_after = read_regular_file_no_follow(image_path)
         .map_err(|error| format!("failed to re-read signature image {}: {error}", image_path.display()))?;
-    let certificate_after = std::fs::read(certificate_path)
-        .map_err(|error| format!("failed to re-read verification certificate {}: {error}", certificate_path.display()))?;
+    let certificate_after = read_regular_file_no_follow(certificate_path)
+        .map_err(|error| format!("failed to re-read source certificate {}: {error}", certificate_path.display()))?;
     let image_after_hash = *blake3::hash(&image_after).as_bytes();
     let certificate_after_hash = *blake3::hash(&certificate_after).as_bytes();
     let stable = image_after_hash == image_before && certificate_after_hash == certificate_before;
 
     Ok(SignatureVerificationEvidence {
         image_blake3: image_before,
-        certificate_blake3: *blake3::hash(&certificate).as_bytes(),
+        certificate_blake3: certificate_before,
         verifier: "sbverify".into(),
         state: if output.status.success() && stable {
             SignatureVerificationState::Verified
@@ -569,13 +621,7 @@ pub fn require_verified_signature_image(
 
 #[cfg(feature = "native")]
 pub fn inspect_pe_signature_file(path: &std::path::Path) -> Result<PeSignatureTableEvidence, String> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to inspect signature subject {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(format!("signature subject {} is not a regular non-symlink file", path.display()));
-    }
-    let image = std::fs::read(path)
-        .map_err(|error| format!("failed to read signature subject {}: {error}", path.display()))?;
+    let image = read_regular_file_no_follow(path)?;
     inspect_pe_signature_table(&image)
 }
 
@@ -801,6 +847,26 @@ mod tests {
         };
         assert!(require_verified_signature_image(&evidence, &[1; 32]).is_err());
     }
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn signature_file_reader_rejects_symlink_paths() {
+        let temp = tempfile::tempdir().expect("temporary signature directory");
+        let regular = temp.path().join("regular");
+        let link = temp.path().join("link");
+        std::fs::write(&regular, b"signature-bytes").expect("regular fixture");
+        std::os::unix::fs::symlink(&regular, &link).expect("symlink fixture");
+
+        assert_eq!(
+            read_regular_file_no_follow(&regular).expect("regular read"),
+            b"signature-bytes"
+        );
+        assert!(
+            read_regular_file_no_follow(&link)
+                .expect_err("symlink must fail closed")
+                .contains("symlink following")
+        );
+    }
+
     #[test]
     fn signature_table_binding_rejects_other_image() {
         let image = pe_with_certificate(0x0002, b"signed-payload");
