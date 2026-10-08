@@ -1320,6 +1320,7 @@ mod tests {
             exact_certificate_in_dbx: false,
             exact_certificate_tbs_hash_in_db: false,
             exact_certificate_tbs_hash_in_dbx: true,
+            matched_dbx_tbs_revocation_time: Some([1; 16]),
             certificate_chain_authorization: None,
             observed_at_ms: None,
             evidence_digest: None,
@@ -1329,6 +1330,29 @@ mod tests {
             DirectTrustDisposition::PotentialX509TbsRevocation
         );
     }
+    #[test]
+    fn direct_trust_summary_distinguishes_zero_time_dbx_tbs_revocation() {
+        let evidence = SignatureDatabaseMatchEvidence {
+            db_records: Vec::new(),
+            dbx_records: Vec::new(),
+            image_authenticode_sha256: [0; 32],
+            direct_db_authenticode_hash_match: false,
+            direct_dbx_authenticode_hash_match: false,
+            exact_certificate_in_db: false,
+            exact_certificate_in_dbx: false,
+            exact_certificate_tbs_hash_in_db: false,
+            exact_certificate_tbs_hash_in_dbx: true,
+            matched_dbx_tbs_revocation_time: Some([0; 16]),
+            certificate_chain_authorization: None,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::ForbiddenByDbxTbsRevocation
+        );
+    }
+
     #[test]
     fn exact_dbx_certificate_match_beats_unevaluated_rules() {
         let evidence = SignatureDatabaseMatchEvidence {
@@ -1585,6 +1609,7 @@ mod tests {
             exact_certificate_in_dbx: false,
             exact_certificate_tbs_hash_in_db: false,
             exact_certificate_tbs_hash_in_dbx: true,
+            matched_dbx_tbs_revocation_time: Some([1; 16]),
             certificate_chain_authorization: None,
             observed_at_ms: None,
             evidence_digest: None,
