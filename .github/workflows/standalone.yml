@@ -78,6 +78,8 @@ jobs:
 
   lockfile-artifact:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      artifact_digest: ${{ steps.upload_lockfile.outputs.artifact-digest }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out exact PR head
@@ -93,6 +95,7 @@ jobs:
       - name: Generate Cargo.lock
         run: cargo generate-lockfile
       - name: Upload generated lockfile
+        id: upload_lockfile
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
@@ -201,6 +204,7 @@ jobs:
             "cargo": "$(cargo --version)",
             "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
             "cargo_lock_source": "${{ github.event_name == 'pull_request' && 'exact-head-artifact' || 'committed-branch-lockfile' }}",
+            "cargo_lock_artifact_digest": "${{ github.event_name == 'pull_request' && needs.lockfile-artifact.outputs.artifact_digest || '' }}",
             "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
             "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
             "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
