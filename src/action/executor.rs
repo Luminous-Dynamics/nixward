@@ -2100,6 +2100,7 @@ impl NixOSExecutor {
                     };
                 }
             super::config_transaction::ConfigTransactionPhase::RecoveryRequired
+                | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
                 if !has_purpose(ActivationWorkerPurpose::Activation)
                     && !has_purpose(ActivationWorkerPurpose::ProfileTransition) => {
                     return ExecutionResult::FailedNoRollback {
@@ -2217,45 +2218,44 @@ impl NixOSExecutor {
             },
         };
 
-        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
-            transaction.phase(),
-            &observation,
-        ) {
-            return ExecutionResult::FailedNoRollback {
-                error: format!("fresh journal recovery confirmation failed: {reason}"),
-                rollback_error: None,
-            };
-        }
-
-        if matches!(
-            observation,
-            super::config_transaction::RecoveryObservation::CandidateProvenActive { .. }
-        ) {
+        let terminal_runtime = match &observation {
+            super::config_transaction::RecoveryObservation::CandidateProvenActive { .. } => Some(candidate_runtime.as_str()),
+            super::config_transaction::RecoveryObservation::BootCandidateProven { .. } => Some(prior_runtime.as_str()),
+            _ => None,
+        };
+        if let Some(expected_runtime) = terminal_runtime {
             if let Err(reason) = transaction.record_activation_post_state(
                 None,
                 Some(observed_runtime.clone()),
                 Some(observed_profile.clone()),
+                expected_runtime,
             ) {
                 return ExecutionResult::FailedNoRollback {
-                    error: format!("candidate-active recovery could not close transaction: {reason}"),
+                    error: format!("proven post-state could not close transaction: {reason}"),
                     rollback_error: None,
                 };
             }
             if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
                 return ExecutionResult::FailedNoRollback {
                     error: reason,
-                    rollback_error: Some("candidate runtime/profile was proven but durable closure could not be persisted".into()),
+                    rollback_error: Some("runtime/profile post-state was proven but terminal state could not be persisted".into()),
                 };
             }
-            let result = ExecutionResult::Success {
-                stdout: String::new(),
-                stderr: "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed".into(),
-                execution_time_ms: 0,
+            Self::cleanup_terminal_retention(&mut transaction, &journal_path);
+            let (stdout, stderr) = match transaction.phase() {
+                super::config_transaction::ConfigTransactionPhase::BootSelected => (
+                    String::new(),
+                    "candidate system profile is selected for the next boot; predecessor runtime remains active by design".to_string(),
+                ),
+                _ => (
+                    String::new(),
+                    "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed".to_string(),
+                ),
             };
+            let result = ExecutionResult::Success { stdout, stderr, execution_time_ms: 0 };
             self.record_execution(&command, decision_quality, &authorization, &result);
             return result;
         }
-
         if matches!(observation, super::config_transaction::RecoveryObservation::MixedOrUnknown { .. }) {
             if let Err(reason) = transaction.enter_recovery_required(&observation) {
                 return ExecutionResult::FailedNoRollback {
@@ -2275,6 +2275,16 @@ impl NixOSExecutor {
             };
             self.record_execution(&command, decision_quality, &authorization, &result);
             return result;
+        }
+
+        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
+            transaction.phase(),
+            &observation,
+        ) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("fresh journal recovery confirmation failed: {reason}"),
+                rollback_error: None,
+            };
         }
 
         if let Err(reason) = transaction.enter_recovery_required(&observation) {
@@ -2682,10 +2692,26 @@ impl NixOSExecutor {
         let runtime = GenerationManager::current_runtime_system_closure().ok();
         let profile = GenerationManager::current_system_profile_closure().ok();
 
+        let expected_runtime = match &command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                action: SystemActivation::Boot,
+                ..
+            } => match authorization.recovery_command.as_ref() {
+                Some(NixOSCommand::ActivateSystemClosure { store_path: prior, .. }) => prior.as_str(),
+                _ => return ExecutionResult::FailedNoRollback {
+                    error: "boot activation is missing exact predecessor runtime binding".into(),
+                    rollback_error: None,
+                },
+            },
+            NixOSCommand::ActivateSystemClosure { store_path, .. } => store_path.as_str(),
+            _ => unreachable!("validated exact activation command"),
+        };
         if let Err(reason) = transaction.record_activation_post_state(
             status,
             runtime.clone(),
             profile.clone(),
+            expected_runtime,
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("activation post-state could not be recorded: {reason}"),
