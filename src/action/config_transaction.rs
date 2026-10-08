@@ -2033,7 +2033,6 @@ impl ConfigTransaction {
             return Err("candidate build receipt can only be bound before source commit".into());
         }
         receipt.validate_identity()?;
-        receipt.verify_retention()?;
         if receipt.source_digest != self.source_digest {
             return Err("candidate build source digest does not match transaction source digest".into());
         }
@@ -2047,6 +2046,7 @@ impl ConfigTransaction {
         if receipt.source_store_path != realization.store_path {
             return Err("candidate build source store path does not match the retained source realization".into());
         }
+        receipt.verify_retention()?;
         if let Some(existing) = &self.candidate_build {
             if existing != &receipt {
                 return Err("candidate build receipt is immutable once bound; refusing replacement".into());
@@ -2853,9 +2853,8 @@ mod tests {
             ),
             state: SourceRealizationLeaseState::Rooted,
         });
-        transaction
-            .bind_candidate_build(test_candidate_receipt())
-            .unwrap();
+        transaction.candidate_store_path = Some(test_candidate_receipt().candidate_store_path.clone());
+        transaction.candidate_build = Some(test_candidate_receipt());
     }
 
     #[test]
