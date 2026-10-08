@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   bootstrap-lockfile:
-    if: github.event_name == 'push' && github.ref != 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
       group: standalone-bootstrap-${{ github.ref }}
@@ -26,20 +26,13 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
 
       - name: Rebase bootstrap workspace to branch tip
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin "${{ github.event.pull_request.head.ref }}"
-            git reset --hard "origin/${{ github.event.pull_request.head.ref }}"
-            test "$(git rev-parse HEAD)" = "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}"
-          else
-            git fetch origin "${GITHUB_REF_NAME}"
-            git reset --hard "origin/${GITHUB_REF_NAME}"
-          fi
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
 
       - name: Inspect branch-tip lockfile state
         id: lockfile
@@ -81,11 +74,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Cargo.lock
           git commit -m "build: add standalone Cargo lockfile"
-          target_ref="${GITHUB_REF_NAME}"
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            target_ref="${{ github.event.pull_request.head.ref }}"
-          fi
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"${target_ref}"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"${GITHUB_REF_NAME}"
 
   validate:
     needs: bootstrap-lockfile
