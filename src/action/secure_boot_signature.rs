@@ -555,7 +555,7 @@ pub struct SignatureVerificationEvidence {
 }
 
 #[cfg(feature = "native")]
-fn read_regular_file_no_follow(
+pub(crate) fn read_regular_file_no_follow(
     path: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
     use nix::errno::Errno;
