@@ -657,6 +657,7 @@ pub struct ExecutionAuthorization {
     approval_evidence_kind: Option<ApprovalEvidenceKind>,
     execution_intent_digest: Option<[u8; 32]>,
     realization_plan_digest: Option<[u8; 32]>,
+    realization_installable: Option<String>,
     authority_signer_key_id: Option<String>,
     authority_challenge_blake3: Option<String>,
     authority_replay_key: Option<String>,
@@ -693,6 +694,7 @@ impl ExecutionAuthorization {
             approval_evidence_kind: None,
             execution_intent_digest: None,
             realization_plan_digest: None,
+            realization_installable: None,
             authority_signer_key_id: None,
             authority_challenge_blake3: None,
             authority_replay_key: None,
@@ -757,6 +759,9 @@ impl ExecutionAuthorization {
             approval_evidence_kind: Some(authorization.approval_evidence_kind()),
             execution_intent_digest: authorization.execution_intent_digest(),
             realization_plan_digest: authorization.realization_plan_digest(),
+            realization_installable: authorization
+                .realization_installable()
+                .map(ToOwned::to_owned),
             authority_signer_key_id: authorization
                 .authority_signer_key_id()
                 .map(|value| value.to_string()),
@@ -793,6 +798,10 @@ impl ExecutionAuthorization {
 
     pub fn realization_plan_digest(&self) -> Option<[u8; 32]> {
         self.realization_plan_digest
+    }
+
+    pub fn realization_installable(&self) -> Option<&str> {
+        self.realization_installable.as_deref()
     }
 
     pub fn authority_signer_key_id(&self) -> Option<&str> {
@@ -842,7 +851,8 @@ impl ExecutionAuthorization {
         if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
                 || self.execution_intent_digest.is_none()
-                || self.realization_plan_digest.is_none())
+                || self.realization_plan_digest.is_none()
+                || self.realization_installable.is_none())
         {
             return Err("system recovery requires cryptographically verified execution-intent authority".into());
         }
