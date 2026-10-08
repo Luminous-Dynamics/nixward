@@ -791,7 +791,7 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
 pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry>, String> {
     let mut entries = BTreeMap::new();
     let mut submenu_stack: Vec<String> = Vec::new();
-    let mut current: Option<(String, String, String, Vec<String>)> = None;
+    let mut current: Option<(String, String, String, Vec<String>, usize)> = None;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -808,19 +808,33 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
             } else {
                 format!("{} > {}", submenu_stack.join(" > "), title)
             };
-            current = Some((entry_id, title, String::new(), Vec::new()));
+            let depth = line.matches('{').count().saturating_sub(line.matches('}').count());
+            if depth == 0 {
+                return Err("GRUB menuentry has no opening block".into());
+            }
+            current = Some((entry_id, title, String::new(), Vec::new(), depth));
             continue;
         }
 
-        if let Some((entry_id, title, linux_line, initrds)) = current.as_mut() {
+        if let Some((entry_id, title, linux_line, initrds, depth)) = current.as_mut() {
             if line.starts_with("linux ") || line.starts_with("linuxefi ") || line.starts_with("multiboot ") {
                 *linux_line = line.to_string();
             } else if line.starts_with("initrd ") || line.starts_with("initrdefi ") {
                 initrds.push(line.to_string());
             }
 
-            if line == "}" {
-                let (entry_id, title, linux_line, initrds) = current.take().expect("entry state");
+            let opened = line.matches('{').count();
+            let closed = line.matches('}').count();
+            *depth = depth
+                .checked_add(opened)
+                .ok_or_else(|| "GRUB menuentry nesting depth overflowed".to_string())?;
+            if closed > *depth {
+                return Err("GRUB menuentry has unbalanced closing braces".into());
+            }
+            *depth -= closed;
+
+            if *depth == 0 {
+                let (entry_id, title, linux_line, initrds, _) = current.take().expect("entry state");
                 let (linux, options) = if linux_line.is_empty() {
                     (None, String::new())
                 } else {
@@ -1263,6 +1277,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
     }
 
+    #[test]
+    fn nested_grub_block_does_not_end_menuentry_early() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("nested shell block should parse");
+        assert!(entries.contains_key("Nested"));
+    }
     #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
         let entries = parse_grub_config_entries(
