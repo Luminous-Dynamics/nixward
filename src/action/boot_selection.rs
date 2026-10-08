@@ -398,7 +398,11 @@ fn observe_grub_from_loader(loader_path: &str) -> Result<BootSelectionEvidence, 
         });
     }
 
-    let root = discover_grub_root().map_err(|reason| UnknownBootSelection {
+    let preferred_root = run_read_only(["-x"])
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| path.is_absolute());
+    let root = discover_grub_root(preferred_root.as_deref()).map_err(|reason| UnknownBootSelection {
         bootloader_family: BootloaderFamily::Grub,
         reason,
     })?;
@@ -472,12 +476,20 @@ pub fn observe_boot_selection_for_candidate(
 }
 
 #[cfg(feature = "native")]
-fn discover_grub_root() -> Result<PathBuf, String> {
+fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> {
     let candidates = [
         PathBuf::from("/boot/grub"),
         PathBuf::from("/boot/efi/grub"),
         PathBuf::from("/efi/grub"),
     ];
+    let mut candidates = preferred_root
+        .into_iter()
+        .map(Path::to_path_buf)
+        .chain(candidates)
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+
     let mut matches = Vec::new();
     for root in candidates {
         match std::fs::symlink_metadata(&root) {
@@ -1154,6 +1166,12 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
+    #[test]
+    fn grub_root_preference_is_covered_by_path_contract() {
+        let root = PathBuf::from("/boot-custom");
+        let candidates = [root.clone(), PathBuf::from("/boot/grub")];
+        assert!(candidates.iter().any(|candidate| candidate == &root));
+    }
     #[test]
     fn selected_non_nixos_grub_entry_is_unbound() {
         let entries = parse_grub_config_entries(
