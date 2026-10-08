@@ -1101,6 +1101,30 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                 Err(reason) => eprintln!("  Secure Boot is Unknown: {reason}"),
             }
         }
+        Some(ObserveDomain::SecureBootDatabases) => {
+            match nixward::action::secure_boot::observe_secure_boot_databases() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => {
+                        println!(
+                            "db={:?}\tdbx={:?}",
+                            evidence.db_payload_blake3,
+                            evidence.dbx_payload_blake3
+                        );
+                    }
+                    _ => {
+                        println!("  db state: {:?}", evidence.db_state);
+                        println!("  db payload BLAKE3: {:?}", evidence.db_payload_blake3);
+                        println!("  dbx state: {:?}", evidence.dbx_state);
+                        println!("  dbx payload BLAKE3: {:?}", evidence.dbx_payload_blake3);
+                        println!("  Qualification: raw firmware database observation only; certificate-to-database authorization remains separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot database evidence is Unknown: {reason}"),
+            }
+        }
         Some(ObserveDomain::Hardware) => {
             match nixward::observe::hardware::HardwareObserver::probe() {
                 Ok(info) => match format {
