@@ -21,7 +21,7 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | firmware trust databases | exact `db`/`dbx` payloads | raw EFI variable digests | Implemented; authorization mapping remains open |
 | PE signature table | exact UKI image | certificate-table offset/size/type/revision/payload digests | Implemented |
 | certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, image-stability recheck | Implemented |
-| Secure Boot signer authorization | exact signer + firmware policy | embedded X.509 chain identity + cryptographically verified `db` anchor identity + `dbx` image/chain vetoes | Partially implemented — Issue #17; timestamp semantics open |
+| Secure Boot signer authorization | exact signer + firmware policy | embedded X.509 chain identity + cryptographically verified `db` anchor identity + `dbx` image/chain vetoes + zero-time TBS hard veto | Partially implemented — Issue #17; timestamp semantics open |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
 | physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
