@@ -40,12 +40,24 @@ The observer requires the exact efivarfs payload shape: four attribute bytes plu
 one boolean data byte. Unsupported values, malformed lengths, missing EFI state,
 and ambiguous variable instances fail closed.
 
+The separate `observe secure-boot-databases` surface reads the UEFI `db` and `dbx`
+signature-database variables under the EFI image-security database GUID and emits
+exact BLAKE3 payload identities. Missing databases are represented as `Absent`,
+while unreadable or malformed state is an observation error and must be treated as
+Unknown by callers. These raw database digests do not establish that a particular
+certificate is authorized or non-revoked.
+
 A separate `secure_boot_signature` evidence subject inspects the exact PE Authenticode
 certificate table of an observed UKI. It records the image BLAKE3 digest, table
 location/size, per-certificate revision/type/length, and per-certificate/table
 digests. An absent table is distinct from malformed data. This proves only that
 certificate bytes are present in the exact image; it does not prove cryptographic
 signature validity, signer authorization, firmware trust acceptance, or revocation.
+
+The same module can run a certificate-pinned `sbverify --cert` verification against
+the exact image. `Verified` is emitted only when the verifier exits successfully
+and the image/certificate bytes are unchanged across the verification call. Tool
+absence or verifier failure is never converted into a pass.
 
 ## Separate signature subject
 
