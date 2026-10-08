@@ -100,14 +100,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   validate:
-    needs: bootstrap-lockfile
+    needs:
+      - bootstrap-lockfile
+      - lockfile-artifact
     concurrency:
       group: standalone-validate-${{ github.ref }}
       cancel-in-progress: true
     # A skipped bootstrap is expected for pull_request and main pushes. GitHub
     # otherwise skips dependent jobs too; always() preserves the fail-closed
     # qualification decision instead of silently producing a skipped check.
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -117,6 +119,13 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Materialize exact PR lockfile
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: .
 
       - name: Assert exact validation subject
         shell: bash
@@ -153,7 +162,7 @@ jobs:
       - name: Verify standalone filesystem boundary
         run: python3 scripts/verify-standalone-boundary.py
 
-      - name: Require repository lockfile
+      - name: Require exact lockfile for validation subject
         shell: bash
         run: test -f Cargo.lock
 
@@ -191,6 +200,7 @@ jobs:
             "rustc": "$(rustc --version)",
             "cargo": "$(cargo --version)",
             "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
+            "cargo_lock_source": "${{ github.event_name == 'pull_request' && 'exact-head-artifact' || 'committed-branch-lockfile' }}",
             "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
             "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
             "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
@@ -209,11 +219,13 @@ jobs:
 
   nix:
     name: Nix packaging
-    needs: bootstrap-lockfile
+    needs:
+      - bootstrap-lockfile
+      - lockfile-artifact
     concurrency:
       group: standalone-nix-${{ github.ref }}
       cancel-in-progress: true
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -223,6 +235,13 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Materialize exact PR lockfile
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: .
 
       - name: Assert exact validation subject
         shell: bash
