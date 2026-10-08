@@ -1764,8 +1764,14 @@ impl ConfigTransaction {
         runtime_closure: Option<String>,
         profile_closure: Option<String>,
     ) -> Result<(), String> {
-        if self.phase != ConfigTransactionPhase::ActivationStarted {
-            return Err("activation post-state must be recorded from ActivationStarted".into());
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+        ) {
+            return Err("activation post-state must be recorded from an activation or recovery phase".into());
         }
         self.process_exit_status = process_exit_status;
         self.observed_runtime_closure = runtime_closure.clone();
