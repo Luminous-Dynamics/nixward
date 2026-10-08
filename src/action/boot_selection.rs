@@ -1608,6 +1608,20 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     }
 
     #[test]
+    fn uki_selector_normalizes_documented_suffixless_id() {
+        assert_eq!(
+            uki_selector_filename("nixos-candidate"),
+            Some("nixos-candidate.efi".to_string())
+        );
+        assert_eq!(
+            uki_selector_filename("nixos-candidate.efi"),
+            Some("nixos-candidate.efi".to_string())
+        );
+        assert_eq!(uki_selector_filename("nixos-candidate.conf"), None);
+        assert_eq!(uki_selector_filename("../nixos-candidate"), None);
+    }
+
+    #[test]
     fn cmdline_exact_init_binding_is_strict() {
         let cmdline = "quiet init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init";
         assert_eq!(
