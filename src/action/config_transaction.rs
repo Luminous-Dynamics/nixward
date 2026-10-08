@@ -716,6 +716,59 @@ impl FrozenConfigSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRealizationLeaseState {
+    Rooted,
+    Released,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRealizationLease {
+    pub source_digest: String,
+    pub store_path: String,
+    pub gc_root_path: String,
+    pub state: SourceRealizationLeaseState,
+}
+
+impl SourceRealizationLease {
+    pub fn new(source: &FrozenConfigSource, store_path: impl Into<String>, gc_root_path: impl Into<String>) -> Result<Self, String> {
+        let store_path = store_path.into();
+        let gc_root_path = gc_root_path.into();
+        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+            return Err("source realization is not bound to a canonical immutable Nix store path".into());
+        }
+        let gc_root = std::path::Path::new(&gc_root_path);
+        let canonical_root = std::path::Path::new("/nix/var/nix/gcroots/nixward");
+        if !gc_root.is_absolute() || !gc_root.starts_with(canonical_root) || gc_root == canonical_root {
+            return Err("source GC root must be a unique child of /nix/var/nix/gcroots/nixward".into());
+        }
+        if gc_root.file_name().and_then(|value| value.to_str()).map(|value| value.is_empty()).unwrap_or(true) {
+            return Err("source GC root must have a stable leaf name".into());
+        }
+        Ok(Self {
+            source_digest: source.root_digest.clone(),
+            store_path,
+            gc_root_path,
+            state: SourceRealizationLeaseState::Rooted,
+        })
+    }
+
+    pub fn release(&mut self) -> Result<(), String> {
+        match self.state {
+            SourceRealizationLeaseState::Rooted => {
+                self.state = SourceRealizationLeaseState::Released;
+                Ok(())
+            }
+            SourceRealizationLeaseState::Released => Err("source realization lease already released".into()),
+        }
+    }
+
+    pub fn is_rooted(&self) -> bool {
+        matches!(self.state, SourceRealizationLeaseState::Rooted)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTransaction {
@@ -730,6 +783,7 @@ pub struct ConfigTransaction {
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
     observed_profile_closure: Option<String>,
+    source_realization: Option<SourceRealizationLease>,
 }
 
 impl ConfigTransaction {
@@ -762,6 +816,7 @@ impl ConfigTransaction {
             process_exit_status: None,
             observed_runtime_closure: None,
             observed_profile_closure: None,
+            source_realization: None,
         }
     }
 
@@ -775,7 +830,10 @@ impl ConfigTransaction {
     pub fn advance(&mut self, next: ConfigTransactionPhase) -> Result<(), String> {
         let allowed = match (self.phase, next) {
             (ConfigTransactionPhase::Prepared, ConfigTransactionPhase::InputFrozen) => true,
-            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => self.candidate_store_path.is_some(),
+            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => {
+                self.candidate_store_path.is_some()
+                    && self.source_realization.as_ref().is_some_and(SourceRealizationLease::is_rooted)
+            },
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_store_path.is_some(),
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::FailedBeforeActivation) => true,
@@ -856,6 +914,37 @@ impl ConfigTransaction {
         }
     }
 
+    pub fn bind_source_realization(
+        &mut self,
+        realization: SourceRealizationLease,
+    ) -> Result<(), String> {
+        if realization.source_digest != self.source_digest {
+            return Err("source realization digest does not match transaction source digest".into());
+        }
+        if !realization.is_rooted() {
+            return Err("source realization lease must be rooted before binding".into());
+        }
+        if self.source_realization.is_some() {
+            return Err("source realization is already bound to this transaction".into());
+        }
+        self.source_realization = Some(realization);
+        Ok(())
+    }
+
+    pub fn source_realization(&self) -> Option<&SourceRealizationLease> {
+        self.source_realization.as_ref()
+    }
+
+    pub fn release_source_realization(&mut self) -> Result<(), String> {
+        let realization = self
+            .source_realization
+            .as_mut()
+            .ok_or_else(|| "transaction has no source realization lease".to_string())?;
+        if matches!(self.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Recovered) {
+            return Err("source realization lease cannot be released while activation/recovery authority is live".into());
+        }
+        realization.release()
+    }
     pub fn set_candidate_store_path(&mut self, candidate_store_path: impl Into<String>) -> Result<(), String> {
         let path = candidate_store_path.into();
         if !super::execution_intent::is_valid_nix_store_path(&path) {
@@ -1064,6 +1153,20 @@ impl ConfigTransaction {
         if let Some(candidate) = transaction.candidate_store_path.as_deref() {
             if !super::execution_intent::is_valid_nix_store_path(candidate) {
                 return Err("transaction journal has an invalid candidate store path".into());
+            }
+        }
+
+        if let Some(realization) = transaction.source_realization.as_ref() {
+            if realization.source_digest != transaction.source_digest {
+                return Err("transaction journal source realization digest mismatch".into());
+            }
+            if !super::execution_intent::is_valid_nix_store_path(&realization.store_path) {
+                return Err("transaction journal contains an invalid source realization store path".into());
+            }
+            let root = std::path::Path::new(&realization.gc_root_path);
+            let namespace = std::path::Path::new("/nix/var/nix/gcroots/nixward");
+            if !root.is_absolute() || !root.starts_with(namespace) || root == namespace {
+                return Err("transaction journal contains an invalid source GC root path".into());
             }
         }
         Ok(transaction)
@@ -1468,6 +1571,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_realization_lease_binds_digest_store_and_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let lease = SourceRealizationLease::new(
+            &source,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
+            "/nix/var/nix/gcroots/nixward/txn-001",
+        )
+        .unwrap();
+        assert_eq!(lease.source_digest, source.root_digest);
+        assert!(lease.is_rooted());
+    }
+
+    #[test]
+    fn source_realization_rejects_gc_root_escaping_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        assert!(SourceRealizationLease::new(
+            &source,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
+            "/tmp/nixward-root",
+        ).is_err());
+    }
+
+    #[test]
+    fn candidate_built_requires_retained_source_realization() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        tx.set_candidate_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test").unwrap();
+        assert!(tx.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
+    }
     #[test]
     fn transaction_candidate_identity_requires_immutable_store_path() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
