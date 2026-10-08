@@ -588,6 +588,38 @@ fn read_efi_database(name: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 #[cfg(feature = "native")]
+fn read_efi_timestamp_database() -> Result<Option<Vec<u8>>, String> {
+    let path = std::path::PathBuf::from(format!(
+        "{}/dbt-{}",
+        EFI_VARS_DIR, EFI_IMAGE_SECURITY_DATABASE_GUID
+    ));
+    let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
+        return Ok(None);
+    };
+    if bytes.len() < 4 {
+        return Err(format!(
+            "EFI timestamp database {} is missing its attribute header",
+            path.display()
+        ));
+    }
+    Ok(Some(bytes[4..].to_vec()))
+}
+
+#[cfg(feature = "native")]
+fn timestamp_database_certificate_digests(
+    dbt_payload: Option<&[u8]>,
+) -> Result<Vec<[u8; 32]>, String> {
+    let Some(payload) = dbt_payload else {
+        return Ok(Vec::new());
+    };
+    Ok(parse_signature_database(payload)?
+        .into_iter()
+        .filter(|record| record.kind == SignatureListKind::X509Certificate)
+        .filter_map(|record| record.certificate_der_blake3)
+        .collect())
+}
+
+#[cfg(feature = "native")]
 fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
     let path = std::path::PathBuf::from(format!("{}/{}-{}", EFI_VARS_DIR, name, EFI_GLOBAL_GUID));
     let Some(bytes) = read_efi_regular_file_no_follow(&path)? else {
