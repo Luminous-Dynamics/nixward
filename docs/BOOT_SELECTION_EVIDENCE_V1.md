@@ -67,6 +67,24 @@ Boot-counting metadata is retained independently. +tries-left and optional
 -tries-done state must not be collapsed into a generic selected boolean. An entry
 without boot-counting metadata is `not-tracked`, not `good`.
 
+## Physical reboot correlation
+
+The systemd-boot current-entry witness proves which entry the loader reports
+as selected. A separate boot-transition correlation proves that the machine
+actually crossed a reboot boundary and that the resulting running OS and kernel
+command line bind to the exact expected NixOS closure.
+
+The correlation requires a pre-reboot kernel `boot_id` captured before the boot
+request and a post-reboot `boot_id` that differs. It independently checks
+`/run/current-system` and the kernel's `init=/nix/store/...-nixos-system-.../init`
+binding. This is useful for GRUB too: it proves the exact closure was physically
+booted without pretending GRUB exposes the same current-entry UAPI witness as
+systemd-boot.
+
+Only the state `BootTransitionState::VerifiedReboot` satisfies this physical
+reboot predicate. Same-boot, missing-ID, runtime mismatch, and command-line
+mismatch states remain non-qualified.
+
 ## Current-boot witness
 
 For systemd-boot, LoaderEntrySelected is the authoritative identifier written by
