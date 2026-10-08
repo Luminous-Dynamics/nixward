@@ -40,6 +40,13 @@ The observer requires the exact efivarfs payload shape: four attribute bytes plu
 one boolean data byte. Unsupported values, malformed lengths, missing EFI state,
 and ambiguous variable instances fail closed.
 
+A separate `secure_boot_signature` evidence subject inspects the exact PE Authenticode
+certificate table of an observed UKI. It records the image BLAKE3 digest, table
+location/size, per-certificate revision/type/length, and per-certificate/table
+digests. An absent table is distinct from malformed data. This proves only that
+certificate bytes are present in the exact image; it does not prove cryptographic
+signature validity, signer authorization, firmware trust acceptance, or revocation.
+
 ## Separate signature subject
 
 Signature verification is intentionally not included in this state observer. A
