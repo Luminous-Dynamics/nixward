@@ -582,6 +582,7 @@ pub struct ChangeAuthorization {
     approval_evidence_kind: ApprovalEvidenceKind,
     execution_intent_digest: Option<[u8; 32]>,
     realization_plan_digest: Option<[u8; 32]>,
+    realization_installable: Option<String>,
     authority_signer_key_id: Option<String>,
     authority_challenge_blake3: Option<String>,
     authority_replay_key: Option<String>,
@@ -611,6 +612,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::GeneralChange,
             execution_intent_digest: None,
             realization_plan_digest: None,
+            realization_installable: None,
             authority_signer_key_id: None,
             authority_challenge_blake3: None,
             authority_replay_key: None,
@@ -668,6 +670,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::ExecutionIntent,
             execution_intent_digest: Some(bundle.intent_digest()),
             realization_plan_digest: Some(bundle.realization_plan_digest()),
+            realization_installable: Some(bundle.installable().to_string()),
             authority_signer_key_id: None,
             authority_challenge_blake3: None,
             authority_replay_key: None,
@@ -731,6 +734,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::AuthoritySignature,
             execution_intent_digest: None,
             realization_plan_digest: None,
+            realization_installable: None,
             authority_signer_key_id: Some(evidence.signer_key_id.clone()),
             authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
             authority_replay_key: Some(evidence.replay_key.clone()),
@@ -779,6 +783,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::ExecutionIntentAuthority,
             execution_intent_digest: Some(bundle.intent_digest()),
             realization_plan_digest: Some(bundle.realization_plan_digest()),
+            realization_installable: Some(bundle.installable().to_string()),
             authority_signer_key_id: Some(evidence.signer_key_id.clone()),
             authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
             authority_replay_key: Some(evidence.replay_key.clone()),
@@ -812,8 +817,9 @@ impl ChangeAuthorization {
             && self.authority_challenge_blake3.is_some()
             && self.authority_replay_key.is_some()
             && self.authority_subject_blake3.is_some();
-        let has_execution_intent =
-            self.execution_intent_digest.is_some() && self.realization_plan_digest.is_some();
+        let has_execution_intent = self.execution_intent_digest.is_some()
+            && self.realization_plan_digest.is_some()
+            && self.realization_installable.is_some();
         let shape_is_valid = match self.approval_evidence_kind {
             ApprovalEvidenceKind::GeneralChange => !has_authority && !has_execution_intent,
             ApprovalEvidenceKind::ExecutionIntent => !has_authority && has_execution_intent,
@@ -850,6 +856,10 @@ impl ChangeAuthorization {
 
     pub fn realization_plan_digest(&self) -> Option<[u8; 32]> {
         self.realization_plan_digest
+    }
+
+    pub fn realization_installable(&self) -> Option<&str> {
+        self.realization_installable.as_deref()
     }
 
     pub fn authority_signer_key_id(&self) -> Option<&str> {
