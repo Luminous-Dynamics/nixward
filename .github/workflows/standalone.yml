@@ -290,7 +290,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
-            git add --intent-to-add Cargo.lock
+            git add --intent-to-add -f Cargo.lock
           fi
           git ls-files --error-unmatch Cargo.lock >/dev/null
 
