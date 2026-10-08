@@ -2633,6 +2633,47 @@ mod tests {
         assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
     }
 
+    #[test]
+    fn transaction_journal_persists_frozen_source_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(
+            source_root.join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        let source =
+            FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let source_digest = decode_digest(&source.root_digest).unwrap();
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], source_digest);
+        transaction
+            .advance(ConfigTransactionPhase::InputFrozen)
+            .unwrap();
+        transaction.bind_frozen_source(&source).unwrap();
+
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+        let loaded = ConfigTransaction::load(&journal).unwrap();
+
+        assert_eq!(loaded.frozen_source(), Some(&source));
+    }
+
+    #[test]
+    fn executable_transaction_journal_rejects_missing_frozen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("transaction.json");
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::SourceCommitted;
+        transaction.persist_atomic(&journal).unwrap();
+
+        assert!(
+            ConfigTransaction::load(&journal)
+                .expect_err("executable journal without frozen source must fail closed")
+                .contains("missing its frozen source snapshot")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn transaction_load_rejects_symlink_path() {
