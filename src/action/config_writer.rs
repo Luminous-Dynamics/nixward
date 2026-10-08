@@ -1,12 +1,12 @@
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
-//! NixOS Configuration Writer — Atomic Modifications with Backup
+//! NixOS Configuration Writer — Atomic Authorized Source Mutation
 //!
 //! Provides safe, atomic configuration file modifications:
 //! - Reads existing config via the parser layer
-//! - Creates a git-tracked backup before any write
-//! - Writes atomically via temp file + rename
+//! - Commits only exact authorized source bytes
+//! - Writes atomically via descriptor-relative temporary file + rename
 //! - Validates syntax with `nix-instantiate --parse` before committing
 //!
 //! This module does NOT execute system commands. Real writes require a
@@ -532,6 +532,20 @@ impl ConfigWriter {
                     | nix::libc::O_CLOEXEC,
             );
             let parent_file = parent_options.open(&parent)?;
+            let configured_stat = std::fs::metadata(&configured_root)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let opened_parent_stat = parent_file.metadata()?;
+                if configured_stat.dev() != opened_parent_stat.dev()
+                    || configured_stat.ino() != opened_parent_stat.ino()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "configuration authority root changed during descriptor acquisition",
+                    ));
+                }
+            }
             let parent_fd = parent_file.as_raw_fd();
 
             // The lock is also opened through the authorized parent descriptor,
@@ -739,9 +753,36 @@ impl ConfigWriter {
         }
     }
 
+    fn trusted_system_executable(name: &str) -> Result<String, std::io::Error> {
+        if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trusted system executable name is invalid",
+            ));
+        }
+        let path = Path::new("/run/current-system/sw/bin").join(name);
+        let canonical = std::fs::canonicalize(&path)?;
+        let value = canonical.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "trusted system executable path is not valid UTF-8",
+            )
+        })?;
+        if !value.starts_with("/nix/store/")
+            || canonical.file_name().and_then(|v| v.to_str()) != Some(name)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "system executable did not resolve into an immutable Nix store object",
+            ));
+        }
+        Ok(value.to_string())
+    }
+
     /// Validate Nix syntax using nix-instantiate --parse.
     fn validate_nix_syntax(content: &str) -> Result<(), std::io::Error> {
-        let mut child = Command::new("nix-instantiate")
+        let executable = Self::trusted_system_executable("nix-instantiate")?;
+        let mut child = Command::new(executable)
             .args(["--parse", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
