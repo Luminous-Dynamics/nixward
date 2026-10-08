@@ -793,6 +793,17 @@ impl NixSourceRealizer {
         })
     }
 
+    fn parse_store_path(stdout: &str) -> Result<String, String> {
+        stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| super::execution_intent::is_valid_nix_store_path(line))
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                "nix store add did not emit a canonical immutable store path".to_string()
+            })
+    }
+
     /// Realize the complete frozen source tree and retain it with a transaction-scoped
     /// GC root. The source tree is rechecked immediately before `nix store add`; the
     /// resulting Nix store tree is then compared byte-for-byte and metadata-for-metadata
@@ -836,12 +847,8 @@ impl NixSourceRealizer {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let store_path = stdout
-            .lines()
-            .map(str::trim)
-            .find(|line| super::execution_intent::is_valid_nix_store_path(line))
-            .ok_or_else(|| "nix store add did not emit a canonical immutable store path".to_string())?
-            .to_string();
+        let store_path = Self::parse_store_path(&stdout)?;
+
 
         source.verify_realization_at(&store_path)?;
 
@@ -1913,6 +1920,36 @@ mod tests {
         )
         .unwrap();
         assert!(source.verify_unchanged(dir.path()).is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn nix_source_realizer_parses_only_canonical_store_output() {
+        let stdout = "warning: copied source\n/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-frozen-source-test\n";
+        assert_eq!(
+            NixSourceRealizer::parse_store_path(stdout).unwrap(),
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-frozen-source-test"
+        );
+
+        assert!(NixSourceRealizer::parse_store_path("not-a-store-path\n").is_err());
+        assert!(NixSourceRealizer::parse_store_path("/nix/store/NOT-A-VALID-PATH\n").is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn nix_source_realizer_rejects_malformed_transaction_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let realizer = NixSourceRealizer {
+            nix_executable: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nix/bin/nix".into(),
+        };
+
+        assert!(realizer
+            .realize(&source_root, &source, "not-a-transaction-id")
+            .is_err());
     }
 
     #[test]
