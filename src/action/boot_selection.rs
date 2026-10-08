@@ -253,7 +253,7 @@ pub fn require_candidate_binding(
 /// changes loader state. Unsupported or incomplete observations become
 /// explicit Unknown results.
 #[cfg(feature = "native")]
-pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let loader_path = run_read_only(["--print-loader-path"])?;
     let loader_name = Path::new(loader_path.trim())
         .file_name()
@@ -289,7 +289,6 @@ pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSele
     })?;
 
     let evidence = resolve_systemd_boot_selection(one_shot.as_deref(), persistent_default.as_deref(), &entries)?;
-    require_candidate_binding(&evidence, expected_candidate_closure)?;
     if evidence.boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -309,6 +308,16 @@ pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSele
             bootloader_family: BootloaderFamily::SystemdBoot,
             reason,
         })
+}
+
+/// Observe systemd-boot selection and require an exact authorized candidate binding.
+#[cfg(feature = "native")]
+pub fn observe_systemd_boot_for_candidate(
+    expected_candidate_closure: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let evidence = observe_systemd_boot()?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    Ok(evidence)
 }
 
 #[cfg(feature = "native")]
