@@ -1756,6 +1756,24 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn dbt_certificate_digest_observation_is_separate_from_trust() {
+        let cert = vec![0x30, 0x01, 0x00];
+        let mut payload = vec![0u8; 28 + 16 + cert.len()];
+        payload[..16].copy_from_slice(&EFI_CERT_X509_GUID);
+        let signature_size = (16 + cert.len()) as u32;
+        let list_size = (28 + signature_size) as u32;
+        payload[16..20].copy_from_slice(&list_size.to_le_bytes());
+        payload[24..28].copy_from_slice(&signature_size.to_le_bytes());
+        payload[28..44].fill(0x11);
+        payload[44..].copy_from_slice(&cert);
+
+        let digests = timestamp_database_certificate_digests(Some(&payload))
+            .expect("dbt database parse");
+        assert_eq!(digests, vec![*blake3::hash(&cert).as_bytes()]);
+    }
+
     #[test]
     fn zero_time_dbx_tbs_record_is_always_revoked() {
         let record = SignatureDatabaseRecord {
