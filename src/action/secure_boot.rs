@@ -7,6 +7,7 @@
 //! signature validity. This module observes firmware state only.
 
 use serde::{Deserialize, Serialize};
+use super::secure_boot_signature::authenticode_sha256;
 
 const EFI_GLOBAL_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFI_IMAGE_SECURITY_DATABASE_GUID: &str = "d719b2cb-3d3a-4596-a3bc-dad00e67656f";
@@ -28,7 +29,7 @@ pub struct SignatureDatabaseRecord {
     pub signature_size: u32,
     pub signature_data_blake3: [u8; 32],
     pub owner: [u8; 16],
-    pub image_sha256: Option<[u8; 32]>,
+    pub image_authenticode_sha256: Option<[u8; 32]>,
     pub certificate_der_blake3: Option<[u8; 32]>,
     #[serde(skip)]
     pub certificate_der: Option<Vec<u8>>,
@@ -40,9 +41,9 @@ pub struct SignatureDatabaseRecord {
 pub struct SignatureDatabaseMatchEvidence {
     pub db_records: Vec<SignatureDatabaseRecord>,
     pub dbx_records: Vec<SignatureDatabaseRecord>,
-    pub image_sha256: [u8; 32],
-    pub direct_db_image_hash_match: bool,
-    pub direct_dbx_image_hash_match: bool,
+    pub image_authenticode_sha256: [u8; 32],
+    pub direct_db_authenticode_hash_match: bool,
+    pub direct_dbx_authenticode_hash_match: bool,
     pub exact_certificate_in_db: bool,
     pub exact_certificate_in_dbx: bool,
     pub exact_certificate_tbs_hash_in_db: bool,
@@ -57,9 +58,9 @@ impl SignatureDatabaseMatchEvidence {
         let preimage = serde_json::to_vec(&(
             &self.db_records,
             &self.dbx_records,
-            self.image_sha256,
-            self.direct_db_image_hash_match,
-            self.direct_dbx_image_hash_match,
+            self.image_authenticode_sha256,
+            self.direct_db_authenticode_hash_match,
+            self.direct_dbx_authenticode_hash_match,
             self.exact_certificate_in_db,
             self.exact_certificate_in_dbx,
             self.exact_certificate_tbs_hash_in_db,
@@ -109,8 +110,8 @@ impl SecureBootDatabaseEvidence {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectTrustDisposition {
-    ForbiddenByImageHash,
-    AuthorizedByImageHash,
+    ForbiddenByAuthenticodeHash,
+    AuthorizedByAuthenticodeHash,
     ExactCertificateInDbx,
     ExactCertificateInDb,
     NoDirectMatch,
@@ -279,7 +280,7 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
             }
             let mut owner = [0u8; 16];
             owner.copy_from_slice(&data[..16]);
-            let (image_sha256, certificate_der_blake3, certificate_der, certificate_tbs_hash, revocation_time) = match kind {
+            let (image_authenticode_sha256, certificate_der_blake3, certificate_der, certificate_tbs_hash, revocation_time) = match kind {
                 SignatureListKind::Sha256ImageHash if data.len() == 48 => {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&data[16..48]);
@@ -304,7 +305,7 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
                     let hash = data[16..80].to_vec();
                     let mut time = [0u8; 16];
                     time.copy_from_slice(&data[80..96]);
-                    (None, None, Some(hash), Some(time))
+                    (None, None, None, Some(hash), Some(time))
                 }
                 SignatureListKind::Unsupported => (None, None, None, None, None),
                 SignatureListKind::Sha256ImageHash
@@ -320,7 +321,7 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
                 signature_size: signature_size as u32,
                 signature_data_blake3: *blake3::hash(data).as_bytes(),
                 owner,
-                image_sha256,
+                image_authenticode_sha256,
                 certificate_der_blake3,
                 certificate_der,
                 certificate_tbs_hash,
@@ -332,10 +333,14 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
     Ok(records)
 }
 
+pub fn image_authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
+    authenticode_sha256(image)
+}
+
 pub fn match_secure_boot_databases(
     db_payload: &[u8],
     dbx_payload: &[u8],
-    image_sha256: [u8; 32],
+    image_authenticode_sha256: [u8; 32],
     signer_certificate_der: Option<&[u8]>,
     signer_certificate_tbs_hashes: &[Vec<u8>],
 ) -> Result<SignatureDatabaseMatchEvidence, String> {
@@ -343,8 +348,8 @@ pub fn match_secure_boot_databases(
     let dbx_records = parse_signature_database(dbx_payload)?;
     let signer_digest = signer_certificate_der.map(|bytes| *blake3::hash(bytes).as_bytes());
     Ok(SignatureDatabaseMatchEvidence {
-        direct_db_image_hash_match: db_records.iter().any(|record| record.image_sha256 == Some(image_sha256)),
-        direct_dbx_image_hash_match: dbx_records.iter().any(|record| record.image_sha256 == Some(image_sha256)),
+        direct_db_authenticode_hash_match: db_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
+        direct_dbx_authenticode_hash_match: dbx_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
         exact_certificate_in_db: signer_digest.is_some_and(|digest| db_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
         exact_certificate_in_dbx: signer_digest.is_some_and(|digest| dbx_records.iter().any(|record| record.certificate_der_blake3 == Some(digest))),
         exact_certificate_tbs_hash_in_db: db_records.iter().any(|record| {
@@ -355,11 +360,29 @@ pub fn match_secure_boot_databases(
         }),
         db_records,
         dbx_records,
-        image_sha256,
+        image_authenticode_sha256,
         certificate_chain_authorization: None,
         observed_at_ms: None,
         evidence_digest: None,
     })
+}
+
+#[cfg(feature = "native")]
+pub fn match_secure_boot_databases_for_image(
+    db_payload: &[u8],
+    dbx_payload: &[u8],
+    image: &[u8],
+    signer_certificate_der: Option<&[u8]>,
+    signer_certificate_tbs_hashes: &[Vec<u8>],
+) -> Result<SignatureDatabaseMatchEvidence, String> {
+    let image_authenticode_sha256 = image_authenticode_sha256(image)?;
+    match_secure_boot_databases(
+        db_payload,
+        dbx_payload,
+        image_authenticode_sha256,
+        signer_certificate_der,
+        signer_certificate_tbs_hashes,
+    )
 }
 
 pub fn derive_direct_trust_disposition(
@@ -368,7 +391,7 @@ pub fn derive_direct_trust_disposition(
     // UEFI validation gives dbx veto semantics precedence over db authorization.
     // Any unsupported dbx list type prevents an "authorized" conclusion because
     // the unsupported record may encode a revocation rule we do not evaluate.
-    if evidence.direct_dbx_image_hash_match {
+    if evidence.direct_dbx_authenticode_hash_match {
         return DirectTrustDisposition::ForbiddenByImageHash;
     }
     if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
@@ -377,7 +400,7 @@ pub fn derive_direct_trust_disposition(
         // evaluation, an authorization conclusion would be unsound.
         return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
-    if evidence.direct_db_image_hash_match {
+    if evidence.direct_db_authenticode_hash_match {
         return DirectTrustDisposition::AuthorizedByImageHash;
     }
     if evidence.exact_certificate_in_dbx || evidence.exact_certificate_tbs_hash_in_dbx {
@@ -544,7 +567,7 @@ pub enum DbCertificateVerificationState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbCertificateVerificationEvidence {
     pub image_blake3: [u8; 32],
-    pub image_sha256: [u8; 32],
+    pub image_authenticode_sha256: [u8; 32],
     pub db_certificate_digests: Vec<[u8; 32]>,
     pub verifying_db_certificate: Option<[u8; 32]>,
     pub state: DbCertificateVerificationState,
@@ -567,13 +590,13 @@ pub fn verify_image_against_db_certificates(
     let image = std::fs::read(image_path)
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_blake3 = *blake3::hash(&image).as_bytes();
-    let image_sha256: [u8; 32] = sha2::Sha256::digest(&image).into();
+    let image_authenticode_sha256: [u8; 32] = sha2::Sha256::digest(&image).into();
     let db = parse_signature_database(db_payload)?;
     let dbx = parse_signature_database(dbx_payload)?;
-    if dbx.iter().any(|record| record.image_sha256 == Some(image_sha256)) {
+    if dbx.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)) {
         return Ok(DbCertificateVerificationEvidence {
             image_blake3,
-            image_sha256,
+            image_authenticode_sha256,
             db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
             verifying_db_certificate: None,
             state: DbCertificateVerificationState::ForbiddenByDbxImageHash,
@@ -585,7 +608,7 @@ pub fn verify_image_against_db_certificates(
     if dbx.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
         return Ok(DbCertificateVerificationEvidence {
             image_blake3,
-            image_sha256,
+            image_authenticode_sha256,
             db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
             verifying_db_certificate: None,
             state: DbCertificateVerificationState::UnknownDbxCertificateRules,
@@ -621,7 +644,7 @@ pub fn verify_image_against_db_certificates(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(DbCertificateVerificationEvidence {
                     image_blake3,
-                    image_sha256,
+                    image_authenticode_sha256,
                     db_certificate_digests,
                     verifying_db_certificate: None,
                     state: DbCertificateVerificationState::ToolUnavailable,
@@ -641,7 +664,7 @@ pub fn verify_image_against_db_certificates(
             if stable {
                 return Ok(DbCertificateVerificationEvidence {
                     image_blake3,
-                    image_sha256,
+                    image_authenticode_sha256,
                     db_certificate_digests,
                     verifying_db_certificate: Some(certificate_digest),
                     state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
@@ -654,7 +677,7 @@ pub fn verify_image_against_db_certificates(
     }
     Ok(DbCertificateVerificationEvidence {
         image_blake3,
-        image_sha256,
+        image_authenticode_sha256,
         db_certificate_digests,
         verifying_db_certificate: None,
         state: DbCertificateVerificationState::NoMatchingDbCertificate,
@@ -708,6 +731,21 @@ mod tests {
         payload
     }
     #[test]
+    fn image_hash_subject_is_named_authenticode() {
+        let records = SignatureDatabaseRecord {
+            kind: SignatureListKind::Sha256ImageHash,
+            signature_size: 48,
+            signature_data_blake3: [0; 32],
+            owner: [0; 16],
+            image_authenticode_sha256: Some([7; 32]),
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: None,
+            revocation_time: None,
+        };
+        assert_eq!(records.image_authenticode_sha256, Some([7; 32]));
+    }
+    #[test]
     fn parses_sha256_signature_database_records() {
         let mut payload = vec![0u8; 28 + 48];
         payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
@@ -718,11 +756,11 @@ mod tests {
         let records = parse_signature_database(&payload).expect("SHA256 signature list");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, SignatureListKind::Sha256ImageHash);
-        assert_eq!(records[0].image_sha256, Some([1u8; 32]));
+        assert_eq!(records[0].image_authenticode_sha256, Some([1u8; 32]));
     }
 
     #[test]
-    fn direct_dbx_image_hash_match_is_observed_separately() {
+    fn direct_dbx_authenticode_hash_match_is_observed_separately() {
         let image_hash = [7u8; 32];
         let mut payload = vec![0u8; 28 + 48];
         payload[..16].copy_from_slice(&EFI_CERT_SHA256_GUID);
@@ -730,8 +768,8 @@ mod tests {
         payload[24..28].copy_from_slice(&48u32.to_le_bytes());
         payload[44..76].copy_from_slice(&image_hash);
         let evidence = match_secure_boot_databases(&payload, &payload, image_hash, None, &[]).expect("database matcher");
-        assert!(evidence.direct_db_image_hash_match);
-        assert!(evidence.direct_dbx_image_hash_match);
+        assert!(evidence.direct_db_authenticode_hash_match);
+        assert!(evidence.direct_dbx_authenticode_hash_match);
         assert_eq!(evidence.certificate_chain_authorization, None);
     }
 
@@ -757,7 +795,7 @@ mod tests {
         payload[24..28].copy_from_slice(&16u32.to_le_bytes());
         let records = parse_signature_database(&payload).expect("unsupported signature list");
         assert_eq!(records[0].kind, SignatureListKind::Unsupported);
-        assert_eq!(records[0].image_sha256, None);
+        assert_eq!(records[0].image_authenticode_sha256, None);
     }
     #[test]
     fn dbx_image_hash_veto_has_precedence_over_db_authorization() {
