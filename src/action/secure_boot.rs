@@ -115,6 +115,7 @@ pub enum DirectTrustDisposition {
     ForbiddenByAuthenticodeHash,
     ForbiddenByExactCertificate,
     PotentialX509TbsRevocation,
+    ForbiddenByDbxTbsRevocation,
     AuthenticodeHashInDb,
     ExactCertificateInDbx,
     ExactCertificateInDb,
@@ -699,31 +700,42 @@ pub struct DbCertificateVerificationEvidence {
 
 impl DbCertificateVerificationEvidence {
     pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
-        let preimage = serde_json::to_vec(&(
-            self.image_blake3,
-            self.image_authenticode_sha256,
-            &self.image_chain_certificate_digests,
-            &self.image_signer_certificate_digests,
-            &self.verified_db_anchor_certificate_digests,
-            &self.db_certificate_digests,
-            &self.dbx_certificate_digests,
-            self.verifying_db_certificate,
-            self.verifying_dbx_certificate,
-            self.dbx_chain_identity_match,
-            self.dbx_chain_tbs_hash_match,
-            &self.dbx_chain_tbs_revocation_times,
-            self.db_payload_blake3,
-            self.dbx_payload_blake3,
-            &self.dbt_certificate_digests,
-            self.dbt_payload_blake3,
-            self.timestamp_database_stability,
-            self.database_stability,
-            self.state,
-            &self.verifier,
-            self.stdout_blake3,
-            self.stderr_blake3,
-            observed_at_ms,
-        ))
+        let mut preimage = Vec::new();
+        preimage.push(b'[');
+        macro_rules! append_json {
+            ($value:expr) => {{
+                if preimage.len() > 1 {
+                    preimage.push(b',');
+                }
+                serde_json::to_writer(&mut preimage, &$value).map_err(|error| {
+                    format!("failed to serialize DB certificate verification evidence: {error}")
+                })?;
+            }};
+        }
+        append_json!(self.image_blake3);
+        append_json!(self.image_authenticode_sha256);
+        append_json!(&self.image_chain_certificate_digests);
+        append_json!(&self.image_signer_certificate_digests);
+        append_json!(&self.verified_db_anchor_certificate_digests);
+        append_json!(&self.db_certificate_digests);
+        append_json!(&self.dbx_certificate_digests);
+        append_json!(self.verifying_db_certificate);
+        append_json!(self.verifying_dbx_certificate);
+        append_json!(self.dbx_chain_identity_match);
+        append_json!(self.dbx_chain_tbs_hash_match);
+        append_json!(&self.dbx_chain_tbs_revocation_times);
+        append_json!(self.db_payload_blake3);
+        append_json!(self.dbx_payload_blake3);
+        append_json!(&self.dbt_certificate_digests);
+        append_json!(self.dbt_payload_blake3);
+        append_json!(self.timestamp_database_stability);
+        append_json!(self.database_stability);
+        append_json!(self.state);
+        append_json!(&self.verifier);
+        append_json!(self.stdout_blake3);
+        append_json!(self.stderr_blake3);
+        append_json!(observed_at_ms);
+        preimage.push(b']');
         .map_err(|error| format!("failed to serialize DB certificate verification evidence: {error}"))?;
         self.observed_at_ms = Some(observed_at_ms);
         self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
@@ -892,16 +904,28 @@ fn dbx_x509_record_matches_certificate(
     let (_, candidate_certificate) = x509_parser::parse_x509_certificate(certificate_der)
         .map_err(|error| format!("failed to parse signing X.509 certificate: {error}"))?;
 
-    let record_issuer =
-        *blake3::hash(record_certificate.tbs_certificate.issuer.as_ref()).as_bytes();
+    let record_issuer = *blake3::hash(
+        &openssl::x509::X509::from_der(record_der)
+            .map_err(|error| format!("failed to parse record X.509 certificate with OpenSSL: {error}"))?
+            .issuer_name()
+            .to_der()
+            .map_err(|error| format!("failed to serialize record X.509 issuer name: {error}"))?,
+    )
+    .as_bytes();
     let record_serial =
         *blake3::hash(record_certificate.tbs_certificate.raw_serial()).as_bytes();
     let mut record_tbs_hasher = sha2::Sha256::new();
     record_tbs_hasher.update(record_certificate.tbs_certificate.as_ref());
     let record_tbs_sha256: [u8; 32] = record_tbs_hasher.finalize().into();
 
-    let candidate_issuer =
-        *blake3::hash(candidate_certificate.tbs_certificate.issuer.as_ref()).as_bytes();
+    let candidate_issuer = *blake3::hash(
+        &openssl::x509::X509::from_der(certificate_der)
+            .map_err(|error| format!("failed to parse candidate X.509 certificate with OpenSSL: {error}"))?
+            .issuer_name()
+            .to_der()
+            .map_err(|error| format!("failed to serialize candidate X.509 issuer name: {error}"))?,
+    )
+    .as_bytes();
     let candidate_serial =
         *blake3::hash(candidate_certificate.tbs_certificate.raw_serial()).as_bytes();
     let mut candidate_tbs_hasher = sha2::Sha256::new();
@@ -960,8 +984,12 @@ fn dbx_x509_record_matches_chain(
     let (_, certificate) = x509_parser::parse_x509_certificate(certificate_der)
         .map_err(|error| format!("failed to parse dbx X.509 certificate: {error}"))?;
 
-    let issuer_blake3 =
-        *blake3::hash(certificate.tbs_certificate.issuer.as_ref()).as_bytes();
+    let issuer_der = openssl::x509::X509::from_der(certificate_der)
+        .map_err(|error| format!("failed to parse dbx X.509 certificate with OpenSSL: {error}"))?
+        .issuer_name()
+        .to_der()
+        .map_err(|error| format!("failed to serialize dbx X.509 issuer name: {error}"))?;
+    let issuer_blake3 = *blake3::hash(&issuer_der).as_bytes();
     let serial_blake3 =
         *blake3::hash(certificate.tbs_certificate.raw_serial()).as_bytes();
 
@@ -2114,8 +2142,12 @@ mod tests {
         let (_, parsed) =
             x509_parser::parse_x509_certificate(&der).expect("parse generated certificate");
 
-        let issuer_blake3 =
-            *blake3::hash(parsed.tbs_certificate.issuer.as_ref()).as_bytes();
+        let issuer_der = X509::from_der(&der)
+            .expect("parse generated issuer certificate")
+            .issuer_name()
+            .to_der()
+            .expect("serialize generated issuer name");
+        let issuer_blake3 = *blake3::hash(&issuer_der).as_bytes();
         let serial_blake3 =
             *blake3::hash(parsed.tbs_certificate.raw_serial()).as_bytes();
         let mut tbs_hasher = sha2::Sha256::new();

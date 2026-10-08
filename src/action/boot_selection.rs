@@ -575,11 +575,11 @@ fn run_grub_read_only(env_path: &Path) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|error| format!("grub-editenv produced invalid UTF-8: {error}"))
 }
 
-fn systemd_effective_selector(
-    one_shot_entry: Option<&str>,
-    persistent_default: Option<&str>,
-    persistent_source: &str,
-) -> Result<(&str, SelectionKind, &str), UnknownBootSelection> {
+fn systemd_effective_selector<'a>(
+    one_shot_entry: Option<&'a str>,
+    persistent_default: Option<&'a str>,
+    persistent_source: &'a str,
+) -> Result<(&'a str, SelectionKind, &'a str), UnknownBootSelection> {
     match one_shot_entry {
         Some(id) if !id.is_empty() => Ok((id, SelectionKind::OneShot, "efi:LoaderEntryOneShot")),
         _ => match persistent_default {
