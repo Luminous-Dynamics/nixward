@@ -30,6 +30,8 @@ pub struct SignatureDatabaseRecord {
     pub owner: [u8; 16],
     pub image_sha256: Option<[u8; 32]>,
     pub certificate_der_blake3: Option<[u8; 32]>,
+    #[serde(skip)]
+    pub certificate_der: Option<Vec<u8>>,
     pub certificate_tbs_hash: Option<Vec<u8>>,
     pub revocation_time: Option<[u8; 16]>,
 }
@@ -277,26 +279,26 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
             }
             let mut owner = [0u8; 16];
             owner.copy_from_slice(&data[..16]);
-            let (image_sha256, certificate_der_blake3, certificate_tbs_hash, revocation_time) = match kind {
+            let (image_sha256, certificate_der_blake3, certificate_der, certificate_tbs_hash, revocation_time) = match kind {
                 SignatureListKind::Sha256ImageHash if data.len() == 48 => {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&data[16..48]);
-                    (Some(hash), None, None, None)
+                    (Some(hash), None, None, None, None)
                 }
                 SignatureListKind::X509Certificate if data.len() >= 17 => {
-                    (None, Some(*blake3::hash(&data[16..]).as_bytes()), None, None)
+                    (None, Some(*blake3::hash(&data[16..]).as_bytes()), Some(data[16..].to_vec()), None, None)
                 }
                 SignatureListKind::X509TbsSha256 if data.len() == 64 => {
                     let mut hash = Vec::from(&data[16..48]);
                     let mut time = [0u8; 16];
                     time.copy_from_slice(&data[48..64]);
-                    (None, None, Some(std::mem::take(&mut hash)), Some(time))
+                    (None, None, None, Some(std::mem::take(&mut hash)), Some(time))
                 }
                 SignatureListKind::X509TbsSha384 if data.len() == 80 => {
                     let hash = data[16..64].to_vec();
                     let mut time = [0u8; 16];
                     time.copy_from_slice(&data[64..80]);
-                    (None, None, Some(hash), Some(time))
+                    (None, None, None, Some(hash), Some(time))
                 }
                 SignatureListKind::X509TbsSha512 if data.len() == 96 => {
                     let hash = data[16..80].to_vec();
@@ -304,7 +306,7 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
                     time.copy_from_slice(&data[80..96]);
                     (None, None, Some(hash), Some(time))
                 }
-                SignatureListKind::Unsupported => (None, None, None, None),
+                SignatureListKind::Unsupported => (None, None, None, None, None),
                 SignatureListKind::Sha256ImageHash
                 | SignatureListKind::X509Certificate
                 | SignatureListKind::X509TbsSha256
@@ -320,6 +322,7 @@ pub fn parse_signature_database(payload: &[u8]) -> Result<Vec<SignatureDatabaseR
                 owner,
                 image_sha256,
                 certificate_der_blake3,
+                certificate_der,
                 certificate_tbs_hash,
                 revocation_time,
             });
@@ -527,6 +530,169 @@ fn read_global_efi_bool(name: &str) -> Result<Option<bool>, String> {
         }
         _ => Err(format!("EFI variable {name} has multiple global-GUID instances")),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DbCertificateVerificationState {
+    VerifiedAgainstDbCertificate,
+    NoMatchingDbCertificate,
+    ForbiddenByDbxImageHash,
+    UnknownDbxCertificateRules,
+    ToolUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbCertificateVerificationEvidence {
+    pub image_blake3: [u8; 32],
+    pub image_sha256: [u8; 32],
+    pub db_certificate_digests: Vec<[u8; 32]>,
+    pub verifying_db_certificate: Option<[u8; 32]>,
+    pub state: DbCertificateVerificationState,
+    pub verifier: String,
+    pub stdout_blake3: [u8; 32],
+    pub stderr_blake3: [u8; 32],
+}
+
+#[cfg(feature = "native")]
+pub fn verify_image_against_db_certificates(
+    image_path: &std::path::Path,
+    db_payload: &[u8],
+    dbx_payload: &[u8],
+) -> Result<DbCertificateVerificationEvidence, String> {
+    let metadata = std::fs::symlink_metadata(image_path)
+        .map_err(|error| format!("failed to inspect UKI {}: {error}", image_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(format!("UKI {} is not a regular non-symlink file", image_path.display()));
+    }
+    let image = std::fs::read(image_path)
+        .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
+    let image_blake3 = *blake3::hash(&image).as_bytes();
+    let image_sha256: [u8; 32] = sha2::Sha256::digest(&image).into();
+    let db = parse_signature_database(db_payload)?;
+    let dbx = parse_signature_database(dbx_payload)?;
+    if dbx.iter().any(|record| record.image_sha256 == Some(image_sha256)) {
+        return Ok(DbCertificateVerificationEvidence {
+            image_blake3,
+            image_sha256,
+            db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
+            verifying_db_certificate: None,
+            state: DbCertificateVerificationState::ForbiddenByDbxImageHash,
+            verifier: "sbverify".into(),
+            stdout_blake3: *blake3::hash(&[]).as_bytes(),
+            stderr_blake3: *blake3::hash(b"dbx image hash veto").as_bytes(),
+        });
+    }
+    if dbx.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
+        return Ok(DbCertificateVerificationEvidence {
+            image_blake3,
+            image_sha256,
+            db_certificate_digests: db.iter().filter_map(|r| r.certificate_der_blake3).collect(),
+            verifying_db_certificate: None,
+            state: DbCertificateVerificationState::UnknownDbxCertificateRules,
+            verifier: "sbverify".into(),
+            stdout_blake3: *blake3::hash(&[]).as_bytes(),
+            stderr_blake3: *blake3::hash(b"unevaluated dbx certificate rule").as_bytes(),
+        });
+    }
+
+    let db_certificates: Vec<(&[u8], [u8; 32])> = db.iter().filter_map(|record| {
+        Some((record.certificate_der.as_deref()?, record.certificate_der_blake3?))
+    }).collect();
+    let db_certificate_digests = db_certificates.iter().map(|(_, digest)| *digest).collect::<Vec<_>>();
+    let mut last_stdout = Vec::new();
+    let mut last_stderr = Vec::new();
+    for (certificate, certificate_digest) in db_certificates {
+        let mut temp = tempfile::NamedTempFile::new()
+            .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
+        let pem = pem_encode_certificate(certificate);
+        use std::io::Write;
+        temp.write_all(pem.as_bytes())
+            .map_err(|error| format!("failed to write temporary certificate file: {error}"))?;
+        temp.flush()
+            .map_err(|error| format!("failed to flush temporary certificate file: {error}"))?;
+        let output = match std::process::Command::new("sbverify")
+            .args(["--cert"])
+            .arg(temp.path())
+            .arg(image_path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DbCertificateVerificationEvidence {
+                    image_blake3,
+                    image_sha256,
+                    db_certificate_digests,
+                    verifying_db_certificate: None,
+                    state: DbCertificateVerificationState::ToolUnavailable,
+                    verifier: "sbverify".into(),
+                    stdout_blake3: *blake3::hash(&last_stdout).as_bytes(),
+                    stderr_blake3: *blake3::hash(error.to_string().as_bytes()).as_bytes(),
+                });
+            }
+            Err(error) => return Err(format!("failed to execute sbverify: {error}")),
+        };
+        last_stdout = output.stdout.clone();
+        last_stderr = output.stderr.clone();
+        if output.status.success() {
+            let image_after = std::fs::read(image_path)
+                .map_err(|error| format!("failed to re-read UKI {}: {error}", image_path.display()))?;
+            let stable = *blake3::hash(&image_after).as_bytes() == image_blake3;
+            if stable {
+                return Ok(DbCertificateVerificationEvidence {
+                    image_blake3,
+                    image_sha256,
+                    db_certificate_digests,
+                    verifying_db_certificate: Some(certificate_digest),
+                    state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+                    verifier: "sbverify".into(),
+                    stdout_blake3: *blake3::hash(&output.stdout).as_bytes(),
+                    stderr_blake3: *blake3::hash(&output.stderr).as_bytes(),
+                });
+            }
+        }
+    }
+    Ok(DbCertificateVerificationEvidence {
+        image_blake3,
+        image_sha256,
+        db_certificate_digests,
+        verifying_db_certificate: None,
+        state: DbCertificateVerificationState::NoMatchingDbCertificate,
+        verifier: "sbverify".into(),
+        stdout_blake3: *blake3::hash(&last_stdout).as_bytes(),
+        stderr_blake3: *blake3::hash(&last_stderr).as_bytes(),
+    })
+}
+
+pub fn require_db_certificate_verification(
+    evidence: &DbCertificateVerificationEvidence,
+    expected_image_blake3: &[u8; 32],
+) -> Result<(), String> {
+    if &evidence.image_blake3 != expected_image_blake3 {
+        return Err("db certificate verification is bound to a different UKI image".into());
+    }
+    if evidence.state != DbCertificateVerificationState::VerifiedAgainstDbCertificate {
+        return Err(format!("db certificate verification state is {:?}", evidence.state));
+    }
+    Ok(())
+}
+
+fn pem_encode_certificate(der: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    let mut index = 0usize;
+    while index < der.len() {
+        let a = der[index];
+        let b = if index + 1 < der.len() { der[index + 1] } else { 0 };
+        let d = if index + 2 < der.len() { der[index + 2] } else { 0 };
+        encoded.push(TABLE[(a >> 2) as usize] as char);
+        encoded.push(TABLE[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
+        encoded.push(if index + 1 < der.len() { TABLE[(((b & 0x0f) << 2) | (d >> 6)) as usize] as char } else { '=' });
+        encoded.push(if index + 2 < der.len() { TABLE[(d & 0x3f) as usize] as char } else { '=' });
+        if encoded.len() % 64 == 0 { encoded.push('\n'); }
+        index += 3;
+    }
+    format!("-----BEGIN CERTIFICATE-----\n{}-----END CERTIFICATE-----\n", encoded)
 }
 
 #[cfg(test)]
