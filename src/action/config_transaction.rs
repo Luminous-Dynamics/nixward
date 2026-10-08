@@ -222,6 +222,7 @@ pub enum SourceEntryKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceManifestEntry {
     pub relative_path: String,
     pub kind: SourceEntryKind,
@@ -234,6 +235,7 @@ pub struct SourceManifestEntry {
 ///
 /// This is a source snapshot, not yet a Nix store realization.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FrozenConfigSource {
     pub root_digest: String,
     pub entrypoint: String,
@@ -368,6 +370,7 @@ impl FrozenConfigSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigTransaction {
     schema: String,
     version: u16,
@@ -527,8 +530,22 @@ impl ConfigTransaction {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
         let encoded = std::fs::read(path.as_ref())
             .map_err(|error| format!("failed to read transaction journal: {error}"))?;
-        serde_json::from_slice(&encoded)
-            .map_err(|error| format!("invalid transaction journal: {error}"))
+        let transaction: Self = serde_json::from_slice(&encoded)
+            .map_err(|error| format!("invalid transaction journal: {error}"))?;
+
+        if transaction.schema != Self::SCHEMA || transaction.version != Self::VERSION {
+            return Err("transaction journal schema/version mismatch".into());
+        }
+        decode_digest(&transaction.transaction_id)
+            .map_err(|_| "transaction journal has an invalid transaction id".to_string())?;
+        decode_digest(&transaction.source_digest)
+            .map_err(|_| "transaction journal has an invalid source digest".to_string())?;
+        if let Some(candidate) = transaction.candidate_store_path.as_deref() {
+            if !super::execution_intent::is_valid_nix_store_path(candidate) {
+                return Err("transaction journal has an invalid candidate store path".into());
+            }
+        }
+        Ok(transaction)
     }
 
 fn decode_digest(value: &str) -> Result<[u8; 32], String> {
@@ -771,6 +788,28 @@ mod tests {
         let loaded = ConfigTransaction::load(&path).unwrap();
         assert_eq!(loaded.transaction_id(), transaction.transaction_id());
         assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
+    }
+
+    #[test]
+    fn transaction_load_rejects_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        std::fs::write(
+            &path,
+            r#"{"schema":"luminous-nixward-config-transaction-v1","version":1,"transaction_id":"0000000000000000000000000000000000000000000000000000000000000000","source_digest":"0000000000000000000000000000000000000000000000000000000000000000","candidate_store_path":null,"phase":"prepared","process_exit_status":null,"observed_runtime_closure":null,"observed_profile_closure":null,"unexpected":true}"#,
+        )
+        .unwrap();
+        assert!(ConfigTransaction::load(&path).is_err());
+    }
+
+    #[test]
+    fn transaction_load_validates_core_identity_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.transaction_id = "BAD".into();
+        transaction.persist_atomic(&path).unwrap();
+        assert!(ConfigTransaction::load(&path).is_err());
     }
 
     #[test]
