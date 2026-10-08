@@ -535,9 +535,11 @@ pub fn resolve_grub_selection(
             bootloader_family: BootloaderFamily::Grub,
             selection_kind: SelectionKind::OneShot,
             selected_entry_id: Some(entry.entry_id.clone()),
-            selected_entry_source: "grubenv:next_entry".into(),
+            selected_entry_source: default_source.into(),
             candidate_closure: exact_store_path_from_entry(entry),
             boot_count_state: entry.boot_count_state,
+            observed_at_ms: None,
+            evidence_digest: None,
         });
     }
 
@@ -580,6 +582,8 @@ pub fn resolve_grub_selection(
         selected_entry_source: default_source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        observed_at_ms: None,
+        evidence_digest: None,
     })
 }
 
@@ -837,7 +841,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     #[test]
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
-        assert_eq!(parse_grub_config_default("set default="${saved_entry}"\n"), Some("${saved_entry}".into()));
+        assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
@@ -859,7 +863,9 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             candidate_closure: Some(
                 "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other".into(),
             ),
-            boot_count_state: BootCountState::Good,
+            boot_count_state: BootCountState::NotTracked,
+            observed_at_ms: None,
+            evidence_digest: None,
         };
         let expected =
             "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate";
