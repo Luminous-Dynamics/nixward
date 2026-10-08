@@ -60,7 +60,7 @@ tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 lru = "0.16"
 dashmap = "5.5"
-nix = { version = "0.27", optional = true, features = ["fs"] }
+nix = { version = "0.27", optional = true, features = ["fs", "dir"] }
 openssl = { version = "0.10.81", optional = true }
 x509-parser = { version = "0.18.1", optional = true }
 tempfile = { version = "3.10", optional = true }
