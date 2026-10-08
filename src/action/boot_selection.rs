@@ -364,10 +364,6 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         });
     }
     let entries_path = boot_path.join("loader/entries");
-    let entries = read_bls_entries(&entries_path).map_err(|reason| UnknownBootSelection {
-        bootloader_family: BootloaderFamily::SystemdBoot,
-        reason,
-    })?;
 
     let one_shot = read_efi_variable("LoaderEntryOneShot").map_err(|reason| UnknownBootSelection {
         bootloader_family: BootloaderFamily::SystemdBoot,
@@ -402,6 +398,17 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         persistent_default.as_deref(),
         persistent_source,
     )?;
+
+    let entries = match read_bls_entries(&entries_path) {
+        Ok(entries) => entries,
+        Err(reason) if uki_selector_filename(selected).is_some() => BTreeMap::new(),
+        Err(reason) => {
+            return Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason,
+            })
+        }
+    };
 
     let evidence = match resolve_systemd_boot_selection_with_source_and_preferred(
         one_shot.as_deref(),
@@ -678,10 +685,16 @@ pub fn observe_current_systemd_boot_witness(
     };
 
     let entries_path = boot_path.join("loader/entries");
-    let entries = read_bls_entries(&entries_path).map_err(|reason| UnknownBootSelection {
-        bootloader_family: BootloaderFamily::SystemdBoot,
-        reason,
-    })?;
+    let entries = match read_bls_entries(&entries_path) {
+        Ok(entries) => entries,
+        Err(reason) if uki_selector_filename(&selected_entry_id).is_some() => BTreeMap::new(),
+        Err(reason) => {
+            return Err(UnknownBootSelection {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                reason,
+            })
+        }
+    };
 
     let selected_entry_closure = if let Some(entry_key) = resolve_bls_entry_key(&selected_entry_id, &entries) {
         entries
