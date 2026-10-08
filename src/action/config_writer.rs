@@ -40,6 +40,17 @@ impl Drop for OwnedConfigFd {
     }
 }
 
+/// Semantic state of the durable source replacement attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCommitState {
+    /// No durable replacement was attempted (noop or dry-run).
+    NotAttempted,
+    /// The replacement was atomically installed and post-state was proven.
+    Committed,
+    /// A replacement was attempted and the final durable/observed state cannot be proven.
+    Indeterminate,
+}
+
 /// Result of a config write operation.
 #[derive(Debug, Clone)]
 pub struct WriteResult {
@@ -51,6 +62,8 @@ pub struct WriteResult {
     pub changed: bool,
     /// Diff between old and new content (unified format).
     pub diff: String,
+    /// Durable source commit state. Never infer this from `Result::Err` alone.
+    pub commit_state: WriteCommitState,
 }
 
 /// A pending config modification (not yet applied).
@@ -359,16 +372,7 @@ impl ConfigWriter {
             ));
         }
 
-        let result = self.apply_patch_unchecked(patch)?;
-        if !self.dry_run && result.changed {
-            let written = std::fs::read_to_string(&patch.target)?;
-            if written != patch.modified {
-                return Err(std::io::Error::other(
-                    "configuration post-state does not match authorized patch",
-                ));
-            }
-        }
-        Ok(result)
+        self.apply_patch_unchecked(patch)
     }
 
     /// Restore the exact pre-state only while the transaction is still before activation.
@@ -381,7 +385,7 @@ impl ConfigWriter {
         plan: &ChangePlan,
         authorization: &ChangeAuthorization,
         phase: ConfigTransactionPhase,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<WriteCommitState, std::io::Error> {
         if !phase.permits_source_rollback() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -409,8 +413,16 @@ impl ConfigWriter {
             return Ok(());
         }
 
-        self.atomic_replace_config(&patch.target, &patch.modified, &patch.original)?;
-        Ok(())
+        match self.atomic_replace_config(&patch.target, &patch.modified, &patch.original)? {
+            WriteCommitState::Committed => Ok(()),
+            WriteCommitState::NotAttempted => Err(std::io::Error::other(
+                "rollback source replacement was not attempted",
+            )),
+            WriteCommitState::Indeterminate => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "rollback source replacement became indeterminate after mutation attempt",
+            )),
+        }
     }
 
     /// Validate and render the result of a patch without mutating disk.
@@ -421,6 +433,7 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: false,
                 diff: String::new(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
         Self::validate_content_structure(&patch.original, &patch.modified)?;
@@ -442,6 +455,7 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: false,
                 diff: String::new(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
 
@@ -454,6 +468,7 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: true,
                 diff: patch.diff(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
 
@@ -463,13 +478,15 @@ impl ConfigWriter {
 
         // The file mutation primitive has no git, shell, or NixOS activation
         // side effects. Those belong to separate transactional domains.
-        self.atomic_replace_config(&patch.target, &patch.original, &patch.modified)?;
+        let commit_state =
+            self.atomic_replace_config(&patch.target, &patch.original, &patch.modified)?;
 
         Ok(WriteResult {
             path: patch.target.clone(),
             backup_path: None,
             changed: true,
             diff: patch.diff(),
+            commit_state,
         })
     }
 
@@ -698,11 +715,9 @@ impl ConfigWriter {
                 ))
             })?;
 
-            fsync(parent_fd).map_err(|error| {
-                std::io::Error::other(format!(
-                    "failed to sync configuration parent directory: {error}"
-                ))
-            })?;
+            if fsync(parent_fd).is_err() {
+                return Ok(WriteCommitState::Indeterminate);
+            }
 
             let verify_fd = openat(
                 parent_fd,
@@ -713,10 +728,10 @@ impl ConfigWriter {
                     | OFlag::O_NONBLOCK,
                 Mode::empty(),
             )
-            .map_err(|error| {
-                std::io::Error::other(format!(
-                    "failed to reopen committed configuration through authority descriptor: {error}"
-                ))
+.map_err(|_error| {
+                std::io::Error::other(
+                    "configuration replacement committed but post-state observation could not be established",
+                )
             })?;
             let verify_fd = OwnedConfigFd(verify_fd);
             let mut observed_bytes = Vec::new();
@@ -724,19 +739,15 @@ impl ConfigWriter {
                 match read(verify_fd.0, &mut buffer) {
                     Ok(0) => break,
                     Ok(count) => observed_bytes.extend_from_slice(&buffer[..count]),
-                    Err(error) => {
-                        return Err(std::io::Error::other(format!(
-                            "failed to read committed configuration: {error}"
-                        )))
+                    Err(_error) => {
+                        return Ok(WriteCommitState::Indeterminate);
                     }
                 }
             }
             if observed_bytes != bytes {
-                return Err(std::io::Error::other(
-                    "configuration post-state does not match atomic replacement",
-                ));
+                return Ok(WriteCommitState::Indeterminate);
             }
-            Ok(())
+            Ok(WriteCommitState::Committed)
         }
 
         #[cfg(not(unix))]
@@ -750,8 +761,10 @@ impl ConfigWriter {
             temp.sync_all()?;
             std::fs::rename(&temp_path, target)?;
             let parent_file = File::open(parent)?;
-            parent_file.sync_all()?;
-            Ok(())
+            if parent_file.sync_all().is_err() {
+                return Ok(WriteCommitState::Indeterminate);
+            }
+            Ok(WriteCommitState::Committed)
         }
     }
 
@@ -907,6 +920,7 @@ mod tests {
         let result = writer.apply_patch_unchecked(&patch).unwrap();
         assert!(result.changed);
         assert!(!result.diff.is_empty());
+        assert_eq!(result.commit_state, WriteCommitState::NotAttempted);
 
         // Original file should be unchanged in dry-run
         let content = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
@@ -1219,6 +1233,7 @@ mod tests {
         let patch = writer.add_system_package("htop").unwrap();
         let result = writer.apply_patch_unchecked(&patch).unwrap();
         assert!(result.changed);
+        assert_eq!(result.commit_state, WriteCommitState::Committed);
 
         let on_disk = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
         assert!(
