@@ -1239,9 +1239,12 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    fn activation_argv_digest(args: &[String]) -> String {
+    fn activation_argv_digest(executable: &str, args: &[String]) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V1\0");
+        hasher.update(b"NIXWARD_EXECUTABLE_ARGV_TUPLE_V2\0");
+        hasher.update(&(executable.len() as u64).to_le_bytes());
+        hasher.update(executable.as_bytes());
+        hasher.update(&(args.len() as u64).to_le_bytes());
         for argument in args {
             hasher.update(&(argument.len() as u64).to_le_bytes());
             hasher.update(argument.as_bytes());
@@ -1331,10 +1334,25 @@ impl NixOSExecutor {
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let mut child = Command::new(executable);
-            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-            let mut child = child.spawn()
-                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
+            let argv_digest = Self::activation_argv_digest(executable, args);
+            let intent = super::config_transaction::WorkerLaunchIntent {
+                transaction_id: transaction_id.clone(),
+                purpose,
+                executable: executable.to_string(),
+                argv_digest: argv_digest.clone(),
+            };
+            transaction.prepare_worker_launch(intent)?;
+            Self::persist_transaction(transaction, journal_path)?;
+            let mut child_command = Command::new(executable);
+            child_command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+            let mut child = match child_command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    transaction.cancel_worker_launch_after_spawn_error(purpose, executable, &argv_digest)?;
+                    Self::persist_transaction(transaction, journal_path)?;
+                    return Err(format!("failed to spawn transaction worker {executable}: {error}"));
+                }
+            };
             let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
             let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
                 Ok(value) => value,
@@ -1988,6 +2006,12 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
         let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "transaction recovery is a host mutation and cannot run in dry-run mode".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction recovery is restricted to exact system closure activation".into(),
@@ -2050,6 +2074,15 @@ impl NixOSExecutor {
                 safety_level: safety,
             };
         }
+        if let Some(intent) = transaction.pending_worker_launch() {
+            return ExecutionResult::FailedNoRollback {
+                error: format!(
+                    "transaction has an unresolved pre-spawn worker intent ({:?}, executable {}); refusing to launch another mutator",
+                    intent.purpose, intent.executable
+                ),
+                rollback_error: None,
+            };
+        }
         if !matches!(
             transaction.phase(),
             super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
@@ -2100,6 +2133,7 @@ impl NixOSExecutor {
                     };
                 }
             super::config_transaction::ConfigTransactionPhase::RecoveryRequired
+                | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
                 if !has_purpose(ActivationWorkerPurpose::Activation)
                     && !has_purpose(ActivationWorkerPurpose::ProfileTransition) => {
                     return ExecutionResult::FailedNoRollback {
@@ -2217,45 +2251,6 @@ impl NixOSExecutor {
             },
         };
 
-        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
-            transaction.phase(),
-            &observation,
-        ) {
-            return ExecutionResult::FailedNoRollback {
-                error: format!("fresh journal recovery confirmation failed: {reason}"),
-                rollback_error: None,
-            };
-        }
-
-        if matches!(
-            observation,
-            super::config_transaction::RecoveryObservation::CandidateProvenActive { .. }
-        ) {
-            if let Err(reason) = transaction.record_activation_post_state(
-                None,
-                Some(observed_runtime.clone()),
-                Some(observed_profile.clone()),
-            ) {
-                return ExecutionResult::FailedNoRollback {
-                    error: format!("candidate-active recovery could not close transaction: {reason}"),
-                    rollback_error: None,
-                };
-            }
-            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
-                return ExecutionResult::FailedNoRollback {
-                    error: reason,
-                    rollback_error: Some("candidate runtime/profile was proven but durable closure could not be persisted".into()),
-                };
-            }
-            let result = ExecutionResult::Success {
-                stdout: String::new(),
-                stderr: "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed".into(),
-                execution_time_ms: 0,
-            };
-            self.record_execution(&command, decision_quality, &authorization, &result);
-            return result;
-        }
-
         if matches!(observation, super::config_transaction::RecoveryObservation::MixedOrUnknown { .. }) {
             if let Err(reason) = transaction.enter_recovery_required(&observation) {
                 return ExecutionResult::FailedNoRollback {
@@ -2277,6 +2272,55 @@ impl NixOSExecutor {
             return result;
         }
 
+        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
+            transaction.phase(),
+            &observation,
+        ) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("fresh journal recovery confirmation failed: {reason}"),
+                rollback_error: None,
+            };
+        }
+
+        let terminal_runtime = match &observation {
+            super::config_transaction::RecoveryObservation::CandidateProvenActive { .. } => Some(candidate_runtime.as_str()),
+            super::config_transaction::RecoveryObservation::BootCandidateProven { .. } => Some(prior_runtime.as_str()),
+            _ => None,
+        };
+        if let Some(expected_runtime) = terminal_runtime {
+            if let Err(reason) = transaction.record_activation_post_state(
+                None,
+                Some(observed_runtime.clone()),
+                Some(observed_profile.clone()),
+                expected_runtime,
+                true,
+            ) {
+                return ExecutionResult::FailedNoRollback {
+                    error: format!("proven post-state could not close transaction: {reason}"),
+                    rollback_error: None,
+                };
+            }
+            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                return ExecutionResult::FailedNoRollback {
+                    error: reason,
+                    rollback_error: Some("runtime/profile post-state was proven but terminal state could not be persisted".into()),
+                };
+            }
+            Self::cleanup_terminal_retention(&mut transaction, &journal_path);
+            let (stdout, stderr) = match transaction.phase() {
+                super::config_transaction::ConfigTransactionPhase::BootSelected => (
+                    String::new(),
+                    "candidate system profile is selected for the next boot; predecessor runtime remains active by design".to_string(),
+                ),
+                _ => (
+                    String::new(),
+                    "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed".to_string(),
+                ),
+            };
+            let result = ExecutionResult::Success { stdout, stderr, execution_time_ms: 0 };
+            self.record_execution(&command, decision_quality, &authorization, &result);
+            return result;
+        }
         if let Err(reason) = transaction.enter_recovery_required(&observation) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("could not enter explicit recovery state: {reason}"),
@@ -2342,6 +2386,7 @@ impl NixOSExecutor {
                         process_exit_status,
                         runtime.clone(),
                         profile.clone(),
+                        true,
                     );
                     let _ = Self::persist_transaction(&transaction, &journal_path);
                     return ExecutionResult::FailedNoRollback {
@@ -2382,6 +2427,7 @@ impl NixOSExecutor {
             status,
             post_runtime.clone(),
             post_profile.clone(),
+            result.is_ok(),
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("recovery post-state could not be journaled: {reason}"),
@@ -2439,6 +2485,12 @@ impl NixOSExecutor {
         transaction_id: impl AsRef<str>,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "transaction-bound exact activation does not support dry-run; no host mutation was performed".into(),
+                safety_level: command.safety_level(),
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction-aware execution is restricted to exact system closure activation".into(),
@@ -2682,10 +2734,26 @@ impl NixOSExecutor {
         let runtime = GenerationManager::current_runtime_system_closure().ok();
         let profile = GenerationManager::current_system_profile_closure().ok();
 
+        let expected_runtime = match &command {
+            NixOSCommand::ActivateSystemClosure {
+                action: SystemActivation::Boot,
+                ..
+            } => match authorization.recovery_command.as_ref() {
+                Some(NixOSCommand::ActivateSystemClosure { store_path: prior, .. }) => prior.as_str(),
+                _ => return ExecutionResult::FailedNoRollback {
+                    error: "boot activation is missing exact predecessor runtime binding".into(),
+                    rollback_error: None,
+                },
+            },
+            NixOSCommand::ActivateSystemClosure { store_path, .. } => store_path.as_str(),
+            _ => unreachable!("validated exact activation command"),
+        };
         if let Err(reason) = transaction.record_activation_post_state(
             status,
             runtime.clone(),
             profile.clone(),
+            expected_runtime,
+            result.is_ok(),
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("activation post-state could not be recorded: {reason}"),
@@ -2722,13 +2790,34 @@ impl NixOSExecutor {
                 }
             }
             super::config_transaction::ConfigTransactionPhase::IndeterminateActivation => {
-                let _ = transaction.advance(
+                if let Err(reason) = transaction.advance(
                     super::config_transaction::ConfigTransactionPhase::RecoveryObservation,
-                );
-                let _ = transaction.advance(
+                ) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("could not enter recovery observation: {reason}"),
+                        rollback_error: None,
+                    };
+                }
+                if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: reason,
+                        rollback_error: Some("indeterminate activation phase remains the last durable journal state".into()),
+                    };
+                }
+                if let Err(reason) = transaction.advance(
                     super::config_transaction::ConfigTransactionPhase::RecoveryRequired,
-                );
-                let _ = Self::persist_transaction(&transaction, &journal_path);
+                ) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("could not enter RecoveryRequired: {reason}"),
+                        rollback_error: None,
+                    };
+                }
+                if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: reason,
+                        rollback_error: Some("RecoveryObservation remains the last durable journal state".into()),
+                    };
+                }
                 ExecutionResult::FailedNoRollback {
                     error: format!(
                         "exact activation did not prove the authorized candidate post-state; transaction is RecoveryRequired (runtime={runtime:?}, profile={profile:?}, process={status:?})"
@@ -2749,7 +2838,7 @@ impl NixOSExecutor {
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
-        if !self.dry_run && matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+        if matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             let blocked = ExecutionResult::Blocked {
                 reason: "exact system activation requires the durable ConfigTransaction execution boundary".into(),
                 safety_level: command.safety_level(),
@@ -3070,6 +3159,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worker_argv_digest_binds_executable_and_argument_boundaries() {
+        let args_a = vec!["--set".to_string(), "/nix/var/nix/profiles/system".to_string()];
+        let args_b = vec!["--set /nix/var/nix/profiles/system".to_string()];
+        let executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-env/bin/nix-env";
+        assert_ne!(
+            NixOSExecutor::activation_argv_digest(executable, &args_a),
+            NixOSExecutor::activation_argv_digest(executable, &args_b),
+        );
+        assert_ne!(
+            NixOSExecutor::activation_argv_digest(executable, &args_a),
+            NixOSExecutor::activation_argv_digest(
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nix-env/bin/nix-env",
+                &args_a,
+            ),
+        );
+    }
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn pidfd_binds_current_process_and_reports_it_live() {
+        let pid = std::process::id();
+        assert!(NixOSExecutor::proc_start_time_ticks(pid).unwrap().is_some());
+        let pidfd = NixOSExecutor::open_pidfd(pid).unwrap();
+        assert!(!NixOSExecutor::pidfd_exited(&pidfd).unwrap());
+        let boot = NixOSExecutor::current_boot_id().unwrap();
+        assert_eq!(boot.len(), 36);
+    }
+    #[test]
     fn test_command_safety_levels() {
         let search = NixOSCommand::Search {
             query: "vim".to_string(),
@@ -3212,6 +3328,37 @@ mod tests {
             ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
         let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
         assert!(auth.validate_for_recovery(&command).is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_exact_activation_is_blocked_even_in_dry_run() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
+            action: SystemActivation::Switch,
+        };
+        let plan = ChangePlan::command_only_with_system_recovery(
+            super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
+            command.clone(),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            SystemActivation::Switch,
+            60_000,
+        )
+        .unwrap();
+        let approval =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
+        let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let result = executor.execute_authorized(command, auth, Some(1.0)).await;
+        match result {
+            ExecutionResult::Blocked { reason, .. } => {
+                assert!(reason.contains("durable ConfigTransaction"));
+            }
+            _ => panic!("legacy exact activation must be blocked even in dry-run"),
+        }
     }
 
     #[test]

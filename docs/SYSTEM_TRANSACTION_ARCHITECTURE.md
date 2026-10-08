@@ -483,10 +483,11 @@ to the GC-root namespace, synchronized durably, and followed by independent
 read-back verification. A journaled `Rooted` state therefore means that the live
 root was observed, not merely that a serialized record claimed it.
 
-This is an input-retention boundary, not yet a complete candidate-build binding:
-the next privileged build step must consume the exact retained source store path
-and bind its resulting system closure to the same transaction without resolving
-the source from the mutable working tree.
+This retention boundary now feeds `NixCandidateBuilder`: builds consume the retained
+store path rather than the mutable working tree, and the resulting closure is tied to
+the expected immutable output path, exact installable selector, realization-plan digest,
+and a separate candidate GC root. Both source and candidate roots are observed from the
+live filesystem before they are allowed to contribute to execution authority.
 
 ## Immutable candidate-build binding (2026-10-08)
 
@@ -496,9 +497,10 @@ flake-relative installable, rewrites that installable against the exact retained
 store path, and invokes Nix through its immutable `/nix/store` executable identity.
 
 Candidate stdout is accepted only when exactly one canonical store path is emitted, and
-that path must equal the externally authorized `expectedOutPath`. The builder then rechecks
+that path must equal the externally authorized `expectedOutPath`. The builder rechecks
 the retained source and emits `CandidateBuildReceipt`, which binds the source digest, exact
-source store path, candidate store path, and realization-plan digest.
+source store path, exact `.#...` selector, candidate store path, candidate GC-root path, and
+realization-plan digest.
 
 `ConfigTransaction::advance(CandidateBuilt)` and `SourceCommitted` now require that receipt.
 A legacy serialized candidate path can remain readable for migration evidence, but it cannot
@@ -508,3 +510,19 @@ The validation PR is also topology-bound: its hosted validation job fetches
 `hardening/full-stack-qualification-2026-10-08` and requires its live SHA to equal the
 validation PR head before qualification proceeds. A moving hardening branch therefore cannot
 silently qualify an older validation mirror.
+
+## Journal-bound pidfd worker identity (2026-10-09)
+
+The transaction journal is versioned to v5 because source-entrypoint identity and worker/process evidence both affect recovery authority. The frozen-source digest now commits to the selected entrypoint as well as the sorted manifest; journal load recomputes that digest and rejects an entrypoint swap even when the alternate file exists in the same tree.
+
+Profile transitions, candidate activation, and recovery activation use one supervised worker path. Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent` containing transaction ID, worker purpose, immutable executable identity, and a length-prefixed digest of the exact executable plus its arguments. After spawn, it captures the PID through `pidfd_open`, verifies stable `/proc/<pid>/stat` start-time and boot ID around pidfd acquisition, and atomically replaces the intent with an append-only worker receipt before waiting for completion.
+
+A pidfd is a live kernel handle, not a serialized token. After process restart, Nixward does not trust the recorded PID alone: it rechecks boot ID and process start time, opens a fresh pidfd, and polls that handle. A recorded worker that may still be alive blocks recovery mutation.
+
+An unresolved `WorkerLaunchIntent` is evidence of ambiguity: the process might have spawned before its pidfd receipt became durable. Recovery does not clear that intent by inference; it blocks another mutation until an explicit reconciliation path establishes what happened. If a mutation-start boundary has no matching receipt, recovery likewise refuses to guess that the process never launched.
+
+`RecoveryMutationStarted` is persisted before a recovery profile or activation process can spawn. A restart in that phase without a recovery worker receipt is ambiguous and cannot automatically launch a second recovery worker. Completed worker identities remain append-only journal history, and every recovery attempt gets a distinct receipt.
+
+`BootSelected` is a terminal state distinct from `Activated`: a `boot` action may correctly select the candidate system profile while `/run/current-system` still resolves to the predecessor until reboot. That state can be reported as success only when both candidate profile and expected predecessor runtime are independently proven. Candidate/source roots are released only after the terminal journal state is durably persisted; a cleanup failure leaves roots in place rather than deleting evidence.
+
+Exact activation and recovery are explicitly refused in dry-run mode, and the legacy executor API cannot launch `ActivateSystemClosure`. Cognitive confidence, child exit status, and a serialized worker PID never substitute for exact authorization plus observed post-state.
