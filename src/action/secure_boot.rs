@@ -153,7 +153,7 @@ mod tests {
         );
         assert_eq!(
             derive_secure_boot_state(Some(true), Some(true)),
-            SecureBootState::SetupMode
+            SecureBootState::Unknown
         );
         assert_eq!(
             derive_secure_boot_state(None, Some(false)),
