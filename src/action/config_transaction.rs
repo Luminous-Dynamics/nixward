@@ -742,8 +742,24 @@ impl SourceRealizationLease {
         }
         let gc_root = std::path::Path::new(&gc_root_path);
         let canonical_root = std::path::Path::new("/nix/var/nix/gcroots/nixward");
-        if !gc_root.is_absolute() || !gc_root.starts_with(canonical_root) || gc_root == canonical_root {
-            return Err("source GC root must be a unique child of /nix/var/nix/gcroots/nixward".into());
+        let relative = gc_root
+            .strip_prefix(canonical_root)
+            .map_err(|_| "source GC root must be under /nix/var/nix/gcroots/nixward".to_string())?;
+        if relative.as_os_str().is_empty()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+            || relative.components().count() != 1
+        {
+            return Err(
+                "source GC root must be exactly one stable child of /nix/var/nix/gcroots/nixward"
+                    .into(),
+            );
         }
         if gc_root.file_name().and_then(|value| value.to_str()).map(|value| value.is_empty()).unwrap_or(true) {
             return Err("source GC root must have a stable leaf name".into());
