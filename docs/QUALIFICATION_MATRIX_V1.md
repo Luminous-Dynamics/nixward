@@ -1,0 +1,46 @@
+# Nixward Qualification Matrix V1
+
+This matrix is the boundary between implementation evidence and qualification.
+`Implemented` means the code path exists and has deterministic tests or source
+validation. `Observed` means a host or workflow produced evidence. `Qualified`
+requires exact-head evidence satisfying the predicate's acceptance contract.
+
+| Predicate | Exact subject | Evidence | Current state |
+| --- | --- | --- | --- |
+| realization | exact NixOS system closure | verified execution-intent + realization-plan `expectedOutPath`, source/config/lock digests | Implemented |
+| runtime pre-state | exact `/run/current-system` closure | read-only store-path observation | Implemented |
+| selected profile pre-state | exact `/nix/var/nix/profiles/system` closure | read-only profile-path observation | Implemented |
+| profile transition | exact candidate profile closure | Nix-supported exact profile set + immediate exact re-observation | Implemented; external-writer CAS remains open |
+| activation | exact candidate closure + action | exact `<store>/bin/switch-to-configuration <action>` | Implemented |
+| recovery | exact prior runtime + profile + action | bound recovery command + post-recovery exact state | Implemented |
+| Nixward transaction serialization | Nixward-owned activation transaction | native cross-process interlock | Implemented |
+| next-boot selection | exact boot entry | read-only systemd-boot/GRUB selection observation | Implemented; overall qualification remains open |
+| Type #1 NixOS binding | exact system closure | BLS `init=/nix/store/...-nixos-system-.../init` | Implemented |
+| Type #2 UKI binding | exact EFI image + system closure | UKI BLAKE3 + `.cmdline` + exact `init=` binding | Implemented |
+| Secure Boot firmware state | exact UEFI policy variables | `SecureBoot` + `SetupMode` raw observations | Implemented |
+| firmware trust databases | exact `db`/`dbx` payloads | raw EFI variable digests | Implemented; authorization mapping remains open |
+| PE signature table | exact UKI image | certificate-table offset/size/type/revision/payload digests | Implemented |
+| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, image/certificate digests, subject-stability recheck | Implemented; trust authorization remains open |
+| Secure Boot signer authorization | exact signer + firmware policy | cert-to-`db`/`dbx` relationship | Open — Issue #17 |
+| external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
+| effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
+| physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
+| hosted compiler/tests | exact Git commit | completed workflow with qualification receipt | Pending; no qualification claim |
+
+## Rules
+
+1. A queued, cancelled, skipped, or stale workflow is not a qualification pass.
+2. A human-readable generation label is not an immutable closure identity.
+3. An EFI image digest is not system-closure provenance.
+4. A valid signature is not firmware trust authorization.
+5. Firmware Secure Boot state is not proof that a selected image booted.
+6. Successful `switch-to-configuration boot` is not proof of effective next-boot selection.
+7. Physical reboot success is not post-boot health.
+8. Unknown or unsupported evidence must remain explicit Unknown rather than being coerced into Pass.
+
+## Current qualification gate
+
+Until a successful exact-head workflow produces the repository's qualification
+receipt, implementation and deterministic fixture evidence remain non-qualified.
+The current GitHub-hosted workflows are queued before their first steps; this is
+not compiler/test evidence.
