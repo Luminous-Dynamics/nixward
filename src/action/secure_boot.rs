@@ -85,6 +85,24 @@ pub struct SecureBootDatabaseEvidence {
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_state: SecureBootDatabaseState,
     pub dbx_payload_blake3: Option<[u8; 32]>,
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl SecureBootDatabaseEvidence {
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            self.db_state,
+            self.db_payload_blake3,
+            self.dbx_state,
+            self.dbx_payload_blake3,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize Secure Boot database evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +380,8 @@ pub fn build_secure_boot_database_evidence(
             SecureBootDatabaseState::Absent
         },
         dbx_payload_blake3: dbx_payload.map(|bytes| *blake3::hash(bytes).as_bytes()),
+        observed_at_ms: None,
+        evidence_digest: None,
     }
 }
 
@@ -370,7 +390,13 @@ pub fn observe_secure_boot_databases() -> Result<SecureBootDatabaseEvidence, Str
     let db = read_efi_database("db")?;
     let dbx = read_efi_database("dbx")?;
     let evidence = build_secure_boot_database_evidence(db.as_deref(), dbx.as_deref());
-    Ok(evidence)
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
+        .as_millis() as u64;
+    evidence
+        .with_observation_metadata(observed_at_ms)
+        .map_err(|error| format!("failed to digest Secure Boot database observation: {error}"))
 }
 
 #[cfg(feature = "native")]
@@ -568,6 +594,14 @@ mod tests {
         assert_eq!(evidence.dbx_payload_blake3, Some(*blake3::hash(dbx).as_bytes()));
     }
 
+    #[test]
+    fn database_observation_digest_binds_payload_identities() {
+        let evidence = build_secure_boot_database_evidence(Some(b"db"), Some(b"dbx"))
+            .with_observation_metadata(100)
+            .expect("database evidence");
+        assert_eq!(evidence.observed_at_ms, Some(100));
+        assert!(evidence.evidence_digest.is_some());
+    }
     #[test]
     fn missing_databases_are_not_treated_as_empty_trust() {
         let evidence = build_secure_boot_database_evidence(None, None);
