@@ -176,6 +176,15 @@ jobs:
           expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
           actual_commit="$(git rev-parse HEAD)"
           test "$actual_commit" = "$expected_commit"
+      - name: Assert validation subject mirrors hardening head
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin hardening/full-stack-qualification-2026-10-08
+          hardening_sha="$(git rev-parse FETCH_HEAD)"
+          test "$hardening_sha" = "${{ github.event.pull_request.head.sha }}"
+
       - name: Assert generated lockfile identity
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
@@ -320,6 +329,15 @@ jobs:
             git add --intent-to-add -f Cargo.lock
           fi
           git ls-files --error-unmatch Cargo.lock >/dev/null
+
+      - name: Assert validation subject mirrors hardening head
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin hardening/full-stack-qualification-2026-10-08
+          hardening_sha="$(git rev-parse FETCH_HEAD)"
+          test "$hardening_sha" = "${{ github.event.pull_request.head.sha }}"
 
       - name: Assert generated lockfile identity
         if: ${{ github.event_name == 'pull_request' }}
