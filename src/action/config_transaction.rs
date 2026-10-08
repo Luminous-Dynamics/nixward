@@ -286,7 +286,6 @@ fn compute_frozen_source_root_digest(
     validate_manifest_relative_path(entrypoint)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(SOURCE_DOMAIN);
-    hasher.update(b"entrypoint\0");
     hasher.update(entrypoint.as_bytes());
     hasher.update(&[0]);
     for entry in manifest {
@@ -3716,6 +3715,31 @@ mod tests {
         let loaded = ConfigTransaction::load(&path).unwrap();
         assert_eq!(loaded.transaction_id(), transaction.transaction_id());
         assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
+    }
+
+    #[test]
+    fn transaction_load_rejects_entrypoint_swap_under_old_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        std::fs::write(source_root.join("other.nix"), "{ other = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let source_digest = decode_digest(&source.root_digest).unwrap();
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], source_digest);
+        transaction.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        transaction.bind_frozen_source(&source).unwrap();
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+
+        let encoded = std::fs::read(&journal).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["frozen_source"]["entrypoint"] = serde_json::Value::String("other.nix".into());
+        std::fs::write(&journal, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert!(ConfigTransaction::load(&journal)
+            .expect_err("entrypoint swap must fail closed")
+            .contains("frozen source manifest does not match its root digest"));
     }
 
     #[test]
