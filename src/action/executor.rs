@@ -1075,6 +1075,12 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    fn authorization_expired(authorization: &ExecutionAuthorization) -> bool {
+        !authorization.automatic_read_only
+            && !authorization.rollback_only
+            && Self::now_ms() > authorization.expires_at_ms
+    }
+
     fn validate_exact_activation_pre_state(
         command: &NixOSCommand,
         authorization: &ExecutionAuthorization,
@@ -1690,12 +1696,9 @@ impl NixOSExecutor {
         // Freshness is checked once more after the one-shot replay key is
         // consumed. This closes the last authorization time-of-check/time-of-use
         // window between approval validation and privileged process spawn.
-        if !authorization.automatic_read_only
-            && !authorization.rollback_only
-            && Self::now_ms() > authorization.expires_at_ms
-        {
+        if Self::authorization_expired(&authorization) {
             let blocked = ExecutionResult::Blocked {
-                reason: "authority-backed authorization expired before command spawn".into(),
+                reason: "authority-backed authorization expired before privileged mutation".into(),
                 safety_level: safety,
             };
             self.record_execution(&command, decision_quality, &authorization, &blocked);
@@ -1735,10 +1738,28 @@ impl NixOSExecutor {
                     return failed;
                 }
             }
+
+            if Self::authorization_expired(&authorization) {
+                let blocked = ExecutionResult::Blocked {
+                    reason: "authority-backed authorization expired after system-profile transition".into(),
+                    safety_level: safety,
+                };
+                self.record_execution(&command, decision_quality, &authorization, &blocked);
+                return blocked;
+            }
         }
 
         // Semantic activation boundary: after this point source-file rollback is
         // forbidden because durable source and runtime generation are distinct domains.
+        if Self::authorization_expired(&authorization) {
+            let blocked = ExecutionResult::Blocked {
+                reason: "authority-backed authorization expired immediately before command spawn".into(),
+                safety_level: safety,
+            };
+            self.record_execution(&command, decision_quality, &authorization, &blocked);
+            return blocked;
+        }
+
         let _activation_started = matches!(command, NixOSCommand::ActivateSystemClosure { .. });
         let start = std::time::Instant::now();
         let result = Self::run_bound_command(&command).await;
@@ -2395,6 +2416,31 @@ mod tests {
             safety_level: SafetyLevel::SystemCritical,
         };
         assert!(NixOSExecutor::trusted_bound_executable(&command).is_err());
+    }
+
+    #[test]
+    fn authorization_expired_rejects_expired_mutation() {
+        let authorization = ExecutionAuthorization {
+            command_digest: [0; 32],
+            rollback_digest: None,
+            authorized_safety: SafetyLevel::SystemCritical,
+            issued_at_ms: 100,
+            expires_at_ms: 100,
+            issuer: "test".into(),
+            evidence_digest: [0; 32],
+            change_plan_digest: None,
+            approval_evidence_kind: None,
+            execution_intent_digest: None,
+            realization_plan_digest: None,
+            authority_signer_key_id: None,
+            authority_challenge_blake3: None,
+            authority_replay_key: None,
+            authority_subject_blake3: None,
+            automatic_read_only: false,
+            rollback_only: false,
+            recovery_command: None,
+        };
+        assert!(NixOSExecutor::authorization_expired(&authorization));
     }
 
     #[test]
