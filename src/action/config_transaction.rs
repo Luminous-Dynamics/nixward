@@ -1014,6 +1014,7 @@ impl SourceRealizationLease {
         Ok(())
     }
 
+    #[cfg(feature = "native")]
     /// Establish the dedicated GC root and only mark the lease rooted after
     /// independently observing that the root resolves to the exact store path.
     ///
