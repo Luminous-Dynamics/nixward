@@ -1304,6 +1304,41 @@ pub struct NixCandidateBuilder {
 }
 
 #[cfg(feature = "native")]
+#[cfg(unix)]
+fn establish_candidate_gc_root(store_path: &str, gc_root_path: &str) -> Result<(), String> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    validate_gc_root_path(gc_root_path)?;
+    if !super::execution_intent::is_valid_nix_store_path(store_path) {
+        return Err("candidate GC root target is not a canonical Nix store path".into());
+    }
+    let gc_root = std::path::Path::new(gc_root_path);
+    let namespace = gc_root.parent().ok_or_else(|| "candidate GC root has no namespace parent".to_string())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    let namespace_dir = options.open(namespace).map_err(|error| format!("failed to securely open candidate GC-root namespace: {error}"))?;
+    let name = gc_root.file_name().and_then(|v| v.to_str()).ok_or_else(|| "candidate GC root filename is invalid UTF-8".to_string())?;
+    let name = CString::new(name).map_err(|_| "candidate GC root filename contains NUL".to_string())?;
+    let target = CString::new(store_path).map_err(|_| "candidate store path contains NUL".to_string())?;
+    let result = unsafe { nix::libc::symlinkat(target.as_ptr(), namespace_dir.as_raw_fd(), name.as_ptr()) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(format!("failed to create candidate GC root: {error}"));
+        }
+    } else {
+        namespace_dir.sync_all().map_err(|error| format!("failed to persist candidate GC root: {error}"))?;
+    }
+    let observed = std::fs::read_link(gc_root).map_err(|error| format!("failed to read candidate GC root: {error}"))?;
+    let resolved = if observed.is_absolute() { observed } else { namespace.join(observed) };
+    if resolved.canonicalize().map_err(|error| format!("failed to resolve candidate GC root: {error}"))? != std::path::Path::new(store_path) {
+        return Err("candidate GC root does not target the exact candidate store path".into());
+    }
+    Ok(())
+}
+
 impl NixCandidateBuilder {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
@@ -1339,6 +1374,7 @@ impl NixCandidateBuilder {
         lease: &SourceRealizationLease,
         installable: &str,
         expected_out_path: &str,
+        transaction_id: &str,
         realization_plan_digest: &str,
     ) -> Result<CandidateBuildReceipt, String> {
         if !lease.is_rooted() {
@@ -1387,6 +1423,19 @@ impl NixCandidateBuilder {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let candidate_store_path = NixSourceRealizer::parse_store_path(&stdout)?;
+        let transaction_id = transaction_id.to_string();
+        if decode_digest(&transaction_id).is_err() {
+            return Err("candidate build transaction id is invalid".into());
+        }
+        let candidate_gc_root = format!(
+            "/nix/var/nix/gcroots/nixward/{}-candidate",
+            transaction_id
+        );
+        #[cfg(unix)]
+        establish_candidate_gc_root(&candidate_store_path, &candidate_gc_root)?;
+        #[cfg(not(unix))]
+        return Err("candidate retention is unsupported on this platform".into());
+
         if candidate_store_path != expected_out_path {
             return Err(format!(
                 "nix build output differs from authorized expected path: observed {candidate_store_path}, expected {expected_out_path}"
@@ -1407,6 +1456,7 @@ impl NixCandidateBuilder {
             lease.store_path.clone(),
             installable_selector,
             candidate_store_path,
+            candidate_gc_root,
             realization_plan_digest.to_string(),
         )
     }
@@ -1429,6 +1479,7 @@ pub struct CandidateBuildReceipt {
     pub source_store_path: String,
     pub installable: String,
     pub candidate_store_path: String,
+    pub gc_root_path: String,
     pub realization_plan_digest: String,
 }
 
@@ -1438,11 +1489,13 @@ impl CandidateBuildReceipt {
         source_store_path: impl Into<String>,
         installable: impl Into<String>,
         candidate_store_path: impl Into<String>,
+        gc_root_path: impl Into<String>,
         realization_plan_digest: impl Into<String>,
     ) -> Result<Self, String> {
         let source_store_path = source_store_path.into();
         let installable = installable.into();
         let candidate_store_path = candidate_store_path.into();
+        let gc_root_path = gc_root_path.into();
         let realization_plan_digest = realization_plan_digest.into();
         if !installable_selector_is_valid(&installable) {
             return Err("candidate build installable is not an exact .# selector".into());
@@ -1453,6 +1506,7 @@ impl CandidateBuildReceipt {
         if !super::execution_intent::is_valid_nix_store_path(&candidate_store_path) {
             return Err("candidate build output is not a canonical immutable Nix store path".into());
         }
+        validate_gc_root_path(&gc_root_path)?;
         if source_store_path == candidate_store_path {
             return Err("candidate build output must differ from retained source realization".into());
         }
@@ -1464,6 +1518,7 @@ impl CandidateBuildReceipt {
             source_store_path,
             installable,
             candidate_store_path,
+            gc_root_path,
             realization_plan_digest,
         })
     }
@@ -1472,6 +1527,7 @@ impl CandidateBuildReceipt {
         if !installable_selector_is_valid(&self.installable) {
             return Err("candidate build installable is invalid".into());
         }
+        validate_gc_root_path(&self.gc_root_path)?;
         if decode_digest(&self.source_digest).is_err() {
             return Err("candidate build source digest is invalid".into());
         }
@@ -2684,6 +2740,8 @@ mod tests {
                 ".#nixosConfigurations.test.config.system.build.toplevel".into(),
             candidate_store_path:
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test".into(),
+            gc_root_path:
+                "/nix/var/nix/gcroots/nixward/test-candidate".into(),
             realization_plan_digest: digest_hex(&[4; 32]),
         }
     }
@@ -2902,6 +2960,7 @@ mod tests {
             path,
             ".#nixosConfigurations.test.config.system.build.toplevel",
             path,
+            "/nix/var/nix/gcroots/nixward/test-candidate",
             "0000000000000000000000000000000000000000000000000000000000000001",
         )
         .is_err());
