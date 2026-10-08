@@ -87,6 +87,13 @@ The verification path now distinguishes five materially different outcomes:
 - `PotentialDbxTbsRevocation`: an exact X.509 TBS hash in `dbx` exists but its revocation-time semantics have not been evaluated;
 - `UnknownDbxCertificateRules`: an unsupported/uninterpreted `dbx` rule prevents a trust conclusion.
 
+A `db` X.509 certificate may be the trust anchor without being embedded in the
+image's PKCS#7 certificate set. After an exact image verifies to such a `db`
+certificate, Nixward records that certificate as a `verified_db_anchor` and
+applies the same `dbx` Issuer + Serial + TBS matching rules to that exact
+verified anchor. This prevents a revoked trusted anchor from becoming an
+authorization pass merely because the anchor was external to the image.
+
 For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is checked for byte stability during verifier invocation and is re-read once more before any terminal trust result is returned. A final image-digest mismatch clears the derived chain and matching fields and produces `ImageChangedDuringVerification`, preventing a receipt from combining chain evidence from one image instance with signature evidence from another. X.509 revocation is correlated against actual signing-chain members rather than merely asking whether a dbx certificate can independently verify the image.
 
 This closes more of the chain-anchor evidence boundary without pretending to reproduce the firmware's complete certificate-policy engine. Same-Issuer/Serial/TBS matching is now implemented for X.509 `dbx` records. Timestamp-aware TBS revocation evaluation remains explicit next-stage work because UEFI associates those records with an EFI_TIME and may require RFC 3161 timestamp validation.
