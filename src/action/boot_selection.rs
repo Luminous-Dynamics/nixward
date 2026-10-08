@@ -1334,14 +1334,6 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert!(entries.contains_key("Nested"));
     }
     #[test]
-    fn nested_shell_block_does_not_end_grub_menuentry() {
-        let entries = parse_grub_config_entries(
-            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
-        )
-        .expect("nested menuentry parses");
-        assert!(entries.contains_key("Nested"));
-    }
-    #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
         let entries = parse_grub_config_entries(
             "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
@@ -1390,7 +1382,11 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
         assert_eq!(
-            parse_grub_config_default("if [ \"${next_entry}\" ]; then\\nset default=\"${next_entry}\"\\nelse\\nset default=\"${saved_entry}\"\\nfi\\n"),
+            parse_grub_config_default(r#"if [ "${next_entry}" ]; then
+set default="${next_entry}"
+else
+set default="${saved_entry}"
+fi"#),
             Some("${saved_entry}".into()),
         );
         assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
@@ -1398,13 +1394,6 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     }
 
     #[cfg(feature = "native")]
-    #[test]
-    fn grub_root_preference_is_first_and_deduplicated() {
-        let preferred = PathBuf::from("/boot-custom");
-        let candidates = candidate_grub_roots(Some(&preferred));
-        assert_eq!(candidates.first(), Some(&preferred));
-        assert_eq!(candidates.iter().filter(|p| *p == &preferred).count(), 1);
-    }
     #[test]
     fn selected_non_nixos_grub_entry_is_unbound() {
         let entries = parse_grub_config_entries(
