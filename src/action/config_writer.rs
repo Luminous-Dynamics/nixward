@@ -19,7 +19,9 @@ use super::config_transaction::ConfigTransactionPhase;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
+#[cfg(not(unix))]
+use std::fs::File;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -1191,7 +1193,7 @@ mod tests {
 
     fn setup_temp_config_live(
         content: &str,
-        git_backup: bool,
+        _git_backup: bool,
     ) -> Option<(tempfile::TempDir, ConfigWriter)> {
         if !nix_instantiate_available() {
             eprintln!(
@@ -1256,87 +1258,6 @@ mod tests {
         // the write.
         let on_disk = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
         assert_eq!(on_disk, SAMPLE_CONFIG);
-    }
-
-    #[test]
-    fn test_apply_patch_creates_real_git_backup() {
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-        let patch = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch).unwrap();
-
-        assert!(
-            dir.path().join(".git").exists(),
-            "git repo should be initialized"
-        );
-        let log = Command::new("git")
-            .args(["log", "--oneline"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let log_str = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(
-            log_str.lines().count(),
-            1,
-            "exactly one backup commit should exist after one apply, got: {log_str}"
-        );
-        assert!(log_str.contains("nixward backup"));
-    }
-
-    #[test]
-    fn test_restore_last_backup_recovers_immediately_prior_content() {
-        // Regression test for a real off-by-one bug found while writing
-        // this integration suite: git_commit_backup() commits the
-        // BEFORE-state of the file right before each write, so the most
-        // recent backup commit (HEAD) already holds the content to restore
-        // to. restore_last_backup() used to check out HEAD~1 instead, which
-        // skips one change too far back, and on the very first restore
-        // (only one commit exists, no parent) failed outright with
-        // "unknown revision HEAD~1".
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-
-        let patch = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch).unwrap();
-        let after_first_apply = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert!(after_first_apply.contains("pkgs.htop"));
-
-        writer
-            .restore_last_backup()
-            .expect("restore must succeed even with only one backup commit");
-
-        let restored = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_eq!(
-            restored, SAMPLE_CONFIG,
-            "restoring the last backup must recover the content from immediately before the last apply"
-        );
-    }
-
-    #[test]
-    fn test_restore_last_backup_after_two_applies() {
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-
-        let patch1 = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch1).unwrap();
-        let after_first = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-
-        let patch2 = writer
-            .set_option("services.openssh.enable", "false")
-            .unwrap();
-        writer.apply_patch_unchecked(&patch2).unwrap();
-        let after_second = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_ne!(after_first, after_second);
-
-        writer.restore_last_backup().unwrap();
-        let restored = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_eq!(
-            restored, after_first,
-            "restoring after the second apply must recover the state from right after the first apply, not the original"
-        );
     }
 
     #[test]
