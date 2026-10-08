@@ -795,14 +795,7 @@ impl SourceRealizationLease {
         })
     }
 
-    /// Prove the lease is rooted by observing the actual GC-root symlink.
-    ///
-    /// The proof is derived from filesystem state rather than a caller-provided
-    /// string claim.
-    pub fn prove_rooted(&mut self) -> Result<(), String> {
-        if self.state != SourceRealizationLeaseState::Pending {
-            return Err("source realization lease is not pending root proof".into());
-        }
+    fn observe_root_target(&self) -> Result<(), String> {
         self.validate_identity()?;
 
         let gc_root = std::path::Path::new(&self.gc_root_path);
@@ -825,13 +818,29 @@ impl SourceRealizationLease {
         let resolved = resolved
             .canonicalize()
             .map_err(|error| format!("failed to resolve source GC root target: {error}"))?;
-        let expected = std::path::Path::new(&self.store_path);
-        if resolved != expected {
+        if resolved != std::path::Path::new(&self.store_path) {
             return Err("source GC root does not target the bound immutable store path".into());
         }
 
+        Ok(())
+    }
+
+    /// Prove the lease is rooted from live GC-root filesystem evidence.
+    pub fn prove_rooted(&mut self) -> Result<(), String> {
+        if self.state != SourceRealizationLeaseState::Pending {
+            return Err("source realization lease is not pending root proof".into());
+        }
+        self.observe_root_target()?;
         self.state = SourceRealizationLeaseState::Rooted;
         Ok(())
+    }
+
+    /// Re-verify a previously rooted lease from live GC-root filesystem evidence.
+    pub fn verify_rooted(&self) -> Result<(), String> {
+        if self.state != SourceRealizationLeaseState::Rooted {
+            return Err("source realization lease is not rooted".into());
+        }
+        self.observe_root_target()
     }
 
     /// Mark the lease released only after independent observation that the GC root is gone.
@@ -1041,7 +1050,13 @@ impl ConfigTransaction {
             }
             let observed = observed_source_store_path
                 .ok_or_else(|| "fresh source GC-root observation is required".to_string())?;
-            realization.prove_rooted()?;
+            match realization.state {
+                SourceRealizationLeaseState::Pending => realization.prove_rooted()?,
+                SourceRealizationLeaseState::Rooted => realization.verify_rooted()?,
+                SourceRealizationLeaseState::Released => {
+                    return Err("released source realization cannot be re-established from a journal".into());
+                }
+            }
             if observed != realization.store_path {
                 return Err("fresh source realization observation does not match the bound store path".into());
             }
