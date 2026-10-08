@@ -1158,32 +1158,28 @@ impl NixOSExecutor {
             .map_err(|error| format!("failed to set exact system profile: {error}"))?;
 
         let process_exit_status = output.status.code();
-        let observed = match GenerationManager::current_system_profile_closure() {
-            Ok(value) => {
-                return Ok(super::config_transaction::classify_profile_transition_post_state(
+        match GenerationManager::current_system_profile_closure() {
+            Ok(observed) => Ok(
+                super::config_transaction::classify_profile_transition_post_state(
                     process_exit_status,
-                    Some(&value),
+                    Some(&observed),
                     profile_store_path,
-                ));
-            }
-            Err(error) => {
-                return Ok(
-                    super::config_transaction::ProfileTransitionDisposition::Indeterminate {
-                        process_exit_status,
-                        observed_profile: None,
-                        reason: format!(
-                            "failed to observe exact system profile transition: {error}; child stderr: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ),
-                    },
-                );
-            }
-        };
-
-        drop(observed);
+                ),
+            ),
+            Err(error) => Ok(
+                super::config_transaction::ProfileTransitionDisposition::Indeterminate {
+                    process_exit_status,
+                    observed_profile: None,
+                    reason: format!(
+                        "failed to observe exact system profile transition: {error}; child stderr: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                },
+            ),
+        }
     }
 
-    async fn verify_exact_activation_post_state(
+   async fn verify_exact_activation_post_state(
         command: &NixOSCommand,
         authorization: &ExecutionAuthorization,
     ) -> Result<(), String> {
