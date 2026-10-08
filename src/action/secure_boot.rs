@@ -575,10 +575,14 @@ pub enum DbCertificateVerificationState {
 pub struct DbCertificateVerificationEvidence {
     pub image_blake3: [u8; 32],
     pub image_authenticode_sha256: [u8; 32],
+    pub image_chain_certificate_digests: Vec<[u8; 32]>,
+    pub image_signer_certificate_digests: Vec<[u8; 32]>,
     pub db_certificate_digests: Vec<[u8; 32]>,
     pub dbx_certificate_digests: Vec<[u8; 32]>,
     pub verifying_db_certificate: Option<[u8; 32]>,
     pub verifying_dbx_certificate: Option<[u8; 32]>,
+    pub dbx_chain_identity_match: Option<[u8; 32]>,
+    pub dbx_chain_tbs_hash_match: Option<[u8; 32]>,
     pub db_payload_blake3: Option<[u8; 32]>,
     pub dbx_payload_blake3: Option<[u8; 32]>,
     pub database_stability: Option<bool>,
@@ -595,10 +599,14 @@ impl DbCertificateVerificationEvidence {
         let preimage = serde_json::to_vec(&(
             self.image_blake3,
             self.image_authenticode_sha256,
+            &self.image_chain_certificate_digests,
+            &self.image_signer_certificate_digests,
             &self.db_certificate_digests,
             &self.dbx_certificate_digests,
             self.verifying_db_certificate,
             self.verifying_dbx_certificate,
+            self.dbx_chain_identity_match,
+            self.dbx_chain_tbs_hash_match,
             self.db_payload_blake3,
             self.dbx_payload_blake3,
             self.database_stability,
@@ -696,6 +704,8 @@ fn db_certificate_verification_base_evidence(
     DbCertificateVerificationEvidence {
         image_blake3,
         image_authenticode_sha256,
+        image_chain_certificate_digests: Vec::new(),
+        image_signer_certificate_digests: Vec::new(),
         db_certificate_digests: db_records
             .iter()
             .filter_map(|record| record.certificate_der_blake3)
@@ -706,6 +716,8 @@ fn db_certificate_verification_base_evidence(
             .collect(),
         verifying_db_certificate: None,
         verifying_dbx_certificate: None,
+        dbx_chain_identity_match: None,
+        dbx_chain_tbs_hash_match: None,
         db_payload_blake3: Some(*blake3::hash(db_payload).as_bytes()),
         dbx_payload_blake3: Some(*blake3::hash(dbx_payload).as_bytes()),
         database_stability: None,
@@ -716,6 +728,61 @@ fn db_certificate_verification_base_evidence(
         observed_at_ms: None,
         evidence_digest: None,
     }
+}
+
+#[cfg(feature = "native")]
+fn dbx_x509_record_matches_chain(
+    record: &SignatureDatabaseRecord,
+    chain: &[super::secure_boot_signature::X509ChainCertificateEvidence],
+) -> Result<Option<[u8; 32]>, String> {
+    let Some(certificate_der) = record.certificate_der.as_deref() else {
+        return Ok(None);
+    };
+
+    let (_, certificate) = x509_parser::parse_x509_certificate(certificate_der)
+        .map_err(|error| format!("failed to parse dbx X.509 certificate: {error}"))?;
+
+    let issuer_blake3 =
+        *blake3::hash(certificate.tbs_certificate.issuer.as_ref()).as_bytes();
+    let serial_blake3 =
+        *blake3::hash(certificate.tbs_certificate.raw_serial()).as_bytes();
+
+    use sha2::Digest;
+    let mut sha256 = sha2::Sha256::new();
+    sha256.update(certificate.tbs_certificate.as_ref());
+    let tbs_sha256: [u8; 32] = sha256.finalize().into();
+
+    for candidate in chain.iter().filter(|candidate| candidate.is_chain_member) {
+        if candidate.issuer_blake3 == issuer_blake3
+            && candidate.serial_blake3 == serial_blake3
+            && candidate.tbs_sha256 == tbs_sha256
+        {
+            return Ok(Some(candidate.certificate_blake3));
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(feature = "native")]
+fn dbx_tbs_record_matches_chain(
+    record: &SignatureDatabaseRecord,
+    chain: &[super::secure_boot_signature::X509ChainCertificateEvidence],
+) -> Option<[u8; 32]> {
+    let Some(expected) = record.certificate_tbs_hash.as_deref() else {
+        return None;
+    };
+
+    chain
+        .iter()
+        .filter(|candidate| candidate.is_chain_member)
+        .find(|candidate| match expected.len() {
+            32 => candidate.tbs_sha256.as_slice() == expected,
+            48 => candidate.tbs_sha384.as_slice() == expected,
+            64 => candidate.tbs_sha512.as_slice() == expected,
+            _ => false,
+        })
+        .map(|candidate| candidate.certificate_blake3)
 }
 
 #[cfg(feature = "native")]
@@ -745,70 +812,99 @@ pub fn verify_image_against_db_certificates(
         &dbx,
     );
 
-    if dbx
+    let chain = super::secure_boot_signature::inspect_x509_signature_chains(&image)?;
+    evidence.image_chain_certificate_digests = chain
         .iter()
-        .any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256))
-    {
+        .filter(|certificate| certificate.is_chain_member)
+        .map(|certificate| certificate.certificate_blake3)
+        .collect();
+    evidence.image_signer_certificate_digests = chain
+        .iter()
+        .filter(|certificate| certificate.is_signer)
+        .map(|certificate| certificate.certificate_blake3)
+        .collect();
+
+    if dbx.iter().any(|record| {
+        record.image_authenticode_sha256 == Some(image_authenticode_sha256)
+    }) {
         evidence.state = DbCertificateVerificationState::ForbiddenByDbxImageHash;
         evidence.stderr_blake3 = *blake3::hash(b"dbx image hash veto").as_bytes();
         return Ok(evidence);
     }
 
     for record in dbx.iter().filter(|record| {
-        record.kind == SignatureListKind::X509Certificate && record.certificate_der.is_some()
+        record.kind == SignatureListKind::X509Certificate
     }) {
-        let certificate = record.certificate_der.as_deref().expect("filtered certificate");
-        let run = run_sbverify_against_certificate(image_path, certificate)?;
-        evidence.stdout_blake3 = run.stdout_blake3;
-        evidence.stderr_blake3 = run.stderr_blake3;
-        match run.state {
-            CertificateVerifierRunState::Verified => {
-                evidence.verifying_dbx_certificate = record.certificate_der_blake3;
-                evidence.state = DbCertificateVerificationState::ForbiddenByDbxCertificateChain;
-                return Ok(evidence);
-            }
-            CertificateVerifierRunState::ToolUnavailable => {
-                evidence.state = DbCertificateVerificationState::ToolUnavailable;
-                return Ok(evidence);
-            }
-            CertificateVerifierRunState::ImageChanged => {
-                evidence.state = DbCertificateVerificationState::ImageChangedDuringVerification;
-                return Ok(evidence);
-            }
-            CertificateVerifierRunState::Failed => {}
+        if let Some(matched_certificate) = dbx_x509_record_matches_chain(record, &chain)? {
+            evidence.verifying_dbx_certificate = record.certificate_der_blake3;
+            evidence.dbx_chain_identity_match = Some(matched_certificate);
+            evidence.state = DbCertificateVerificationState::ForbiddenByDbxCertificateChain;
+            evidence.stderr_blake3 =
+                *blake3::hash(b"dbx X509 Issuer+Serial+TBS chain match").as_bytes();
+            return Ok(evidence);
         }
     }
 
-    if dbx
-        .iter()
-        .any(|record| record.kind == SignatureListKind::X509TbsSha256
-            || record.kind == SignatureListKind::X509TbsSha384
-            || record.kind == SignatureListKind::X509TbsSha512)
-    {
-        evidence.state = DbCertificateVerificationState::PotentialDbxTbsRevocation;
-        evidence.stderr_blake3 = *blake3::hash(b"unevaluated dbx X509 TBS revocation timestamp").as_bytes();
-        return Ok(evidence);
+    for record in dbx.iter().filter(|record| {
+        matches!(
+            record.kind,
+            SignatureListKind::X509TbsSha256
+                | SignatureListKind::X509TbsSha384
+                | SignatureListKind::X509TbsSha512
+        )
+    }) {
+        if let Some(matched_certificate) = dbx_tbs_record_matches_chain(record, &chain) {
+            evidence.dbx_chain_tbs_hash_match = Some(matched_certificate);
+            evidence.state = DbCertificateVerificationState::PotentialDbxTbsRevocation;
+            evidence.stderr_blake3 =
+                *blake3::hash(b"dbx X509 TBS chain match requires timestamp evaluation").as_bytes();
+            return Ok(evidence);
+        }
     }
 
-    if dbx
-        .iter()
-        .any(|record| record.kind == SignatureListKind::Unsupported)
+    if dbx.iter().any(|record| {
+        matches!(
+            record.kind,
+            SignatureListKind::X509Certificate
+                | SignatureListKind::X509TbsSha256
+                | SignatureListKind::X509TbsSha384
+                | SignatureListKind::X509TbsSha512
+        )
+    }) && evidence.image_chain_certificate_digests.is_empty()
     {
         evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
-        evidence.stderr_blake3 = *blake3::hash(b"unsupported dbx signature rule").as_bytes();
+        evidence.stderr_blake3 = *blake3::hash(
+            b"dbx certificate rule cannot be correlated to an image signing chain",
+        )
+        .as_bytes();
         return Ok(evidence);
     }
 
-    for record in db.iter().filter(|record| {
-        record.kind == SignatureListKind::X509Certificate && record.certificate_der.is_some()
-    }) {
-        let certificate = record.certificate_der.as_deref().expect("filtered certificate");
+    if dbx.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
+        evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"unsupported dbx signature rule").as_bytes();
+        return Ok(evidence);
+    }
+
+    let db_certificates: Vec<(&[u8], [u8; 32])> = db
+        .iter()
+        .filter_map(|record| {
+            Some((record.certificate_der.as_deref()?, record.certificate_der_blake3?))
+        })
+        .collect();
+
+    let mut last_stdout = Vec::new();
+    let mut last_stderr = Vec::new();
+
+    for (certificate, certificate_digest) in db_certificates.iter().copied() {
         let run = run_sbverify_against_certificate(image_path, certificate)?;
         evidence.stdout_blake3 = run.stdout_blake3;
         evidence.stderr_blake3 = run.stderr_blake3;
+
         match run.state {
             CertificateVerifierRunState::Verified => {
-                evidence.verifying_db_certificate = record.certificate_der_blake3;
+                evidence.verifying_db_certificate = Some(certificate_digest);
                 evidence.state = DbCertificateVerificationState::VerifiedAgainstDbCertificate;
                 return Ok(evidence);
             }
@@ -820,10 +916,15 @@ pub fn verify_image_against_db_certificates(
                 evidence.state = DbCertificateVerificationState::ImageChangedDuringVerification;
                 return Ok(evidence);
             }
-            CertificateVerifierRunState::Failed => {}
+            CertificateVerifierRunState::Failed => {
+                last_stdout = run.stdout_blake3.to_vec();
+                last_stderr = run.stderr_blake3.to_vec();
+            }
         }
     }
 
+    evidence.stdout_blake3 = *blake3::hash(&last_stdout).as_bytes();
+    evidence.stderr_blake3 = *blake3::hash(&last_stderr).as_bytes();
     evidence.state = DbCertificateVerificationState::NoMatchingDbCertificate;
     Ok(evidence)
 }
@@ -843,6 +944,8 @@ pub fn verify_image_against_live_secure_boot_databases(
         return Ok(DbCertificateVerificationEvidence {
             image_blake3,
             image_authenticode_sha256,
+            image_chain_certificate_digests: Vec::new(),
+            image_signer_certificate_digests: Vec::new(),
             db_certificate_digests: db_before
                 .as_deref()
                 .map(parse_signature_database)
@@ -861,6 +964,8 @@ pub fn verify_image_against_live_secure_boot_databases(
                 .collect(),
             verifying_db_certificate: None,
             verifying_dbx_certificate: None,
+            dbx_chain_identity_match: None,
+            dbx_chain_tbs_hash_match: None,
             db_payload_blake3: db_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             dbx_payload_blake3: dbx_before.as_deref().map(|bytes| *blake3::hash(bytes).as_bytes()),
             database_stability: None,
