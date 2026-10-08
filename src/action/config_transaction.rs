@@ -3171,7 +3171,7 @@ mod tests {
         std::fs::write(dir.path().join("other.nix"), "{}\n").unwrap();
         let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
         let mut tampered = source.clone();
-        tampered.manifest[0].relative_path = "forged-entry.nix".into();
+        tampered.manifest[0].size += 1;
         assert!(
             tampered
                 .validate_identity()
@@ -3493,8 +3493,11 @@ mod tests {
         transaction.persist_atomic(&path).unwrap();
         let encoded = std::fs::read(&path).unwrap();
         let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        value["frozen_source"]["manifest"][0]["relative_path"] =
-            serde_json::Value::String("forged-entry.nix".into());
+        let old_size = value["frozen_source"]["manifest"][0]["size"]
+            .as_u64()
+            .unwrap();
+        value["frozen_source"]["manifest"][0]["size"] =
+            serde_json::Value::from(old_size + 1);
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         assert!(
