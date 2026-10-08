@@ -764,7 +764,7 @@ fn run_sbverify_against_certificate(
     image_path: &std::path::Path,
     certificate_der: &[u8],
 ) -> Result<CertificateVerifierRun, String> {
-    let image_before = std::fs::read(image_path)
+    let image_before = super::secure_boot_signature::read_regular_file_no_follow(image_path)
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_before_hash = *blake3::hash(&image_before).as_bytes();
 
@@ -806,7 +806,7 @@ fn run_sbverify_against_certificate(
         Err(error) => return Err(format!("failed to execute sbverify: {error}")),
     };
 
-    let image_after = std::fs::read(image_path)
+    let image_after = super::secure_boot_signature::read_regular_file_no_follow(image_path)
         .map_err(|error| format!("failed to re-read UKI {}: {error}", image_path.display()))?;
     let image_after_hash = *blake3::hash(&image_after).as_bytes();
 
@@ -871,7 +871,7 @@ fn finalize_image_bound_verification(
     image_path: &std::path::Path,
     mut evidence: DbCertificateVerificationEvidence,
 ) -> Result<DbCertificateVerificationEvidence, String> {
-    let image = std::fs::read(image_path)
+    let image = super::secure_boot_signature::read_regular_file_no_follow(image_path)
         .map_err(|error| format!("failed to re-read UKI {} after verification: {error}", image_path.display()))?;
     let observed_hash = *blake3::hash(&image).as_bytes();
     if observed_hash != evidence.image_blake3 {
@@ -1067,7 +1067,7 @@ pub fn verify_image_against_db_certificates(
         return Err(format!("UKI {} is not a regular non-symlink file", image_path.display()));
     }
 
-    let image = std::fs::read(image_path)
+    let image = super::secure_boot_signature::read_regular_file_no_follow(image_path)
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_blake3 = *blake3::hash(&image).as_bytes();
     let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
@@ -1330,7 +1330,7 @@ pub fn verify_image_against_live_secure_boot_databases(
     let dbt_before = read_efi_timestamp_database()?;
 
     if db_before.is_none() || dbx_before.is_none() {
-        let image = std::fs::read(image_path)
+        let image = super::secure_boot_signature::read_regular_file_no_follow(image_path)
             .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
         let image_blake3 = *blake3::hash(&image).as_bytes();
         let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
