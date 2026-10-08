@@ -124,7 +124,6 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     }
     sections.sort_unstable_by_key(|(offset, _)| *offset);
 
-    let mut highest_section_end = size_of_headers;
     let mut previous_section_end = size_of_headers;
     for (ptr_to_raw, size_of_raw) in sections {
         if ptr_to_raw < size_of_headers {
@@ -149,15 +148,12 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
         }
 
         hasher.update(&image[ptr_to_raw..end]);
-        highest_section_end = highest_section_end.max(end);
         previous_section_end = end;
     }
 
     // Authenticode hashes the bytes belonging to the PE headers and the
     // declared section ranges. Bytes beyond the highest section raw-data end
-    // are not part of the image hash (and therefore do not receive special
-    // treatment merely because a certificate table happens to follow them).
-    let _ = highest_section_end;
+    // are not part of the image hash.
     Ok(hasher.finalize().into())
 }
 
@@ -659,7 +655,7 @@ mod tests {
 
         image[0..2].copy_from_slice(b"MZ");
         image[0x3c..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
-        image[pe_offset..pe_offset + 4].copy_from_slice(b"PE\\0\\0");
+        image[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
         let coff = pe_offset + 4;
         image[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes());
         image[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes());
@@ -671,11 +667,11 @@ mod tests {
         image[cert_dir + 4..cert_dir + 8].copy_from_slice(&(cert_padded as u32).to_le_bytes());
 
         let first_header = section_table;
-        image[first_header..first_header + 8].copy_from_slice(b".text\\0\\0\\0");
+        image[first_header..first_header + 8].copy_from_slice(b".text\0\0\0");
         image[first_header + 16..first_header + 20].copy_from_slice(&(first_size as u32).to_le_bytes());
         image[first_header + 20..first_header + 24].copy_from_slice(&(first_offset as u32).to_le_bytes());
         let second_header = section_table + 40;
-        image[second_header..second_header + 8].copy_from_slice(b".data\\0\\0\\0");
+        image[second_header..second_header + 8].copy_from_slice(b".data\0\0\0");
         image[second_header + 16..second_header + 20].copy_from_slice(&(second_size as u32).to_le_bytes());
         image[second_header + 20..second_header + 24].copy_from_slice(&(second_offset as u32).to_le_bytes());
 
