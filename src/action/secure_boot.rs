@@ -1724,6 +1724,30 @@ mod tests {
             dbx_x509_record_matches_chain(&record, &chain).expect("X509 match"),
             Some(certificate_digest)
         );
+
+        assert!(
+            dbx_x509_record_matches_certificate(
+                &record,
+                record.certificate_der.as_deref().expect("record certificate"),
+            )
+            .expect("exact anchor identity match")
+        );
+
+        let tbs_record = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509TbsSha256,
+            signature_size: 64,
+            signature_data_blake3: [0; 32],
+            owner: [7; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: Some(tbs_sha256.to_vec()),
+            revocation_time: Some([1; 16]),
+        };
+        assert!(
+            dbx_tbs_record_matches_certificate(&tbs_record, &der)
+                .expect("exact anchor TBS match")
+        );
     }
 
 
