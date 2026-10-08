@@ -1323,11 +1323,13 @@ impl ConfigTransaction {
     pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
     pub fn source_digest(&self) -> &str { &self.source_digest }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
+    /// Return the candidate store path only when it is bound by the exact
+    /// candidate-build receipt. Legacy journal-only candidate paths are not
+    /// execution authority.
     pub fn candidate_store_path(&self) -> Option<&str> {
         self.candidate_build
             .as_ref()
             .map(|receipt| receipt.candidate_store_path.as_str())
-            .or(self.candidate_store_path.as_deref())
     }
 
     pub fn permits_source_rollback(&self) -> bool { self.phase.permits_source_rollback() }
@@ -1349,9 +1351,6 @@ impl ConfigTransaction {
                         "candidate realization requires an exact retained-source build receipt".into(),
                     );
                 }
-                lease.verify_rooted().map_err(|error| {
-                    format!("candidate realization requires live source GC-root evidence: {error}")
-                })?;
                 true
             },
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
@@ -1573,6 +1572,26 @@ impl ConfigTransaction {
 
     pub fn candidate_build(&self) -> Option<&CandidateBuildReceipt> {
         self.candidate_build.as_ref()
+    }
+
+    /// Legacy journal compatibility setter. This field is deliberately not
+    /// authoritative for execution; bind_candidate_build is required before
+    /// CandidateBuilt can be reached.
+    pub fn set_candidate_store_path(&mut self, candidate_store_path: impl Into<String>) -> Result<(), String> {
+        if !matches!(self.phase, ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt) {
+            return Err("candidate store path can only be set before source commit".into());
+        }
+        let candidate_store_path = candidate_store_path.into();
+        if !super::execution_intent::is_valid_nix_store_path(&candidate_store_path) {
+            return Err("candidate store path must be a canonical immutable Nix store path".into());
+        }
+        if let Some(receipt) = &self.candidate_build {
+            if receipt.candidate_store_path != candidate_store_path {
+                return Err("candidate store path conflicts with the bound candidate-build receipt".into());
+            }
+        }
+        self.candidate_store_path = Some(candidate_store_path);
+        Ok(())
     }
 
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
