@@ -255,14 +255,19 @@ pub fn require_candidate_binding(
 #[cfg(feature = "native")]
 pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let loader_path = run_read_only(["--print-loader-path"])?;
-    let loader_name = Path::new(loader_path.trim())
+    observe_systemd_boot_from_loader(loader_path.trim())
+}
+
+#[cfg(feature = "native")]
+fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_name = Path::new(loader_path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("");
     if !loader_name.to_ascii_lowercase().starts_with("systemd-boot") {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::Unknown,
-            reason: format!("current EFI loader is not systemd-boot: {}", loader_path.trim()),
+            reason: format!("current EFI loader is not systemd-boot: {loader_path}"),
         });
     }
 
@@ -308,6 +313,144 @@ pub fn observe_systemd_boot() -> Result<BootSelectionEvidence, UnknownBootSelect
             bootloader_family: BootloaderFamily::SystemdBoot,
             reason,
         })
+}
+
+/// Observe GRUB selection and keep candidate qualification separate.
+#[cfg(feature = "native")]
+pub fn observe_grub() -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    observe_grub_from_loader(loader_path.trim())
+}
+
+#[cfg(feature = "native")]
+fn observe_grub_from_loader(loader_path: &str) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_name = Path::new(loader_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !loader_name.contains("grub") {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("current EFI loader is not GRUB: {loader_path}"),
+        });
+    }
+
+    let root = discover_grub_root().map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let config_path = root.join("grub.cfg");
+    let env_path = root.join("grubenv");
+    let config = std::fs::read_to_string(&config_path).map_err(|error| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason: format!("failed to read generated GRUB config {}: {error}", config_path.display()),
+    })?;
+    let environment_text = run_grub_read_only(&env_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let environment = parse_grub_environment(&environment_text);
+    let generated_default = parse_grub_config_default(&config);
+    let entries = parse_grub_config_entries(&config).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })?;
+    let evidence = resolve_grub_selection(&environment, generated_default.as_deref(), &entries)?;
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Grub,
+            reason: format!("system clock could not produce an observation timestamp: {error}"),
+        })?
+        .as_millis() as u64;
+    evidence.with_observation_metadata(observed_at_ms).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::Grub,
+        reason,
+    })
+}
+
+#[cfg(feature = "native")]
+pub fn observe_grub_for_candidate(
+    expected_candidate_closure: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let evidence = observe_grub()?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+pub fn observe_boot_selection() -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    let loader_path = loader_path.trim();
+    let loader_name = Path::new(loader_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if loader_name.starts_with("systemd-boot") {
+        observe_systemd_boot_from_loader(loader_path)
+    } else if loader_name.contains("grub") {
+        observe_grub_from_loader(loader_path)
+    } else {
+        Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("unsupported current EFI bootloader: {loader_path}"),
+        })
+    }
+}
+
+#[cfg(feature = "native")]
+pub fn observe_boot_selection_for_candidate(
+    expected_candidate_closure: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let evidence = observe_boot_selection()?;
+    require_candidate_binding(&evidence, expected_candidate_closure)?;
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
+fn discover_grub_root() -> Result<PathBuf, String> {
+    let candidates = [
+        PathBuf::from("/boot/grub"),
+        PathBuf::from("/boot/efi/grub"),
+        PathBuf::from("/efi/grub"),
+    ];
+    let mut matches = Vec::new();
+    for root in candidates {
+        let cfg = root.join("grub.cfg");
+        let env = root.join("grubenv");
+        if regular_file(&cfg)? && regular_file(&env)? {
+            matches.push(root);
+        }
+    }
+    match matches.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => Err("no supported NixOS GRUB config/environment pair was found".into()),
+        _ => Err("multiple GRUB config/environment pairs were found; refusing ambiguous observation".into()),
+    }
+}
+
+#[cfg(feature = "native")]
+fn regular_file(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!("refusing symlinked bootloader state {}", path.display())),
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("failed to inspect bootloader state {}: {error}", path.display())),
+    }
+}
+
+#[cfg(feature = "native")]
+fn run_grub_read_only(env_path: &Path) -> Result<String, String> {
+    let output = Command::new("grub-editenv")
+        .args([env_path.as_os_str(), std::ffi::OsStr::new("list")])
+        .output()
+        .map_err(|error| format!("failed to execute read-only grub-editenv list: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("grub-editenv list failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    String::from_utf8(output.stdout).map_err(|error| format!("grub-editenv produced invalid UTF-8: {error}"))
 }
 
 /// Observe systemd-boot selection and require an exact authorized candidate binding.
