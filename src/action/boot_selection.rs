@@ -544,7 +544,7 @@ pub fn resolve_grub_selection(
             bootloader_family: BootloaderFamily::Grub,
             selection_kind: SelectionKind::OneShot,
             selected_entry_id: Some(entry.entry_id.clone()),
-            selected_entry_source: default_source.into(),
+            selected_entry_source: "grubenv:next_entry".into(),
             candidate_closure: exact_store_path_from_entry(entry),
             boot_count_state: entry.boot_count_state,
             observed_at_ms: None,
