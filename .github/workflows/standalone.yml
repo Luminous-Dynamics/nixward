@@ -9,8 +9,9 @@ on:
     branches:
       - main
 
-# Keep only the newest qualification subject for each PR, while allowing the
-# hardening branch's lockfile bootstrap to converge independently.
+# The dedicated validation PR is the only authoritative pull-request
+# qualification surface; the integration PR remains review-only until merge.
+# Keep only the newest qualification subject for each surface.
 concurrency:
   group: standalone-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -85,7 +86,7 @@ jobs:
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"${GITHUB_REF_NAME}"
 
   lockfile-artifact:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'validation/full-stack-qualification-2026-10-08'
     concurrency:
       group: standalone-lockfile-artifact-${{ github.event.pull_request.number || github.ref }}
       # Only the newest exact PR head is meaningful for qualification.
@@ -144,7 +145,7 @@ jobs:
     # qualification decision instead of silently producing a skipped check.
     # Hardening-branch pushes exist only to converge the committed lockfile.
     # Qualification itself is the PR exact-head surface (or main after merge).
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'validation/full-stack-qualification-2026-10-08') || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
