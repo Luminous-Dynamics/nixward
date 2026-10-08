@@ -272,10 +272,10 @@ impl FrozenConfigSource {
         let mut manifest = Vec::new();
         #[cfg(unix)]
         {
-            let mut root_dir = Self::open_source_root(&root)?;
+            let (mut root_dir, root_stat) = Self::open_source_root(&root)?;
             Self::walk_descriptor_bound(&mut root_dir, Path::new(""), &mut manifest)?;
             let after_root = Self::fstat_directory(&root_dir, &root)?;
-            if !Self::directory_stat_stable(&root_dir.1, &after_root) {
+            if !Self::directory_stat_stable(&root_stat, &after_root) {
                 return Err("config source root changed while being snapshotted".into());
             }
         }
@@ -445,6 +445,7 @@ impl FrozenConfigSource {
         root: &Path,
     ) -> Result<(nix::dir::Dir, nix::sys::stat::FileStat), String> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
 
         let expected = std::fs::symlink_metadata(root)
             .map_err(|error| format!("failed to inspect config source root: {error}"))?;
@@ -481,7 +482,6 @@ impl FrozenConfigSource {
         relative: &Path,
         manifest: &mut Vec<SourceManifestEntry>,
     ) -> Result<(), String> {
-        use std::ffi::CString;
         use std::os::fd::AsRawFd;
         use std::os::unix::ffi::OsStrExt;
 
@@ -539,15 +539,6 @@ impl FrozenConfigSource {
                     if !Self::directory_stat_stable(&before, &after) {
                         return Err(format!(
                             "source directory {} changed while being snapshotted",
-                            child_relative.display()
-                        ));
-                    }
-
-                    let current_names = Self::source_directory_names(&mut child_dir)?;
-                    let expected_names = Self::source_directory_names(&mut child_dir)?;
-                    if current_names != expected_names {
-                        return Err(format!(
-                            "source directory {} changed during enumeration",
                             child_relative.display()
                         ));
                     }
