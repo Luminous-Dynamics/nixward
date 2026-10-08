@@ -611,6 +611,105 @@ pub(crate) fn read_regular_file_no_follow(
     }
 }
 
+#[cfg(all(feature = "native", unix))]
+pub(crate) fn read_regular_file_no_follow_stable(
+    path: &std::path::Path,
+    expected: &std::fs::Metadata,
+) -> Result<Vec<u8>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    use nix::errno::Errno;
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::{fstat, SFlag};
+    use nix::unistd::{close, read};
+
+    fn identity_matches(
+        expected: &std::fs::Metadata,
+        actual: &nix::sys::stat::FileStat,
+    ) -> bool {
+        expected.dev() == actual.st_dev
+            && expected.ino() == actual.st_ino
+            && expected.len() == actual.st_size.max(0) as u64
+            && expected.mode() == (actual.st_mode & 0o7777)
+    }
+
+    fn stat_stable(
+        before: &nix::sys::stat::FileStat,
+        after: &nix::sys::stat::FileStat,
+    ) -> bool {
+        before.st_dev == after.st_dev
+            && before.st_ino == after.st_ino
+            && before.st_mode == after.st_mode
+            && before.st_size == after.st_size
+            && before.st_mtime == after.st_mtime
+            && before.st_mtime_nsec == after.st_mtime_nsec
+            && before.st_ctime == after.st_ctime
+            && before.st_ctime_nsec == after.st_ctime_nsec
+    }
+
+    if !expected.is_file() {
+        return Err(format!("file {} is not a regular file", path.display()));
+    }
+
+    let fd = open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|error| {
+        if error == Errno::ENOENT {
+            format!("file {} does not exist", path.display())
+        } else {
+            format!("failed to securely open {} without symlink following: {error}", path.display())
+        }
+    })?;
+
+    let read_result: Result<Vec<u8>, String> = (|| {
+        let opened = fstat(fd)
+            .map_err(|error| format!("failed to inspect opened file {}: {error}", path.display()))?;
+        if !SFlag::from_bits_truncate(opened.st_mode).contains(SFlag::S_IFREG) {
+            return Err(format!("file {} is not a regular file", path.display()));
+        }
+        if !identity_matches(expected, &opened) {
+            return Err(format!(
+                "file {} changed between source inspection and secure open",
+                path.display()
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match read(fd, &mut buffer) {
+                Ok(0) => break,
+                Ok(len) => bytes.extend_from_slice(&buffer[..len]),
+                Err(Errno::EINTR) => continue,
+                Err(error) => {
+                    return Err(format!("failed to read {}: {error}", path.display()));
+                }
+            }
+        }
+
+        let after = fstat(fd)
+            .map_err(|error| format!("failed to re-inspect opened file {}: {error}", path.display()))?;
+        if !stat_stable(&opened, &after) {
+            return Err(format!(
+                "file {} changed while being snapshotted",
+                path.display()
+            ));
+        }
+
+        Ok(bytes)
+    })();
+
+    let close_result = close(fd);
+    match (read_result, close_result) {
+        (Ok(bytes), Ok(())) => Ok(bytes),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(format!("failed to close {} after read: {error}", path.display())),
+    }
+}
+
 #[cfg(feature = "native")]
 pub fn verify_pe_signature_with_certificate(
     image_path: &std::path::Path,
@@ -946,6 +1045,24 @@ mod tests {
         };
         assert!(require_verified_signature_image(&evidence, &[1; 32]).is_err());
     }
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn stable_file_reader_rejects_identity_replacement() {
+        let temp = tempfile::tempdir().expect("temporary signature directory");
+        let regular = temp.path().join("regular");
+        let replacement = temp.path().join("replacement");
+        std::fs::write(&regular, b"original").expect("original fixture");
+        let expected = std::fs::symlink_metadata(&regular).expect("original metadata");
+        std::fs::write(&replacement, b"replacement").expect("replacement fixture");
+        std::fs::rename(&replacement, &regular).expect("replace fixture");
+
+        assert!(
+            read_regular_file_no_follow_stable(&regular, &expected)
+                .expect_err("replacement must fail closed")
+                .contains("changed")
+        );
+    }
+
     #[cfg(all(feature = "native", unix))]
     #[test]
     fn signature_file_reader_rejects_symlink_paths() {
