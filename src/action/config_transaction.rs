@@ -865,34 +865,177 @@ impl ConfigTransaction {
 
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
         let path = path.as_ref();
-        let parent = path.parent().ok_or_else(|| "transaction journal path has no parent".to_string())?;
-        std::fs::create_dir_all(parent).map_err(|error| format!("failed to create transaction journal directory: {error}"))?;
-        let encoded = serde_json::to_vec_pretty(self).map_err(|error| format!("failed to serialize transaction journal: {error}"))?;
-        let filename = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| "transaction journal filename is invalid UTF-8".to_string())?;
-        let temp_path = parent.join(format!(".{filename}.tmp-{}", std::process::id()));
+        let parent = path
+            .parent()
+            .ok_or_else(|| "transaction journal path has no parent".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create transaction journal directory: {error}"))?;
+
+        let encoded = serde_json::to_vec_pretty(self)
+            .map_err(|error| format!("failed to serialize transaction journal: {error}"))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "transaction journal filename is invalid UTF-8".to_string())?;
+        let temp_name = format!(".{filename}.tmp-{}", std::process::id());
+
+        #[cfg(unix)]
         {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            use nix::errno::Errno;
+            use nix::fcntl::{openat, renameat, OFlag};
+            use nix::sys::stat::Mode;
+            use nix::unistd::{close, fsync, unlinkat, write, UnlinkatFlags};
+
+            let parent = parent
+                .canonicalize()
+                .map_err(|error| format!("failed to canonicalize transaction journal directory: {error}"))?;
+            let mut parent_options = std::fs::OpenOptions::new();
+            parent_options.read(true);
+            parent_options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let parent_dir = parent_options.open(&parent).map_err(|error| {
+                format!(
+                    "failed to securely open transaction journal directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+            let parent_fd = parent_dir.as_raw_fd();
+
+            let filename_c = CString::new(filename.as_bytes())
+                .map_err(|_| "transaction journal filename contains an embedded NUL".to_string())?;
+            let temp_name_c = CString::new(temp_name.as_bytes())
+                .map_err(|_| "transaction journal temporary filename contains an embedded NUL".to_string())?;
+
+            let temp_fd = openat(
+                parent_fd,
+                temp_name_c.as_c_str(),
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to create descriptor-bound transaction journal candidate: {error}"
+                )
+            })?;
+
+            let write_result = (|| -> Result<(), String> {
+                let mut written = 0usize;
+                while written < encoded.len() {
+                    match write(temp_fd, &encoded[written..]) {
+                        Ok(0) => {
+                            return Err(
+                                "descriptor-bound transaction journal write made no progress"
+                                    .into(),
+                            );
+                        }
+                        Ok(count) => written += count,
+                        Err(Errno::EINTR) => continue,
+                        Err(error) => {
+                            return Err(format!(
+                                "failed to write descriptor-bound transaction journal candidate: {error}"
+                            ));
+                        }
+                    }
+                }
+                fsync(temp_fd).map_err(|error| {
+                    format!(
+                        "failed to sync descriptor-bound transaction journal candidate: {error}"
+                    )
+                })?;
+                Ok(())
+            })();
+
+            let close_result = close(temp_fd);
+            if let Err(error) = write_result {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                let _ = close_result;
+                return Err(error);
+            }
+            close_result.map_err(|error| {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                format!(
+                    "failed to close descriptor-bound transaction journal candidate: {error}"
+                )
+            })?;
+
+            if let Err(error) = renameat(
+                Some(parent_fd),
+                temp_name_c.as_c_str(),
+                Some(parent_fd),
+                filename_c.as_c_str(),
+            ) {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed to commit descriptor-bound transaction journal: {error}"
+                ));
+            }
+
+            fsync(parent_fd).map_err(|error| {
+                format!(
+                    "failed to sync transaction journal directory after rename: {error}"
+                )
+            })?;
+
+            return Ok(());
+        }
+
+        #[cfg(not(unix))]
+        {
+            let temp_path = parent.join(&temp_name);
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+            let mut file = options
+                .open(&temp_path)
+                .map_err(|error| {
+                    format!("failed to create transaction journal candidate: {error}")
+                })?;
+            file.write_all(&encoded).map_err(|error| {
+                format!("failed to write transaction journal candidate: {error}")
+            })?;
+            file.sync_all().map_err(|error| {
+                format!("failed to sync transaction journal candidate: {error}")
+            })?;
+            if let Err(error) = std::fs::rename(&temp_path, path) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(format!("failed to commit transaction journal: {error}"));
             }
-            let mut file = options.open(&temp_path).map_err(|error| format!("failed to create transaction journal candidate: {error}"))?;
-            file.write_all(&encoded).map_err(|error| format!("failed to write transaction journal candidate: {error}"))?;
-            file.sync_all().map_err(|error| format!("failed to sync transaction journal candidate: {error}"))?;
+            let parent_dir = std::fs::File::open(parent)
+                .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
+            parent_dir.sync_all().map_err(|error| {
+                format!("failed to sync transaction journal directory: {error}")
+            })?;
+            Ok(())
         }
-        if let Err(error) = std::fs::rename(&temp_path, path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(format!("failed to commit transaction journal: {error}"));
-        }
-        let parent_dir = std::fs::File::open(parent).map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
-        parent_dir.sync_all().map_err(|error| format!("failed to sync transaction journal directory: {error}"))?;
-        Ok(())
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
-        let encoded = std::fs::read(path.as_ref()).map_err(|error| format!("failed to read transaction journal: {error}"))?;
+        let path = path.as_ref();
+        let encoded = {
+            #[cfg(unix)]
+            {
+                let expected = std::fs::symlink_metadata(path)
+                    .map_err(|error| format!("failed to inspect transaction journal: {error}"))?;
+                super::secure_boot_signature::read_regular_file_no_follow_stable(path, &expected)
+                    .map_err(|error| format!("failed to securely read transaction journal: {error}"))?
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::read(path)
+                    .map_err(|error| format!("failed to read transaction journal: {error}"))?
+            }
+        };
         let transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
         if transaction.schema != Self::SCHEMA || transaction.version != Self::VERSION {
             return Err("transaction journal schema/version mismatch".into());
@@ -1219,6 +1362,42 @@ mod tests {
         let loaded = ConfigTransaction::load(&path).unwrap();
         assert_eq!(loaded.transaction_id(), transaction.transaction_id());
         assert_eq!(loaded.phase(), ConfigTransactionPhase::Prepared);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_load_rejects_symlink_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("transaction.json");
+        let link = dir.path().join("transaction-link.json");
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.persist_atomic(&journal).unwrap();
+        std::os::unix::fs::symlink(&journal, &link).unwrap();
+
+        assert!(
+            ConfigTransaction::load(&link)
+                .expect_err("journal symlink must fail closed")
+                .contains("securely read transaction journal")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_persist_replaces_final_symlink_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("transaction.json");
+        let target = dir.path().join("redirect-target.json");
+        std::fs::write(&target, b"sentinel").unwrap();
+        std::os::unix::fs::symlink(&target, &journal).unwrap();
+
+        ConfigTransaction::new([1; 32], [2; 32], [3; 32])
+            .persist_atomic(&journal)
+            .unwrap();
+
+        let metadata = std::fs::symlink_metadata(&journal).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "sentinel");
+        assert!(ConfigTransaction::load(&journal).is_ok());
     }
 
     #[test]
