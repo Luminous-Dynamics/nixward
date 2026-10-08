@@ -111,7 +111,9 @@ impl SecureBootDatabaseEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DirectTrustDisposition {
     ForbiddenByAuthenticodeHash,
-    AuthorizedByAuthenticodeHash,
+    ForbiddenByExactCertificate,
+    PotentialX509TbsRevocation,
+    AuthenticodeHashInDb,
     ExactCertificateInDbx,
     ExactCertificateInDb,
     NoDirectMatch,
@@ -388,20 +390,24 @@ pub fn match_secure_boot_databases_for_image(
 pub fn derive_direct_trust_disposition(
     evidence: &SignatureDatabaseMatchEvidence,
 ) -> DirectTrustDisposition {
-    // Definite image/certificate matches in dbx are vetoes and therefore take
-    // precedence over authorization. Other dbx certificate rules remain
-    // unevaluated and prevent a positive authorization conclusion.
+    // Definite image-hash and exact X.509 certificate matches in dbx are
+    // immediate veto evidence. X.509 TBS-hash records can carry a revocation
+    // time, so an exact match requires signature-timestamp evaluation before
+    // it can be classified as allowed or forbidden.
     if evidence.direct_dbx_authenticode_hash_match {
         return DirectTrustDisposition::ForbiddenByAuthenticodeHash;
     }
-    if evidence.exact_certificate_in_dbx || evidence.exact_certificate_tbs_hash_in_dbx {
-        return DirectTrustDisposition::ExactCertificateInDbx;
+    if evidence.exact_certificate_in_dbx {
+        return DirectTrustDisposition::ForbiddenByExactCertificate;
+    }
+    if evidence.exact_certificate_tbs_hash_in_dbx {
+        return DirectTrustDisposition::PotentialX509TbsRevocation;
     }
     if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
         return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     if evidence.direct_db_authenticode_hash_match {
-        return DirectTrustDisposition::AuthorizedByAuthenticodeHash;
+        return DirectTrustDisposition::AuthenticodeHashInDb;
     }
     if evidence.exact_certificate_in_db || evidence.exact_certificate_tbs_hash_in_db {
         return DirectTrustDisposition::ExactCertificateInDb;
@@ -751,7 +757,28 @@ mod tests {
         assert_eq!(evidence.image_authenticode_sha256, expected);
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::AuthorizedByAuthenticodeHash
+            DirectTrustDisposition::AuthenticodeHashInDb
+        );
+    }
+    #[test]
+    fn exact_dbx_tbs_match_is_potential_revocation_not_immediate_veto() {
+        let evidence = SignatureDatabaseMatchEvidence {
+            db_records: Vec::new(),
+            dbx_records: Vec::new(),
+            image_authenticode_sha256: [1; 32],
+            direct_db_authenticode_hash_match: false,
+            direct_dbx_authenticode_hash_match: false,
+            exact_certificate_in_db: false,
+            exact_certificate_in_dbx: false,
+            exact_certificate_tbs_hash_in_db: false,
+            exact_certificate_tbs_hash_in_dbx: true,
+            certificate_chain_authorization: None,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::PotentialX509TbsRevocation
         );
     }
     #[test]
@@ -889,7 +916,7 @@ mod tests {
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::AuthorizedByAuthenticodeHash
+            DirectTrustDisposition::AuthenticodeHashInDb
         );
     }
     #[test]
