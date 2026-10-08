@@ -97,6 +97,17 @@
       "expected": {
         "boot_count_state": "NotTracked"
       }
+    },
+    {
+      "id": "grub-generated-default-exact",
+      "family": "grub",
+      "generated_default": "NixOS - Configuration 42",
+      "grub_config": "menuentry \"NixOS - Configuration 42\" --class nixos {\n linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init quiet\n initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd\n}\n",
+      "expected": {
+        "selection_kind": "GeneratedDefault",
+        "selected_entry_id": "NixOS - Configuration 42",
+        "candidate_closure": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
+      }
     }
   ]
 }
