@@ -1079,6 +1079,11 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     }
 
     #[test]
+    fn malformed_systemd_default_directive_is_ignored() {
+        assert_eq!(parse_systemd_loader_default("defaults candidate\n"), None);
+        assert_eq!(parse_systemd_loader_default("default candidate trailing\n").as_deref(), Some("candidate"));
+    }
+    #[test]
     fn systemd_pattern_default_is_unknown() {
         let entries = BTreeMap::new();
         let error = resolve_systemd_boot_selection(None, Some("nixos-*"), &entries)
@@ -1152,6 +1157,25 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
+    #[test]
+    fn selected_non_nixos_grub_entry_is_unbound() {
+        let entries = parse_grub_config_entries(
+            "menuentry \"Windows\" {\n chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\nmenuentry \"NixOS\" {\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+        )
+        .expect("mixed GRUB config parses");
+        let environment = BTreeMap::from([(
+            "next_entry".to_string(),
+            "Windows".to_string(),
+        )]);
+        let evidence = resolve_grub_selection(&environment, None, &entries)
+            .expect("selected non-NixOS entry should still be observable");
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("Windows"));
+        assert_eq!(evidence.candidate_closure, None);
+        assert!(require_candidate_binding(
+            &evidence,
+            "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate",
+        ).is_err());
+    }
     #[test]
     fn duplicate_grub_titles_fail_closed() {
         let result = parse_grub_config_entries(
