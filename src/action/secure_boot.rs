@@ -730,18 +730,29 @@ fn run_sbverify_against_certificate(
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_before_hash = *blake3::hash(&image_before).as_bytes();
 
-    let mut temp = tempfile::NamedTempFile::new()
-        .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
+    let mut image_snapshot = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("failed to create temporary image snapshot: {error}"))?;
     use std::io::Write;
-    temp.write_all(pem_encode_certificate(certificate_der).as_bytes())
+    image_snapshot
+        .write_all(&image_before)
+        .map_err(|error| format!("failed to write temporary image snapshot: {error}"))?;
+    image_snapshot
+        .flush()
+        .map_err(|error| format!("failed to flush temporary image snapshot: {error}"))?;
+
+    let mut certificate_snapshot = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
+    certificate_snapshot
+        .write_all(pem_encode_certificate(certificate_der).as_bytes())
         .map_err(|error| format!("failed to write temporary certificate file: {error}"))?;
-    temp.flush()
+    certificate_snapshot
+        .flush()
         .map_err(|error| format!("failed to flush temporary certificate file: {error}"))?;
 
     let output = match std::process::Command::new("sbverify")
         .args(["--cert"])
-        .arg(temp.path())
-        .arg(image_path)
+        .arg(certificate_snapshot.path())
+        .arg(image_snapshot.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()
