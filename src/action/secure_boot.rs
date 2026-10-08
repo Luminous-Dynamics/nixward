@@ -758,53 +758,11 @@ fn finalize_image_bound_verification(
 }
 
 #[cfg(feature = "native")]
-fn db_certificate_identity(
-    certificate_der: &[u8],
-) -> Result<
-    (
-        [u8; 32],
-        [u8; 32],
-        [u8; 32],
-        [u8; 32],
-        [u8; 48],
-        [u8; 64],
-    ),
-    String,
-> {
-    let certificate_digest = *blake3::hash(certificate_der).as_bytes();
-    let (_, certificate) = x509_parser::parse_x509_certificate(certificate_der)
-        .map_err(|error| format!("failed to parse X.509 certificate: {error}"))?;
-    let issuer_blake3 =
-        *blake3::hash(certificate.tbs_certificate.issuer.as_ref()).as_bytes();
-    let serial_blake3 =
-        *blake3::hash(certificate.tbs_certificate.raw_serial()).as_bytes();
-
-    use sha2::Digest;
-    let mut sha256 = sha2::Sha256::new();
-    sha256.update(certificate.tbs_certificate.as_ref());
-    let tbs_sha256 = sha256.finalize().into();
-    let mut sha384 = sha2::Sha384::new();
-    sha384.update(certificate.tbs_certificate.as_ref());
-    let tbs_sha384 = sha384.finalize().into();
-    let mut sha512 = sha2::Sha512::new();
-    sha512.update(certificate.tbs_certificate.as_ref());
-    let tbs_sha512 = sha512.finalize().into();
-
-    Ok((
-        certificate_digest,
-        issuer_blake3,
-        serial_blake3,
-        tbs_sha256,
-        tbs_sha384,
-        tbs_sha512,
-    ))
-}
-
-#[cfg(feature = "native")]
 fn dbx_x509_record_matches_certificate(
     record: &SignatureDatabaseRecord,
     certificate_der: &[u8],
 ) -> Result<bool, String> {
+    use sha2::Digest;
     let Some(record_der) = record.certificate_der.as_deref() else {
         return Ok(false);
     };
@@ -1617,11 +1575,12 @@ mod tests {
             image_authenticode_sha256: [7; 32],
             image_chain_certificate_digests: vec![[1; 32]],
             image_signer_certificate_digests: vec![[2; 32]],
-            db_certificate_digests: vec![[3; 32]],
-            dbx_certificate_digests: vec![[4; 32]],
-            verifying_db_certificate: Some([5; 32]),
+            verified_db_anchor_certificate_digests: vec![[3; 32]],
+            db_certificate_digests: vec![[4; 32]],
+            dbx_certificate_digests: vec![[5; 32]],
+            verifying_db_certificate: Some([6; 32]),
             verifying_dbx_certificate: None,
-            dbx_chain_identity_match: Some([6; 32]),
+            dbx_chain_identity_match: Some([7; 32]),
             dbx_chain_tbs_hash_match: None,
             db_payload_blake3: Some([8; 32]),
             dbx_payload_blake3: Some([9; 32]),
