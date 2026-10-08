@@ -482,13 +482,15 @@ fn candidate_grub_roots(preferred_root: Option<&Path>) -> Vec<PathBuf> {
         PathBuf::from("/boot/efi/grub"),
         PathBuf::from("/efi/grub"),
     ];
-    let mut candidates = preferred_root
-        .into_iter()
-        .map(Path::to_path_buf)
-        .chain(defaults)
-        .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.dedup();
+    let mut candidates = Vec::new();
+    if let Some(preferred) = preferred_root {
+        candidates.push(preferred.to_path_buf());
+    }
+    for candidate in defaults {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
     candidates
 }
 
@@ -578,6 +580,14 @@ fn run_read_only<const N: usize>(args: [&str; N]) -> Result<String, UnknownBootS
 
 #[cfg(feature = "native")]
 fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, String> {
+    let root_metadata = std::fs::symlink_metadata(entries_path)
+        .map_err(|error| format!("failed to inspect BLS entry directory {}: {error}", entries_path.display()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
+        return Err(format!(
+            "BLS entry directory {} is not a regular non-symlink directory",
+            entries_path.display()
+        ));
+    }
     let mut entries = BTreeMap::new();
     let directory = std::fs::read_dir(entries_path).map_err(|error| {
         format!("failed to read authoritative BLS entry directory {}: {error}", entries_path.display())
@@ -643,12 +653,17 @@ fn decode_efivar_string(bytes: &[u8]) -> Result<String, String> {
         return Err("EFI variable payload is not a valid UTF-16LE string".into());
     }
     let mut units = Vec::new();
+    let mut terminated = false;
     for chunk in bytes[4..].chunks_exact(2) {
         let value = u16::from_le_bytes([chunk[0], chunk[1]]);
         if value == 0 {
+            terminated = true;
             break;
         }
         units.push(value);
+    }
+    if !terminated {
+        return Err("EFI variable UTF-16 payload is not NUL terminated".into());
     }
     String::from_utf16(&units).map_err(|error| format!("EFI variable UTF-16 decoding failed: {error}"))
 }
@@ -776,11 +791,14 @@ fn parse_grub_linux_line(line: &str) -> Result<(Option<String>, String), String>
 
 /// Parse the generated GRUB default expression without interpreting it as identity.
 pub fn parse_grub_config_default(text: &str) -> Option<String> {
-    text.lines().find_map(|raw_line| {
-        let line = raw_line.trim();
-        let value = line.strip_prefix("set default=")?.trim();
-        Some(value.trim_matches(|c: char| c == '\'' || c == '"').to_string())
-    })
+    text.lines()
+        .filter_map(|raw_line| {
+            let line = raw_line.trim();
+            let value = line.strip_prefix("set default=")?.trim();
+            Some(value.trim_matches(|c: char| c == '\'' || c == '"').to_string())
+        })
+        .filter(|value| !value.contains("${next_entry}"))
+        .last()
 }
 /// Resolve a conservative GRUB selection from exact environment/config values.
 ///
