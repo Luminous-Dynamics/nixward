@@ -1348,4 +1348,123 @@ mod tests {
             .expect("evidence");
         assert_ne!(first.evidence_digest, second.evidence_digest);
     }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn dbx_tbs_revocation_only_matches_exact_chain_member() {
+        let evidence = super::secure_boot_signature::X509ChainCertificateEvidence {
+            signature_index: 0,
+            certificate_index: 0,
+            certificate_blake3: [9; 32],
+            issuer_blake3: [1; 32],
+            serial_blake3: [2; 32],
+            tbs_sha256: [3; 32],
+            tbs_sha384: [4; 48],
+            tbs_sha512: [5; 64],
+            is_signer: true,
+            is_chain_member: true,
+        };
+
+        let mut record = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509TbsSha256,
+            signature_size: 64,
+            signature_data_blake3: [0; 32],
+            owner: [0; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: Some(vec![3; 32]),
+            revocation_time: Some([0x11; 16]),
+        };
+
+        assert_eq!(
+            dbx_tbs_record_matches_chain(&record, &[evidence.clone()]),
+            Some([9; 32])
+        );
+
+        record.certificate_tbs_hash = Some(vec![7; 32]);
+        assert_eq!(
+            dbx_tbs_record_matches_chain(&record, &[evidence]),
+            None
+        );
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn dbx_x509_rule_requires_exact_issuer_serial_and_tbs_identity() {
+        use openssl::asn1::Asn1Integer;
+        use openssl::bn::BigNum;
+        use openssl::hash::MessageDigest;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::x509::X509NameBuilder;
+        use openssl::x509::X509Builder;
+        use sha2::Digest;
+
+        let rsa = Rsa::generate(2048).expect("test RSA key");
+        let key = PKey::from_rsa(rsa).expect("test private key");
+        let mut name_builder = X509NameBuilder::new().expect("name builder");
+        name_builder
+            .append_entry_by_text("CN", "Nixward Test")
+            .expect("CN");
+        let name = name_builder.build();
+
+        let serial_bn = BigNum::from_u32(42).expect("serial");
+        let serial = Asn1Integer::from_bn(&serial_bn).expect("ASN.1 serial");
+        let mut builder = X509Builder::new().expect("certificate builder");
+        builder.set_version(2).expect("version");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_serial_number(&serial).expect("serial number");
+        builder.set_pubkey(&key).expect("public key");
+        builder
+            .sign(&key, MessageDigest::sha256())
+            .expect("certificate signature");
+        let certificate = builder.build();
+        let der = certificate.to_der().expect("certificate DER");
+
+        let (_, parsed) =
+            x509_parser::parse_x509_certificate(&der).expect("parse generated certificate");
+
+        let issuer_blake3 =
+            *blake3::hash(parsed.tbs_certificate.issuer.as_ref()).as_bytes();
+        let serial_blake3 =
+            *blake3::hash(parsed.tbs_certificate.raw_serial()).as_bytes();
+        let mut tbs_hasher = sha2::Sha256::new();
+        tbs_hasher.update(parsed.tbs_certificate.as_ref());
+        let tbs_sha256: [u8; 32] = tbs_hasher.finalize().into();
+
+        let certificate_digest = *blake3::hash(&der).as_bytes();
+        let chain = [super::secure_boot_signature::X509ChainCertificateEvidence {
+            signature_index: 0,
+            certificate_index: 0,
+            certificate_blake3: certificate_digest,
+            issuer_blake3,
+            serial_blake3,
+            tbs_sha256,
+            tbs_sha384: [0; 48],
+            tbs_sha512: [0; 64],
+            is_signer: true,
+            is_chain_member: true,
+        }];
+
+        let record = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509Certificate,
+            signature_size: (16 + der.len()) as u32,
+            signature_data_blake3: *blake3::hash(&der).as_bytes(),
+            owner: [7; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: Some(certificate_digest),
+            certificate_der: Some(der),
+            certificate_tbs_hash: None,
+            revocation_time: None,
+        };
+
+        assert_eq!(
+            dbx_x509_record_matches_chain(&record, &chain).expect("X509 match"),
+            Some(certificate_digest)
+        );
+    }
+
+
 }
