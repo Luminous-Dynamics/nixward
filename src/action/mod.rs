@@ -44,8 +44,8 @@ pub use change_covenant::{
 pub use config_writer::{ConfigPatch, ConfigWriter, WriteResult};
 pub use config_transaction::{
     ActivationDisposition, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
-    ProfileTransitionDisposition,
-    RecoveryObservation, SourceEntryKind, SourceManifestEntry, classify_activation_post_state,
+    ProfileTransitionDisposition, RecoveryObservation, SourceEntryKind, SourceManifestEntry,
+    SourceRealizationLease, SourceRealizationLeaseState, classify_activation_post_state,
 };
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
