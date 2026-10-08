@@ -487,3 +487,24 @@ This is an input-retention boundary, not yet a complete candidate-build binding:
 the next privileged build step must consume the exact retained source store path
 and bind its resulting system closure to the same transaction without resolving
 the source from the mutable working tree.
+
+## Immutable candidate-build binding (2026-10-08)
+
+The frozen-source retention boundary is now connected to an actual candidate-build primitive.
+`NixCandidateBuilder` refuses unrooted or stale source realizations, accepts only a `.#...`
+flake-relative installable, rewrites that installable against the exact retained source
+store path, and invokes Nix through its immutable `/nix/store` executable identity.
+
+Candidate stdout is accepted only when exactly one canonical store path is emitted, and
+that path must equal the externally authorized `expectedOutPath`. The builder then rechecks
+the retained source and emits `CandidateBuildReceipt`, which binds the source digest, exact
+source store path, candidate store path, and realization-plan digest.
+
+`ConfigTransaction::advance(CandidateBuilt)` and `SourceCommitted` now require that receipt.
+A legacy serialized candidate path can remain readable for migration evidence, but it cannot
+grant candidate-build or activation authority.
+
+The validation PR is also topology-bound: its hosted validation job fetches
+`hardening/full-stack-qualification-2026-10-08` and requires its live SHA to equal the
+validation PR head before qualification proceeds. A moving hardening branch therefore cannot
+silently qualify an older validation mirror.
