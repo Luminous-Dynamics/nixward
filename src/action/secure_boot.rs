@@ -7,7 +7,6 @@
 //! signature validity. This module observes firmware state only.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 const EFI_GLOBAL_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 const EFI_VARS_DIR: &str = "/sys/firmware/efi/efivars";
@@ -61,8 +60,9 @@ pub fn derive_secure_boot_state(
 ) -> SecureBootState {
     match (secure_boot, setup_mode) {
         (Some(true), Some(false)) => SecureBootState::Enabled,
-        (Some(false), Some(true)) | (Some(false), Some(false)) => SecureBootState::Disabled,
-        (Some(true), Some(true)) => SecureBootState::SetupMode,
+        (Some(false), Some(true)) => SecureBootState::SetupMode,
+        (Some(false), Some(false)) => SecureBootState::Disabled,
+        (Some(true), Some(true)) => SecureBootState::Unknown,
         _ => SecureBootState::Unknown,
     }
 }
@@ -149,7 +149,7 @@ mod tests {
         );
         assert_eq!(
             derive_secure_boot_state(Some(false), Some(true)),
-            SecureBootState::Disabled
+            SecureBootState::SetupMode
         );
         assert_eq!(
             derive_secure_boot_state(Some(true), Some(true)),
