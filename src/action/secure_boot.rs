@@ -1134,12 +1134,75 @@ pub fn verify_image_against_db_certificates(
 }
 
 #[cfg(feature = "native")]
+fn build_live_policy_rejection_evidence(
+    image_path: &std::path::Path,
+    state: SecureBootState,
+) -> Result<DbCertificateVerificationEvidence, String> {
+    let image = std::fs::read(image_path)
+        .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
+    let image_blake3 = *blake3::hash(&image).as_bytes();
+    let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
+
+    let (verifier_state, message) = match state {
+        SecureBootState::Disabled => (
+            DbCertificateVerificationState::SecureBootPolicyDisabled,
+            b"firmware reports SecureBoot disabled" as &[u8],
+        ),
+        SecureBootState::SetupMode => (
+            DbCertificateVerificationState::SecureBootPolicySetupMode,
+            b"firmware reports SetupMode" as &[u8],
+        ),
+        SecureBootState::Unknown => (
+            DbCertificateVerificationState::SecureBootPolicyUnknown,
+            b"Secure Boot firmware policy state is unknown" as &[u8],
+        ),
+        SecureBootState::Enabled => unreachable!("policy rejection helper called for Enabled"),
+    };
+
+    let evidence = DbCertificateVerificationEvidence {
+        image_blake3,
+        image_authenticode_sha256,
+        image_chain_certificate_digests: Vec::new(),
+        image_signer_certificate_digests: Vec::new(),
+        verified_db_anchor_certificate_digests: Vec::new(),
+        db_certificate_digests: Vec::new(),
+        dbx_certificate_digests: Vec::new(),
+        verifying_db_certificate: None,
+        verifying_dbx_certificate: None,
+        dbx_chain_identity_match: None,
+        dbx_chain_tbs_hash_match: None,
+        db_payload_blake3: None,
+        dbx_payload_blake3: None,
+        secure_boot_state: Some(state),
+        database_stability: None,
+        secure_boot_state_stability: Some(true),
+        state: verifier_state,
+        verifier: "sbverify".into(),
+        stdout_blake3: *blake3::hash(&[]).as_bytes(),
+        stderr_blake3: *blake3::hash(message).as_bytes(),
+        observed_at_ms: None,
+        evidence_digest: None,
+    };
+
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock could not produce observation timestamp: {error}"))?
+        .as_millis() as u64;
+
+    evidence.with_observation_metadata(observed_at_ms)
+}
+
+#[cfg(feature = "native")]
 pub fn verify_image_against_live_secure_boot_databases(
     image_path: &std::path::Path,
 ) -> Result<DbCertificateVerificationEvidence, String> {
     let secure_boot_before = read_global_efi_bool("SecureBoot")?;
     let setup_mode_before = read_global_efi_bool("SetupMode")?;
     let state_before = derive_secure_boot_state(secure_boot_before, setup_mode_before);
+
+    if state_before != SecureBootState::Enabled {
+        return build_live_policy_rejection_evidence(image_path, state_before);
+    }
 
     let db_before = read_efi_database("db")?;
     let dbx_before = read_efi_database("dbx")?;
