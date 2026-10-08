@@ -763,6 +763,98 @@ impl FrozenConfigSource {
     }
 }
 
+/// Native Nix realization boundary for a frozen configuration source.
+///
+/// The returned store path is Nix's immutable object identity; the frozen-source
+/// digest remains a separate semantic identity and is verified against the realized
+/// tree before the retention lease becomes executable.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone)]
+pub struct NixSourceRealizer {
+    nix_executable: String,
+}
+
+#[cfg(feature = "native")]
+impl NixSourceRealizer {
+    pub fn new() -> Result<Self, String> {
+        let link = std::path::Path::new("/run/current-system/sw/bin/nix");
+        let canonical = std::fs::canonicalize(link)
+            .map_err(|error| format!("failed to resolve trusted Nix executable: {error}"))?;
+        let value = canonical
+            .to_str()
+            .ok_or_else(|| "trusted Nix executable path is not valid UTF-8".to_string())?;
+        if !value.starts_with("/nix/store/")
+            || canonical.file_name().and_then(|name| name.to_str()) != Some("nix")
+        {
+            return Err("trusted Nix executable did not resolve to an immutable Nix store executable".into());
+        }
+        Ok(Self {
+            nix_executable: value.to_string(),
+        })
+    }
+
+    /// Realize the complete frozen source tree and retain it with a transaction-scoped
+    /// GC root. The source tree is rechecked immediately before `nix store add`; the
+    /// resulting Nix store tree is then compared byte-for-byte and metadata-for-metadata
+    /// against the frozen manifest.
+    pub fn realize(
+        &self,
+        source_root: &std::path::Path,
+        source: &FrozenConfigSource,
+        transaction_id: &str,
+    ) -> Result<SourceRealizationLease, String> {
+        if decode_digest(transaction_id).is_err() {
+            return Err("source realization transaction id is invalid".into());
+        }
+        if !source_root.is_dir() {
+            return Err("source realization root must be a directory".into());
+        }
+        source.verify_unchanged(source_root)?;
+
+        let name = format!(
+            "nixward-frozen-source-{}",
+            transaction_id.get(..16).unwrap_or(transaction_id)
+        );
+        let output = std::process::Command::new(&self.nix_executable)
+            .env_clear()
+            .env("HOME", "/root")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .args(["store", "add", "--name", &name])
+            .arg(source_root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|error| format!("failed to execute trusted nix store add: {error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "nix store add failed with {:?}: {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let store_path = stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| super::execution_intent::is_valid_nix_store_path(line))
+            .ok_or_else(|| "nix store add did not emit a canonical immutable store path".to_string())?
+            .to_string();
+
+        source.verify_realization_at(&store_path)?;
+
+        let gc_root_path = format!(
+            "/nix/var/nix/gcroots/nixward/{transaction_id}",
+        );
+        let mut lease = SourceRealizationLease::new(source, store_path, gc_root_path)?;
+        lease.establish_root()?;
+        lease.verify_source_realization(source)?;
+        Ok(lease)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceRealizationLeaseState {
