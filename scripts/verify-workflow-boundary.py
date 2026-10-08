@@ -70,8 +70,8 @@ else:
                 errors.append(f"{job_name} job must declare lockfile-artifact as a dependency")
             if "Require trusted repository PR" not in body:
                 errors.append(f"{job_name} job must explicitly reject fork pull requests")
-            if "github.event.pull_request.head.repo.full_name" not in body or "github.repository" not in body:
-                errors.append(f"{job_name} job must compare PR head repository with github.repository")
+            if "test \"${{ github.event.pull_request.head.repo.full_name }}\" = \"${{ github.repository }}\"" not in body:
+                errors.append(f"{job_name} job must contain an exact PR-head repository equality test")
 
     for marker in [
         "nixward-cargo-lock-${{ github.event.pull_request.head.sha }}",
