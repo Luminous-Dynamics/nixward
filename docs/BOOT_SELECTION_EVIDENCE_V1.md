@@ -65,8 +65,14 @@ A one-shot next_entry takes precedence when present. Otherwise resolve an exact
 generated default. Numeric defaults are rejected as Unknown because they are menu
 positions rather than stable identities.
 
+Current NixOS generated GRUB configuration emits each system configuration as a
+menuentry and places the exact system closure in the entry's kernel command via
+init=/nix/store/...-nixos-system-.../init. The parser therefore binds to that
+exact init closure rather than treating the menu title as the subject identity.
+
 The selected menu entry must then be mapped to an exact NixOS closure. Labels
-alone do not qualify.
+alone do not qualify. Duplicate menuentry titles fail closed because a title-only
+selector would otherwise be ambiguous.
 
 ## Unknown
 
@@ -83,10 +89,12 @@ Unknown is evidence of insufficiency, not evidence of success.
 
 ## Current implementation boundary
 
-src/action/boot_selection.rs contains deterministic parsers and pure selection
-resolvers only. Host-side acquisition of EFI, $BOOT, and GRUB state must be
-implemented as a separate privileged read-only adapter and must feed these
-resolvers rather than duplicate selection semantics.
+src/action/boot_selection.rs contains deterministic parsers and selection
+resolvers plus a read-only systemd-boot host observer. The observer obtains EFI
+selection variables, the authoritative BLS root, and Type #1 entries, then feeds
+the pure resolvers. Pure GRUB parsing and selection resolution are present, while
+host-side GRUB observation remains a separate adapter because its generated
+configuration and environment have different semantics.
 
 ## Test fixtures
 
