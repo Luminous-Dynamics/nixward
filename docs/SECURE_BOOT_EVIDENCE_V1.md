@@ -79,16 +79,17 @@ veto. The current implementation deliberately leaves this as a separate
 
 ## Certificate-chain trust boundary
 
-The verification path now distinguishes four materially different outcomes:
+The verification path now distinguishes five materially different outcomes:
 
 - `VerifiedAgainstDbCertificate`: the exact image cryptographically verifies to a certificate observed in `db`;
-- `ForbiddenByDbxCertificateChain`: the exact image cryptographically verifies to a certificate observed in `dbx`, establishing a chain-level revocation match;
+- the verifier also records the exact X.509 certificate chain embedded in the image signature, including signer identities and chain-member TBS/issuer/serial digests;
+- `ForbiddenByDbxCertificateChain`: an X.509 certificate observed in `dbx` has the same Issuer, Serial Number, and To-Be-Signed hash as a certificate in the image's verified signing chain;
 - `PotentialDbxTbsRevocation`: an exact X.509 TBS hash in `dbx` exists but its revocation-time semantics have not been evaluated;
 - `UnknownDbxCertificateRules`: an unsupported/uninterpreted `dbx` rule prevents a trust conclusion.
 
-For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is also checked for byte stability during each verifier invocation.
+For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is also checked for byte stability during each verifier invocation. X.509 revocation is correlated against actual signing-chain members rather than merely asking whether a dbx certificate can independently verify the image.
 
-This closes more of the chain-anchor evidence boundary without pretending to reproduce the firmware's complete certificate-policy engine. Same-Issuer/Serial/TBS revocation matching and revocation-time evaluation remain explicit next-stage work.
+This closes more of the chain-anchor evidence boundary without pretending to reproduce the firmware's complete certificate-policy engine. Same-Issuer/Serial/TBS matching is now implemented for X.509 `dbx` records. Timestamp-aware TBS revocation evaluation remains explicit next-stage work because UEFI associates those records with an EFI_TIME and may require RFC 3161 timestamp validation.
 
 ## Separate signature subject
 

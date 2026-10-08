@@ -23,6 +23,10 @@ pub struct PeCertificateRecord {
     pub certificate_type: u16,
     pub length: u32,
     pub payload_blake3: [u8; 32],
+    /// Exact certificate payload bytes. Omitted from serialized evidence; the
+    /// digest above is the wire-level identity.
+    #[serde(skip)]
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +249,7 @@ pub fn inspect_pe_signature_table(image: &[u8]) -> Result<PeSignatureTableEviden
             certificate_type,
             length,
             payload_blake3: *blake3::hash(payload).as_bytes(),
+            payload: payload.to_vec(),
         });
         let aligned = (length as usize)
             .checked_add(7)
@@ -264,6 +269,183 @@ pub fn inspect_pe_signature_table(image: &[u8]) -> Result<PeSignatureTableEviden
         table_blake3: Some(*blake3::hash(table).as_bytes()),
         certificates,
     })
+}
+
+
+/// X.509 identity evidence extracted from one PKCS#7 signature's certificate
+/// set. Chain membership is determined from the signer certificate through
+/// issuer/subject relationships with cryptographic child-signature checks.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct X509ChainCertificateEvidence {
+    pub signature_index: u32,
+    pub certificate_index: u32,
+    pub certificate_blake3: [u8; 32],
+    pub issuer_blake3: [u8; 32],
+    pub serial_blake3: [u8; 32],
+    pub tbs_sha256: [u8; 32],
+    pub tbs_sha384: [u8; 48],
+    pub tbs_sha512: [u8; 64],
+    pub is_signer: bool,
+    pub is_chain_member: bool,
+}
+
+/// Extract X.509 certificates from every embedded PKCS#7 PE signature and
+/// identify the signer chain candidates. This is read-only and bounded by the
+/// already-parsed PE certificate table.
+#[cfg(feature = "native")]
+pub fn inspect_x509_signature_chains(
+    image: &[u8],
+) -> Result<Vec<X509ChainCertificateEvidence>, String> {
+    use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
+    use openssl::stack::Stack;
+    use openssl::x509::X509;
+    use sha2::{Digest, Sha256, Sha384, Sha512};
+
+    let table = inspect_pe_signature_table(image)?;
+    let mut output = Vec::new();
+
+    for (signature_index, record) in table
+        .certificates
+        .iter()
+        .filter(|record| record.certificate_type == 0x0002)
+        .enumerate()
+    {
+        let pkcs7 = Pkcs7::from_der(&record.payload)
+            .map_err(|error| format!("failed to parse embedded PKCS#7 signature {signature_index}: {error}"))?;
+        let signed = pkcs7
+            .signed()
+            .ok_or_else(|| format!("embedded PKCS#7 signature {signature_index} is not SignedData"))?;
+        let certificates = signed
+            .certificates()
+            .ok_or_else(|| format!("embedded PKCS#7 signature {signature_index} contains no certificates"))?;
+
+        let empty_store = Stack::<X509>::new()
+            .map_err(|error| format!("failed to create PKCS#7 signer certificate store: {error}"))?;
+        let signers = pkcs7
+            .signers(&empty_store, Pkcs7Flags::empty())
+            .map_err(|error| format!("failed to identify PKCS#7 signers for signature {signature_index}: {error}"))?;
+        let signer_digests: Vec<[u8; 32]> = signers
+            .iter()
+            .map(|cert| {
+                let der = cert
+                    .to_der()
+                    .map_err(|error| format!("failed to serialize signer certificate: {error}"))?;
+                Ok(*blake3::hash(&der).as_bytes())
+            })
+            .collect::<Result<_, String>>()?;
+
+        let mut certs = Vec::with_capacity(certificates.len());
+        for cert in certificates.iter() {
+            let der = cert
+                .to_der()
+                .map_err(|error| format!("failed to serialize embedded X.509 certificate: {error}"))?;
+            let (_, parsed) = x509_parser::parse_x509_certificate(&der)
+                .map_err(|error| format!("failed to parse embedded X.509 certificate: {error}"))?;
+            let issuer = parsed.tbs_certificate.issuer.as_ref();
+            let serial = cert
+                .serial_number()
+                .to_bn()
+                .map_err(|error| format!("failed to normalize X.509 serial number: {error}"))?
+                .to_vec();
+            let tbs = parsed.tbs_certificate.as_ref();
+
+            let mut sha256 = Sha256::new();
+            sha256.update(tbs);
+            let mut sha384 = Sha384::new();
+            sha384.update(tbs);
+            let mut sha512 = Sha512::new();
+            sha512.update(tbs);
+
+            certs.push((
+                cert,
+                *blake3::hash(&der).as_bytes(),
+                *blake3::hash(issuer).as_bytes(),
+                *blake3::hash(&serial).as_bytes(),
+                sha256.finalize().into(),
+                sha384.finalize().into(),
+                sha512.finalize().into(),
+            ));
+        }
+
+        let mut chain_indices = std::collections::BTreeSet::new();
+        for signer in signers.iter() {
+            let signer_der = signer
+                .to_der()
+                .map_err(|error| format!("failed to serialize signer certificate: {error}"))?;
+            let signer_digest = *blake3::hash(&signer_der).as_bytes();
+            let Some(mut current_index) = certs
+                .iter()
+                .position(|(_, digest, ..)| *digest == signer_digest)
+            else {
+                return Err(format!(
+                    "PKCS#7 signer certificate for signature {signature_index} is absent from the embedded certificate set"
+                ));
+            };
+
+            loop {
+                if !chain_indices.insert(current_index) {
+                    break;
+                }
+
+                let current = certs[current_index].0;
+                let mut parent_candidates = Vec::new();
+                for (candidate_index, candidate) in certs.iter().enumerate() {
+                    if candidate_index == current_index {
+                        continue;
+                    }
+                    if candidate
+                        .0
+                        .subject_name()
+                        .try_cmp(current.issuer_name())
+                        .map_err(|error| format!("failed to compare X.509 issuer/subject names: {error}"))?
+                        != std::cmp::Ordering::Equal
+                    {
+                        continue;
+                    }
+                    let public_key = candidate
+                        .0
+                        .public_key()
+                        .map_err(|error| format!("failed to extract parent certificate public key: {error}"))?;
+                    let signed_by_parent = current
+                        .verify(&public_key)
+                        .map_err(|error| format!("failed to verify X.509 chain link: {error}"))?;
+                    if signed_by_parent {
+                        parent_candidates.push(candidate_index);
+                    }
+                }
+
+                match parent_candidates.as_slice() {
+                    [] => break,
+                    [only] => current_index = *only,
+                    _ => {
+                        return Err(format!(
+                            "PKCS#7 signature {signature_index} has ambiguous certificate-chain parentage"
+                        ))
+                    }
+                }
+            }
+        }
+
+        for (certificate_index, (_, certificate_blake3, issuer_blake3, serial_blake3, tbs_sha256, tbs_sha384, tbs_sha512)) in
+            certs.iter().enumerate()
+        {
+            output.push(X509ChainCertificateEvidence {
+                signature_index: signature_index as u32,
+                certificate_index: certificate_index as u32,
+                certificate_blake3: *certificate_blake3,
+                issuer_blake3: *issuer_blake3,
+                serial_blake3: *serial_blake3,
+                tbs_sha256: *tbs_sha256,
+                tbs_sha384: *tbs_sha384,
+                tbs_sha512: *tbs_sha512,
+                is_signer: signer_digests.contains(certificate_blake3),
+                is_chain_member: chain_indices.contains(&certificate_index),
+            });
+        }
+    }
+
+    Ok(output)
 }
 
 pub fn require_signature_table_image(
@@ -530,4 +712,73 @@ mod tests {
         assert!(require_signature_table_image(&evidence, &other).is_err());
         assert!(require_signature_table_image(&evidence, &evidence.image_blake3).is_ok());
     }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn pkcs7_fixture_extracts_signer_chain_identity() {
+        use openssl::hash::MessageDigest;
+        use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::stack::Stack;
+        use openssl::x509::{X509Builder, X509NameBuilder};
+
+        let rsa = Rsa::generate(2048).expect("test RSA key");
+        let key = PKey::from_rsa(rsa).expect("test private key");
+
+        let mut name = X509NameBuilder::new().expect("name builder");
+        name.append_entry_by_text("CN", "Nixward PKCS7 Fixture")
+            .expect("CN");
+        let name = name.build();
+
+        let mut builder = X509Builder::new().expect("certificate builder");
+        builder.set_version(2).expect("version");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_pubkey(&key).expect("public key");
+
+        let serial = openssl::asn1::Asn1Integer::from_bn(
+            &openssl::bn::BigNum::from_u32(7).expect("serial"),
+        )
+        .expect("serial number");
+        builder.set_serial_number(&serial).expect("serial number");
+        builder
+            .sign(&key, MessageDigest::sha256())
+            .expect("certificate signature");
+        let certificate = builder.build();
+
+        let certificates = Stack::new().expect("certificate stack");
+        let pkcs7 = Pkcs7::sign(
+            &certificate,
+            &key,
+            &certificates,
+            b"nixward-chain-fixture",
+            Pkcs7Flags::BINARY,
+        )
+        .expect("PKCS7 signing");
+        let payload = pkcs7.to_der().expect("PKCS7 DER");
+        let image = pe_with_certificate(0x0002, &payload);
+
+        let evidence = inspect_x509_signature_chains(&image).expect("chain evidence");
+        assert!(!evidence.is_empty());
+        assert_eq!(
+            evidence.iter().filter(|certificate| certificate.is_signer).count(),
+            1
+        );
+        assert_eq!(
+            evidence
+                .iter()
+                .filter(|certificate| certificate.is_chain_member)
+                .count(),
+            1
+        );
+        assert_eq!(
+            evidence
+                .iter()
+                .find(|certificate| certificate.is_signer)
+                .map(|certificate| certificate.certificate_blake3),
+            Some(*blake3::hash(&certificate.to_der().expect("certificate DER")).as_bytes())
+        );
+    }
+
 }
