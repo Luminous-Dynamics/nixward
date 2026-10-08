@@ -3515,6 +3515,71 @@ mod tests {
         assert_eq!(tx.phase(), ConfigTransactionPhase::RecoveryRequired);
     }
 
+    fn worker_launch_intent_for_test(transaction_id: &str, purpose: ActivationWorkerPurpose) -> WorkerLaunchIntent {
+        WorkerLaunchIntent {
+            transaction_id: transaction_id.to_string(),
+            purpose,
+            executable: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/bin/switch-to-configuration".into(),
+            argv_digest: digest_hex(&[6; 32]),
+        }
+    }
+
+    #[test]
+    fn worker_launch_intent_must_be_durable_before_identity() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        assert_eq!(tx.pending_worker_launch(), Some(&intent));
+        assert!(tx.prepare_worker_launch(intent.clone()).is_err());
+
+        let mut identity = worker_identity_for_test(tx.transaction_id());
+        identity.purpose = ActivationWorkerPurpose::Activation;
+        assert!(tx.bind_activation_worker_identity(identity.clone()).is_ok());
+        assert!(tx.pending_worker_launch().is_none());
+        assert_eq!(tx.activation_worker_identities(), &[identity]);
+    }
+
+    #[test]
+    fn worker_spawn_error_can_cancel_only_the_matching_intent() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        assert!(tx.cancel_worker_launch_after_spawn_error(
+            ActivationWorkerPurpose::Recovery,
+            &intent.executable,
+            &intent.argv_digest,
+        ).is_err());
+        assert_eq!(tx.pending_worker_launch(), Some(&intent));
+        tx.cancel_worker_launch_after_spawn_error(
+            ActivationWorkerPurpose::Activation,
+            &intent.executable,
+            &intent.argv_digest,
+        ).unwrap();
+        assert!(tx.pending_worker_launch().is_none());
+    }
+
+    #[test]
+    fn journal_restart_preserves_unresolved_worker_launch_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let source_digest = decode_digest(&source.root_digest).unwrap();
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], source_digest);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        tx.frozen_source = Some(source);
+        let intent = worker_launch_intent_for_test(tx.transaction_id(), ActivationWorkerPurpose::Activation);
+        tx.prepare_worker_launch(intent.clone()).unwrap();
+        let journal = dir.path().join("transaction.json");
+        tx.persist_atomic(&journal).unwrap();
+        let loaded = ConfigTransaction::load(&journal).unwrap();
+        assert_eq!(loaded.pending_worker_launch(), Some(&intent));
+        assert!(loaded.activation_worker_identities().is_empty());
+    }
+
     #[test]
     fn transaction_graph_rejects_phase_skip() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
