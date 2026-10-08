@@ -20,7 +20,7 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | Secure Boot firmware state | exact UEFI policy variables | `SecureBoot` + `SetupMode` raw observations | Implemented |
 | firmware trust databases | exact `db`/`dbx` payloads | raw EFI variable digests | Implemented; authorization mapping remains open |
 | PE signature table | exact UKI image | certificate-table offset/size/type/revision/payload digests | Implemented |
-| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, image-stability recheck | Implemented |
+| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, image-stability recheck | Implemented; live surface additionally requires enabled/stable firmware policy |
 | Secure Boot signer authorization | exact signer + firmware policy | embedded X.509 chain identity + cryptographically verified `db` anchor identity + `dbx` image/chain vetoes + zero-time TBS hard veto | Partially implemented — Issue #17; timestamp semantics open |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
@@ -44,6 +44,7 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 13. An X.509 `dbx` certificate veto is valid only when the stored certificate identity matches a certificate in the exact signing chain.
 14. A TBS-hash `dbx` record remains non-vetoing until its EFI_TIME/timestamp semantics are evaluated.
 15. A `db` trust anchor is not eligible to authorize the image until the exact image cryptographically verifies to that anchor; that verified anchor is then subject to the same `dbx` chain rules.
+16. A live Secure Boot verification cannot qualify while firmware policy is Disabled, SetupMode, Unknown, or changed during the verification window.
 9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
 10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
 
