@@ -2764,13 +2764,34 @@ impl NixOSExecutor {
                 }
             }
             super::config_transaction::ConfigTransactionPhase::IndeterminateActivation => {
-                let _ = transaction.advance(
+                if let Err(reason) = transaction.advance(
                     super::config_transaction::ConfigTransactionPhase::RecoveryObservation,
-                );
-                let _ = transaction.advance(
+                ) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("could not enter recovery observation: {reason}"),
+                        rollback_error: None,
+                    };
+                }
+                if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: reason,
+                        rollback_error: Some("indeterminate activation phase remains the last durable journal state".into()),
+                    };
+                }
+                if let Err(reason) = transaction.advance(
                     super::config_transaction::ConfigTransactionPhase::RecoveryRequired,
-                );
-                let _ = Self::persist_transaction(&transaction, &journal_path);
+                ) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("could not enter RecoveryRequired: {reason}"),
+                        rollback_error: None,
+                    };
+                }
+                if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                    return ExecutionResult::FailedNoRollback {
+                        error: reason,
+                        rollback_error: Some("RecoveryObservation remains the last durable journal state".into()),
+                    };
+                }
                 ExecutionResult::FailedNoRollback {
                     error: format!(
                         "exact activation did not prove the authorized candidate post-state; transaction is RecoveryRequired (runtime={runtime:?}, profile={profile:?}, process={status:?})"
