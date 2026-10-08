@@ -23,6 +23,7 @@ pub mod gc_manager;
 pub mod generation_manager;
 pub mod phi_gate;
 pub mod plan_executor;
+pub mod profile_transition;
 pub mod service_manager;
 pub mod system_transaction;
 
