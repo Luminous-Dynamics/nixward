@@ -996,9 +996,6 @@ impl SourceRealizationLease {
     }
 
     fn validate_identity(&self) -> Result<(), String> {
-        if !installable_selector_is_valid(&self.installable) {
-            return Err("candidate build installable is invalid".into());
-        }
         if decode_digest(&self.source_digest).is_err() {
             return Err("source realization source digest is invalid".into());
         }
@@ -1472,6 +1469,9 @@ impl CandidateBuildReceipt {
     }
 
     fn validate_identity(&self) -> Result<(), String> {
+        if !installable_selector_is_valid(&self.installable) {
+            return Err("candidate build installable is invalid".into());
+        }
         if decode_digest(&self.source_digest).is_err() {
             return Err("candidate build source digest is invalid".into());
         }
