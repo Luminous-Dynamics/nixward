@@ -46,6 +46,7 @@ pub use config_transaction::{
     ActivationDisposition, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
     ProfileTransitionDisposition, RecoveryObservation, SourceEntryKind, SourceManifestEntry,
     SourceRealizationLease, SourceRealizationLeaseState, classify_activation_post_state,
+    NixSourceRealizer,
 };
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
