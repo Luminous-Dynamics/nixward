@@ -119,6 +119,8 @@ impl ConfigPatch {
 pub struct ConfigWriter {
     /// Root directory for NixOS config (default: /etc/nixos).
     config_root: PathBuf,
+    /// Durable Nixward coordination state. Must remain outside the frozen source tree.
+    state_root: PathBuf,
     /// Whether to validate syntax before writing.
     validate: bool,
     /// Dry-run mode: produce patches without writing.
@@ -133,6 +135,7 @@ impl ConfigWriter {
     pub fn new() -> Self {
         Self {
             config_root: PathBuf::from("/etc/nixos"),
+            state_root: PathBuf::from("/var/lib/nixward"),
             validate: true,
             dry_run: false,
             machine_binding_override: None,
@@ -151,6 +154,13 @@ impl ConfigWriter {
     /// primitive. A git backup is an independent history mechanism and cannot
     /// participate in the NixOS activation transaction.
     pub fn with_git_backup(self, _enabled: bool) -> Self {
+        self
+    }
+
+    /// Set the durable Nixward coordination state root.
+    /// This path is intentionally outside the Nix source tree.
+    pub fn with_state_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.state_root = root.into();
         self
     }
 
@@ -1203,10 +1213,7 @@ mod tests {
     // rather than fail the whole matrix on an environment gap unrelated to
     // the code under test.
     fn nix_instantiate_available() -> bool {
-        Command::new("nix-instantiate")
-            .arg("--version")
-            .output()
-            .is_ok()
+        Path::new("/run/current-system/sw/bin/nix-instantiate").exists()
     }
 
     fn setup_temp_config_live(
@@ -1225,6 +1232,7 @@ mod tests {
         fs::write(dir.path().join("configuration.nix"), content).unwrap();
         let writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(git_backup)
             .with_dry_run(false);
         Some((dir, writer))
