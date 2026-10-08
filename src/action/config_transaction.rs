@@ -1593,6 +1593,7 @@ impl NixCandidateBuilder {
                 "--no-link",
                 "--print-out-paths",
                 "--no-update-lock-file",
+                "--no-write-lock-file",
             ])
             .arg(&installable)
             .stdout(std::process::Stdio::piped())
@@ -1655,7 +1656,20 @@ impl NixCandidateBuilder {
         #[cfg(not(unix))]
         return Err("candidate retention is unsupported on this platform".into());
 
-        receipt.verify_retention()?;
+        if let Err(verify_error) = receipt.verify_retention() {
+            let cleanup = cleanup_gc_root_if_target_matches(
+                &receipt.gc_root_path,
+                &receipt.candidate_store_path,
+            );
+            return Err(match cleanup {
+                Ok(()) => format!(
+                    "candidate retention verification failed; matching root was removed: {verify_error}"
+                ),
+                Err(cleanup_error) => format!(
+                    "candidate retention verification failed: {verify_error}; cleanup also failed or was refused: {cleanup_error}"
+                ),
+            });
+        }
         Ok(receipt)
     }
 
