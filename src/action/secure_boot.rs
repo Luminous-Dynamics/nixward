@@ -353,14 +353,25 @@ pub fn match_secure_boot_databases(
     let db_records = parse_signature_database(db_payload)?;
     let dbx_records = parse_signature_database(dbx_payload)?;
     let signer_digest = signer_certificate_der.map(|bytes| *blake3::hash(bytes).as_bytes());
-    let matched_dbx_tbs_revocation_time = dbx_records.iter().find_map(|record| {
-        let hash = record.certificate_tbs_hash.as_ref()?;
-        if signer_certificate_tbs_hashes.iter().any(|candidate| candidate == hash) {
-            record.revocation_time
-        } else {
-            None
+    let mut matched_dbx_tbs_revocation_time = None;
+    for record in &dbx_records {
+        let Some(hash) = record.certificate_tbs_hash.as_ref() else {
+            continue;
+        };
+        if !signer_certificate_tbs_hashes
+            .iter()
+            .any(|candidate| candidate == hash)
+        {
+            continue;
         }
-    });
+        if record.revocation_time == Some([0; 16]) {
+            matched_dbx_tbs_revocation_time = record.revocation_time;
+            break;
+        }
+        if matched_dbx_tbs_revocation_time.is_none() {
+            matched_dbx_tbs_revocation_time = record.revocation_time;
+        }
+    }
     Ok(SignatureDatabaseMatchEvidence {
         direct_db_authenticode_hash_match: db_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
         direct_dbx_authenticode_hash_match: dbx_records.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)),
@@ -1375,6 +1386,7 @@ mod tests {
             exact_certificate_in_dbx: true,
             exact_certificate_tbs_hash_in_db: false,
             exact_certificate_tbs_hash_in_dbx: false,
+            matched_dbx_tbs_revocation_time: None,
             certificate_chain_authorization: None,
             observed_at_ms: None,
             evidence_digest: None,
