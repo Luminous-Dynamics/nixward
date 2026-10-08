@@ -120,7 +120,7 @@ jobs:
     # A skipped bootstrap is expected for pull_request and main pushes. GitHub
     # otherwise skips dependent jobs too; always() preserves the fail-closed
     # qualification decision instead of silently producing a skipped check.
-    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -138,6 +138,12 @@ jobs:
           name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
           path: .
 
+      - name: Require trusted repository PR
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${${{ github.event.pull_request.head.repo.full_name }}}" = "${${{ github.repository }}}"
       - name: Assert exact validation subject
         shell: bash
         run: |
@@ -265,6 +271,12 @@ jobs:
           name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
           path: .
 
+      - name: Require trusted repository PR
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${${{ github.event.pull_request.head.repo.full_name }}}" = "${${{ github.repository }}}"
       - name: Assert exact validation subject
         shell: bash
         run: |
