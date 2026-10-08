@@ -9,6 +9,12 @@ on:
     branches:
       - main
 
+# Keep only the newest qualification subject for each PR, while allowing the
+# hardening branch's lockfile bootstrap to converge independently.
+concurrency:
+  group: standalone-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -136,7 +142,9 @@ jobs:
     # A skipped bootstrap is expected for pull_request and main pushes. GitHub
     # otherwise skips dependent jobs too; always() preserves the fail-closed
     # qualification decision instead of silently producing a skipped check.
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
+    # Hardening-branch pushes exist only to converge the committed lockfile.
+    # Qualification itself is the PR exact-head surface (or main after merge).
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -269,7 +277,9 @@ jobs:
     concurrency:
       group: standalone-nix-${{ github.ref }}
       cancel-in-progress: true
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
+    # Hardening-branch pushes exist only to converge the committed lockfile.
+    # Qualification itself is the PR exact-head surface (or main after merge).
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
