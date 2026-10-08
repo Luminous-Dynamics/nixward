@@ -590,7 +590,7 @@ pub fn verify_image_against_db_certificates(
     let image = std::fs::read(image_path)
         .map_err(|error| format!("failed to read UKI {}: {error}", image_path.display()))?;
     let image_blake3 = *blake3::hash(&image).as_bytes();
-    let image_authenticode_sha256: [u8; 32] = sha2::Sha256::digest(&image).into();
+    let image_authenticode_sha256 = super::secure_boot_signature::authenticode_sha256(&image)?;
     let db = parse_signature_database(db_payload)?;
     let dbx = parse_signature_database(dbx_payload)?;
     if dbx.iter().any(|record| record.image_authenticode_sha256 == Some(image_authenticode_sha256)) {
