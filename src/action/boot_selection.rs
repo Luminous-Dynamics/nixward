@@ -476,8 +476,8 @@ pub fn observe_boot_selection_for_candidate(
 }
 
 #[cfg(feature = "native")]
-fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> {
-    let candidates = [
+fn candidate_grub_roots(preferred_root: Option<&Path>) -> Vec<PathBuf> {
+    let defaults = [
         PathBuf::from("/boot/grub"),
         PathBuf::from("/boot/efi/grub"),
         PathBuf::from("/efi/grub"),
@@ -485,13 +485,17 @@ fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> 
     let mut candidates = preferred_root
         .into_iter()
         .map(Path::to_path_buf)
-        .chain(candidates)
+        .chain(defaults)
         .collect::<Vec<_>>();
     candidates.sort();
     candidates.dedup();
+    candidates
+}
 
+#[cfg(feature = "native")]
+fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> {
     let mut matches = Vec::new();
-    for root in candidates {
+    for root in candidate_grub_roots(preferred_root) {
         match std::fs::symlink_metadata(&root) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!("refusing symlinked GRUB root {}", root.display()));
@@ -500,10 +504,7 @@ fn discover_grub_root(preferred_root: Option<&Path>) -> Result<PathBuf, String> 
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                return Err(format!(
-                    "failed to inspect GRUB root {}: {error}",
-                    root.display()
-                ));
+                return Err(format!("failed to inspect GRUB root {}: {error}", root.display()));
             }
         }
         let cfg = root.join("grub.cfg");
@@ -1166,11 +1167,13 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parse_grub_config_default("set timeout=5\n"), None);
     }
 
+    #[cfg(feature = "native")]
     #[test]
-    fn grub_root_preference_is_covered_by_path_contract() {
-        let root = PathBuf::from("/boot-custom");
-        let candidates = [root.clone(), PathBuf::from("/boot/grub")];
-        assert!(candidates.iter().any(|candidate| candidate == &root));
+    fn grub_root_preference_is_first_and_deduplicated() {
+        let preferred = PathBuf::from("/boot-custom");
+        let candidates = candidate_grub_roots(Some(&preferred));
+        assert_eq!(candidates.first(), Some(&preferred));
+        assert_eq!(candidates.iter().filter(|p| *p == &preferred).count(), 1);
     }
     #[test]
     fn selected_non_nixos_grub_entry_is_unbound() {
