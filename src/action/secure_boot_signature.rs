@@ -136,8 +136,13 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     let cert_end = cert_table_offset
         .checked_add(cert_table_size)
         .ok_or_else(|| "PE certificate table range overflows".to_string())?;
-    if cert_table_size != 0 && (cert_table_offset == 0 || cert_end > image.len()) {
-        return Err("PE certificate table lies outside the image".into());
+    if cert_table_size != 0 {
+        if cert_table_offset == 0 || cert_end > image.len() {
+            return Err("PE certificate table lies outside the image".into());
+        }
+        if cert_table_offset < size_of_headers {
+            return Err("PE certificate table overlaps PE headers".into());
+        }
     }
 
     let section_table = optional_end;
@@ -821,6 +826,15 @@ mod tests {
         image[cert_offset + 8] ^= 0xff;
         let after_certificate = authenticode_sha256(&image).expect("authenticode hash");
         assert_eq!(before, after_certificate);
+    }
+
+    #[test]
+    fn authenticode_hash_rejects_certificate_table_in_headers() {
+        let mut image = pe_with_certificate(0x0002, b"signed-payload");
+        let optional = 0x40usize + 24;
+        let cert_dir = optional + 144;
+        image[cert_dir..cert_dir + 4].copy_from_slice(&0x180u32.to_le_bytes());
+        assert!(authenticode_sha256(&image).is_err());
     }
 
     #[test]
