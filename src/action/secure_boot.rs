@@ -1339,6 +1339,52 @@ mod tests {
         assert_ne!(first.evidence_digest, second.evidence_digest);
     }
     #[test]
+    fn unsupported_dbx_rule_dominates_potential_tbs_revocation() {
+        let evidence = SignatureDatabaseMatchEvidence {
+            db_records: Vec::new(),
+            dbx_records: vec![
+                SignatureDatabaseRecord {
+                    kind: SignatureListKind::X509TbsSha256,
+                    signature_size: 64,
+                    signature_data_blake3: [0; 32],
+                    owner: [0; 16],
+                    image_authenticode_sha256: None,
+                    certificate_der_blake3: None,
+                    certificate_der: None,
+                    certificate_tbs_hash: Some(vec![1; 32]),
+                    revocation_time: Some([2; 16]),
+                },
+                SignatureDatabaseRecord {
+                    kind: SignatureListKind::Unsupported,
+                    signature_size: 16,
+                    signature_data_blake3: [0; 32],
+                    owner: [0; 16],
+                    image_authenticode_sha256: None,
+                    certificate_der_blake3: None,
+                    certificate_der: None,
+                    certificate_tbs_hash: None,
+                    revocation_time: None,
+                },
+            ],
+            image_authenticode_sha256: [3; 32],
+            direct_db_authenticode_hash_match: false,
+            direct_dbx_authenticode_hash_match: false,
+            exact_certificate_in_db: false,
+            exact_certificate_in_dbx: false,
+            exact_certificate_tbs_hash_in_db: false,
+            exact_certificate_tbs_hash_in_dbx: true,
+            certificate_chain_authorization: None,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::PotentialX509TbsRevocation
+        );
+    }
+
+    #[test]
     fn evidence_digest_binds_secure_boot_state() {
         let first = build_secure_boot_evidence(Some(true), Some(false))
             .with_observation_metadata(100)
