@@ -263,6 +263,16 @@ fn nix_normalized_mode(kind: &SourceEntryKind, source_mode: u32) -> u32 {
     }
 }
 
+fn installable_selector_is_valid(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(".#") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
 fn manifest_relative_path(path: &Path) -> Result<String, String> {
     let value = path
         .to_str()
@@ -928,14 +938,18 @@ impl NixSourceRealizer {
         let store_path = Self::parse_store_path(&stdout)?;
 
 
-        source.verify_realization_at(&store_path)?;
-
         let gc_root_path = format!(
             "/nix/var/nix/gcroots/nixward/{transaction_id}",
         );
         let mut lease = SourceRealizationLease::new(source, store_path, gc_root_path)?;
-        lease.establish_root()?;
-        lease.verify_source_realization(source)?;
+        if let Err(error) = lease.establish_root() {
+            return Err(error);
+        }
+        if let Err(error) = lease.verify_source_realization(source) {
+            let _ = lease.release_root();
+            return Err(error);
+        }
+        lease.verify_rooted()?;
         Ok(lease)
     }
 }
@@ -982,6 +996,9 @@ impl SourceRealizationLease {
     }
 
     fn validate_identity(&self) -> Result<(), String> {
+        if !installable_selector_is_valid(&self.installable) {
+            return Err("candidate build installable is invalid".into());
+        }
         if decode_digest(&self.source_digest).is_err() {
             return Err("source realization source digest is invalid".into());
         }
@@ -1343,6 +1360,7 @@ impl NixCandidateBuilder {
             return Err("candidate build realization-plan digest is invalid".into());
         }
 
+        let installable_selector = installable.to_string();
         let installable = Self::exact_installable(&lease.store_path, installable)?;
 
         let output = std::process::Command::new(&self.nix_executable)
@@ -1390,6 +1408,7 @@ impl NixCandidateBuilder {
         CandidateBuildReceipt::new(
             source,
             lease.store_path.clone(),
+            installable_selector,
             candidate_store_path,
             realization_plan_digest.to_string(),
         )
@@ -1411,6 +1430,7 @@ impl NixCandidateBuilder {
 pub struct CandidateBuildReceipt {
     pub source_digest: String,
     pub source_store_path: String,
+    pub installable: String,
     pub candidate_store_path: String,
     pub realization_plan_digest: String,
 }
@@ -1419,12 +1439,17 @@ impl CandidateBuildReceipt {
     pub fn new(
         source: &FrozenConfigSource,
         source_store_path: impl Into<String>,
+        installable: impl Into<String>,
         candidate_store_path: impl Into<String>,
         realization_plan_digest: impl Into<String>,
     ) -> Result<Self, String> {
         let source_store_path = source_store_path.into();
+        let installable = installable.into();
         let candidate_store_path = candidate_store_path.into();
         let realization_plan_digest = realization_plan_digest.into();
+        if !installable_selector_is_valid(&installable) {
+            return Err("candidate build installable is not an exact .# selector".into());
+        }
         if !super::execution_intent::is_valid_nix_store_path(&source_store_path) {
             return Err("candidate build source is not a canonical immutable Nix store path".into());
         }
@@ -1440,6 +1465,7 @@ impl CandidateBuildReceipt {
         Ok(Self {
             source_digest: source.root_digest.clone(),
             source_store_path,
+            installable,
             candidate_store_path,
             realization_plan_digest,
         })
@@ -2654,6 +2680,8 @@ mod tests {
             source_digest: digest_hex(&[3; 32]),
             source_store_path:
                 "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward-frozen-config".into(),
+            installable:
+                ".#nixosConfigurations.test.config.system.build.toplevel".into(),
             candidate_store_path:
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test".into(),
             realization_plan_digest: digest_hex(&[4; 32]),
@@ -2872,6 +2900,7 @@ mod tests {
         assert!(CandidateBuildReceipt::new(
             &source,
             path,
+            ".#nixosConfigurations.test.config.system.build.toplevel",
             path,
             "0000000000000000000000000000000000000000000000000000000000000001",
         )
