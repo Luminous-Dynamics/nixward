@@ -391,7 +391,6 @@ impl FrozenConfigSource {
         dir: &mut nix::dir::Dir,
     ) -> Result<Vec<std::ffi::CString>, String> {
         use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
 
         let mut names = Vec::new();
         for result in dir.iter() {
