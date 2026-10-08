@@ -1118,7 +1118,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     #[test]
     fn malformed_systemd_default_directive_is_ignored() {
         assert_eq!(parse_systemd_loader_default("defaults candidate\n"), None);
-        assert_eq!(parse_systemd_loader_default("default candidate trailing\n").as_deref(), Some("candidate"));
+        assert_eq!(parse_systemd_loader_default("default candidate trailing\n"), None);
     }
     #[test]
     fn systemd_pattern_default_is_unknown() {
@@ -1205,7 +1205,12 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     fn grub_config_default_is_parsed_read_only() {
         assert_eq!(parse_grub_config_default("set timeout=5\nset default=0\n"), Some("0".into()));
         assert_eq!(
-            parse_grub_config_default("if [ \"${next_entry}\" ]; then\\nset default=\"${next_entry}\"\\nelse\\nset default=\"${saved_entry}\"\\nfi\\n"),
+            parse_grub_config_default(r#"if [ "${next_entry}" ]; then
+set default="${next_entry}"
+else
+set default="${saved_entry}"
+fi
+"#),
             Some("${saved_entry}".into()),
         );
         assert_eq!(parse_grub_config_default("set default=\"${saved_entry}\"\n"), Some("${saved_entry}".into()));
