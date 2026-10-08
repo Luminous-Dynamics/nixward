@@ -3486,6 +3486,17 @@ mod tests {
         wrong_executable.executable = "/usr/bin/switch-to-configuration".into();
         assert!(wrong_executable.validate_identity().is_err());
 
+        let mut traversing_executable = identity.clone();
+        traversing_executable.executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/../../tmp/evil".into();
+        assert!(traversing_executable.validate_identity().is_err());
+
+        let mut traversing_intent = worker_launch_intent_for_test(
+            &tx.transaction_id,
+            ActivationWorkerPurpose::Activation,
+        );
+        traversing_intent.executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test/../../tmp/evil".into();
+        assert!(traversing_intent.validate_identity().is_err());
+
         let mut wrong_digest = identity;
         wrong_digest.argv_digest = "invalid".into();
         assert!(wrong_digest.validate_identity().is_err());
