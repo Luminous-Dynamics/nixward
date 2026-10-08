@@ -1239,9 +1239,12 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    fn activation_argv_digest(args: &[String]) -> String {
+    fn activation_argv_digest(executable: &str, args: &[String]) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V1\0");
+        hasher.update(b"NIXWARD_EXECUTABLE_ARGV_TUPLE_V2\0");
+        hasher.update(&(executable.len() as u64).to_le_bytes());
+        hasher.update(executable.as_bytes());
+        hasher.update(&(args.len() as u64).to_le_bytes());
         for argument in args {
             hasher.update(&(argument.len() as u64).to_le_bytes());
             hasher.update(argument.as_bytes());
@@ -1331,7 +1334,7 @@ impl NixOSExecutor {
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let argv_digest = Self::activation_argv_digest(args);
+            let argv_digest = Self::activation_argv_digest(executable, args);
             let intent = super::config_transaction::WorkerLaunchIntent {
                 transaction_id: transaction_id.clone(),
                 purpose,
