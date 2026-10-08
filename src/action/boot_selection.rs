@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "native")]
 use super::uki_evidence::{inspect_uki_file, resolve_boot_artifact_path};
 #[cfg(feature = "native")]
 use std::process::Command;
