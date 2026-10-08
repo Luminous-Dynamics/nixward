@@ -911,6 +911,83 @@ impl SourceRealizationLease {
         Ok(())
     }
 
+    /// Establish the dedicated GC root and only mark the lease rooted after
+    /// independently observing that the root resolves to the exact store path.
+    ///
+    /// This is intentionally separate from nix store add: Nix store objects are
+    /// immutable, but materialization alone does not retain the object against GC.
+    /// The lease therefore creates a dedicated root under Nixward's GC-root namespace
+    /// and then verifies the live root target before granting the Rooted state.
+    pub fn establish_root(&mut self) -> Result<(), String> {
+        if self.state != SourceRealizationLeaseState::Pending {
+            return Err("source realization lease is not pending root establishment".into());
+        }
+        self.validate_identity()?;
+        let gc_root = std::path::Path::new(&self.gc_root_path);
+        let namespace = gc_root
+            .parent()
+            .ok_or_else(|| "source GC root has no namespace parent".to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let namespace_dir = options.open(namespace).map_err(|error| {
+                format!(
+                    "failed to securely open source GC-root namespace {}: {error}",
+                    namespace.display()
+                )
+            })?;
+
+            let name = gc_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "source GC root filename is not valid UTF-8".to_string())?;
+            let name = CString::new(name)
+                .map_err(|_| "source GC root filename contains NUL".to_string())?;
+            let target = CString::new(self.store_path.as_str())
+                .map_err(|_| "source store path contains NUL".to_string())?;
+
+            let result = unsafe {
+                nix::libc::symlinkat(
+                    target.as_ptr(),
+                    namespace_dir.as_raw_fd(),
+                    name.as_ptr(),
+                )
+            };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(format!("failed to create source GC root atomically: {error}"));
+                }
+                // Existing roots are not accepted on creation alone; the exact
+                // target is independently re-observed below. This permits crash
+                // recovery without turning a journal record into authority.
+            } else {
+                namespace_dir
+                    .sync_all()
+                    .map_err(|error| format!("failed to persist source GC root: {error}"))?;
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            return Err("source GC-root establishment is unsupported on this platform".into());
+        }
+
+        self.observe_root_target()?;
+        self.state = SourceRealizationLeaseState::Rooted;
+        Ok(())
+    }
     /// Prove the lease is rooted from live GC-root filesystem evidence.
     pub fn prove_rooted(&mut self) -> Result<(), String> {
         if self.state != SourceRealizationLeaseState::Pending {
