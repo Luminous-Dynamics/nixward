@@ -6,14 +6,19 @@ Part of the [Symthaea](https://luminousdynamics.org) cognitive architecture.
 
 ## Standalone qualification status
 
-This repository is undergoing a standalone extraction hardening pass in pull
-request #2. The standalone boundary is **not considered qualified** until the
-exact validated checkout has a completed successful CI run and emits its
-qualification receipt.
+This repository is undergoing a standalone extraction hardening pass. The
+integrated qualification candidate is validated at an exact Git commit, and
+the standalone boundary is **not considered qualified** until that exact
+checkout has a completed successful CI run and emits its qualification
+receipt.
 
-The only cross-repository Rust dependency is `symthaea-core`, pinned to commit
-`77b872fd116c7b6f44fedd82bb8c6100240caa73`. The repository-local boundary
-checker rejects escaping local paths and floating Git branch/tag selectors.
+The only cross-project Rust dependency is `symthaea-core`, currently sourced
+from crates.io at exact version `0.5.1` for the standalone packaging
+experiment. Pull-request qualification generates the exact `Cargo.lock` for
+the candidate head and binds its identity into the qualification receipt;
+post-merge provenance requires that lockfile to be committed on `main`.
+The repository-local boundary checker rejects escaping local paths and
+floating Git branch/tag selectors.
 
 ## System Transaction Architecture
 
