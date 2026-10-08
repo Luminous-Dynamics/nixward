@@ -125,7 +125,7 @@ impl ConfigWriter {
     /// Git commits are deliberately outside the authoritative source mutation
     /// primitive. A git backup is an independent history mechanism and cannot
     /// participate in the NixOS activation transaction.
-        pub fn with_git_backup(self, _enabled: bool) -> Self {
+    pub fn with_git_backup(self, _enabled: bool) -> Self {
         self
     }
 
@@ -553,6 +553,10 @@ impl ConfigWriter {
         temp.sync_all()?;
         drop(temp);
 
+        // Keep the parent directory open across the replacement so the rename
+        // is anchored to the already-authorized directory descriptor.
+        let parent_file = File::open(parent)?;
+
         #[cfg(unix)]
         {
             nix::fcntl::renameat(
@@ -574,8 +578,7 @@ impl ConfigWriter {
             }
         }
 
-        let parent_file = File::open(parent)?;
-
+        parent_file.sync_all()?;
 
         let mut verify_options = OpenOptions::new();
         verify_options.read(true);
@@ -795,6 +798,38 @@ mod tests {
         };
         let result = writer.apply_patch_unchecked(&patch);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_authority_root_rejects_outside_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), SAMPLE_CONFIG).unwrap();
+        std::fs::write(outside.path().join("other.nix"), SAMPLE_CONFIG).unwrap();
+
+        let writer = ConfigWriter::new()
+            .with_config_root(dir.path())
+            .with_dry_run(false)
+            .with_validate(false)
+            .with_machine_binding_override("test-machine".into());
+        let patch = ConfigPatch {
+            target: outside.path().join("other.nix"),
+            original: SAMPLE_CONFIG.to_string(),
+            modified: SAMPLE_CONFIG.replace("firefox", "htop"),
+            description: "outside root".into(),
+        };
+        let machine = MachineBinding::new("test-machine").unwrap();
+        let plan = ChangePlan::config_only(machine, &patch, 60_000).unwrap();
+        let auth =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [3; 32]).unwrap();
+
+        assert!(writer
+            .apply_patch_authorized(&patch, &plan, &auth)
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("other.nix")).unwrap(),
+            SAMPLE_CONFIG
+        );
     }
 
     #[test]

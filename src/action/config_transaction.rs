@@ -9,6 +9,7 @@
 //! immutable source snapshots, and fail-closed classification helpers.
 
 use super::executor::SystemActivation;
+use std::io::Write;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -329,15 +330,15 @@ impl FrozenConfigSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigTransaction {
-    pub schema: String,
-    pub version: u16,
-    pub transaction_id: String,
-    pub source_digest: String,
-    pub candidate_store_path: Option<String>,
-    pub phase: ConfigTransactionPhase,
-    pub process_exit_status: Option<i32>,
-    pub observed_runtime_closure: Option<String>,
-    pub observed_profile_closure: Option<String>,
+    schema: String,
+    version: u16,
+    transaction_id: String,
+    source_digest: String,
+    candidate_store_path: Option<String>,
+    phase: ConfigTransactionPhase,
+    process_exit_status: Option<i32>,
+    observed_runtime_closure: Option<String>,
+    observed_profile_closure: Option<String>,
 }
 
 impl ConfigTransaction {
@@ -362,6 +363,70 @@ impl ConfigTransaction {
             observed_profile_closure: None,
         }
     }
+
+    pub fn phase(&self) -> ConfigTransactionPhase {
+        self.phase
+    }
+
+    pub fn source_digest(&self) -> &str {
+        &self.source_digest
+    }
+
+    pub fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+
+    pub fn candidate_store_path(&self) -> Option<&str> {
+        self.candidate_store_path.as_deref()
+    }
+
+    /// Advance only along the transaction's declared state graph.
+    pub fn advance(&mut self, next: ConfigTransactionPhase) -> Result<(), String> {
+        let allowed = match (self.phase, next) {
+            (ConfigTransactionPhase::Prepared, ConfigTransactionPhase::InputFrozen) => true,
+            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => true,
+            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => true,
+            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ActivationStarted) => true,
+            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::Activated) => true,
+            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::FailedBeforeActivation) => false,
+            (ConfigTransactionPhase::ActivationStarted, ConfigTransactionPhase::IndeterminateActivation) => true,
+            (ConfigTransactionPhase::IndeterminateActivation, ConfigTransactionPhase::RecoveryObservation) => true,
+            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::RecoveryRequired) => true,
+            (ConfigTransactionPhase::RecoveryObservation, ConfigTransactionPhase::Recovered) => true,
+            (ConfigTransactionPhase::RecoveryRequired, ConfigTransactionPhase::Recovered) => true,
+            (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::FailedBeforeActivation) => true,
+            _ => false,
+        };
+        if !allowed {
+            return Err(format!(
+                "illegal config transaction transition: {:?} -> {:?}",
+                self.phase, next
+            ));
+        }
+        self.phase = next;
+        Ok(())
+    }
+
+    pub fn set_candidate_store_path(
+        &mut self,
+        candidate_store_path: impl Into<String>,
+    ) -> Result<(), String> {
+        let path = candidate_store_path.into();
+        if !super::execution_intent::is_valid_nix_store_path(&path) {
+            return Err("candidate store path is not a canonical immutable Nix store path".into());
+        }
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt
+        ) {
+            return Err("candidate store path can only be bound before source commit".into());
+        }
+        self.candidate_store_path = Some(path);
+        Ok(())
+    }
+
     /// Persist the journal record without exposing a partially written JSON object.
     ///
     /// The journal is evidence of transaction intent/state, not an authorization
@@ -387,12 +452,15 @@ impl ConfigTransaction {
         let temp_path = parent.join(temp_name);
 
         {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temp_path)
                 .map_err(|error| format!("failed to create transaction journal candidate: {error}"))?;
-            use std::io::Write;
             file.write_all(&encoded)
                 .map_err(|error| format!("failed to write transaction journal candidate: {error}"))?;
             file.sync_all()
@@ -415,8 +483,6 @@ impl ConfigTransaction {
         serde_json::from_slice(&encoded)
             .map_err(|error| format!("invalid transaction journal: {error}"))
     }
-
-}
 
 fn decode_digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
@@ -539,6 +605,46 @@ mod tests {
         )
         .unwrap();
         assert!(source.verify_unchanged(dir.path()).is_err());
+    }
+
+    #[test]
+    fn transaction_graph_rejects_phase_skip() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        assert!(transaction.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
+        assert_eq!(transaction.phase(), ConfigTransactionPhase::Prepared);
+        transaction
+            .advance(ConfigTransactionPhase::InputFrozen)
+            .unwrap();
+        transaction
+            .advance(ConfigTransactionPhase::CandidateBuilt)
+            .unwrap();
+        transaction
+            .advance(ConfigTransactionPhase::SourceCommitted)
+            .unwrap();
+        transaction
+            .advance(ConfigTransactionPhase::ActivationStarted)
+            .unwrap();
+        assert!(transaction
+            .advance(ConfigTransactionPhase::FailedBeforeActivation)
+            .is_err());
+    }
+
+    #[test]
+    fn transaction_candidate_identity_requires_immutable_store_path() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction
+            .advance(ConfigTransactionPhase::InputFrozen)
+            .unwrap();
+        assert!(transaction.set_candidate_store_path("/tmp/not-nix").is_err());
+        transaction
+            .set_candidate_store_path(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test",
+            )
+            .unwrap();
+        assert_eq!(
+            transaction.candidate_store_path(),
+            Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test")
+        );
     }
 
     #[test]
