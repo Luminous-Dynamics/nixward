@@ -1756,6 +1756,7 @@ impl CandidateBuildReceipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivationWorkerPurpose {
+    ProfileTransition,
     Activation,
     Recovery,
 }
@@ -2299,6 +2300,9 @@ impl ConfigTransaction {
             return Err("activation worker identity belongs to a different transaction".into());
         }
         match identity.purpose {
+            ActivationWorkerPurpose::ProfileTransition if self.phase != ConfigTransactionPhase::ProfileTransitionStarted => {
+                return Err("profile-transition worker identity requires durable ProfileTransitionStarted".into());
+            }
             ActivationWorkerPurpose::Activation if self.phase != ConfigTransactionPhase::ActivationStarted => {
                 return Err("activation worker identity requires durable ActivationStarted".into());
             }
@@ -2559,13 +2563,15 @@ impl ConfigTransaction {
                 return Err("transaction journal activation worker belongs to a different transaction".into());
             }
             match worker.purpose {
-                ActivationWorkerPurpose::Activation if matches!(transaction.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt | ConfigTransactionPhase::SourceCommitted | ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition) => {
+                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
+                    return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
+                }
+                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
                 ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
-                _ => {}
             }
         }
         if let Some(receipt) = transaction.candidate_build.as_ref() {
