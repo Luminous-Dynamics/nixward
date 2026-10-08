@@ -869,6 +869,9 @@ pub struct ConfigTransaction {
     observed_runtime_closure: Option<String>,
     observed_profile_closure: Option<String>,
     source_realization: Option<SourceRealizationLease>,
+    /// False after journal load until an authoritative recovery observation is refreshed.
+    #[serde(skip)]
+    recovery_observed: bool,
 }
 
 impl ConfigTransaction {
@@ -902,6 +905,7 @@ impl ConfigTransaction {
             observed_runtime_closure: None,
             observed_profile_closure: None,
             source_realization: None,
+            recovery_observed: true,
         }
     }
 
@@ -913,6 +917,11 @@ impl ConfigTransaction {
     pub fn permits_source_rollback(&self) -> bool { self.phase.permits_source_rollback() }
 
     pub fn advance(&mut self, next: ConfigTransactionPhase) -> Result<(), String> {
+        if !self.recovery_observed
+            && !matches!(self.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen)
+        {
+            return Err("loaded transaction requires fresh recovery observation before further execution".into());
+        }
         let allowed = match (self.phase, next) {
             (ConfigTransactionPhase::Prepared, ConfigTransactionPhase::InputFrozen) => true,
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::CandidateBuilt) => {
@@ -999,6 +1008,38 @@ impl ConfigTransaction {
         }
     }
 
+    /// Re-establish execution significance after loading a journal.
+    /// The expected phase is supplied by authoritative execution context, not
+    /// trusted from the journal record itself.
+    pub fn confirm_recovery_observation(
+        &mut self,
+        expected_phase: ConfigTransactionPhase,
+        observed_source_store_path: Option<&str>,
+        observation: &RecoveryObservation,
+    ) -> Result<(), String> {
+        if self.recovery_observed {
+            return Err("recovery observation has already been confirmed".into());
+        }
+        if self.phase != expected_phase {
+            return Err("journal phase does not match authoritative recovery context".into());
+        }
+        if matches!(observation, RecoveryObservation::MixedOrUnknown { .. }) {
+            return Err("mixed or unknown recovery observation cannot restore execution significance".into());
+        }
+        if let Some(realization) = self.source_realization.as_mut() {
+            if realization.state == SourceRealizationLeaseState::Released {
+                return Err("released source realization cannot be re-established from a journal".into());
+            }
+            let observed = observed_source_store_path
+                .ok_or_else(|| "fresh source GC-root observation is required".to_string())?;
+            realization.prove_rooted()?;
+            if observed != realization.store_path {
+                return Err("fresh source realization observation does not match the bound store path".into());
+            }
+        }
+        self.recovery_observed = true;
+        Ok(())
+    }
     pub fn bind_source_realization(
         &mut self,
         realization: SourceRealizationLease,
@@ -1248,14 +1289,17 @@ impl ConfigTransaction {
             if !super::execution_intent::is_valid_nix_store_path(&realization.store_path) {
                 return Err("transaction journal contains an invalid source realization store path".into());
             }
-            let root = std::path::Path::new(&realization.gc_root_path);
-            let namespace = std::path::Path::new("/nix/var/nix/gcroots/nixward");
-            if !root.is_absolute() || !root.starts_with(namespace) || root == namespace {
-                return Err("transaction journal contains an invalid source GC root path".into());
+            SourceRealizationLease::validate_gc_root_path(&realization.gc_root_path)?;
+
+        }
+        let mut transaction = transaction;
+        if let Some(realization) = transaction.source_realization.as_mut() {
+            if realization.state == SourceRealizationLeaseState::Rooted {
+                realization.state = SourceRealizationLeaseState::Pending;
             }
         }
-        Ok(transaction)
-    }
+        transaction.recovery_observed = false;
+        Ok(transaction)    }
 }
 fn decode_digest(value: &str) -> Result<[u8; 32], String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) {
@@ -1730,6 +1774,26 @@ mod tests {
         tx.advance(ConfigTransactionPhase::InputFrozen).unwrap();
         tx.set_candidate_store_path("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test").unwrap();
         assert!(tx.advance(ConfigTransactionPhase::CandidateBuilt).is_err());
+    }
+    #[test]
+    fn journal_load_downgrades_historical_root_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let mut lease = SourceRealizationLease::new(
+            &source,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
+            "/nix/var/nix/gcroots/nixward/txn-001",
+        ).unwrap();
+        // Unit-test the historical state transition without requiring a live GC root.
+        lease.state = SourceRealizationLeaseState::Rooted;
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.source_realization = Some(lease);
+        let path = dir.path().join("transaction.json");
+        tx.persist_atomic(&path).unwrap();
+        let loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.source_realization().unwrap().state, SourceRealizationLeaseState::Pending);
+        assert!(!loaded.recovery_observed);
     }
     #[test]
     fn transaction_candidate_identity_requires_immutable_store_path() {
