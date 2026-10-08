@@ -808,8 +808,8 @@ mod tests {
     #[test]
     fn authenticode_hash_allows_nonmonotonic_raw_offsets_when_rvas_are_ordered() {
         let mut image = pe_with_two_sections_and_overlay();
-        let first_header = 0x130usize;
-        let second_header = 0x158usize;
+        let first_header = 0x148usize;
+        let second_header = 0x170usize;
 
         image[second_header + 20..second_header + 24]
             .copy_from_slice(&0x200u32.to_le_bytes());
