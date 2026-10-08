@@ -19,7 +19,9 @@ use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Stdio;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, OpenOptionsExt};
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -177,6 +179,7 @@ impl HostExecutionPolicy {
 /// observation through profile mutation, activation, verification, and any
 /// bound recovery. It is separate from Nix's own profile lock because Nix
 /// releases its profile lock before the immutable closure is invoked.
+#[derive(Debug)]
 struct NixwardTransactionInterlock {
     file: File,
 }
