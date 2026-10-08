@@ -1036,7 +1036,7 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
             cmd_generations_list(format);
         }
         Some(ObserveDomain::BootSelection) => {
-            match nixward::action::boot_selection::observe_systemd_boot() {
+            match nixward::action::boot_selection::observe_boot_selection() {
                 Ok(evidence) => match format {
                     OutputFormat::Json => {
                         println!(
