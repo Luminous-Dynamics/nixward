@@ -1732,6 +1732,38 @@ mod tests {
         assert!(!dbx_tbs_record_is_always_revoked(&record));
     }
 
+    #[cfg(feature = "native")]
+    #[test]
+    fn evidence_digest_binds_all_dbx_tbs_revocation_times() {
+        let mut first = db_certificate_verification_base_evidence(
+            [1; 32],
+            [2; 32],
+            b"db",
+            b"dbx",
+            &[],
+            &[],
+        );
+        first.dbx_chain_tbs_revocation_times = vec![[1; 16], [2; 16]];
+        let first = first
+            .with_observation_metadata(100)
+            .expect("first evidence");
+
+        let mut second = db_certificate_verification_base_evidence(
+            [1; 32],
+            [2; 32],
+            b"db",
+            b"dbx",
+            &[],
+            &[],
+        );
+        second.dbx_chain_tbs_revocation_times = vec![[1; 16], [3; 16]];
+        let second = second
+            .with_observation_metadata(100)
+            .expect("second evidence");
+
+        assert_ne!(first.evidence_digest, second.evidence_digest);
+    }
+
     #[cfg(all(feature = "native", unix))]
     #[test]
     fn efivar_reader_rejects_symlinks_and_non_regular_files() {
