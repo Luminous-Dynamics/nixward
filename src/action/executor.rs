@@ -1115,6 +1115,15 @@ impl NixOSExecutor {
             // that child has its own activation lock and must acquire it
             // independently.
             Self::set_exact_system_profile(profile_store_path).await?;
+            let observed_profile = GenerationManager::current_system_profile_closure().map_err(|error| {
+                format!("failed to re-observe exact system profile before closure activation: {error}")
+            })?;
+            if observed_profile != *profile_store_path {
+                return Err(format!(
+                    "system profile drifted after exact transition: expected {}, observed {}",
+                    profile_store_path, observed_profile
+                ));
+            }
         }
 
         let (cmd, args) = command.to_command();
@@ -1806,6 +1815,17 @@ mod tests {
         ).is_err());
     }
 
+    #[test]
+    fn exact_profile_drift_message_contains_both_bound_identities() {
+        let expected = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test";
+        let observed = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-foreign";
+        let reason = format!(
+            "system profile drifted after exact transition: expected {}, observed {}",
+            expected, observed
+        );
+        assert!(reason.contains(expected));
+        assert!(reason.contains(observed));
+    }
     #[test]
     fn exact_activation_requires_exact_profile_target() {
         let command = NixOSCommand::ActivateSystemClosure {
