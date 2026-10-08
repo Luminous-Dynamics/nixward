@@ -1783,6 +1783,44 @@ impl ConfigTransaction {
         Ok(())
     }
 
+    /// Enter the explicit recovery domain from any activation/profile-transition
+    /// uncertainty. The observation is recorded before the phase becomes
+    /// RecoveryRequired so the durable journal never claims recovery without
+    /// preserving the evidence that triggered it.
+    pub fn enter_recovery_required(
+        &mut self,
+        observation: &RecoveryObservation,
+    ) -> Result<(), String> {
+        if matches!(observation, RecoveryObservation::MixedOrUnknown { .. }) {
+            return Err("mixed or unknown observation cannot enter recovery".into());
+        }
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::ProfileTransitionStarted
+                | ConfigTransactionPhase::ProfileCommitted
+                | ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired,
+        ) {
+            return Err("transaction is not in a recoverable uncertainty phase".into());
+        }
+        match observation {
+            RecoveryObservation::PredecessorProvenActive { runtime_closure, profile_closure }
+            | RecoveryObservation::CandidateProvenActive { runtime_closure, profile_closure }
+            | RecoveryObservation::BootCandidateProven { runtime_closure, profile_closure } => {
+                self.observed_runtime_closure = Some(runtime_closure.clone());
+                self.observed_profile_closure = Some(profile_closure.clone());
+            }
+            RecoveryObservation::MixedOrUnknown { runtime_closure, profile_closure, .. } => {
+                self.observed_runtime_closure = runtime_closure.clone();
+                self.observed_profile_closure = profile_closure.clone();
+            }
+        }
+        self.phase = ConfigTransactionPhase::RecoveryRequired;
+        Ok(())
+    }
     /// Record recovery post-state and close the transaction only when the exact
     /// authorized predecessor runtime and profile are both observed.
     pub fn record_recovery_post_state(
