@@ -245,6 +245,20 @@ pub struct FrozenConfigSource {
     pub manifest: Vec<SourceManifestEntry>,
 }
 
+fn manifest_relative_path(path: &Path) -> Result<String, String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| format!("source path {} is not valid UTF-8", path.display()))?;
+    #[cfg(unix)]
+    if value.contains('\\') {
+        return Err(format!(
+            "source path {} contains '\\', which is ambiguous in the portable manifest",
+            path.display()
+        ));
+    }
+    Ok(value.replace('\\', "/"))
+}
+
 impl FrozenConfigSource {
     pub fn capture(root: impl AsRef<Path>, entrypoint: impl AsRef<Path>) -> Result<Self, String> {
         let root = root.as_ref().canonicalize().map_err(|error| {
@@ -296,7 +310,7 @@ impl FrozenConfigSource {
         }
         manifest.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
-        let relative_entrypoint_string = relative_entrypoint.to_string_lossy().replace('\\', "/");
+        let relative_entrypoint_string = manifest_relative_path(relative_entrypoint)?;
         if !manifest.iter().any(|entry| {
             entry.relative_path == relative_entrypoint_string
                 && matches!(entry.kind, SourceEntryKind::File)
@@ -320,7 +334,7 @@ impl FrozenConfigSource {
 
         Ok(Self {
             root_digest: digest_hex(hasher.finalize().as_bytes()),
-            entrypoint: relative_entrypoint.to_string_lossy().replace('\\', "/"),
+            entrypoint: manifest_relative_path(relative_entrypoint)?,
             manifest,
         })
     }
@@ -348,7 +362,7 @@ impl FrozenConfigSource {
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| format!("source path {} escaped root", path.display()))?;
-            let relative_path = relative.to_string_lossy().replace('\\', "/");
+            let relative_path = manifest_relative_path(relative)?;
             let metadata = std::fs::symlink_metadata(&path)
                 .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
 
@@ -523,7 +537,7 @@ impl FrozenConfigSource {
                         return Err(format!("source directory {} is not a directory", child_relative.display()));
                     }
 
-                    let relative_path = child_relative.to_string_lossy().replace('\\', "/");
+                    let relative_path = manifest_relative_path(&child_relative)?;
                     let mode = (before.st_mode & 0o7777) as u32;
                     let mut hasher = blake3::Hasher::new();
                     hasher.update(ENTRY_DOMAIN);
@@ -774,24 +788,64 @@ impl SourceRealizationLease {
 
     /// Mark the retention lease rooted only after independent observation proves
     /// that the GC-root path resolves to exactly the bound immutable source store path.
-    pub fn prove_rooted(&mut self, observed_store_path: &str) -> Result<(), String> {
+    /// Prove the lease is rooted by observing the actual GC-root symlink.
+    ///
+    /// Nix treats symlinks under its GC-root namespace as roots of the target
+    /// store path, so the proof is derived from filesystem state rather than a
+    /// caller-provided string claim. citeturn903237search1
+    pub fn prove_rooted(&mut self) -> Result<(), String> {
         if self.state != SourceRealizationLeaseState::Pending {
             return Err("source realization lease is not pending root proof".into());
         }
-        if observed_store_path != self.store_path {
-            return Err("observed source GC root does not resolve to the bound store path".into());
+        self.validate_identity()?;
+
+        let gc_root = std::path::Path::new(&self.gc_root_path);
+        let metadata = std::fs::symlink_metadata(gc_root)
+            .map_err(|error| format!("failed to inspect source GC root: {error}"))?;
+        if !metadata.file_type().is_symlink() {
+            return Err("source GC root exists but is not a symlink".into());
         }
+
+        let target = std::fs::read_link(gc_root)
+            .map_err(|error| format!("failed to read source GC root target: {error}"))?;
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            gc_root
+                .parent()
+                .ok_or_else(|| "source GC root has no parent".to_string())?
+                .join(target)
+        };
+        let resolved = resolved
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve source GC root target: {error}"))?;
+        let expected = std::path::Path::new(&self.store_path);
+        if resolved != expected {
+            return Err("source GC root does not target the bound immutable store path".into());
+        }
+
         self.state = SourceRealizationLeaseState::Rooted;
         Ok(())
     }
+
+    /// Mark the lease released only after independent observation that the GC root is gone.
     pub fn release(&mut self) -> Result<(), String> {
         match self.state {
             SourceRealizationLeaseState::Pending => {
                 Err("cannot release an unrooted source realization lease".into())
             }
             SourceRealizationLeaseState::Rooted => {
-                self.state = SourceRealizationLeaseState::Released;
-                Ok(())
+                let gc_root = std::path::Path::new(&self.gc_root_path);
+                match std::fs::symlink_metadata(gc_root) {
+                    Ok(_) => Err("source GC root still exists; refusing false release".into()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        self.state = SourceRealizationLeaseState::Released;
+                        Ok(())
+                    }
+                    Err(error) => Err(format!(
+                        "failed to inspect source GC root for release: {error}"
+                    )),
+                }
             }
             SourceRealizationLeaseState::Released => {
                 Err("source realization lease already released".into())
@@ -1620,6 +1674,20 @@ mod tests {
         assert!(!lease.is_rooted());
         lease.prove_rooted("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config").unwrap();
         assert!(lease.is_rooted());
+    }
+
+    #[test]
+    fn source_realization_lease_refuses_false_release() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let mut lease = SourceRealizationLease::new(
+            &source,
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config",
+            "/nix/var/nix/gcroots/nixward/txn-001",
+        )
+        .unwrap();
+        assert!(lease.release().is_err());
     }
 
     #[test]
