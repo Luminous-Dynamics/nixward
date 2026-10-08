@@ -1239,7 +1239,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     #[test]
     fn malformed_systemd_default_directive_is_ignored() {
         assert_eq!(parse_systemd_loader_default("defaults candidate\n"), None);
-        assert_eq!(parse_systemd_loader_default("default candidate trailing\n").as_deref(), Some("candidate"));
+        assert_eq!(parse_systemd_loader_default("default candidate trailing\n"), None);
     }
     #[test]
     fn systemd_pattern_default_is_unknown() {
