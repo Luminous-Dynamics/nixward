@@ -1125,7 +1125,7 @@ mod tests {
         );
 
         writer
-            .restore_patch_original_authorized(&patch, &plan, &auth)
+            .restore_patch_original_pre_activation_authorized(&patch, &plan, &auth, ConfigTransactionPhase::SourceCommitted)
             .unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("configuration.nix")).unwrap(),
@@ -1158,7 +1158,7 @@ mod tests {
         )
         .unwrap();
         let error = writer
-            .restore_patch_original_authorized(&patch, &plan, &auth)
+            .restore_patch_original_pre_activation_authorized(&patch, &plan, &auth, ConfigTransactionPhase::SourceCommitted)
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
