@@ -75,7 +75,8 @@
       "entry_id": "kernel-only.conf",
       "entry_text": "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel",
       "expected": {
-        "candidate_closure": null
+        "result": "Unknown",
+        "reason_contains": "does not expose an exact"
       }
     },
     {
@@ -107,6 +108,15 @@
         "selection_kind": "GeneratedDefault",
         "selected_entry_id": "NixOS - Configuration 42",
         "candidate_closure": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
+      }
+    },
+    {
+      "id": "boot-artifact-lookalike-init",
+      "family": "systemd-boot",
+      "entry_id": "lookalike.conf",
+      "entry_text": "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-lookalike-kernel\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux/init\n",
+      "expected": {
+        "candidate_closure": null
       }
     }
   ]
