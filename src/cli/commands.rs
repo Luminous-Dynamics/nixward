@@ -344,6 +344,8 @@ pub enum ObserveDomain {
     SecureBoot,
     /// Raw UEFI Secure Boot db/dbx evidence (read-only).
     SecureBootDatabases,
+    /// Unified Secure Boot state + db/dbx snapshot (read-only).
+    SecureBootSnapshot,
 }
 
 /// Flake subcommands.
