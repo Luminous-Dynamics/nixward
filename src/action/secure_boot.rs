@@ -722,12 +722,12 @@ fn pem_encode_certificate(der: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    fn make_sha256_signature_list(image_hash: [u8; 32]) -> Vec<u8> {
+    fn make_image_hash_signature_list(hash: [u8; 32]) -> Vec<u8> {
         let mut payload = vec![0u8; 28 + 48];
         payload[..16].copy_from_slice(&EFI_CERT_SHA256_GUID);
         payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
         payload[24..28].copy_from_slice(&48u32.to_le_bytes());
-        payload[44..76].copy_from_slice(&image_hash);
+        payload[44..76].copy_from_slice(&hash);
         payload
     }
     #[test]
@@ -744,6 +744,19 @@ mod tests {
             revocation_time: None,
         };
         assert_eq!(records.image_authenticode_sha256, Some([7; 32]));
+    }
+    #[test]
+    fn trust_matcher_subject_is_explicitly_authenticode_hash() {
+        let expected = [0xabu8; 32];
+        let db = make_image_hash_signature_list(expected);
+        let evidence = match_secure_boot_databases(&db, &[], expected, None, &[])
+            .expect("db matcher");
+        assert!(evidence.direct_db_authenticode_hash_match);
+        assert_eq!(evidence.image_authenticode_sha256, expected);
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::AuthorizedByAuthenticodeHash
+        );
     }
     #[test]
     fn parses_sha256_signature_database_records() {
@@ -800,8 +813,8 @@ mod tests {
     #[test]
     fn dbx_image_hash_veto_has_precedence_over_db_authorization() {
         let image_hash = [7u8; 32];
-        let db = make_sha256_signature_list(image_hash);
-        let dbx = make_sha256_signature_list(image_hash);
+        let db = make_image_hash_signature_list(image_hash);
+        let dbx = make_image_hash_signature_list(image_hash);
         let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
@@ -814,7 +827,7 @@ mod tests {
     #[test]
     fn unsupported_dbx_record_prevents_authorization_conclusion() {
         let image_hash = [8u8; 32];
-        let db = make_sha256_signature_list(image_hash);
+        let db = make_image_hash_signature_list(image_hash);
         let mut dbx = vec![0u8; 28 + 16];
         dbx[16..20].copy_from_slice(&(44u32).to_le_bytes());
         dbx[24..28].copy_from_slice(&16u32.to_le_bytes());
@@ -828,7 +841,7 @@ mod tests {
     #[test]
     fn certificate_based_dbx_rules_block_hash_only_authorization() {
         let image_hash = [8u8; 32];
-        let db = make_sha256_signature_list(image_hash);
+        let db = make_image_hash_signature_list(image_hash);
         let mut dbx = vec![0u8; 28 + 17];
         dbx[16..20].copy_from_slice(&(45u32).to_le_bytes());
         dbx[24..28].copy_from_slice(&17u32.to_le_bytes());
@@ -843,7 +856,7 @@ mod tests {
     }
     fn db_image_hash_is_authorizing_only_without_dbx_veto() {
         let image_hash = [8u8; 32];
-        let db = make_sha256_signature_list(image_hash);
+        let db = make_image_hash_signature_list(image_hash);
         let evidence = match_secure_boot_databases(&db, &[], image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
