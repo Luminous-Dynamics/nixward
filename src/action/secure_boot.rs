@@ -2097,7 +2097,7 @@ mod tests {
             .expect("CN");
         let name = name_builder.build();
 
-        let serial_bn = BigNum::from_u32(42).expect("serial");
+        let serial_bn = BigNum::from_u32(128).expect("serial");
         let serial = Asn1Integer::from_bn(&serial_bn).expect("ASN.1 serial");
         let mut builder = X509Builder::new().expect("certificate builder");
         builder.set_version(2).expect("version");
@@ -2123,12 +2123,17 @@ mod tests {
         let tbs_sha256: [u8; 32] = tbs_hasher.finalize().into();
 
         let certificate_digest = *blake3::hash(&der).as_bytes();
+        let (_, parsed_for_serial_test) =
+            x509_parser::parse_x509_certificate(&der).expect("parse serial test certificate");
+        let expected_serial_digest =
+            *blake3::hash(parsed_for_serial_test.tbs_certificate.raw_serial()).as_bytes();
+
         let chain = [super::secure_boot_signature::X509ChainCertificateEvidence {
             signature_index: 0,
             certificate_index: 0,
             certificate_blake3: certificate_digest,
             issuer_blake3,
-            serial_blake3,
+            serial_blake3: expected_serial_digest,
             tbs_sha256,
             tbs_sha384: [0; 48],
             tbs_sha512: [0; 64],
@@ -2159,6 +2164,11 @@ mod tests {
                 record.certificate_der.as_deref().expect("record certificate"),
             )
             .expect("exact anchor identity match")
+        );
+        assert_eq!(
+            chain[0].serial_blake3,
+            expected_serial_digest,
+            "chain serial identity must preserve raw X.509 serial bytes"
         );
 
         let tbs_record = SignatureDatabaseRecord {
