@@ -173,11 +173,25 @@ pub fn resolve_systemd_boot_selection(
     persistent_default: Option<&str>,
     entries: &BTreeMap<String, BlsEntry>,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    resolve_systemd_boot_selection_with_source(
+        one_shot_entry,
+        persistent_default,
+        entries,
+        "efi:LoaderEntryDefault/loader.conf",
+    )
+}
+
+fn resolve_systemd_boot_selection_with_source(
+    one_shot_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    entries: &BTreeMap<String, BlsEntry>,
+    persistent_source: &str,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let (selection_kind, selected, source) = match one_shot_entry {
         Some(id) if !id.is_empty() => (SelectionKind::OneShot, id, "efi:LoaderEntryOneShot"),
         _ => match persistent_default {
             Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
-                (SelectionKind::PersistentDefault, id, "efi:LoaderEntryDefault/loader.conf")
+                (SelectionKind::PersistentDefault, id, persistent_source)
             }
             Some(_) => {
                 return Err(UnknownBootSelection {
@@ -226,6 +240,17 @@ fn resolve_bls_entry_key(selected: &str, entries: &BTreeMap<String, BlsEntry>) -
         Some(entry) => Some(entry.entry_id.clone()),
         None => None,
     }
+}
+
+/// Parse the exact `default` selector from systemd-boot's loader.conf.
+/// Patterns and magic selectors are preserved and are later rejected by the
+/// exact-selection resolver rather than being guessed.
+fn parse_systemd_loader_default(text: &str) -> Option<String> {
+    text.lines().find_map(|raw_line| {
+        let line = raw_line.trim();
+        let value = line.strip_prefix("default")?.trim_start();
+        Some(value.to_string())
+    })
 }
 
 /// Require an observed boot selection to bind to the exact authorized system closure.
@@ -307,8 +332,27 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         bootloader_family: BootloaderFamily::SystemdBoot,
         reason,
     })?;
+    let (persistent_default, persistent_source) = match persistent_default {
+        Some(value) => (Some(value), "efi:LoaderEntryDefault"),
+        None => {
+            let loader_conf = std::fs::read_to_string(boot_path.join("loader/loader.conf"))
+                .map_err(|error| UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::SystemdBoot,
+                    reason: format!("failed to read systemd-boot loader.conf: {error}"),
+                })?;
+            (
+                parse_systemd_loader_default(&loader_conf),
+                "loader.conf:default",
+            )
+        }
+    };
 
-    let evidence = resolve_systemd_boot_selection(one_shot.as_deref(), persistent_default.as_deref(), &entries)?;
+    let evidence = resolve_systemd_boot_selection_with_source(
+        one_shot.as_deref(),
+        persistent_default.as_deref(),
+        &entries,
+        persistent_source,
+    )?;
     if evidence.boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -952,6 +996,13 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
     }
 
+    #[test]
+    fn systemd_loader_conf_default_is_parsed_without_inference() {
+        let exact = parse_systemd_loader_default("timeout 5\ndefault candidate\n");
+        assert_eq!(exact.as_deref(), Some("candidate"));
+        let pattern = parse_systemd_loader_default("default nixos-*\n");
+        assert_eq!(pattern.as_deref(), Some("nixos-*"));
+    }
     #[test]
     fn systemd_pattern_default_is_unknown() {
         let entries = BTreeMap::new();
