@@ -75,6 +75,8 @@ else:
                 errors.append(f"{job_name} job must explicitly reject fork pull requests")
             if "test \"${{ github.event.pull_request.head.repo.full_name }}\" = \"${{ github.repository }}\"" not in body:
                 errors.append(f"{job_name} job must contain an exact PR-head repository equality test")
+            if "github.event_name == 'pull_request' || github.ref == 'refs/heads/main'" not in body:
+                errors.append(f"{job_name} job must not perform qualification on hardening-branch pushes")
 
     for marker in [
         "nixward-cargo-lock-${{ github.event.pull_request.head.sha }}",
