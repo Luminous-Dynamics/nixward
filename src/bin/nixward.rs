@@ -1101,6 +1101,31 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                 Err(reason) => eprintln!("  Secure Boot is Unknown: {reason}"),
             }
         }
+        Some(ObserveDomain::SecureBootSnapshot) => {
+            match nixward::action::secure_boot::observe_secure_boot_snapshot() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => {
+                        println!("{:?}", evidence.state);
+                    }
+                    _ => {
+                        println!("  Secure Boot: {:?}", evidence.state);
+                        println!("  SecureBoot variable: {:?}", evidence.secure_boot_variable);
+                        println!("  SetupMode variable: {:?}", evidence.setup_mode_variable);
+                        println!("  db state: {:?}", evidence.db_state);
+                        println!("  db payload BLAKE3: {:?}", evidence.db_payload_blake3);
+                        println!("  dbx state: {:?}", evidence.dbx_state);
+                        println!("  dbx payload BLAKE3: {:?}", evidence.dbx_payload_blake3);
+                        println!("  Observed at: {}", evidence.observed_at_ms.unwrap_or_default());
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: unified firmware-state observation only; signer authorization is separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot snapshot is Unknown: {reason}"),
+            }
+        }
         Some(ObserveDomain::SecureBootDatabases) => {
             match nixward::action::secure_boot::observe_secure_boot_databases() {
                 Ok(evidence) => match format {
