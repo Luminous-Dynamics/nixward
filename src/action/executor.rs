@@ -1626,6 +1626,7 @@ impl NixOSExecutor {
         let receipt = transaction
             .candidate_build()
             .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
+        receipt.verify_retention()?;
         if receipt.candidate_store_path != *store_path {
             return Err("transaction candidate does not match activation closure".into());
         }
