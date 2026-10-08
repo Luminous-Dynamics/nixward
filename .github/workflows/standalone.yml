@@ -18,7 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     concurrency:
       group: standalone-bootstrap-${{ github.ref }}
-      cancel-in-progress: false
+      # The job rebases to the live branch tip before generation, so an older
+      # queued bootstrap is never more authoritative than the newest one.
+      cancel-in-progress: true
     permissions:
       contents: write
     steps:
@@ -78,6 +80,10 @@ jobs:
 
   lockfile-artifact:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: standalone-lockfile-artifact-${{ github.event.pull_request.number || github.ref }}
+      # Only the newest exact PR head is meaningful for qualification.
+      cancel-in-progress: true
     outputs:
       artifact_digest: ${{ steps.upload_lockfile.outputs.artifact-digest }}
       cargo_lock_sha256: ${{ steps.lockfile_digest.outputs.cargo_lock_sha256 }}
