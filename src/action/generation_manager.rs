@@ -72,31 +72,76 @@ impl GenerationManager {
             })
     }
 
+    fn resolve_profile_link_to_store_closure(
+        path: &std::path::Path,
+    ) -> Result<String, std::io::Error> {
+        let mut current = path.to_path_buf();
+
+        for _ in 0..8 {
+            let metadata = std::fs::symlink_metadata(&current)?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&current)?;
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new("/"))
+                        .join(target)
+                };
+                continue;
+            }
+
+            let store_path = current.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "profile link target is not valid UTF-8",
+                )
+            })?;
+            if !is_valid_nix_store_path(store_path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "profile link does not resolve to a canonical Nix store path",
+                ));
+            }
+            return Ok(store_path.to_string());
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "profile link resolution exceeded symlink depth limit",
+        ))
+    }
+
+    /// Resolve the live NixOS system profile to its exact immutable system closure.
+    ///
+    /// This is an observation only. Callers that intend to mutate the machine
+    /// must compare the observed profile closure again immediately before any
+    /// profile mutation.
+    pub fn current_system_profile_closure() -> Result<String, std::io::Error> {
+        Self::resolve_profile_link_to_store_closure(
+            std::path::Path::new("/nix/var/nix/profiles/system"),
+        )
+    }
+
+    /// Resolve the exact system closure currently running on the machine.
+    ///
+    /// NixOS documents /run/current-system as the running system toplevel.
+    /// Recovery must bind to this runtime subject rather than infer runtime
+    /// state from the mutable system profile alone.
+    pub fn current_runtime_system_closure() -> Result<String, std::io::Error> {
+        Self::resolve_profile_link_to_store_closure(
+            std::path::Path::new("/run/current-system"),
+        )
+    }
+
     /// Resolve one NixOS generation to its exact immutable system closure.
     ///
     /// The generation link itself is mutable profile state; authorization must
     /// bind the resolved store closure rather than the generation number.
     pub fn exact_generation_closure(generation: u32) -> Result<String, std::io::Error> {
         let link_path = format!("/nix/var/nix/profiles/system-{generation}-link");
-        let target = std::fs::read_link(&link_path)?;
-        let target = if target.is_absolute() {
-            target
-        } else {
-            std::path::Path::new("/nix/var/nix/profiles").join(target)
-        };
-        let store_path = target.to_str().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "generation link target is not valid UTF-8",
-            )
-        })?;
-        if !is_valid_nix_store_path(store_path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "generation link does not resolve to a canonical Nix store path",
-            ));
-        }
-        Ok(store_path.to_string())
+        Self::resolve_profile_link_to_store_closure(std::path::Path::new(&link_path))
     }
 
     /// Construct the canonical immutable activation command for one generation.
@@ -105,7 +150,11 @@ impl GenerationManager {
         action: SystemActivation,
     ) -> Result<NixOSCommand, std::io::Error> {
         let store_path = Self::exact_generation_closure(generation)?;
-        Ok(NixOSCommand::ActivateSystemClosure { store_path, action })
+        Ok(NixOSCommand::ActivateSystemClosure {
+            profile_store_path: Some(store_path.clone()),
+            store_path,
+            action,
+        })
     }
 
     /// Resolve the newest generation older than the current one.
@@ -349,6 +398,9 @@ mod tests {
     fn test_exact_generation_activation_command_uses_immutable_store_path() {
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
             action: SystemActivation::Switch,
         };
         let (bin, args) = command.to_command();

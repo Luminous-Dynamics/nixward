@@ -487,10 +487,18 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
         ExecutionResult::RolledBack {
             error,
             rollback_output,
+            recovery_closure,
+            post_recovery_closure,
         } => {
             eprintln!("  Command failed and was rolled back: {error}");
             if !rollback_output.is_empty() {
-                eprintln!("  Rollback: {}", rollback_output.trim_end());
+                eprintln!("  Recovery: {}", rollback_output.trim_end());
+            }
+            if let Some(recovery_closure) = recovery_closure {
+                eprintln!("  Recovery closure: {recovery_closure}");
+            }
+            if let Some(post_recovery_closure) = post_recovery_closure {
+                eprintln!("  Verified post-recovery closure: {post_recovery_closure}");
             }
         }
         ExecutionResult::PendingConfirmation { .. } => {
@@ -592,10 +600,18 @@ fn print_execution_result(result: ExecutionResult, dry_run: bool, format: Output
         ExecutionResult::RolledBack {
             error,
             rollback_output,
+            recovery_closure,
+            post_recovery_closure,
         } => {
-            eprintln!("  Activation command failed and rollback completed: {error}");
+            eprintln!("  Activation command failed and exact recovery completed: {error}");
             if !rollback_output.is_empty() {
-                eprintln!("  Rollback: {}", rollback_output.trim_end());
+                eprintln!("  Recovery: {}", rollback_output.trim_end());
+            }
+            if let Some(recovery_closure) = recovery_closure {
+                eprintln!("  Recovery closure: {recovery_closure}");
+            }
+            if let Some(post_recovery_closure) = post_recovery_closure {
+                eprintln!("  Verified post-recovery closure: {post_recovery_closure}");
             }
         }
         ExecutionResult::PendingConfirmation { .. } => {
@@ -636,12 +652,28 @@ fn cmd_closure_prepare(
         })?;
 
         let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
+        let prior_system_closure = GenerationManager::current_runtime_system_closure()
+            .map_err(|error| format!("failed to capture exact pre-state running system closure: {error}"))?;
+        let prior_system_profile_closure = GenerationManager::current_system_profile_closure()
+            .map_err(|error| format!("failed to capture exact pre-state system-profile closure: {error}"))?;
         let machine = MachineBinding::new(bundle.execution_target_identity())?;
+        let candidate_store_path = bundle.expected_out_path().to_string();
         let command = NixOSCommand::ActivateSystemClosure {
-            store_path: bundle.expected_out_path().to_string(),
+            store_path: candidate_store_path.clone(),
+            profile_store_path: Some(candidate_store_path),
             action: action.to_system_activation(),
         };
-        let plan = ChangePlan::command_only(machine, command, ttl_ms)?;
+        // Recovery must preserve the same activation semantics as the
+        // transaction that failed: test must not silently become switch.
+        let recovery_action = action.to_system_activation();
+        let plan = ChangePlan::command_only_with_system_recovery(
+            machine,
+            command,
+            prior_system_closure.clone(),
+            prior_system_profile_closure.clone(),
+            recovery_action,
+            ttl_ms,
+        )?;
 
         let challenge = nixward::action::authority_approval::build_execution_intent_change_challenge(
             &plan,
@@ -656,7 +688,12 @@ fn cmd_closure_prepare(
         write_private_json(&challenge_out, &challenge)?;
 
         println!("  Exact realization verified.");
+        println!("  Pre-state running closure: {}", prior_system_closure);
+        println!("  Pre-state profile closure: {}", prior_system_profile_closure);
         println!("  Store closure: {}", bundle.expected_out_path());
+        println!("  Recovery running closure: {}", prior_system_closure);
+        println!("  Recovery profile closure: {}", prior_system_profile_closure);
+        println!("  Recovery action: {:?}", recovery_action);
         println!("  Plan digest: {}", hex32(&plan.digest()));
         println!("  Authority challenge: {}", challenge.digest().map_err(|e| e.to_string())?);
         println!("  Plan output: {}", plan_out.display());
@@ -708,8 +745,10 @@ fn cmd_closure_activate(
         match command {
             NixOSCommand::ActivateSystemClosure {
                 store_path,
+                profile_store_path: Some(profile_store_path),
                 action: _,
             } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path()
                 && plan.machine().machine_id() == bundle.execution_target_identity() => {}
             NixOSCommand::ActivateSystemClosure { .. } => {
                 return Err(

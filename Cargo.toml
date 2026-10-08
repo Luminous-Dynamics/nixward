@@ -64,7 +64,7 @@ tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 lru = "0.16"
 dashmap = "5.5"
-nix = { version = "0.27", optional = true }
+nix = { version = "0.27", optional = true, features = ["fs"] }
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rnix = "0.11"
 ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc", "rand_core"] }

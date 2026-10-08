@@ -12,14 +12,13 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: standalone-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   bootstrap-lockfile:
     if: github.event_name == 'push' && github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
+    concurrency:
+      group: standalone-bootstrap-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -28,7 +27,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Rebase bootstrap workspace to branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
+      - name: Inspect branch-tip lockfile state
+        id: lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.lock ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock already present at branch tip"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock missing; bootstrap required"
+          fi
+
       - name: Install pinned Rust toolchain
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -36,10 +56,12 @@ jobs:
           rustup default 1.96.0
 
       - name: Generate lockfile
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: cargo generate-lockfile
 
       - name: Persist generated lockfile
+        if: steps.lockfile.outputs.needed == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -56,6 +78,9 @@ jobs:
 
   validate:
     needs: bootstrap-lockfile
+    concurrency:
+      group: standalone-validate-${{ github.ref }}
+      cancel-in-progress: true
     # A skipped bootstrap is expected for pull_request and main pushes. GitHub
     # otherwise skips dependent jobs too; always() preserves the fail-closed
     # qualification decision instead of silently producing a skipped check.
@@ -162,6 +187,9 @@ jobs:
   nix:
     name: Nix packaging
     needs: bootstrap-lockfile
+    concurrency:
+      group: standalone-nix-${{ github.ref }}
+      cancel-in-progress: true
     if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
@@ -206,6 +234,9 @@ jobs:
 
   provenance:
     name: Signed Nixward provenance
+    concurrency:
+      group: standalone-provenance-${{ github.ref }}
+      cancel-in-progress: true
     needs:
       - validate
       - nix
