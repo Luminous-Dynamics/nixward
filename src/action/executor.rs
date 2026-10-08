@@ -2266,6 +2266,7 @@ impl NixOSExecutor {
                 Some(observed_runtime.clone()),
                 Some(observed_profile.clone()),
                 expected_runtime,
+                true,
             ) {
                 return ExecutionResult::FailedNoRollback {
                     error: format!("proven post-state could not close transaction: {reason}"),
@@ -2358,6 +2359,7 @@ impl NixOSExecutor {
                         process_exit_status,
                         runtime.clone(),
                         profile.clone(),
+                        true,
                     );
                     let _ = Self::persist_transaction(&transaction, &journal_path);
                     return ExecutionResult::FailedNoRollback {
@@ -2398,6 +2400,7 @@ impl NixOSExecutor {
             status,
             post_runtime.clone(),
             post_profile.clone(),
+            result.is_ok(),
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("recovery post-state could not be journaled: {reason}"),
@@ -2724,6 +2727,7 @@ impl NixOSExecutor {
             runtime.clone(),
             profile.clone(),
             expected_runtime,
+            result.is_ok(),
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("activation post-state could not be recorded: {reason}"),
