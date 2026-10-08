@@ -143,7 +143,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "${${{ github.event.pull_request.head.repo.full_name }}}" = "${${{ github.repository }}}"
+          test "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.repository }}"
       - name: Assert exact validation subject
         shell: bash
         run: |
@@ -253,7 +253,7 @@ jobs:
     concurrency:
       group: standalone-nix-${{ github.ref }}
       cancel-in-progress: true
-    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
