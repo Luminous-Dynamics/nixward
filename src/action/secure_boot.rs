@@ -256,9 +256,13 @@ pub fn derive_direct_trust_disposition(
     evidence: &SignatureDatabaseMatchEvidence,
 ) -> DirectTrustDisposition {
     // UEFI validation gives dbx veto semantics precedence over db authorization.
-    // Certificate-chain authorization cannot be inferred from a raw DER match.
+    // Any unsupported dbx list type prevents an "authorized" conclusion because
+    // the unsupported record may encode a revocation rule we do not evaluate.
     if evidence.direct_dbx_image_hash_match {
         return DirectTrustDisposition::ForbiddenByImageHash;
+    }
+    if evidence.dbx_records.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
+        return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     if evidence.direct_db_image_hash_match {
         return DirectTrustDisposition::AuthorizedByImageHash;
@@ -269,9 +273,7 @@ pub fn derive_direct_trust_disposition(
     if evidence.exact_certificate_in_db {
         return DirectTrustDisposition::ExactCertificateInDb;
     }
-    if evidence.db_records.iter().chain(evidence.dbx_records.iter()).any(|record| {
-        record.kind == SignatureListKind::Unsupported
-    }) {
+    if evidence.db_records.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
         return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     DirectTrustDisposition::NoDirectMatch
@@ -440,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn unsupported_dbx_record_prevents_authorization_conclusion() {
+        let image_hash = [8u8; 32];
+        let db = make_sha256_signature_list(image_hash);
+        let mut dbx = vec![0u8; 28 + 16];
+        dbx[16..20].copy_from_slice(&(44u32).to_le_bytes());
+        dbx[24..28].copy_from_slice(&16u32.to_le_bytes());
+        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None)
+            .expect("database matcher");
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::UnknownUnsupportedRecord
+        );
+    }
     fn db_image_hash_is_authorizing_only_without_dbx_veto() {
         let image_hash = [8u8; 32];
         let db = make_sha256_signature_list(image_hash);
