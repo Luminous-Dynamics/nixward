@@ -876,7 +876,6 @@ fn exact_store_path_from_entry(entry: &BlsEntry) -> Option<String> {
         })
     })
 }
-}
 
 fn contains_selection_pattern(value: &str) -> bool {
     value.contains('*') || value.contains('?') || value.contains('[')
