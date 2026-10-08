@@ -24,7 +24,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | Secure Boot signer authorization | exact signer + firmware policy | `db` chain-anchor verification + `dbx` chain-veto evidence; TBS/time semantics still separate | Partially implemented — Issue #17 |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
-| physical boot identity | exact current boot | systemd-boot LoaderEntrySelected + selected-entry closure + /run/current-system + kernel init= + boot ID | Implemented for systemd-boot; real-host qualification open — Issue #8 |
+| physical reboot identity | exact reboot into candidate | pre/post kernel boot ID transition + exact /run/current-system + kernel init= closure | Implemented for systemd-boot and GRUB runtime correlation; real-host qualification open — Issue #8 |
+| current boot entry identity | exact current boot | systemd-boot LoaderEntrySelected + selected-entry closure + /run/current-system + kernel init= + boot ID | Implemented for systemd-boot; real-host qualification open — Issue #8 |
 | physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
 | hosted compiler/tests | exact Git commit | completed workflow with qualification receipt | Pending; no qualification claim |
 
@@ -41,6 +42,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
 10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
 11. LoaderEntrySelected establishes current systemd-boot entry identity; it does not establish post-boot health.
+12. A physical reboot predicate requires distinct pre/post boot IDs; merely observing the expected closure on an unchanged boot is insufficient.
+13. A runtime reboot witness for GRUB establishes exact closure boot identity, not exact GRUB menu-entry identity.
 12. A verified current-boot witness remains non-qualified until the expected pre-reboot state and the exact post-reboot witness are captured on the target host.
 
 ## Current qualification gate

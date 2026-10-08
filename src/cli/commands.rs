@@ -141,6 +141,19 @@ pub enum Command {
         expected_closure: String,
     },
 
+    /// Verify that a reboot occurred into an exact NixOS system closure.
+    ///
+    /// This is read-only and proves physical boot identity, not bootloader
+    /// menu-entry selection or post-boot health.
+    VerifyBootTransition {
+        /// Exact boot ID captured before requesting the reboot.
+        #[arg(long)]
+        pre_boot_id: String,
+        /// Exact NixOS system closure expected after reboot.
+        #[arg(long)]
+        expected_closure: String,
+    },
+
     /// Observe the current system state.
     Observe {
         /// Show specific domain only.
@@ -501,6 +514,25 @@ mod tests {
             cli.command,
             Some(Command::VerifyBootWitness { expected_entry, expected_closure })
                 if expected_entry == "nixos-candidate.conf"
+                    && expected_closure == "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
+        ));
+    }
+
+
+    #[test]
+    fn test_parse_boot_transition() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "verify-boot-transition",
+            "--pre-boot-id",
+            "boot-a",
+            "--expected-closure",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::VerifyBootTransition { pre_boot_id, expected_closure })
+                if pre_boot_id == "boot-a"
                     && expected_closure == "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
         ));
     }

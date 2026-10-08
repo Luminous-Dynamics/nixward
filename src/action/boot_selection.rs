@@ -604,6 +604,145 @@ impl BootWitnessEvidence {
     }
 }
 
+/// Evidence that a new kernel boot occurred and produced the exact expected
+/// NixOS system closure. This proves physical reboot/candidate runtime identity,
+/// but intentionally does not prove which bootloader menu entry caused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BootTransitionState {
+    VerifiedReboot,
+    SameBoot,
+    RunningClosureMismatch,
+    CmdlineClosureMismatch,
+    BootIdUnavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootTransitionEvidence {
+    pub pre_boot_id: String,
+    pub post_boot_id: Option<String>,
+    pub expected_closure: String,
+    pub running_closure: Option<String>,
+    pub cmdline_closure: Option<String>,
+    pub state: BootTransitionState,
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl BootTransitionEvidence {
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            &self.pre_boot_id,
+            &self.post_boot_id,
+            &self.expected_closure,
+            &self.running_closure,
+            &self.cmdline_closure,
+            self.state,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize boot transition evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
+}
+
+pub fn correlate_boot_transition(
+    pre_boot_id: &str,
+    post_boot_id: Option<&str>,
+    expected_closure: &str,
+    running_closure: Option<&str>,
+    cmdline_closure: Option<&str>,
+) -> BootTransitionEvidence {
+    let state = match post_boot_id {
+        None | Some("") => BootTransitionState::BootIdUnavailable,
+        Some(post) if post == pre_boot_id => BootTransitionState::SameBoot,
+        Some(_) if running_closure != Some(expected_closure) => {
+            BootTransitionState::RunningClosureMismatch
+        }
+        Some(_) if cmdline_closure != Some(expected_closure) => {
+            BootTransitionState::CmdlineClosureMismatch
+        }
+        Some(_) => BootTransitionState::VerifiedReboot,
+    };
+
+    BootTransitionEvidence {
+        pre_boot_id: pre_boot_id.to_string(),
+        post_boot_id: post_boot_id.map(str::to_string),
+        expected_closure: expected_closure.to_string(),
+        running_closure: running_closure.map(str::to_string),
+        cmdline_closure: cmdline_closure.map(str::to_string),
+        state,
+        observed_at_ms: None,
+        evidence_digest: None,
+    }
+}
+
+#[cfg(feature = "native")]
+pub fn observe_boot_transition(
+    pre_boot_id: &str,
+    expected_closure: &str,
+) -> Result<BootTransitionEvidence, UnknownBootSelection> {
+    if pre_boot_id.is_empty()
+        || !super::execution_intent::is_valid_nix_store_path(expected_closure)
+        || !expected_closure.contains("-nixos-system-")
+    {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: "boot transition evidence requires an exact pre-boot ID and NixOS system closure".into(),
+        });
+    }
+
+    let running_closure = read_current_system_closure().ok();
+    let cmdline_closure = std::fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|cmdline| exact_nixos_system_closure_from_cmdline(&cmdline));
+    let post_boot_id = read_boot_id().ok();
+
+    let mut evidence = correlate_boot_transition(
+        pre_boot_id,
+        post_boot_id.as_deref(),
+        expected_closure,
+        running_closure.as_deref(),
+        cmdline_closure.as_deref(),
+    );
+
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("system clock could not produce an observation timestamp: {error}"),
+        })?
+        .as_millis() as u64;
+
+    evidence = evidence.with_observation_metadata(observed_at_ms).map_err(|reason| {
+        UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason,
+        }
+    })?;
+    Ok(evidence)
+}
+
+pub fn require_boot_transition(
+    evidence: &BootTransitionEvidence,
+    expected_closure: &str,
+) -> Result<(), UnknownBootSelection> {
+    if evidence.expected_closure != expected_closure {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: "boot transition evidence is bound to a different expected closure".into(),
+        });
+    }
+    if evidence.state != BootTransitionState::VerifiedReboot {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::Unknown,
+            reason: format!("boot transition state is {:?}", evidence.state),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(feature = "native")]
 pub fn observe_current_systemd_boot_witness(
     expected_entry_id: &str,
@@ -1619,6 +1758,39 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         );
         assert_eq!(uki_selector_filename("nixos-candidate.conf"), None);
         assert_eq!(uki_selector_filename("../nixos-candidate"), None);
+    }
+
+    #[test]
+    fn boot_transition_requires_new_boot_id() {
+        let verified = correlate_boot_transition(
+            "boot-a",
+            Some("boot-b"),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+        );
+        assert_eq!(verified.state, BootTransitionState::VerifiedReboot);
+
+        let same_boot = correlate_boot_transition(
+            "boot-a",
+            Some("boot-a"),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+        );
+        assert_eq!(same_boot.state, BootTransitionState::SameBoot);
+    }
+
+    #[test]
+    fn boot_transition_does_not_conflate_runtime_with_cmdline() {
+        let evidence = correlate_boot_transition(
+            "boot-a",
+            Some("boot-b"),
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+            Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other"),
+        );
+        assert_eq!(evidence.state, BootTransitionState::CmdlineClosureMismatch);
     }
 
     #[test]
