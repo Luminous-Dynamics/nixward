@@ -578,11 +578,40 @@ impl ConfigWriter {
             }
             let parent_fd = parent_file.as_raw_fd();
 
-            // The lock is also opened through the authorized parent descriptor,
-            // preventing a second path-resolution domain for Nixward writers.
+            // Coordination state is intentionally outside config_root so frozen
+            // source snapshots contain only intended Nix configuration inputs.
+            let state_root = self.state_root.canonicalize().map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to canonicalize Nixward state root: {error}"
+                ))
+            })?;
+            if state_root == configured_root {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Nixward state root must not equal the config source root",
+                ));
+            }
+            if !state_root.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Nixward state root is not a directory",
+                ));
+            }
+            let mut state_options = OpenOptions::new();
+            state_options.read(true);
+            state_options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let state_dir = state_options.open(&state_root)?;
+            let state_fd = state_dir.as_raw_fd();
+
+            // The lock is descriptor-bound to the dedicated state directory,
+            // never to the mutable configuration source namespace.
             let lock_fd = openat(
-                parent_fd,
-                ".nixward-config-write.lock",
+                state_fd,
+                "config-write.lock",
                 OFlag::O_RDWR
                     | OFlag::O_CREAT
                     | OFlag::O_CLOEXEC
