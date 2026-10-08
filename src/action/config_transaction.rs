@@ -1857,6 +1857,40 @@ pub enum ActivationWorkerPurpose {
     Activation,
     Recovery,
 }
+fn validate_worker_executable_path(value: &str, label: &str) -> Result<(), String> {
+    const STORE_PREFIX: &str = "/nix/store/";
+    let path = Path::new(value);
+    if !path.is_absolute() || !value.starts_with(STORE_PREFIX) {
+        return Err(format!("{label} is not an absolute Nix store path"));
+    }
+    let relative = value
+        .strip_prefix(STORE_PREFIX)
+        .ok_or_else(|| format!("{label} escaped the Nix store"))?;
+    let mut components = relative.split('/');
+    let store_component = components
+        .next()
+        .ok_or_else(|| format!("{label} has no store object component"))?;
+    let store_path = format!("{STORE_PREFIX}{store_component}");
+    if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+        return Err(format!("{label} has an invalid Nix store object identity"));
+    }
+    let suffix = components.collect::<Vec<_>>();
+    if suffix.is_empty()
+        || suffix.iter().any(|component| {
+            component.is_empty()
+                || *component == "."
+                || *component == ".."
+                || component.chars().any(char::is_control)
+        })
+    {
+        return Err(format!("{label} contains empty, traversal, or control path components"));
+    }
+    let canonical = format!("{STORE_PREFIX}{store_component}/{}", suffix.join("/"));
+    if canonical != value {
+        return Err(format!("{label} is not in canonical lexical form"));
+    }
+    Ok(())
+}
 /// Durable pre-spawn intent. If present after restart, process creation may have
 /// occurred without a persisted pidfd identity; that uncertainty blocks new mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1873,24 +1907,7 @@ impl WorkerLaunchIntent {
         if decode_digest(&self.transaction_id).is_err() || decode_digest(&self.argv_digest).is_err() {
             return Err("worker launch intent contains an invalid digest".into());
         }
-        let executable = std::path::Path::new(&self.executable);
-        if !executable.is_absolute() || !executable.starts_with("/nix/store/") {
-            return Err("worker launch executable is not an absolute Nix store path".into());
-        }
-        let component = executable
-            .strip_prefix("/nix/store/")
-            .map_err(|_| "worker launch executable escaped the Nix store".to_string())?
-            .components()
-            .next()
-            .and_then(|part| match part {
-                std::path::Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-            .ok_or_else(|| "worker launch executable has no store object identity".to_string())?;
-        let store_path = format!("/nix/store/{component}");
-        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
-            return Err("worker launch executable has invalid store identity".into());
-        }
+        validate_worker_executable_path(&self.executable, "worker launch executable")?;
         Ok(())
     }
 }
@@ -1930,24 +1947,7 @@ impl ActivationWorkerIdentity {
         if decode_digest(&self.argv_digest).is_err() {
             return Err("activation worker argv digest is invalid".into());
         }
-        let executable = std::path::Path::new(&self.executable);
-        if !executable.is_absolute() || !executable.starts_with("/nix/store/") {
-            return Err("activation worker executable is not an absolute Nix store path".into());
-        }
-        let store_component = executable
-            .strip_prefix("/nix/store/")
-            .map_err(|_| "activation worker executable escaped the Nix store".to_string())?
-            .components()
-            .next()
-            .and_then(|component| match component {
-                std::path::Component::Normal(value) => value.to_str(),
-                _ => None,
-            })
-            .ok_or_else(|| "activation worker executable has no store object component".to_string())?;
-        let store_path = format!("/nix/store/{store_component}");
-        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
-            return Err("activation worker executable has an invalid Nix store identity".into());
-        }
+        validate_worker_executable_path(&self.executable, "activation worker executable")?;
         Ok(())
     }
 }
