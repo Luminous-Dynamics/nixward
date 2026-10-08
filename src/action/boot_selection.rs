@@ -480,6 +480,20 @@ fn discover_grub_root() -> Result<PathBuf, String> {
     ];
     let mut matches = Vec::new();
     for root in candidates {
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("refusing symlinked GRUB root {}", root.display()));
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => continue,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect GRUB root {}: {error}",
+                    root.display()
+                ));
+            }
+        }
         let cfg = root.join("grub.cfg");
         let env = root.join("grubenv");
         if regular_file(&cfg)? && regular_file(&env)? {
@@ -560,6 +574,14 @@ fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, S
         let path = item.path();
         if path.extension().and_then(|x| x.to_str()) != Some("conf") {
             continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("failed to inspect BLS entry {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(format!(
+                "BLS entry {} is not a regular non-symlink file",
+                path.display()
+            ));
         }
         let id = path
             .file_name()
@@ -670,7 +692,11 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
 
             if line == "}" {
                 let (entry_id, title, linux_line, initrds) = current.take().expect("entry state");
-                let (linux, options) = parse_grub_linux_line(&linux_line)?;
+                let (linux, options) = if linux_line.is_empty() {
+                    (None, String::new())
+                } else {
+                    parse_grub_linux_line(&linux_line)?
+                };
                 let entry = BlsEntry {
                     entry_id: entry_id.clone(),
                     title: Some(title),
@@ -1037,6 +1063,21 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         let pattern = parse_systemd_loader_default("default nixos-*\n");
         assert_eq!(pattern.as_deref(), Some("nixos-*"));
     }
+    #[test]
+    fn systemd_loader_entry_suffix_is_normalized_exactly() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "candidate.conf".into(),
+            entry(
+                "candidate.conf",
+                "linux /EFI/nixos/kernel.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
+            ),
+        );
+        let evidence = resolve_systemd_boot_selection(Some("candidate"), None, &entries)
+            .expect("suffix-less LoaderEntryOneShot should map to candidate.conf");
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("candidate.conf"));
+    }
+
     #[test]
     fn systemd_pattern_default_is_unknown() {
         let entries = BTreeMap::new();
