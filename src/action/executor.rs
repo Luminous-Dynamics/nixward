@@ -840,7 +840,6 @@ impl ExecutionAuthorization {
             return Err("recovery authorization is missing signer, challenge, subject or replay binding".into());
         }
         if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
-            && !self.rollback_only
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
                 || self.execution_intent_digest.is_none()
                 || self.realization_plan_digest.is_none())
