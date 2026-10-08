@@ -1632,9 +1632,12 @@ impl NixOSExecutor {
         if receipt.candidate_store_path != *profile_store_path {
             return Err("transaction candidate does not match selected system profile".into());
         }
-        if authorization.realization_plan_digest() != Some(
-            super::config_transaction::decode_digest_for_executor(&receipt.realization_plan_digest)?,
-        ) {
+        let expected_realization_plan_digest = authorization
+            .realization_plan_digest()
+            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        if expected_realization_plan_digest.as_deref()
+            != Some(receipt.realization_plan_digest.as_str())
+        {
             return Err("transaction realization-plan identity does not match authorization".into());
         }
         Ok(())
