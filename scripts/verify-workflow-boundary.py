@@ -160,6 +160,8 @@ else:
             "predicate-type: https://github.com/Luminous-Dynamics/nixward/attestations/qualification/v1",
             "predicate-path: qualification-predicate.json",
             "Generate signed SLSA provenance",
+            "Require committed lockfile",
+            "git ls-files --error-unmatch Cargo.lock",
             "Generate signed qualification attestation",
             "nix_flake_check",
             "nix_package_build",
