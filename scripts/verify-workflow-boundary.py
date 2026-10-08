@@ -34,6 +34,45 @@ else:
     if checkout_count == 0:
         errors.append("no actions/checkout step found")
 
+    lockfile_artifact = re.search(
+        r"(?ms)^  lockfile-artifact:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+        text,
+    )
+    if not lockfile_artifact:
+        errors.append("missing exact-head lockfile-artifact job")
+    else:
+        body = lockfile_artifact.group(0)
+        required = [
+            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
+            "persist-credentials: false",
+            "ref: ${{ github.event.pull_request.head.sha }}",
+            "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "id: upload_lockfile",
+            "steps.upload_lockfile.outputs.artifact-digest",
+            "steps.lockfile_digest.outputs.cargo_lock_sha256",
+        ]
+        for marker in required:
+            if marker not in body:
+                errors.append(f"lockfile-artifact job missing required marker: {marker}")
+        if re.search(r"(?m)^    permissions:\n(?:      [^\n]+\n)*      contents: write\\s*$", body):
+            errors.append("lockfile-artifact job must not have contents: write")
+
+    for job_name in ["validate", "nix"]:
+        job = re.search(
+            rf"(?ms)^  {job_name}:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+            text,
+        )
+        if job and "- lockfile-artifact" not in job.group(0):
+            errors.append(f"{job_name} job must depend on lockfile-artifact for PR qualification")
+
+    for marker in [
+        "nixward-cargo-lock-${{ github.event.pull_request.head.sha }}",
+        "needs.lockfile-artifact.outputs.cargo_lock_sha256",
+        "cargo_lock_artifact_digest",
+    ]:
+        if marker not in text:
+            errors.append(f"workflow missing exact lockfile artifact binding: {marker}")
+
     # Only the lockfile bootstrap job may receive repository write authority.
     bootstrap = re.search(
         r"(?ms)^  bootstrap-lockfile:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
