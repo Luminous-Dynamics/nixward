@@ -1323,7 +1323,12 @@ impl ConfigTransaction {
     pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
     pub fn source_digest(&self) -> &str { &self.source_digest }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
-    pub fn candidate_store_path(&self) -> Option<&str> { self.candidate_store_path.as_deref() }
+    pub fn candidate_store_path(&self) -> Option<&str> {
+        self.candidate_build
+            .as_ref()
+            .map(|receipt| receipt.candidate_store_path.as_str())
+            .or(self.candidate_store_path.as_deref())
+    }
 
     pub fn permits_source_rollback(&self) -> bool { self.phase.permits_source_rollback() }
 
@@ -1339,8 +1344,10 @@ impl ConfigTransaction {
                 let Some(lease) = self.source_realization.as_ref() else {
                     return Err("candidate realization requires a retained source realization".into());
                 };
-                if self.candidate_store_path.is_none() {
-                    return Err("candidate realization requires an immutable store path".into());
+                if self.candidate_build.is_none() {
+                    return Err(
+                        "candidate realization requires an exact retained-source build receipt".into(),
+                    );
                 }
                 lease.verify_rooted().map_err(|error| {
                     format!("candidate realization requires live source GC-root evidence: {error}")
@@ -1350,7 +1357,9 @@ impl ConfigTransaction {
             (ConfigTransactionPhase::InputFrozen, ConfigTransactionPhase::FailedBeforeActivation) => true,
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::SourceCommitted) => self.candidate_build.is_some(),
             (ConfigTransactionPhase::CandidateBuilt, ConfigTransactionPhase::FailedBeforeActivation) => true,
-            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ProfileTransitionStarted) => self.candidate_store_path.is_some(),
+            (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::ProfileTransitionStarted) => {
+                self.candidate_build.is_some()
+            },
             (ConfigTransactionPhase::SourceCommitted, ConfigTransactionPhase::FailedBeforeActivation) => true,
             (ConfigTransactionPhase::ProfileTransitionStarted, ConfigTransactionPhase::ProfileCommitted) => true,
             (ConfigTransactionPhase::ProfileTransitionStarted, ConfigTransactionPhase::IndeterminateProfileTransition) => true,
