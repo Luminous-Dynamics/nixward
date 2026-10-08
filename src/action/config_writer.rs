@@ -28,6 +28,16 @@ use std::os::fd::AsRawFd;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(unix)]
+struct OwnedConfigFd(i32);
+
+#[cfg(unix)]
+impl Drop for OwnedConfigFd {
+    fn drop(&mut self) {
+        let _ = nix::unistd::close(self.0);
+    }
+}
+
 /// Result of a config write operation.
 #[derive(Debug, Clone)]
 pub struct WriteResult {
@@ -492,55 +502,13 @@ impl ConfigWriter {
                 "configuration target is outside the configured authority root",
             ));
         }
+
         let name = target.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "configuration target has no filename",
             )
         })?;
-
-        let lock_path = self.config_root.join(".nixward-config-write.lock");
-        let lock = {
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create(true);
-            #[cfg(unix)]
-            options
-                .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-                .mode(0o600);
-            options.open(&lock_path)?
-        };
-
-        #[cfg(unix)]
-        nix::fcntl::flock(lock.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|error| {
-                std::io::Error::other(format!("failed to acquire config mutation lock: {error}"))
-            })?;
-
-        let mut target_options = OpenOptions::new();
-        target_options.read(true);
-        #[cfg(unix)]
-        target_options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-        let mut target_file = target_options.open(target)?;
-        let metadata = target_file.metadata()?;
-        let mut current = String::new();
-        target_file.read_to_string(&mut current)?;
-        if current != expected {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "configuration changed during transaction; refusing stale replacement",
-            ));
-        }
-
-        // The parent descriptor is the authority anchor for both candidate
-        // creation and replacement. No later path walk is needed for the
-        // privileged rename.
-        let mut parent_options = OpenOptions::new();
-        parent_options.read(true);
-        #[cfg(unix)]
-        parent_options.custom_flags(
-            nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC,
-        );
-        let parent_file = parent_options.open(parent)?;
 
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_name = format!(
@@ -552,17 +520,99 @@ impl ConfigWriter {
 
         #[cfg(unix)]
         {
-            use nix::fcntl::{openat, OFlag};
+            use nix::fcntl::{flock, openat, renameat, FlockArg, OFlag};
             use nix::sys::stat::Mode;
-            use nix::unistd::{close, fsync, unlinkat, write, UnlinkatFlags};
+            use nix::unistd::{fsync, read, unlinkat, write, UnlinkatFlags};
 
-            let target_mode = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.permissions().mode() & 0o7777
-            };
+            let mut parent_options = OpenOptions::new();
+            parent_options.read(true);
+            parent_options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let parent_file = parent_options.open(&parent)?;
+            let parent_fd = parent_file.as_raw_fd();
+
+            // The lock is also opened through the authorized parent descriptor,
+            // preventing a second path-resolution domain for Nixward writers.
+            let lock_fd = openat(
+                parent_fd,
+                ".nixward-config-write.lock",
+                OFlag::O_RDWR
+                    | OFlag::O_CREAT
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to create descriptor-bound config lock: {error}"
+                ))
+            })?;
+
+            let lock_fd = OwnedConfigFd(lock_fd);
+            flock(lock_fd.0, FlockArg::LockExclusive).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to acquire config mutation lock: {error}"
+                ))
+            })?;
+
+            let target_fd = openat(
+                parent_fd,
+                name,
+                OFlag::O_RDONLY
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to open configuration target through authority descriptor: {error}"
+                ))
+            })?;
+            let target_fd = OwnedConfigFd(target_fd);
+            let target_stat = nix::sys::stat::fstat(target_fd.0).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to stat configuration target descriptor: {error}"
+                ))
+            })?;
+            if target_stat.st_mode & nix::libc::S_IFMT != nix::libc::S_IFREG {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "configuration target is not a regular file",
+                ));
+            }
+
+            let mut current_bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                match read(target_fd.0, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => current_bytes.extend_from_slice(&buffer[..count]),
+                    Err(error) => {
+                        return Err(std::io::Error::other(format!(
+                            "failed to read configuration target descriptor: {error}"
+                        )))
+                    }
+                }
+            }
+            let current = std::str::from_utf8(&current_bytes).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("configuration target is not valid UTF-8: {error}"),
+                )
+            })?;
+            if current != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "configuration changed during transaction; refusing stale replacement",
+                ));
+            }
 
             let temp_fd = openat(
-                parent_file.as_raw_fd(),
+                parent_fd,
                 &temp_name,
                 OFlag::O_RDWR
                     | OFlag::O_CREAT
@@ -576,114 +626,117 @@ impl ConfigWriter {
                     "failed to create descriptor-bound config candidate: {error}"
                 ))
             })?;
+            let temp_fd = OwnedConfigFd(temp_fd);
 
-            let result = (|| {
-                let bytes = replacement.as_bytes();
-                let mut offset = 0;
-                while offset < bytes.len() {
-                    let written = write(temp_fd, &bytes[offset..]).map_err(|error| {
-                        std::io::Error::other(format!(
-                            "failed to write descriptor-bound config candidate: {error}"
-                        ))
-                    })?;
-                    if written == 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::WriteZero,
-                            "descriptor-bound config candidate write made no progress",
-                        ));
-                    }
-                    offset += written;
+            let mut offset = 0;
+            let bytes = replacement.as_bytes();
+            while offset < bytes.len() {
+                let written = write(temp_fd.0, &bytes[offset..]).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to write descriptor-bound config candidate: {error}"
+                    ))
+                })?;
+                if written == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "descriptor-bound config candidate write made no progress",
+                    ));
                 }
+                offset += written;
+            }
 
-                fsync(temp_fd).map_err(|error| {
-                    std::io::Error::other(format!(
-                        "failed to sync descriptor-bound config candidate: {error}"
-                    ))
-                })?;
-                nix::sys::stat::fchmod(temp_fd, Mode::from_bits_truncate(target_mode))
-                    .map_err(|error| {
-                        std::io::Error::other(format!(
-                            "failed to preserve configuration mode: {error}"
-                        ))
-                    })?;
-                fsync(temp_fd).map_err(|error| {
-                    std::io::Error::other(format!(
-                        "failed to resync descriptor-bound config candidate: {error}"
-                    ))
-                })?;
-
-                nix::fcntl::renameat(
-                    Some(parent_file.as_raw_fd()),
-                    &temp_name,
-                    Some(parent_file.as_raw_fd()),
-                    name,
-                )
-                .map_err(|error| {
-                    std::io::Error::other(format!(
-                        "descriptor-bound config rename failed: {error}"
-                    ))
-                })?;
-
-                fsync(parent_file.as_raw_fd()).map_err(|error| {
-                    std::io::Error::other(format!(
-                        "failed to sync configuration parent directory: {error}"
-                    ))
-                })?;
-                Ok::<(), std::io::Error>(())
-            })();
-
-            let close_result = close(temp_fd).map_err(|error| {
+            fsync(temp_fd.0).map_err(|error| {
                 std::io::Error::other(format!(
-                    "failed to close descriptor-bound config candidate: {error}"
+                    "failed to sync descriptor-bound config candidate: {error}"
                 ))
-            });
+            })?;
+            nix::sys::stat::fchmod(
+                temp_fd.0,
+                Mode::from_bits_truncate(target_stat.st_mode & 0o7777),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to preserve configuration permissions: {error}"
+                ))
+            })?;
+            fsync(temp_fd.0).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to resync descriptor-bound config candidate: {error}"
+                ))
+            })?;
 
-            if let Err(error) = result {
+            renameat(
+                Some(parent_fd),
+                &temp_name,
+                Some(parent_fd),
+                name,
+            )
+            .map_err(|error| {
                 let _ = unlinkat(
-                    Some(parent_file.as_raw_fd()),
+                    Some(parent_fd),
                     &temp_name,
                     UnlinkatFlags::NoRemoveDir,
                 );
-                let _ = close_result;
-                return Err(error);
-            }
+                std::io::Error::other(format!(
+                    "descriptor-bound config rename failed: {error}"
+                ))
+            })?;
 
-            // Once renameat + parent fsync has succeeded, the source mutation
-            // is committed. A later descriptor-close error cannot truthfully
-            // downgrade the transaction to "failed" or invite a source rollback.
-            let _ = close_result;
+            fsync(parent_fd).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to sync configuration parent directory: {error}"
+                ))
+            })?;
+
+            let verify_fd = openat(
+                parent_fd,
+                name,
+                OFlag::O_RDONLY
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to reopen committed configuration through authority descriptor: {error}"
+                ))
+            })?;
+            let verify_fd = OwnedConfigFd(verify_fd);
+            let mut observed_bytes = Vec::new();
+            loop {
+                match read(verify_fd.0, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => observed_bytes.extend_from_slice(&buffer[..count]),
+                    Err(error) => {
+                        return Err(std::io::Error::other(format!(
+                            "failed to read committed configuration: {error}"
+                        )))
+                    }
+                }
+            }
+            if observed_bytes != bytes {
+                return Err(std::io::Error::other(
+                    "configuration post-state does not match atomic replacement",
+                ));
+            }
+            Ok(())
         }
 
         #[cfg(not(unix))]
         {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
             let temp_path = parent.join(&temp_name);
-            let mut temp_options = OpenOptions::new();
-            temp_options.read(true).write(true).create_new(true);
-            let mut temp = temp_options.open(&temp_path)?;
+            let mut temp = options.open(&temp_path)?;
             temp.write_all(replacement.as_bytes())?;
             temp.flush()?;
             temp.sync_all()?;
-            temp.set_permissions(metadata.permissions())?;
-            temp.sync_all()?;
             std::fs::rename(&temp_path, target)?;
+            let parent_file = File::open(parent)?;
+            parent_file.sync_all()?;
+            Ok(())
         }
-
-
-
-        let mut verify_options = OpenOptions::new();
-        verify_options.read(true);
-        #[cfg(unix)]
-        verify_options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-        let mut verify = verify_options.open(target)?;
-        let mut observed = String::new();
-        verify.read_to_string(&mut observed)?;
-        if observed != replacement {
-            return Err(std::io::Error::other(
-                "configuration post-state does not match atomic replacement",
-            ));
-        }
-
-        Ok(())
     }
 
     /// Validate Nix syntax using nix-instantiate --parse.
