@@ -1877,6 +1877,16 @@ impl NixOSExecutor {
             },
         };
 
+        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
+            transaction.phase(),
+            &observation,
+        ) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("fresh journal recovery confirmation failed: {reason}"),
+                rollback_error: None,
+            };
+        }
+
         if matches!(
             observation,
             super::config_transaction::RecoveryObservation::CandidateProvenActive { .. }
@@ -1907,8 +1917,18 @@ impl NixOSExecutor {
         }
 
         if matches!(observation, super::config_transaction::RecoveryObservation::MixedOrUnknown { .. }) {
-            let _ = transaction.enter_recovery_required(&observation);
-            let _ = Self::persist_transaction(&transaction, &journal_path);
+            if let Err(reason) = transaction.enter_recovery_required(&observation) {
+                return ExecutionResult::FailedNoRollback {
+                    error: format!("could not persist mixed/unknown recovery state: {reason}"),
+                    rollback_error: None,
+                };
+            }
+            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                return ExecutionResult::FailedNoRollback {
+                    error: reason,
+                    rollback_error: None,
+                };
+            }
             let result = ExecutionResult::FailedNoRollback {
                 error: "recovery refused because live system state is mixed or unknown".into(),
                 rollback_error: None,
@@ -1944,6 +1964,12 @@ impl NixOSExecutor {
                 };
             }
         };
+        if let Err(reason) = rollback_authorization.validate_for_recovery(&rollback_command) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("recovery rollback capability is invalid: {reason}"),
+                rollback_error: None,
+            };
+        }
 
         // Ensure the exact predecessor profile is selected before invoking its
         // immutable activation artifact.
@@ -1981,9 +2007,7 @@ impl NixOSExecutor {
             }
         }
 
-        let start = std::time::Instant::now();
         let result = Self::run_bound_command(&rollback_command).await;
-        let elapsed = start.elapsed().as_millis() as u64;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
         let post_runtime = GenerationManager::current_runtime_system_closure().ok();
