@@ -461,9 +461,10 @@ impl ConfigWriter {
         })
     }
 
-    /// Replace one configuration file using an exclusive same-directory
-    /// candidate, no-follow target access, durable candidate data, atomic
-    /// replacement, parent-directory synchronization, and read-back verification.
+    /// Replace one configuration file using a descriptor-anchored source-root
+    /// directory, no-follow target access, an exclusive candidate created through
+    /// openat, durable candidate data, renameat, parent-directory synchronization,
+    /// and read-back verification.
     ///
     /// The compare-and-set remains advisory against writers that bypass
     /// Nixward's own coordination lock; that external-writer gap stays explicit.
@@ -530,6 +531,17 @@ impl ConfigWriter {
             ));
         }
 
+        // The parent descriptor is the authority anchor for both candidate
+        // creation and replacement. No later path walk is needed for the
+        // privileged rename.
+        let mut parent_options = OpenOptions::new();
+        parent_options.read(true);
+        #[cfg(unix)]
+        parent_options.custom_flags(
+            nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC,
+        );
+        let parent_file = parent_options.open(parent)?;
+
         let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_name = format!(
             ".nixward-config-{}-{}-{}.tmp",
@@ -537,48 +549,121 @@ impl ConfigWriter {
             counter,
             name.to_string_lossy()
         );
-        let temp_path = parent.join(&temp_name);
-
-        let mut temp_options = OpenOptions::new();
-        temp_options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        temp_options
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
-            .mode(0o600);
-        let mut temp = temp_options.open(&temp_path)?;
-        temp.write_all(replacement.as_bytes())?;
-        temp.flush()?;
-        temp.sync_all()?;
-        temp.set_permissions(metadata.permissions())?;
-        temp.sync_all()?;
-        drop(temp);
-
-        // Keep the parent directory open across the replacement so the rename
-        // is anchored to the already-authorized directory descriptor.
-        let parent_file = File::open(parent)?;
 
         #[cfg(unix)]
         {
-            nix::fcntl::renameat(
-                Some(parent_file.as_raw_fd()),
+            use nix::fcntl::{openat, OFlag};
+            use nix::sys::stat::Mode;
+            use nix::unistd::{close, fsync, unlinkat, write, UnlinkatFlags};
+
+            let target_mode = {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o7777
+            };
+
+            let temp_fd = openat(
+                parent_file.as_raw_fd(),
                 &temp_name,
-                Some(parent_file.as_raw_fd()),
-                name,
+                OFlag::O_RDWR
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
             )
             .map_err(|error| {
-                let _ = std::fs::remove_file(&temp_path);
-                std::io::Error::other(format!("descriptor-bound config rename failed: {error}"))
+                std::io::Error::other(format!(
+                    "failed to create descriptor-bound config candidate: {error}"
+                ))
             })?;
-        }
-        #[cfg(not(unix))]
-        {
-            if let Err(error) = std::fs::rename(&temp_path, target) {
-                let _ = std::fs::remove_file(&temp_path);
+
+            let result = (|| {
+                let bytes = replacement.as_bytes();
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    let written = write(temp_fd, &bytes[offset..]).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "failed to write descriptor-bound config candidate: {error}"
+                        ))
+                    })?;
+                    if written == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "descriptor-bound config candidate write made no progress",
+                        ));
+                    }
+                    offset += written;
+                }
+
+                fsync(temp_fd).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to sync descriptor-bound config candidate: {error}"
+                    ))
+                })?;
+                nix::sys::stat::fchmod(temp_fd, Mode::from_bits_truncate(target_mode))
+                    .map_err(|error| {
+                        std::io::Error::other(format!(
+                            "failed to preserve configuration mode: {error}"
+                        ))
+                    })?;
+                fsync(temp_fd).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to resync descriptor-bound config candidate: {error}"
+                    ))
+                })?;
+
+                nix::fcntl::renameat(
+                    Some(parent_file.as_raw_fd()),
+                    &temp_name,
+                    Some(parent_file.as_raw_fd()),
+                    name,
+                )
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "descriptor-bound config rename failed: {error}"
+                    ))
+                })?;
+
+                fsync(parent_file.as_raw_fd()).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to sync configuration parent directory: {error}"
+                    ))
+                })?;
+                Ok::<(), std::io::Error>(())
+            })();
+
+            let close_result = close(temp_fd).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to close descriptor-bound config candidate: {error}"
+                ))
+            });
+
+            if let Err(error) = result {
+                let _ = unlinkat(
+                    Some(parent_file.as_raw_fd()),
+                    &temp_name,
+                    UnlinkatFlags::NoRemoveDir,
+                );
                 return Err(error);
             }
+            close_result?;
         }
 
-        parent_file.sync_all()?;
+        #[cfg(not(unix))]
+        {
+            let temp_path = parent.join(&temp_name);
+            let mut temp_options = OpenOptions::new();
+            temp_options.read(true).write(true).create_new(true);
+            let mut temp = temp_options.open(&temp_path)?;
+            temp.write_all(replacement.as_bytes())?;
+            temp.flush()?;
+            temp.sync_all()?;
+            temp.set_permissions(metadata.permissions())?;
+            temp.sync_all()?;
+            std::fs::rename(&temp_path, target)?;
+        }
+
+
 
         let mut verify_options = OpenOptions::new();
         verify_options.read(true);
