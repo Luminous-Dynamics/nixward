@@ -36,6 +36,7 @@ pub enum BootCountState {
     Good,
     Indeterminate,
     Bad,
+    NotTracked,
     Unknown,
 }
 
@@ -239,7 +240,7 @@ pub fn observe_systemd_boot(expected_candidate_closure: &str) -> Result<BootSele
         });
     }
 
-    let boot_path = PathBuf::from(run_read_only(["-x"])? .trim());
+    let boot_path = PathBuf::from(run_read_only(["-x"])?.trim());
     if !boot_path.is_absolute() {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -474,7 +475,7 @@ fn parse_boot_count(entry_id: &str) -> Result<(BootCountState, Option<u32>, Opti
         .unwrap_or(entry_id);
 
     let Some(plus) = stem.rfind('+') else {
-        return Ok((BootCountState::Good, None, None));
+        return Ok((BootCountState::NotTracked, None, None));
     };
 
     let counters = &stem[plus + 1..];
@@ -568,6 +569,15 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     fn malformed_efi_variable_payload_is_unknown() {
         assert!(decode_efivar_string(&[0, 0, 0, 7, 1]).is_err());
     }
+    #[test]
+    fn uncounted_entry_is_not_treated_as_successfully_assessed() {
+        let parsed = entry(
+            "nixos.conf",
+            "linux /EFI/nixos/kernel.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet\n",
+        );
+        assert_eq!(parsed.boot_count_state, BootCountState::NotTracked);
+    }
+
     #[test]
     fn boot_count_zero_is_bad() {
         let parsed = entry(
