@@ -30,6 +30,8 @@ One fact must never satisfy another predicate implicitly.
 
 Missing EFI state is `Unknown`, not disabled.
 
+For operator evidence, prefer the unified `observe secure-boot-snapshot` surface. It binds SecureBoot/SetupMode state, `db`, and `dbx` payload identities to one observation timestamp and BLAKE3 digest. The narrower state/database observations remain useful diagnostics but should not be treated as a single correlated snapshot.
+
 ## Observation
 
 `src/action/secure_boot.rs` reads only the global UEFI `SecureBoot` and `SetupMode`
@@ -42,7 +44,8 @@ and ambiguous variable instances fail closed.
 
 The separate `observe secure-boot-databases` surface reads the UEFI `db` and `dbx`
 signature-database variables under the EFI image-security database GUID and emits
-exact BLAKE3 payload identities. Missing databases are represented as `Absent`,
+exact BLAKE3 payload identities. The broader snapshot surface includes those same
+identities alongside the firmware policy state. Missing databases are represented as `Absent`,
 while unreadable or malformed state is an observation error and must be treated as
 Unknown by callers. These raw database digests do not establish that a particular
 certificate is authorized or non-revoked.
