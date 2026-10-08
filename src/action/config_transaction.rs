@@ -2560,7 +2560,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn candidate_build_receipt_rejects_same_source_and_output() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -2579,6 +2578,7 @@ mod tests {
         .is_err());
     }
 
+    #[test]
     fn source_realization_lease_binds_digest_store_and_root() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
