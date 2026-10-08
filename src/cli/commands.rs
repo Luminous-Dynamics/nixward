@@ -340,6 +340,8 @@ pub enum ObserveDomain {
     Flakes,
     /// Effective next-boot selection evidence (read-only).
     BootSelection,
+    /// Firmware Secure Boot policy state (read-only).
+    SecureBoot,
 }
 
 /// Flake subcommands.
