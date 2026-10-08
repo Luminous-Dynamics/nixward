@@ -859,33 +859,23 @@ pub fn resolve_grub_selection(
 }
 
 fn exact_store_path_from_entry(entry: &BlsEntry) -> Option<String> {
-    [
-        entry.linux.as_deref(),
-        entry.efi.as_deref(),
-        entry.uki.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|value| {
-        super::execution_intent::is_valid_nix_store_path(value)
-            && value.contains("-nixos-system-")
-    })
-    .map(str::to_string)
-    .or_else(|| {
-        entry.options.as_deref().and_then(|options| {
-            options.split_whitespace().find_map(|token| {
-                let init = token.strip_prefix("init=")?;
-                let store_path = init.strip_suffix("/init")?;
-                if super::execution_intent::is_valid_nix_store_path(store_path)
-                    && store_path.contains("-nixos-system-")
-                {
-                    Some(store_path.to_string())
-                } else {
-                    None
-                }
-            })
+    // Kernel/initrd/EFI artifact paths are not the NixOS system closure. For
+    // Type #1 entries, the system closure is bound by the kernel command's
+    // init=.../init target, which NixOS emits from the generation's init path.
+    entry.options.as_deref().and_then(|options| {
+        options.split_whitespace().find_map(|token| {
+            let init = token.strip_prefix("init=")?;
+            let store_path = init.strip_suffix("/init")?;
+            if super::execution_intent::is_valid_nix_store_path(store_path)
+                && store_path.contains("-nixos-system-")
+            {
+                Some(store_path.to_string())
+            } else {
+                None
+            }
         })
-    )
+    })
+}
 }
 
 fn contains_selection_pattern(value: &str) -> bool {
@@ -1064,6 +1054,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(pattern.as_deref(), Some("nixos-*"));
     }
     #[test]
+    fn boot_artifact_path_cannot_qualify_as_system_closure() {
+        let parsed = entry(
+            "candidate.conf",
+            "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-lookalike-kernel\n",
+        );
+        assert_eq!(super::exact_store_path_from_entry(&parsed), None);
+    }
+    #[test]
     fn systemd_loader_entry_suffix_is_normalized_exactly() {
         let mut entries = BTreeMap::new();
         entries.insert(
@@ -1140,7 +1138,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             "candidate".into(),
             entry(
                 "candidate",
-                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+                "efi /EFI/nixos/candidate.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
             ),
         );
         let evidence = resolve_grub_selection(&environment, Some("saved"), &entries)
@@ -1220,7 +1218,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             "candidate".into(),
             entry(
                 "candidate",
-                "efi /nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate\n",
+                "efi /EFI/nixos/candidate.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init\n",
             ),
         )]);
 
