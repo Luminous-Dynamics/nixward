@@ -547,7 +547,6 @@ pub fn observe_boot_selection_for_candidate(
 /// selected entry, /run/current-system, and the kernel init= command-line
 /// binding. This proves a current-boot identity boundary, not service health
 /// or long-term system correctness.
-#[cfg(feature = "native")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BootWitnessState {
     Verified,
@@ -620,10 +619,10 @@ pub fn observe_current_systemd_boot_witness(
         .to_ascii_lowercase();
     if !loader_name.starts_with("systemd-boot") {
         return Ok(BootWitnessEvidence {
-            bootloader_family: if loader_name.is_empty() {
-                BootloaderFamily::Unknown
-            } else {
+            bootloader_family: if loader_name.contains("grub") {
                 BootloaderFamily::Grub
+            } else {
+                BootloaderFamily::Unknown
             },
             expected_entry_id: expected_entry_id.into(),
             selected_entry_id: None,
@@ -688,10 +687,10 @@ pub fn observe_current_systemd_boot_witness(
         entries
             .get(&entry_key)
             .and_then(exact_store_path_from_entry)
-    } else if is_uki_selector(&selected_entry_id) {
+    } else if let Some(uki_filename) = uki_selector_filename(&selected_entry_id) {
         let uki_path = resolve_boot_artifact_path(
             &boot_path,
-            &format!("/EFI/Linux/{selected_entry_id}"),
+            &format!("/EFI/Linux/{uki_filename}"),
         )
         .map_err(|reason| UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -956,11 +955,22 @@ fn systemd_effective_selector_with_preferred(
     }
 }
 
-fn is_uki_selector(selector: &str) -> bool {
-    selector.ends_with(".efi")
-        && !selector.contains('/')
-        && !selector.contains('\\')
-        && !selector.contains("..")
+fn uki_selector_filename(selector: &str) -> Option<String> {
+    if selector.is_empty()
+        || selector.ends_with(".conf")
+        || selector.contains('/')
+        || selector.contains('\\')
+        || selector.contains("..")
+        || selector.contains('\0')
+    {
+        return None;
+    }
+
+    if selector.ends_with(".efi") {
+        Some(selector.to_string())
+    } else {
+        Some(format!("{selector}.efi"))
+    }
 }
 
 #[cfg(feature = "native")]
@@ -970,9 +980,13 @@ fn observe_systemd_uki_from_selection(
     selection_kind: SelectionKind,
     selection_source: &str,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    let uki_filename = uki_selector_filename(selected).ok_or_else(|| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason: format!("selected UKI identifier is not a safe EFI filename: {selected}"),
+    })?;
     let uki_path = resolve_boot_artifact_path(
         boot_path,
-        &format!("/EFI/Linux/{selected}"),
+        &format!("/EFI/Linux/{uki_filename}"),
     )
     .map_err(|reason| UnknownBootSelection {
         bootloader_family: BootloaderFamily::SystemdBoot,
