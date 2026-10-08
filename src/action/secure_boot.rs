@@ -1365,6 +1365,53 @@ mod tests {
     }
 
     #[test]
+    fn zero_time_dbx_tbs_match_dominates_timestamped_match_ordering() {
+        let evidence = SignatureDatabaseMatchEvidence {
+            db_records: Vec::new(),
+            dbx_records: vec![
+                SignatureDatabaseRecord {
+                    kind: SignatureListKind::X509TbsSha256,
+                    signature_size: 64,
+                    signature_data_blake3: [1; 32],
+                    owner: [1; 16],
+                    image_authenticode_sha256: None,
+                    certificate_der_blake3: None,
+                    certificate_der: None,
+                    certificate_tbs_hash: Some(vec![3; 32]),
+                    revocation_time: Some([7; 16]),
+                },
+                SignatureDatabaseRecord {
+                    kind: SignatureListKind::X509TbsSha256,
+                    signature_size: 64,
+                    signature_data_blake3: [2; 32],
+                    owner: [2; 16],
+                    image_authenticode_sha256: None,
+                    certificate_der_blake3: None,
+                    certificate_der: None,
+                    certificate_tbs_hash: Some(vec![3; 32]),
+                    revocation_time: Some([0; 16]),
+                },
+            ],
+            image_authenticode_sha256: [0; 32],
+            direct_db_authenticode_hash_match: false,
+            direct_dbx_authenticode_hash_match: false,
+            exact_certificate_in_db: false,
+            exact_certificate_in_dbx: false,
+            exact_certificate_tbs_hash_in_db: false,
+            exact_certificate_tbs_hash_in_dbx: true,
+            matched_dbx_tbs_revocation_time: Some([0; 16]),
+            certificate_chain_authorization: None,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::ForbiddenByDbxTbsRevocation
+        );
+    }
+
+    #[test]
     fn exact_dbx_certificate_match_beats_unevaluated_rules() {
         let evidence = SignatureDatabaseMatchEvidence {
             db_records: Vec::new(),
