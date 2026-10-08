@@ -365,11 +365,10 @@ pub fn inspect_x509_signature_chains(
             let (_, parsed) = x509_parser::parse_x509_certificate(&der)
                 .map_err(|error| format!("failed to parse embedded X.509 certificate: {error}"))?;
             let issuer = parsed.tbs_certificate.issuer.as_ref();
-            let serial = cert
-                .serial_number()
-                .to_bn()
-                .map_err(|error| format!("failed to normalize X.509 serial number: {error}"))?
-                .to_vec();
+            // Preserve the exact X.509 serial-number content octets.
+            // Do not normalize through a library-specific integer representation:
+            // Secure Boot dbx identity matching is byte-sensitive here.
+            let serial = parsed.tbs_certificate.raw_serial().to_vec();
             let tbs = parsed.tbs_certificate.as_ref();
 
             let mut sha256 = Sha256::new();
