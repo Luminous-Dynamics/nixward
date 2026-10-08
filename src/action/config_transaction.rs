@@ -2891,6 +2891,21 @@ mod tests {
     }
 
     #[test]
+    fn mixed_recovery_observation_requires_recovery() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let observation = RecoveryObservation::MixedOrUnknown {
+            runtime_closure: Some("runtime".into()),
+            profile_closure: Some("profile".into()),
+            reason: "unexpected state".into(),
+        };
+        tx.enter_recovery_required(&observation).unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::RecoveryRequired);
+        assert_eq!(tx.observed_runtime_closure.as_deref(), Some("runtime"));
+        assert_eq!(tx.observed_profile_closure.as_deref(), Some("profile"));
+    }
+
+    #[test]
     fn profile_transition_is_the_source_rollback_boundary() {
         assert!(ConfigTransactionPhase::SourceCommitted.permits_source_rollback());
         assert!(!ConfigTransactionPhase::ProfileTransitionStarted.permits_source_rollback());
