@@ -246,6 +246,23 @@ pub struct FrozenConfigSource {
     pub manifest: Vec<SourceManifestEntry>,
 }
 
+fn nix_normalized_mode(kind: &SourceEntryKind, source_mode: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        match kind {
+            SourceEntryKind::Directory => 0o555,
+            SourceEntryKind::File => {
+                if source_mode & 0o111 != 0 { 0o555 } else { 0o444 }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = kind;
+        source_mode
+    }
+}
+
 fn manifest_relative_path(path: &Path) -> Result<String, String> {
     let value = path
         .to_str()
@@ -384,7 +401,8 @@ impl FrozenConfigSource {
                 hasher.update(ENTRY_DOMAIN);
                 hasher.update(b"dir\0");
                 hasher.update(relative_path.as_bytes());
-                hasher.update(&mode.to_le_bytes());
+                let normalized_mode = nix_normalized_mode(&SourceEntryKind::Directory, mode);
+                hasher.update(&normalized_mode.to_le_bytes());
                 let digest = *hasher.finalize().as_bytes();
                 manifest.push(SourceManifestEntry {
                     relative_path,
@@ -401,7 +419,8 @@ impl FrozenConfigSource {
                 hasher.update(ENTRY_DOMAIN);
                 hasher.update(relative_path.as_bytes());
                 hasher.update(&[0]);
-                hasher.update(&mode.to_le_bytes());
+                let normalized_mode = nix_normalized_mode(&SourceEntryKind::File, mode);
+                hasher.update(&normalized_mode.to_le_bytes());
                 hasher.update(&(bytes.len() as u64).to_le_bytes());
                 hasher.update(&bytes);
                 manifest.push(SourceManifestEntry {
@@ -550,7 +569,8 @@ impl FrozenConfigSource {
                     hasher.update(ENTRY_DOMAIN);
                     hasher.update(b"dir\0");
                     hasher.update(relative_path.as_bytes());
-                    hasher.update(&mode.to_le_bytes());
+                    let normalized_mode = nix_normalized_mode(&SourceEntryKind::Directory, mode);
+                    hasher.update(&normalized_mode.to_le_bytes());
                     let digest = *hasher.finalize().as_bytes();
                     manifest.push(SourceManifestEntry {
                         relative_path,
@@ -653,7 +673,8 @@ impl FrozenConfigSource {
                     hasher.update(ENTRY_DOMAIN);
                     hasher.update(relative_path.as_bytes());
                     hasher.update(&[0]);
-                    hasher.update(&mode.to_le_bytes());
+                    let normalized_mode = nix_normalized_mode(&SourceEntryKind::File, mode);
+                    hasher.update(&normalized_mode.to_le_bytes());
                     hasher.update(&(bytes.len() as u64).to_le_bytes());
                     hasher.update(&bytes);
                     manifest.push(SourceManifestEntry {
