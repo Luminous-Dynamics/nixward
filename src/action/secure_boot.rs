@@ -1580,6 +1580,38 @@ mod tests {
     }
 
     #[test]
+    fn zero_time_dbx_tbs_record_is_always_revoked() {
+        let record = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509TbsSha256,
+            signature_size: 64,
+            signature_data_blake3: [0; 32],
+            owner: [0; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: Some(vec![3; 32]),
+            revocation_time: Some([0; 16]),
+        };
+        assert!(dbx_tbs_record_is_always_revoked(&record));
+    }
+
+    #[test]
+    fn nonzero_time_dbx_tbs_record_remains_time_dependent() {
+        let record = SignatureDatabaseRecord {
+            kind: SignatureListKind::X509TbsSha256,
+            signature_size: 64,
+            signature_data_blake3: [0; 32],
+            owner: [0; 16],
+            image_authenticode_sha256: None,
+            certificate_der_blake3: None,
+            certificate_der: None,
+            certificate_tbs_hash: Some(vec![3; 32]),
+            revocation_time: Some([1; 16]),
+        };
+        assert!(!dbx_tbs_record_is_always_revoked(&record));
+    }
+
+    #[test]
     fn evidence_digest_binds_secure_boot_state() {
         let first = build_secure_boot_evidence(Some(true), Some(false))
             .with_observation_metadata(100)
