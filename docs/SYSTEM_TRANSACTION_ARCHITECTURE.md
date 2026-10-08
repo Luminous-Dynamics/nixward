@@ -513,17 +513,18 @@ silently qualify an older validation mirror.
 
 ## Journal-bound pidfd worker identity (2026-10-09)
 
-The transaction journal is versioned to v3 because worker/process evidence changes its
-recovery contract. Profile transitions, candidate activation, and recovery activation are
-spawned through one supervised worker path. Before awaiting process completion, Nixward
-captures the child PID through `pidfd_open`, verifies a stable `/proc/<pid>/stat` start-time
-and boot ID around pidfd acquisition, binds the immutable executable path and argv digest
-to the transaction ID and worker purpose, and durably persists the worker receipt.
+The transaction journal is versioned to v4 because worker/process evidence changes its
+recovery contract. Profile transitions, candidate activation, and recovery activation use
+one supervised worker path. Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent`
+containing the transaction, worker purpose, immutable executable identity, and argv digest.
+After spawn, it captures the child PID through `pidfd_open`, verifies a stable
+`/proc/<pid>/stat` start-time and boot ID around pidfd acquisition, and atomically replaces
+the pending intent with the concrete worker receipt before waiting for completion.
 
 A pidfd is a live kernel handle, not a serialized token. After process restart, Nixward
 does not trust the recorded PID alone: it rechecks the boot ID and process start time, opens
 a fresh pidfd, and polls that handle. A recorded worker that may still be alive blocks
-recovery mutation. If a process-start boundary was persisted but its worker receipt is
+recovery mutation. An unresolved `WorkerLaunchIntent` is also evidence of ambiguity: the process may have persisted but its worker receipt is
 missing, recovery also fails closed; it does not infer that the process was never launched.
 
 `RecoveryMutationStarted` is persisted before a recovery profile or activation process can
