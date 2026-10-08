@@ -878,6 +878,32 @@ impl SourceRealizationLease {
         let resolved = resolved
             .canonicalize()
             .map_err(|error| format!("failed to resolve source GC root target: {error}"))?;
+
+        let final_metadata = std::fs::symlink_metadata(gc_root)
+            .map_err(|error| format!("failed to re-inspect source GC root after resolution: {error}"))?;
+        if !final_metadata.file_type().is_symlink() {
+            return Err("source GC root ceased to be a symlink during observation".into());
+        }
+        let final_target = std::fs::read_link(gc_root)
+            .map_err(|error| format!("failed to reread source GC root target: {error}"))?;
+        if final_target != target {
+            return Err("source GC root target changed during resolution".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if before.dev() != final_metadata.dev()
+                || before.ino() != final_metadata.ino()
+                || before.mode() != final_metadata.mode()
+                || before.len() != final_metadata.len()
+                || before.mtime() != final_metadata.mtime()
+                || before.mtime_nsec() != final_metadata.mtime_nsec()
+                || before.ctime() != final_metadata.ctime()
+                || before.ctime_nsec() != final_metadata.ctime_nsec()
+            {
+                return Err("source GC root changed during target resolution".into());
+            }
+        }
         if resolved != std::path::Path::new(&self.store_path) {
             return Err("source GC root does not target the bound immutable store path".into());
         }
