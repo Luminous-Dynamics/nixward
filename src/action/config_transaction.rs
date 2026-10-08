@@ -794,14 +794,17 @@ impl NixSourceRealizer {
     }
 
     fn parse_store_path(stdout: &str) -> Result<String, String> {
-        stdout
+        let paths: Vec<String> = stdout
             .lines()
             .map(str::trim)
-            .find(|line| super::execution_intent::is_valid_nix_store_path(line))
+            .filter(|line| super::execution_intent::is_valid_nix_store_path(line))
             .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                "nix store add did not emit a canonical immutable store path".to_string()
-            })
+            .collect();
+        match paths.as_slice() {
+            [path] => Ok(path.clone()),
+            [] => Err("nix store add did not emit a canonical immutable store path".into()),
+            _ => Err("nix store add emitted multiple canonical immutable store paths".into()),
+        }
     }
 
     /// Realize the complete frozen source tree and retain it with a transaction-scoped
@@ -1933,6 +1936,13 @@ mod tests {
 
         assert!(NixSourceRealizer::parse_store_path("not-a-store-path\n").is_err());
         assert!(NixSourceRealizer::parse_store_path("/nix/store/NOT-A-VALID-PATH\n").is_err());
+        assert!(
+            NixSourceRealizer::parse_store_path(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first\n/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-second\n"
+            )
+            .expect_err("multiple store paths must fail closed")
+            .contains("multiple canonical immutable store paths")
+        );
     }
 
     #[cfg(feature = "native")]
