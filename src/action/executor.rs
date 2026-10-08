@@ -1691,6 +1691,32 @@ impl NixOSExecutor {
             .map_err(|error| format!("durable transaction journal update failed: {error}"))
     }
 
+    fn cleanup_terminal_retention(
+        transaction: &mut super::config_transaction::ConfigTransaction,
+        path: &Path,
+    ) {
+        #[cfg(feature = "native")]
+        {
+            if let Err(error) = transaction.release_candidate_retention() {
+                warn!(error = %error, "candidate retention cleanup deferred; terminal evidence preserved");
+            }
+        }
+
+        let source_released = match transaction.release_source_realization() {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(error = %error, "source retention cleanup deferred; terminal evidence preserved");
+                false
+            }
+        };
+
+        if source_released {
+            if let Err(error) = Self::persist_transaction(transaction, path) {
+                warn!(error = %error, "failed to persist post-cleanup transaction journal; terminal state remains durable");
+            }
+        }
+    }
+
     /// Execute an exact immutable system activation only through its durable
     /// ConfigTransaction journal.
     ///
@@ -2032,6 +2058,7 @@ impl NixOSExecutor {
 
         match transaction.phase() {
             super::config_transaction::ConfigTransactionPhase::Recovered => {
+                Self::cleanup_terminal_retention(&mut transaction, &journal_path);
                 let rollback_output = result
                     .as_ref()
                     .ok()
@@ -2323,6 +2350,7 @@ impl NixOSExecutor {
 
         match transaction.phase() {
             super::config_transaction::ConfigTransactionPhase::Activated => {
+                Self::cleanup_terminal_retention(&mut transaction, &journal_path);
                 match result {
                     Ok(output) => ExecutionResult::Success {
                         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
