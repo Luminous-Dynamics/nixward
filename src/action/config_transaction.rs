@@ -265,6 +265,39 @@ fn nix_normalized_mode(kind: &SourceEntryKind, source_mode: u32) -> u32 {
     }
 }
 
+fn validate_manifest_relative_path(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("frozen source manifest contains a non-canonical path: {value:?}"));
+    }
+    Ok(())
+}
+
+fn compute_frozen_source_root_digest(
+    manifest: &[SourceManifestEntry],
+) -> Result<String, String> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(SOURCE_DOMAIN);
+    for entry in manifest {
+        hasher.update(entry.relative_path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(match entry.kind {
+            SourceEntryKind::File => b"file\0".as_slice(),
+            SourceEntryKind::Directory => b"dir\0".as_slice(),
+        });
+        hasher.update(&entry.mode.to_le_bytes());
+        hasher.update(&entry.size.to_le_bytes());
+        hasher.update(&decode_digest(&entry.digest)?);
+    }
+    Ok(digest_hex(hasher.finalize().as_bytes()))
+}
+
 fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), String> {
     validate_gc_root_path(gc_root_path)?;
     if !super::execution_intent::is_valid_nix_store_path(store_path) {
@@ -456,25 +489,15 @@ impl FrozenConfigSource {
             return Err("config entrypoint is not a regular file in the frozen source tree".into());
         }
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(SOURCE_DOMAIN);
-        for entry in &manifest {
-            hasher.update(entry.relative_path.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(match entry.kind {
-                SourceEntryKind::File => b"file\0".as_slice(),
-                SourceEntryKind::Directory => b"dir\0".as_slice(),
-            });
-            hasher.update(&entry.mode.to_le_bytes());
-            hasher.update(&entry.size.to_le_bytes());
-            hasher.update(&decode_digest(&entry.digest)?);
-        }
+        let root_digest = compute_frozen_source_root_digest(&manifest)?;
 
-        Ok(Self {
-            root_digest: digest_hex(hasher.finalize().as_bytes()),
+        let source = Self {
+            root_digest,
             entrypoint: manifest_relative_path(relative_entrypoint)?,
             manifest,
-        })
+        };
+        source.validate_identity()?;
+        Ok(source)
     }
 
     #[cfg(not(unix))]
@@ -860,6 +883,7 @@ impl FrozenConfigSource {
     }
 
     pub fn verify_unchanged(&self, root: impl AsRef<Path>) -> Result<(), String> {
+        self.validate_identity()?;
         let observed = Self::capture(root, &self.entrypoint)?;
         if observed.root_digest != self.root_digest
             || observed.entrypoint != self.entrypoint
@@ -877,6 +901,7 @@ impl FrozenConfigSource {
     /// as interchangeable with Nix's NAR hash, which is a separate canonical
     /// whole-tree fingerprint.
     pub fn verify_realization_at(&self, realized_root: impl AsRef<Path>) -> Result<(), String> {
+        self.validate_identity()?;
         let realized_root = realized_root.as_ref();
         let metadata = std::fs::symlink_metadata(realized_root)
             .map_err(|error| format!("failed to inspect Nix realization root: {error}"))?;
@@ -2197,6 +2222,7 @@ impl ConfigTransaction {
     /// transaction. The snapshot is part of the journal evidence, not a
     /// mutable working-tree reference.
     pub fn bind_frozen_source(&mut self, source: &FrozenConfigSource) -> Result<(), String> {
+        source.validate_identity()?;
         if self.phase != ConfigTransactionPhase::InputFrozen {
             return Err("frozen source can only be bound at InputFrozen".into());
         }
@@ -2579,6 +2605,7 @@ impl ConfigTransaction {
             return Err("transaction journal at executable phase is missing its frozen source snapshot".into());
         }
         if let Some(source) = transaction.frozen_source.as_ref() {
+            source.validate_identity()?;
             if source.root_digest != transaction.source_digest {
                 return Err("transaction journal frozen source digest mismatch".into());
             }
@@ -3134,6 +3161,26 @@ mod tests {
     }
 
     #[test]
+    fn frozen_source_rejects_manifest_tampering_under_old_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("other.nix"), "{}\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let mut tampered = source.clone();
+        tampered.manifest[0].relative_path = "forged-entry.nix".into();
+        assert!(
+            tampered
+                .validate_identity()
+                .expect_err("manifest mutation must not retain the old digest")
+                .contains("manifest does not match its root digest")
+        );
+    }
+
+    #[test]
     fn frozen_source_detects_drift() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
@@ -3423,6 +3470,38 @@ mod tests {
         transaction.transaction_id = "BAD".into();
         transaction.persist_atomic(&path).unwrap();
         assert!(ConfigTransaction::load(&path).is_err());
+    }
+
+    #[test]
+    fn transaction_load_rejects_tampered_frozen_source_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        transaction.bind_frozen_source(&source).unwrap();
+
+        let path = dir.path().join("transaction.json");
+        transaction.persist_atomic(&path).unwrap();
+        let encoded = std::fs::read(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["frozen_source"]["manifest"][0]["relative_path"] =
+            serde_json::Value::String("forged-entry.nix".into());
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert!(
+            ConfigTransaction::load(&path)
+                .expect_err("tampered frozen source manifest must fail closed")
+                .contains("manifest does not match its root digest")
+        );
     }
 
     #[test]
