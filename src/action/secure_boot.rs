@@ -391,20 +391,21 @@ pub fn derive_direct_trust_disposition(
     evidence: &SignatureDatabaseMatchEvidence,
 ) -> DirectTrustDisposition {
     // Definite image-hash and exact X.509 certificate matches in dbx are
-    // immediate veto evidence. X.509 TBS-hash records can carry a revocation
-    // time, so an exact match requires signature-timestamp evaluation before
-    // it can be classified as allowed or forbidden.
+    // immediate veto evidence. Unsupported rules dominate uncertain outcomes.
+    // X.509 TBS-hash records can carry a revocation time, so an exact match
+    // requires signature-timestamp evaluation before it can be classified as
+    // allowed or forbidden.
     if evidence.direct_dbx_authenticode_hash_match {
         return DirectTrustDisposition::ForbiddenByAuthenticodeHash;
     }
     if evidence.exact_certificate_in_dbx {
         return DirectTrustDisposition::ForbiddenByExactCertificate;
     }
+    if evidence.dbx_records.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
+        return DirectTrustDisposition::UnknownUnsupportedRecord;
+    }
     if evidence.exact_certificate_tbs_hash_in_dbx {
         return DirectTrustDisposition::PotentialX509TbsRevocation;
-    }
-    if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
-        return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     if evidence.direct_db_authenticode_hash_match {
         return DirectTrustDisposition::AuthenticodeHashInDb;
@@ -1380,7 +1381,7 @@ mod tests {
 
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::PotentialX509TbsRevocation
+            DirectTrustDisposition::UnknownUnsupportedRecord
         );
     }
 
