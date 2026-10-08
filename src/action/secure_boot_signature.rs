@@ -712,4 +712,73 @@ mod tests {
         assert!(require_signature_table_image(&evidence, &other).is_err());
         assert!(require_signature_table_image(&evidence, &evidence.image_blake3).is_ok());
     }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn pkcs7_fixture_extracts_signer_chain_identity() {
+        use openssl::hash::MessageDigest;
+        use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::stack::Stack;
+        use openssl::x509::{X509Builder, X509NameBuilder};
+
+        let rsa = Rsa::generate(2048).expect("test RSA key");
+        let key = PKey::from_rsa(rsa).expect("test private key");
+
+        let mut name = X509NameBuilder::new().expect("name builder");
+        name.append_entry_by_text("CN", "Nixward PKCS7 Fixture")
+            .expect("CN");
+        let name = name.build();
+
+        let mut builder = X509Builder::new().expect("certificate builder");
+        builder.set_version(2).expect("version");
+        builder.set_subject_name(&name).expect("subject");
+        builder.set_issuer_name(&name).expect("issuer");
+        builder.set_pubkey(&key).expect("public key");
+
+        let serial = openssl::asn1::Asn1Integer::from_bn(
+            &openssl::bn::BigNum::from_u32(7).expect("serial"),
+        )
+        .expect("serial number");
+        builder.set_serial_number(&serial).expect("serial number");
+        builder
+            .sign(&key, MessageDigest::sha256())
+            .expect("certificate signature");
+        let certificate = builder.build();
+
+        let certificates = Stack::new().expect("certificate stack");
+        let pkcs7 = Pkcs7::sign(
+            &certificate,
+            &key,
+            &certificates,
+            b"nixward-chain-fixture",
+            Pkcs7Flags::BINARY,
+        )
+        .expect("PKCS7 signing");
+        let payload = pkcs7.to_der().expect("PKCS7 DER");
+        let image = pe_with_certificate(0x0002, &payload);
+
+        let evidence = inspect_x509_signature_chains(&image).expect("chain evidence");
+        assert!(!evidence.is_empty());
+        assert_eq!(
+            evidence.iter().filter(|certificate| certificate.is_signer).count(),
+            1
+        );
+        assert_eq!(
+            evidence
+                .iter()
+                .filter(|certificate| certificate.is_chain_member)
+                .count(),
+            1
+        );
+        assert_eq!(
+            evidence
+                .iter()
+                .find(|certificate| certificate.is_signer)
+                .map(|certificate| certificate.certificate_blake3),
+            Some(*blake3::hash(&certificate.to_der().expect("certificate DER")).as_bytes())
+        );
+    }
+
 }
