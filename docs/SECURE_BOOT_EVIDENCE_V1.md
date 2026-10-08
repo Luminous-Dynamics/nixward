@@ -59,8 +59,13 @@ signature validity, signer authorization, firmware trust acceptance, or revocati
 
 The same module can run a certificate-pinned `sbverify --cert` verification against
 the exact image. `Verified` is emitted only when the verifier exits successfully
-and the image/certificate bytes are unchanged across the verification call. Tool
-absence or verifier failure is never converted into a pass.
+and the image bytes are unchanged across the verification call. When the supplied
+certificate comes from UEFI `db`, success establishes verification to that exact
+certificate as a trust anchor; this is evidence of a certificate-chain anchor, not
+a blanket statement that firmware would accept the image. The verifier can also
+be run against certificates observed in `dbx`: success is definite chain-level
+revocation evidence for that exact revoked certificate. Tool absence or verifier
+failure is never converted into a pass.
 
 For UEFI `EFI_CERT_SHA256_GUID` database records, the image subject is the PE/COFF
 Authenticode SHA-256, not the flat file SHA-256. The implementation therefore
@@ -69,7 +74,21 @@ uses the exact Authenticode hash procedure for `db`/`dbx` image-hash comparisons
 X.509 TBS hash records in `dbx` carry a revocation time. An exact TBS match is
 therefore recorded as a potential revocation until the signed-image timestamp and
 certificate-chain semantics are evaluated; it is not collapsed into an immediate
-veto.
+veto. The current implementation deliberately leaves this as a separate
+`PotentialDbxTbsRevocation` state.
+
+## Certificate-chain trust boundary
+
+The verification path now distinguishes four materially different outcomes:
+
+- `VerifiedAgainstDbCertificate`: the exact image cryptographically verifies to a certificate observed in `db`;
+- `ForbiddenByDbxCertificateChain`: the exact image cryptographically verifies to a certificate observed in `dbx`, establishing a chain-level revocation match;
+- `PotentialDbxTbsRevocation`: an exact X.509 TBS hash in `dbx` exists but its revocation-time semantics have not been evaluated;
+- `UnknownDbxCertificateRules`: an unsupported/uninterpreted `dbx` rule prevents a trust conclusion.
+
+For live-host evidence, Nixward reads `db` and `dbx` before verification and re-reads both after verification. A database digest change invalidates the verification result rather than allowing evidence from one database snapshot to qualify another. The image itself is also checked for byte stability during each verifier invocation.
+
+This closes more of the chain-anchor evidence boundary without pretending to reproduce the firmware's complete certificate-policy engine. Same-Issuer/Serial/TBS revocation matching and revocation-time evaluation remain explicit next-stage work.
 
 ## Separate signature subject
 
