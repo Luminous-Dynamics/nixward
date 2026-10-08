@@ -39,11 +39,7 @@ path = "src/bin/nixward_owner_key.rs"
 # Pin the cognitive core to a content-addressed upstream revision. This is the
 # only cross-repository source dependency; all other dependencies are resolved
 # from crates.io so this repository remains independently buildable.
-symthaea-core = {
-  git = "https://github.com/Luminous-Dynamics/symthaea.git",
-  rev = "77b872fd116c7b6f44fedd82bb8c6100240caa73",
-  package = "symthaea-core",
-}
+symthaea-core = { git = "https://github.com/Luminous-Dynamics/symthaea.git", rev = "77b872fd116c7b6f44fedd82bb8c6100240caa73", package = "symthaea-core" }
 
 # Native-only (C FFI, async)
 tree-sitter = { version = "0.24", optional = true }
