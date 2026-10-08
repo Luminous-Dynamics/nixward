@@ -230,6 +230,8 @@ fn resolve_systemd_boot_selection_with_source(
         selected_entry_source: source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        selected_image_path: None,
+        selected_image_blake3: None,
         observed_at_ms: None,
         evidence_digest: None,
     })
@@ -1001,6 +1003,8 @@ pub fn resolve_grub_selection(
         selected_entry_source: default_source.into(),
         candidate_closure: exact_store_path_from_entry(entry),
         boot_count_state: entry.boot_count_state,
+        selected_image_path: None,
+        selected_image_blake3: None,
         observed_at_ms: None,
         evidence_digest: None,
     })
@@ -1148,6 +1152,8 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             selected_entry_source: "efi:LoaderEntryOneShot".into(),
             candidate_closure: Some("/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate".into()),
             boot_count_state: BootCountState::NotTracked,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         };
@@ -1395,6 +1401,8 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
                 "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other".into(),
             ),
             boot_count_state: BootCountState::NotTracked,
+            selected_image_path: None,
+            selected_image_blake3: None,
             observed_at_ms: None,
             evidence_digest: None,
         };
