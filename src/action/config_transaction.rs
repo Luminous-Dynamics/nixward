@@ -254,15 +254,26 @@ impl FrozenConfigSource {
             return Err("config source root must be a directory".into());
         }
 
-        let entrypoint = {
+        let entrypoint_path = {
             let path = entrypoint.as_ref();
             if path.is_absolute() {
+                if !path.starts_with(&root) {
+                    return Err("config entrypoint escapes source root".into());
+                }
                 path.to_path_buf()
             } else {
                 root.join(path)
             }
         };
-        let entrypoint = entrypoint
+        let entrypoint_metadata = std::fs::symlink_metadata(&entrypoint_path)
+            .map_err(|error| format!("failed to inspect config entrypoint: {error}"))?;
+        if entrypoint_metadata.file_type().is_symlink() {
+            return Err("config entrypoint may not be a symbolic link".into());
+        }
+        if !entrypoint_metadata.is_file() {
+            return Err("config entrypoint must be a regular file".into());
+        }
+        let entrypoint = entrypoint_path
             .canonicalize()
             .map_err(|error| format!("failed to canonicalize config entrypoint: {error}"))?;
         let relative_entrypoint = entrypoint
@@ -1239,6 +1250,26 @@ mod tests {
             SystemActivation::Switch,
         );
         assert!(matches!(result, ActivationDisposition::RecoveryRequired { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_rejects_external_entrypoint_symlink_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        let alias = outside.path().join("entrypoint.nix");
+        std::os::unix::fs::symlink(root.path().join("configuration.nix"), &alias).unwrap();
+
+        assert!(
+            FrozenConfigSource::capture(root.path(), &alias)
+                .expect_err("external entrypoint symlink must fail closed")
+                .contains("escapes source root")
+        );
     }
 
     #[cfg(unix)]
