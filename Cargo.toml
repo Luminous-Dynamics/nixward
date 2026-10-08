@@ -39,7 +39,7 @@ path = "src/bin/nixward_owner_key.rs"
 # Pin the cognitive core to a content-addressed upstream revision. This is the
 # only cross-repository source dependency; all other dependencies are resolved
 # from crates.io so this repository remains independently buildable.
-symthaea-core = { git = "https://github.com/Luminous-Dynamics/symthaea.git", rev = "77b872fd116c7b6f44fedd82bb8c6100240caa73", package = "symthaea-core" }
+symthaea-core = { version = "=0.5.1", package = "symthaea-core" }
 
 # Native-only (C FFI, async)
 tree-sitter = { version = "0.24", optional = true }
@@ -63,6 +63,7 @@ dashmap = "5.5"
 nix = { version = "0.27", optional = true, features = ["fs"] }
 openssl = { version = "0.10.81", optional = true }
 x509-parser = { version = "0.18.1", optional = true }
+tempfile = { version = "3.10", optional = true }
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 rnix = "0.11"
 ed25519-dalek = { version = "=2.1.0", default-features = false, features = ["alloc", "rand_core"] }
@@ -98,7 +99,7 @@ harness = false
 
 [features]
 default = ["native"]
-native = ["nix", "rusqlite", "tree-sitter", "tree-sitter-nix", "tokio", "openssl", "x509-parser"]
+native = ["nix", "rusqlite", "tree-sitter", "tree-sitter-nix", "tokio", "openssl", "x509-parser", "tempfile"]
 cli = ["clap", "clap_complete", "native"]
 tui = ["crossterm", "ratatui", "cli"]
 daemon = ["tokio/full", "native"]
