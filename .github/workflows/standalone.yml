@@ -1,0 +1,398 @@
+name: standalone
+
+on:
+  push:
+    branches:
+      - main
+      - "hardening/**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-lockfile:
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: standalone-bootstrap-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Rebase bootstrap workspace to branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+
+      - name: Inspect branch-tip lockfile state
+        id: lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.lock ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock already present at branch tip"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Cargo.lock missing; bootstrap required"
+          fi
+
+      - name: Install pinned Rust toolchain
+        if: steps.lockfile.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Generate lockfile
+        if: steps.lockfile.outputs.needed == 'true'
+        shell: bash
+        run: cargo generate-lockfile
+
+      - name: Persist generated lockfile
+        if: steps.lockfile.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock && git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            echo "Cargo.lock already current"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "build: add standalone Cargo lockfile"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:"${GITHUB_REF_NAME}"
+
+  lockfile-artifact:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    outputs:
+      artifact_digest: ${{ steps.upload_lockfile.outputs.artifact-digest }}
+      cargo_lock_sha256: ${{ steps.lockfile_digest.outputs.cargo_lock_sha256 }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+      - name: Hash generated Cargo.lock
+        id: lockfile_digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo_lock_sha256=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload generated lockfile
+        id: upload_lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+  validate:
+    needs:
+      - bootstrap-lockfile
+      - lockfile-artifact
+    concurrency:
+      group: standalone-validate-${{ github.ref }}
+      cancel-in-progress: true
+    # A skipped bootstrap is expected for pull_request and main pushes. GitHub
+    # otherwise skips dependent jobs too; always() preserves the fail-closed
+    # qualification decision instead of silently producing a skipped check.
+    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact validation subject
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Materialize exact PR lockfile
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: .
+
+      - name: Assert exact validation subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$expected_commit"
+      - name: Assert generated lockfile identity
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_lockfile_sha256="${{ needs.lockfile-artifact.outputs.cargo_lock_sha256 }}"
+          actual_lockfile_sha256="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          test "$actual_lockfile_sha256" = "$expected_lockfile_sha256"
+
+
+      - name: Refresh hardening branch after lock bootstrap
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${GITHUB_REF_NAME}")"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+          cargo --version
+
+      - name: Verify workflow authority boundary
+        run: python3 scripts/verify-workflow-boundary.py
+
+      - name: Verify immutable action pins
+        run: python3 scripts/verify-action-pins.py
+
+      - name: Verify standalone filesystem boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Require exact lockfile for validation subject
+        shell: bash
+        run: test -f Cargo.lock
+
+      - name: Check default feature set
+        run: cargo check --locked --all-targets
+
+      - name: Check full native feature set
+        run: cargo check --locked --all-targets --features full
+
+      - name: Run library tests
+        run: cargo test --locked --lib
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Emit qualification receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          validated_commit="$(git rev-parse HEAD)"
+          trigger_commit="${GITHUB_SHA}"
+          requested_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            test "$validated_commit" = "$requested_commit"
+          fi
+          cat > qualification-receipt.json <<JSON
+          {
+            "schema": "luminous-nixward-standalone-qualification-v1",
+            "validated_commit": "$validated_commit",
+            "requested_commit": "$requested_commit",
+            "trigger_commit": "$trigger_commit",
+            "rustc": "$(rustc --version)",
+            "cargo": "$(cargo --version)",
+            "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
+            "cargo_lock_source": "${{ github.event_name == 'pull_request' && 'exact-head-artifact' || 'committed-branch-lockfile' }}",
+            "cargo_lock_generated_sha256": "${{ github.event_name == 'pull_request' && needs.lockfile-artifact.outputs.cargo_lock_sha256 || '' }}",
+            "cargo_lock_artifact_digest": "${{ github.event_name == 'pull_request' && needs.lockfile-artifact.outputs.artifact_digest || '' }}",
+            "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
+            "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
+            "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
+            "rust_toolchain_sha256": "$(sha256sum rust-toolchain.toml | cut -d' ' -f1)",
+            "boundary": "standalone-source-and-lock-boundary-pass"
+          }
+          JSON
+
+      - name: Upload qualification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nixward-standalone-qualification-${{ github.sha }}
+          path: qualification-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  nix:
+    name: Nix packaging
+    needs:
+      - bootstrap-lockfile
+      - lockfile-artifact
+    concurrency:
+      group: standalone-nix-${{ github.ref }}
+      cancel-in-progress: true
+    if: ${{ always() && ((github.event_name == 'pull_request' && needs.lockfile-artifact.result == 'success') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || needs.bootstrap-lockfile.result == 'success'))) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact validation subject
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Materialize exact PR lockfile
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: nixward-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: .
+
+      - name: Assert exact validation subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_commit="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected_commit"
+
+      - name: Stage exact PR lockfile for Nix source capture
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            git add --intent-to-add Cargo.lock
+          fi
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+
+      - name: Assert generated lockfile identity
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_lockfile_sha256="${{ needs.lockfile-artifact.outputs.cargo_lock_sha256 }}"
+          actual_lockfile_sha256="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          test "$actual_lockfile_sha256" = "$expected_lockfile_sha256"
+
+      - name: Refresh hardening branch after lock bootstrap
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "${GITHUB_REF_NAME}"
+          git reset --hard "origin/${GITHUB_REF_NAME}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "origin/${GITHUB_REF_NAME}")"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - name: Verify standalone boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Check locked flake
+        run: nix flake check --no-update-lock-file --no-write-lock-file
+
+      - name: Build exact Nixward package
+        run: nix build .#nixward --no-update-lock-file --no-write-lock-file
+
+  provenance:
+    name: Signed Nixward provenance
+    concurrency:
+      group: standalone-provenance-${{ github.ref }}
+      cancel-in-progress: true
+    needs:
+      - validate
+      - nix
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.validate.result == 'success' && needs.nix.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - name: Verify standalone boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Require committed lockfile
+        run: test -f Cargo.lock
+
+      - name: Build exact Nixward CLI
+        run: nix build .#nixward --no-update-lock-file --no-write-lock-file
+
+      - name: Generate signed SLSA provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ github.workspace }}/result/bin/nixward
+          show-summary: true
+
+      - name: Emit signed qualification predicate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > qualification-predicate.json <<JSON
+          {
+            "schema": "luminous-nixward-qualification-v1",
+            "validated_commit": "${GITHUB_SHA}",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "checks": {
+              "workflow_authority_boundary": "pass",
+              "standalone_filesystem_boundary": "pass",
+              "cargo_locked": true,
+              "default_feature_check": "pass",
+              "full_native_feature_check": "pass",
+              "library_tests": "pass",
+              "format_check": "pass",
+              "clippy": "pass",
+              "nix_flake_check": "pass",
+              "nix_package_build": "pass"
+            },
+            "inputs": {
+              "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
+              "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
+              "flake_sha256": "$(sha256sum flake.nix | cut -d' ' -f1)",
+              "flake_lock_sha256": "$(sha256sum flake.lock | cut -d' ' -f1)",
+              "rust_toolchain_sha256": "$(sha256sum rust-toolchain.toml | cut -d' ' -f1)",
+              "git_tree": "$(git rev-parse HEAD^{tree})"
+            }
+          }
+          JSON
+
+      - name: Generate signed qualification attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ github.workspace }}/result/bin/nixward
+          predicate-type: https://github.com/Luminous-Dynamics/nixward/attestations/qualification/v1
+          predicate-path: qualification-predicate.json
+          show-summary: true
