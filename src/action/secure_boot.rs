@@ -2142,8 +2142,12 @@ mod tests {
         let (_, parsed) =
             x509_parser::parse_x509_certificate(&der).expect("parse generated certificate");
 
-        let issuer_blake3 =
-            *blake3::hash(parsed.tbs_certificate.issuer.as_ref()).as_bytes();
+        let issuer_der = X509::from_der(&der)
+            .expect("parse generated issuer certificate")
+            .issuer_name()
+            .to_der()
+            .expect("serialize generated issuer name");
+        let issuer_blake3 = *blake3::hash(&issuer_der).as_bytes();
         let serial_blake3 =
             *blake3::hash(parsed.tbs_certificate.raw_serial()).as_bytes();
         let mut tbs_hasher = sha2::Sha256::new();
