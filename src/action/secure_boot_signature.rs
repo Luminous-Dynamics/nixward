@@ -342,10 +342,7 @@ pub fn inspect_x509_signature_chains(
                 .map_err(|error| format!("failed to serialize embedded X.509 certificate: {error}"))?;
             let (_, parsed) = x509_parser::parse_x509_certificate(&der)
                 .map_err(|error| format!("failed to parse embedded X.509 certificate: {error}"))?;
-            let issuer = cert
-                .issuer_name()
-                .to_der()
-                .map_err(|error| format!("failed to serialize X.509 issuer name: {error}"))?;
+            let issuer = parsed.tbs_certificate.issuer.as_ref();
             let serial = cert
                 .serial_number()
                 .to_bn()
@@ -363,7 +360,7 @@ pub fn inspect_x509_signature_chains(
             certs.push((
                 cert,
                 *blake3::hash(&der).as_bytes(),
-                *blake3::hash(&issuer).as_bytes(),
+                *blake3::hash(issuer).as_bytes(),
                 *blake3::hash(&serial).as_bytes(),
                 sha256.finalize().into(),
                 sha384.finalize().into(),
