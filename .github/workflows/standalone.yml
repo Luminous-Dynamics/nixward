@@ -280,7 +280,7 @@ jobs:
       cancel-in-progress: true
     # Hardening-branch pushes exist only to converge the committed lockfile.
     # Qualification itself is the PR exact-head surface (or main after merge).
-    if: ${{ always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
+    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'validation/full-stack-qualification-2026-10-08') || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
