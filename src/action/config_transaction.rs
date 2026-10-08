@@ -1742,6 +1742,62 @@ impl CandidateBuildReceipt {
     }
 }
 
+/// Durable audit identity for the exact process that was spawned for activation.
+/// This record is descriptive after restart; only a fresh pidfd + boot/start-time
+/// check can establish whether that same worker is still live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivationWorkerIdentity {
+    pub transaction_id: String,
+    pub pid: u32,
+    pub boot_id: String,
+    pub start_time_ticks: u64,
+    pub executable: String,
+    pub argv_digest: String,
+}
+
+impl ActivationWorkerIdentity {
+    pub fn validate_identity(&self) -> Result<(), String> {
+        if decode_digest(&self.transaction_id).is_err() {
+            return Err("activation worker transaction id is invalid".into());
+        }
+        if self.pid <= 1 || self.start_time_ticks == 0 {
+            return Err("activation worker PID or start-time identity is invalid".into());
+        }
+        if self.boot_id.len() != 36
+            || !self.boot_id.bytes().enumerate().all(|(index, byte)| {
+                matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+                    || (!matches!(index, 8 | 13 | 18 | 23)
+                        && byte.is_ascii_hexdigit()
+                        && !byte.is_ascii_uppercase())
+            })
+        {
+            return Err("activation worker boot id is not canonical lowercase UUID text".into());
+        }
+        if decode_digest(&self.argv_digest).is_err() {
+            return Err("activation worker argv digest is invalid".into());
+        }
+        let executable = std::path::Path::new(&self.executable);
+        if !executable.is_absolute() || !executable.starts_with("/nix/store/") {
+            return Err("activation worker executable is not an absolute Nix store path".into());
+        }
+        let store_component = executable
+            .strip_prefix("/nix/store/")
+            .map_err(|_| "activation worker executable escaped the Nix store".to_string())?
+            .components()
+            .next()
+            .and_then(|component| match component {
+                std::path::Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+            .ok_or_else(|| "activation worker executable has no store object component".to_string())?;
+        let store_path = format!("/nix/store/{store_component}");
+        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+            return Err("activation worker executable has an invalid Nix store identity".into());
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTransaction {
@@ -1757,6 +1813,8 @@ pub struct ConfigTransaction {
     candidate_store_path: Option<String>,
     #[serde(default)]
     candidate_build: Option<CandidateBuildReceipt>,
+    #[serde(default)]
+    activation_worker: Option<ActivationWorkerIdentity>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -1795,6 +1853,7 @@ impl ConfigTransaction {
             frozen_source: None,
             candidate_store_path: None,
             candidate_build: None,
+            activation_worker: None,
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -2211,6 +2270,33 @@ impl ConfigTransaction {
         self.candidate_build.as_ref()
     }
 
+    /// Persist one immutable worker identity only after the process has been
+    /// captured by pidfd and before waiting for activation to finish.
+    pub fn bind_activation_worker_identity(
+        &mut self,
+        identity: ActivationWorkerIdentity,
+    ) -> Result<(), String> {
+        if self.phase != ConfigTransactionPhase::ActivationStarted {
+            return Err("activation worker identity can only be bound after durable ActivationStarted".into());
+        }
+        identity.validate_identity()?;
+        if identity.transaction_id != self.transaction_id {
+            return Err("activation worker identity belongs to a different transaction".into());
+        }
+        if let Some(existing) = &self.activation_worker {
+            if existing != &identity {
+                return Err("activation worker identity is immutable once bound".into());
+            }
+            return Ok(());
+        }
+        self.activation_worker = Some(identity);
+        Ok(())
+    }
+
+    pub fn activation_worker_identity(&self) -> Option<&ActivationWorkerIdentity> {
+        self.activation_worker.as_ref()
+    }
+
     /// Legacy journal compatibility setter. This field is deliberately not
     /// authoritative for execution; bind_candidate_build is required before
     /// CandidateBuilt can be reached.
@@ -2442,6 +2528,15 @@ impl ConfigTransaction {
             }
         }
 
+        if let Some(worker) = transaction.activation_worker.as_ref() {
+            worker.validate_identity()?;
+            if worker.transaction_id != transaction.transaction_id {
+                return Err("transaction journal activation worker belongs to a different transaction".into());
+            }
+            if matches!(transaction.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen | ConfigTransactionPhase::CandidateBuilt | ConfigTransactionPhase::SourceCommitted | ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition) {
+                return Err("transaction journal has activation worker identity before activation began".into());
+            }
+        }
         if let Some(receipt) = transaction.candidate_build.as_ref() {
             receipt.validate_identity()?;
             if receipt.source_digest != transaction.source_digest {
