@@ -1120,7 +1120,7 @@ impl NixOSExecutor {
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|error| format!("failed to execute command {cmd}: {error}"))
+            .map_err(|error| format!("failed to execute command {declared_cmd}: {error}"))
     }
 
     fn trusted_bound_executable(command: &NixOSCommand) -> Result<String, String> {
@@ -1137,16 +1137,24 @@ impl NixOSExecutor {
             .to_str()
             .ok_or_else(|| "bound executable path is not valid UTF-8".to_string())?;
 
-        if !value.starts_with("/nix/store/") {
-            return Err(format!(
-                "bound executable {declared} did not resolve to an immutable Nix store path"
-            ));
-        }
+        Self::validate_store_backed_executable(&canonical, &format!(
+            "bound executable {declared}"
+        ))?;
 
         if let NixOSCommand::ActivateSystemClosure { store_path, .. } = command {
+            let store_metadata = std::fs::symlink_metadata(store_path)
+                .map_err(|error| format!("failed to inspect activation store path: {error}"))?;
+            if store_metadata.file_type().is_symlink() || !store_metadata.is_dir() {
+                return Err(
+                    "activation store path must be a canonical immutable directory".into(),
+                );
+            }
             let expected_root = Path::new(store_path)
                 .canonicalize()
                 .map_err(|error| format!("failed to resolve activation store path: {error}"))?;
+            if expected_root != Path::new(store_path) {
+                return Err("activation store path is not the declared canonical store path".into());
+            }
             let expected_executable = expected_root.join("bin/switch-to-configuration");
             if canonical != expected_executable {
                 return Err(
@@ -1158,6 +1166,40 @@ impl NixOSExecutor {
         Ok(value.to_string())
     }
 
+    fn validate_store_backed_executable(
+        canonical: &Path,
+        description: &str,
+    ) -> Result<(), String> {
+        if !canonical.starts_with("/nix/store/") {
+            return Err(format!(
+                "{description} did not resolve to an immutable Nix store path"
+            ));
+        }
+        let relative = canonical
+            .strip_prefix("/nix/store/")
+            .map_err(|_| format!("{description} escaped the Nix store namespace"))?;
+        let store_name = relative
+            .components()
+            .next()
+            .and_then(|component| match component {
+                std::path::Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+            .ok_or_else(|| format!("{description} does not contain a store object component"))?;
+        let store_path = format!("/nix/store/{store_name}");
+        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+            return Err(format!(
+                "{description} did not resolve beneath a canonical Nix store object"
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(canonical)
+            .map_err(|error| format!("failed to inspect {description}: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!("{description} is not a regular immutable store executable"));
+        }
+        Ok(())
+    }
+
     fn trusted_system_executable(name: &str) -> Result<String, String> {
         if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
             return Err("trusted system executable name is invalid".into());
@@ -1165,16 +1207,18 @@ impl NixOSExecutor {
         let link = Path::new("/run/current-system/sw/bin").join(name);
         let canonical = std::fs::canonicalize(&link)
             .map_err(|error| format!("failed to resolve trusted system executable {name}: {error}"))?;
+        if canonical.file_name().and_then(|v| v.to_str()) != Some(name) {
+            return Err(format!(
+                "system executable {name} did not resolve to its expected immutable store filename"
+            ));
+        }
+        Self::validate_store_backed_executable(
+            &canonical,
+            &format!("system executable {name}"),
+        )?;
         let value = canonical
             .to_str()
             .ok_or_else(|| "trusted system executable path is not valid UTF-8".to_string())?;
-        if !value.starts_with("/nix/store/")
-            || canonical.file_name().and_then(|v| v.to_str()) != Some(name)
-        {
-            return Err(format!(
-                "system executable {name} did not resolve to an immutable Nix store executable"
-            ));
-        }
         Ok(value.to_string())
     }
 
@@ -2338,6 +2382,19 @@ mod tests {
             gc.rollback_command().is_none(),
             "GC should not have rollback"
         );
+    }
+
+    #[test]
+    fn bound_executable_rejects_non_store_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-a-store-executable");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        let command = NixOSCommand::Custom {
+            command: path.to_string_lossy().into_owned(),
+            args: vec![],
+            safety_level: SafetyLevel::SystemCritical,
+        };
+        assert!(NixOSExecutor::trusted_bound_executable(&command).is_err());
     }
 
     #[test]
