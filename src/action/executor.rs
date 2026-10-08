@@ -3095,6 +3095,16 @@ impl NixOSExecutor {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn pidfd_binds_current_process_and_reports_it_live() {
+        let pid = std::process::id();
+        assert!(NixOSExecutor::proc_start_time_ticks(pid).unwrap().is_some());
+        let pidfd = NixOSExecutor::open_pidfd(pid).unwrap();
+        assert!(!NixOSExecutor::pidfd_exited(&pidfd).unwrap());
+        let boot = NixOSExecutor::current_boot_id().unwrap();
+        assert_eq!(boot.len(), 36);
+    }
     #[test]
     fn test_command_safety_levels() {
         let search = NixOSCommand::Search {
