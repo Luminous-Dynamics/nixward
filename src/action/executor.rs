@@ -3158,6 +3158,23 @@ impl NixOSExecutor {
 mod tests {
     use super::*;
 
+    #[test]
+    fn worker_argv_digest_binds_executable_and_argument_boundaries() {
+        let args_a = vec!["--set".to_string(), "/nix/var/nix/profiles/system".to_string()];
+        let args_b = vec!["--set /nix/var/nix/profiles/system".to_string()];
+        let executable = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nix-env/bin/nix-env";
+        assert_ne!(
+            NixOSExecutor::activation_argv_digest(executable, &args_a),
+            NixOSExecutor::activation_argv_digest(executable, &args_b),
+        );
+        assert_ne!(
+            NixOSExecutor::activation_argv_digest(executable, &args_a),
+            NixOSExecutor::activation_argv_digest(
+                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nix-env/bin/nix-env",
+                &args_a,
+            ),
+        );
+    }
     #[cfg(all(feature = "native", target_os = "linux"))]
     #[test]
     fn pidfd_binds_current_process_and_reports_it_live() {
