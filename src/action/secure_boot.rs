@@ -388,23 +388,20 @@ pub fn match_secure_boot_databases_for_image(
 pub fn derive_direct_trust_disposition(
     evidence: &SignatureDatabaseMatchEvidence,
 ) -> DirectTrustDisposition {
-    // UEFI validation gives dbx veto semantics precedence over db authorization.
-    // Any unsupported dbx list type prevents an "authorized" conclusion because
-    // the unsupported record may encode a revocation rule we do not evaluate.
+    // Definite image/certificate matches in dbx are vetoes and therefore take
+    // precedence over authorization. Other dbx certificate rules remain
+    // unevaluated and prevent a positive authorization conclusion.
     if evidence.direct_dbx_authenticode_hash_match {
-        return DirectTrustDisposition::ForbiddenByImageHash;
-    }
-    if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
-        // Certificate and certificate-chain revocation rules can veto an image
-        // independently of its direct SHA-256 hash match. Without chain-aware
-        // evaluation, an authorization conclusion would be unsound.
-        return DirectTrustDisposition::UnknownUnsupportedRecord;
-    }
-    if evidence.direct_db_authenticode_hash_match {
-        return DirectTrustDisposition::AuthorizedByImageHash;
+        return DirectTrustDisposition::ForbiddenByAuthenticodeHash;
     }
     if evidence.exact_certificate_in_dbx || evidence.exact_certificate_tbs_hash_in_dbx {
         return DirectTrustDisposition::ExactCertificateInDbx;
+    }
+    if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
+        return DirectTrustDisposition::UnknownUnsupportedRecord;
+    }
+    if evidence.direct_db_authenticode_hash_match {
+        return DirectTrustDisposition::AuthorizedByAuthenticodeHash;
     }
     if evidence.exact_certificate_in_db || evidence.exact_certificate_tbs_hash_in_db {
         return DirectTrustDisposition::ExactCertificateInDb;
@@ -414,7 +411,6 @@ pub fn derive_direct_trust_disposition(
     }
     DirectTrustDisposition::NoDirectMatch
 }
-
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
     let end = offset.checked_add(4).ok_or_else(|| "u32 read overflows".to_string())?;
     let slice = bytes.get(offset..end).ok_or_else(|| "EFI signature database is truncated".to_string())?;
@@ -819,7 +815,7 @@ mod tests {
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::ForbiddenByImageHash
+            DirectTrustDisposition::ForbiddenByAuthenticodeHash
         );
     }
 
@@ -861,7 +857,7 @@ mod tests {
             .expect("database matcher");
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::AuthorizedByImageHash
+            DirectTrustDisposition::AuthorizedByAuthenticodeHash
         );
     }
     #[test]
