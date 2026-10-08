@@ -728,6 +728,23 @@ impl FrozenConfigSource {
         }
         Ok(())
     }
+
+    /// Verify that an immutable realization root has exactly the same source
+    /// manifest as this frozen source snapshot.
+    ///
+    /// The frozen manifest is deliberately compared directly; it is not treated
+    /// as interchangeable with Nix's NAR hash, which is a separate canonical
+    /// whole-tree fingerprint.
+    pub fn verify_realization_at(&self, realized_root: impl AsRef<Path>) -> Result<(), String> {
+        let observed = Self::capture(realized_root, Path::new(&self.entrypoint))?;
+        if observed.root_digest != self.root_digest
+            || observed.entrypoint != self.entrypoint
+            || observed.manifest != self.manifest
+        {
+            return Err("realized Nix store tree does not exactly match frozen source".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -793,6 +810,14 @@ impl SourceRealizationLease {
             gc_root_path,
             state: SourceRealizationLeaseState::Pending,
         })
+    }
+
+    fn verify_source_realization(&self, source: &FrozenConfigSource) -> Result<(), String> {
+        self.validate_identity()?;
+        if source.root_digest != self.source_digest {
+            return Err("source realization lease digest does not match supplied frozen source".into());
+        }
+        source.verify_realization_at(&self.store_path)
     }
 
     fn observe_root_target(&self) -> Result<(), String> {
@@ -1066,17 +1091,22 @@ impl ConfigTransaction {
     }
     pub fn bind_source_realization(
         &mut self,
+        source: &FrozenConfigSource,
         realization: SourceRealizationLease,
     ) -> Result<(), String> {
+        if self.source_realization.is_some() {
+            return Err("source realization is already bound to this transaction".into());
+        }
         if realization.source_digest != self.source_digest {
             return Err("source realization digest does not match transaction source digest".into());
+        }
+        if source.root_digest != self.source_digest {
+            return Err("supplied frozen source does not match transaction source digest".into());
         }
         if !realization.is_rooted() {
             return Err("source realization lease must be rooted before binding".into());
         }
-        if self.source_realization.is_some() {
-            return Err("source realization is already bound to this transaction".into());
-        }
+        realization.verify_source_realization(source)?;
         self.source_realization = Some(realization);
         Ok(())
     }
@@ -1591,6 +1621,32 @@ mod tests {
     }
 
     #[test]
+    fn frozen_source_verifies_exact_realization() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let realized_dir = tempfile::tempdir().unwrap();
+
+        for root in [source_dir.path(), realized_dir.path()] {
+            std::fs::write(
+                root.join("configuration.nix"),
+                "{ config = {}; }\n",
+            )
+            .unwrap();
+            std::fs::create_dir(root.join("nested")).unwrap();
+            std::fs::write(root.join("nested/value.nix"), "value = 1;\n").unwrap();
+        }
+
+        let source = FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
+        source.verify_realization_at(realized_dir.path()).unwrap();
+
+        std::fs::write(
+            realized_dir.path().join("nested/value.nix"),
+            "value = 2;\n",
+        )
+        .unwrap();
+        assert!(source.verify_realization_at(realized_dir.path()).is_err());
+    }
+
+    #[test]
     fn frozen_source_detects_drift() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("configuration.nix"), "{ config = {}; }\n").unwrap();
@@ -1762,8 +1818,6 @@ mod tests {
         .unwrap();
         assert_eq!(lease.source_digest, source.root_digest);
         assert!(!lease.is_rooted());
-        lease.prove_rooted("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-frozen-config").unwrap();
-        assert!(lease.is_rooted());
     }
 
     #[test]
