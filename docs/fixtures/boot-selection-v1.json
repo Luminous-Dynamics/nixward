@@ -88,6 +88,15 @@
         "result": "Unknown",
         "reason_contains": "not the authorized candidate"
       }
+    },
+    {
+      "id": "boot-count-not-tracked",
+      "family": "systemd-boot",
+      "entry_id": "nixos.conf",
+      "entry_text": "linux /EFI/nixos/kernel.efi\\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet\\n",
+      "expected": {
+        "boot_count_state": "NotTracked"
+      }
     }
   ]
 }
