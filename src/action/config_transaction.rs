@@ -1476,6 +1476,7 @@ impl ConfigTransaction {
 
     pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
     pub fn source_digest(&self) -> &str { &self.source_digest }
+    pub fn plan_digest(&self) -> Result<[u8; 32], String> { decode_digest(&self.plan_digest) }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
     /// Return the candidate store path only when it is bound by the exact
     /// candidate-build receipt. Legacy journal-only candidate paths are not
@@ -1568,6 +1569,64 @@ impl ConfigTransaction {
         Ok(())
     }
 
+    /// Record activation process status and post-state atomically in the typed
+    /// lifecycle. Runtime/profile evidence outranks the child exit status.
+    pub fn record_activation_post_state(
+        &mut self,
+        process_exit_status: Option<i32>,
+        runtime_closure: Option<String>,
+        profile_closure: Option<String>,
+    ) -> Result<(), String> {
+        if self.phase != ConfigTransactionPhase::ActivationStarted {
+            return Err("activation post-state must be recorded from ActivationStarted".into());
+        }
+        self.process_exit_status = process_exit_status;
+        self.observed_runtime_closure = runtime_closure.clone();
+        self.observed_profile_closure = profile_closure.clone();
+        let Some(candidate) = self.candidate_store_path() else {
+            return Err("activation post-state requires a bound candidate build receipt".into());
+        };
+        if runtime_closure.as_deref() == Some(candidate)
+            && profile_closure.as_deref() == Some(candidate)
+        {
+            self.phase = ConfigTransactionPhase::Activated;
+        } else {
+            self.phase = ConfigTransactionPhase::IndeterminateActivation;
+        }
+        Ok(())
+    }
+
+    /// Record recovery post-state and close the transaction only when the exact
+    /// authorized predecessor runtime and profile are both observed.
+    pub fn record_recovery_post_state(
+        &mut self,
+        expected_runtime_closure: &str,
+        expected_profile_closure: &str,
+        process_exit_status: Option<i32>,
+        observed_runtime_closure: Option<String>,
+        observed_profile_closure: Option<String>,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.phase,
+            ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::IndeterminateProfileTransition,
+        ) {
+            return Err("recovery post-state cannot be recorded from the current transaction phase".into());
+        }
+        self.process_exit_status = process_exit_status;
+        self.observed_runtime_closure = observed_runtime_closure.clone();
+        self.observed_profile_closure = observed_profile_closure.clone();
+        if observed_runtime_closure.as_deref() == Some(expected_runtime_closure)
+            && observed_profile_closure.as_deref() == Some(expected_profile_closure)
+        {
+            self.phase = ConfigTransactionPhase::Recovered;
+        } else {
+            self.phase = ConfigTransactionPhase::RecoveryRequired;
+        }
+        Ok(())
+    }
     pub fn record_profile_transition(
         &mut self,
         disposition: &ProfileTransitionDisposition,
