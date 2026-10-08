@@ -1478,6 +1478,7 @@ impl ConfigTransaction {
     pub fn source_digest(&self) -> &str { &self.source_digest }
     pub fn plan_digest(&self) -> Result<[u8; 32], String> { decode_digest(&self.plan_digest) }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
+    pub fn recovery_observation_confirmed(&self) -> bool { self.recovery_observed }
     /// Return the candidate store path only when it is bound by the exact
     /// candidate-build receipt. Legacy journal-only candidate paths are not
     /// execution authority.
@@ -1654,7 +1655,6 @@ impl ConfigTransaction {
     pub fn confirm_recovery_observation_from_journal(
         &mut self,
         expected_phase: ConfigTransactionPhase,
-        observed_source_store_path: Option<&str>,
         observation: &RecoveryObservation,
     ) -> Result<(), String> {
         let source = self
@@ -1662,10 +1662,18 @@ impl ConfigTransaction {
             .as_ref()
             .ok_or_else(|| "transaction journal has no persisted frozen source snapshot".to_string())?
             .clone();
+        let observed_source_store_path = self
+            .source_realization
+            .as_ref()
+            .map(|realization| {
+                realization.verify_rooted()?;
+                Ok::<String, String>(realization.store_path.clone())
+            })
+            .transpose()?;
         self.confirm_recovery_observation(
             &source,
             expected_phase,
-            observed_source_store_path,
+            observed_source_store_path.as_deref(),
             observation,
         )
     }
