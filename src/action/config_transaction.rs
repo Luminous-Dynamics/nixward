@@ -1009,63 +1009,98 @@ impl NixSourceRealizer {
         if !source_root.is_dir() {
             return Err("source realization root must be a directory".into());
         }
-        source.verify_unchanged(source_root)?;
-
         let name = format!(
             "nixward-frozen-source-{}",
             transaction_id.get(..16).unwrap_or(transaction_id)
         );
-        let output = std::process::Command::new(&self.nix_executable)
-            .env_clear()
-            .env("HOME", "/root")
-            .env("LANG", "C")
-            .env("LC_ALL", "C")
-            .args(["store", "add", "--name", &name])
-            .arg(source_root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|error| format!("failed to execute trusted nix store add: {error}"))?;
+        let gc_root_path = format!("/nix/var/nix/gcroots/nixward/{transaction_id}");
+        let mut last_collection_race = None;
 
-        if !output.status.success() {
-            return Err(format!(
-                "nix store add failed with {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        // Nix documents that the store-add operation does not register a GC root.
+        // Retry only when the returned object actually vanished before it could be
+        // checked/rooted; never retry content mismatches or authorization failures.
+        for attempt in 0..3 {
+            source.verify_unchanged(source_root)?;
+
+            let output = std::process::Command::new(&self.nix_executable)
+                .env_clear()
+                .env("HOME", "/root")
+                .env("LANG", "C")
+                .env("LC_ALL", "C")
+                .args(["store", "add", "--name", &name])
+                .arg(source_root)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .map_err(|error| format!("failed to execute trusted nix store add: {error}"))?;
+
+            if !output.status.success() {
+                return Err(format!(
+                    "nix store add failed with {:?}: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let store_path = Self::parse_store_path(&stdout)?;
+            let mut lease = SourceRealizationLease::new(
+                source,
+                store_path.clone(),
+                gc_root_path.clone(),
+            )?;
+
+            if let Err(error) = lease.verify_source_realization(source) {
+                let missing = matches!(
+                    std::fs::symlink_metadata(&store_path),
+                    Err(ref metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound
+                );
+                if missing && attempt < 2 {
+                    last_collection_race = Some(error);
+                    continue;
+                }
+                return Err(error);
+            }
+
+            if let Err(error) = lease.establish_root() {
+                let missing = matches!(
+                    std::fs::symlink_metadata(&store_path),
+                    Err(ref metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound
+                );
+                if missing && attempt < 2 {
+                    last_collection_race = Some(error);
+                    continue;
+                }
+                return Err(error);
+            }
+
+            if let Err(error) = lease.verify_source_realization(source) {
+                let cleanup = cleanup_gc_root_if_target_matches(&gc_root_path, &store_path);
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => format!(
+                        "source realization verification failed: {error}; root cleanup also failed: {cleanup_error}"
+                    ),
+                });
+            }
+            if let Err(error) = lease.verify_rooted() {
+                let cleanup = cleanup_gc_root_if_target_matches(&gc_root_path, &store_path);
+                return Err(match cleanup {
+                    Ok(()) => error,
+                    Err(cleanup_error) => format!(
+                        "source root re-verification failed: {error}; root cleanup also failed: {cleanup_error}"
+                    ),
+                });
+            }
+            return Ok(lease);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let store_path = Self::parse_store_path(&stdout)?;
-
-
-        let gc_root_path = format!(
-            "/nix/var/nix/gcroots/nixward/{transaction_id}",
-        );
-        let mut lease = SourceRealizationLease::new(source, store_path, gc_root_path)?;
-
-        // Nix store add does not root its result. Verify the object before
-        // creating the GC root, then verify both content and retention again.
-        lease.verify_source_realization(source)?;
-        lease.establish_root()?;
-
-        if let Err(error) = lease.verify_source_realization(source) {
-            return match lease.release_root() {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(format!(
-                    "source realization verification failed: {error}; root cleanup also failed: {cleanup_error}"
-                )),
-            };
-        }
-        if let Err(error) = lease.verify_rooted() {
-            return match lease.release_root() {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(format!(
-                    "source root re-verification failed: {error}; root cleanup also failed: {cleanup_error}"
-                )),
-            };
-        }
-        Ok(lease)
+        Err(format!(
+            "Nix source realization was collected before it could be retained after three attempts: {}",
+            last_collection_race.unwrap_or_else(|| "no retryable collection race was observed".into())
+        ))
     }
 }
 
