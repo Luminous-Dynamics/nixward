@@ -442,6 +442,7 @@ impl ConfigWriter {
             backup_path: None,
             changed: true,
             diff: patch.diff(),
+            commit_state: WriteCommitState::NotAttempted,
         })
     }
 
