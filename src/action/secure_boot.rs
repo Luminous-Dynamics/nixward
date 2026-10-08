@@ -564,6 +564,7 @@ pub enum DbCertificateVerificationState {
     NoMatchingDbCertificate,
     ForbiddenByDbxImageHash,
     ForbiddenByDbxCertificateChain,
+    ForbiddenByDbxTbsRevocation,
     PotentialDbxTbsRevocation,
     UnknownDbxCertificateRules,
     MissingSecureBootDatabase,
@@ -863,6 +864,11 @@ fn dbx_x509_record_matches_chain(
 }
 
 #[cfg(feature = "native")]
+fn dbx_tbs_record_is_always_revoked(record: &SignatureDatabaseRecord) -> bool {
+    record.revocation_time == Some([0; 16])
+}
+
+#[cfg(feature = "native")]
 fn dbx_tbs_record_matches_chain(
     record: &SignatureDatabaseRecord,
     chain: &[super::secure_boot_signature::X509ChainCertificateEvidence],
@@ -960,9 +966,19 @@ pub fn verify_image_against_db_certificates(
     }) {
         if let Some(matched_certificate) = dbx_tbs_record_matches_chain(record, &chain) {
             evidence.dbx_chain_tbs_hash_match = Some(matched_certificate);
-            evidence.state = DbCertificateVerificationState::PotentialDbxTbsRevocation;
-            evidence.stderr_blake3 =
-                *blake3::hash(b"dbx X509 TBS chain match requires timestamp evaluation").as_bytes();
+            evidence.state = if dbx_tbs_record_is_always_revoked(record) {
+                DbCertificateVerificationState::ForbiddenByDbxTbsRevocation
+            } else {
+                DbCertificateVerificationState::PotentialDbxTbsRevocation
+            };
+            evidence.stderr_blake3 = *blake3::hash(
+                if dbx_tbs_record_is_always_revoked(record) {
+                    b"dbx X509 TBS chain match with zero EFI_TIME: always revoked" as &[u8]
+                } else {
+                    b"dbx X509 TBS chain match requires timestamp evaluation"
+                },
+            )
+            .as_bytes();
             return finalize_image_bound_verification(image_path, evidence);
         }
     }
@@ -1036,6 +1052,17 @@ pub fn verify_image_against_db_certificates(
                     )
                 }) {
                     if dbx_tbs_record_matches_certificate(record, certificate)? {
+                        if dbx_tbs_record_is_always_revoked(record) {
+                            evidence.verifying_dbx_certificate = None;
+                            evidence.dbx_chain_tbs_hash_match = Some(certificate_digest);
+                            evidence.state =
+                                DbCertificateVerificationState::ForbiddenByDbxTbsRevocation;
+                            evidence.stderr_blake3 = *blake3::hash(
+                                b"verified db trust anchor has zero-time dbx TBS revocation",
+                            )
+                            .as_bytes();
+                            return finalize_image_bound_verification(image_path, evidence);
+                        }
                         potential_db_anchor = Some(certificate_digest);
                         break;
                     }
