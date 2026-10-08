@@ -2218,6 +2218,37 @@ impl NixOSExecutor {
             },
         };
 
+        if matches!(observation, super::config_transaction::RecoveryObservation::MixedOrUnknown { .. }) {
+            if let Err(reason) = transaction.enter_recovery_required(&observation) {
+                return ExecutionResult::FailedNoRollback {
+                    error: format!("could not persist mixed/unknown recovery state: {reason}"),
+                    rollback_error: None,
+                };
+            }
+            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
+                return ExecutionResult::FailedNoRollback {
+                    error: reason,
+                    rollback_error: None,
+                };
+            }
+            let result = ExecutionResult::FailedNoRollback {
+                error: "recovery refused because live system state is mixed or unknown".into(),
+                rollback_error: None,
+            };
+            self.record_execution(&command, decision_quality, &authorization, &result);
+            return result;
+        }
+
+        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
+            transaction.phase(),
+            &observation,
+        ) {
+            return ExecutionResult::FailedNoRollback {
+                error: format!("fresh journal recovery confirmation failed: {reason}"),
+                rollback_error: None,
+            };
+        }
+
         let terminal_runtime = match &observation {
             super::config_transaction::RecoveryObservation::CandidateProvenActive { .. } => Some(candidate_runtime.as_str()),
             super::config_transaction::RecoveryObservation::BootCandidateProven { .. } => Some(prior_runtime.as_str()),
@@ -2256,37 +2287,6 @@ impl NixOSExecutor {
             self.record_execution(&command, decision_quality, &authorization, &result);
             return result;
         }
-        if matches!(observation, super::config_transaction::RecoveryObservation::MixedOrUnknown { .. }) {
-            if let Err(reason) = transaction.enter_recovery_required(&observation) {
-                return ExecutionResult::FailedNoRollback {
-                    error: format!("could not persist mixed/unknown recovery state: {reason}"),
-                    rollback_error: None,
-                };
-            }
-            if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
-                return ExecutionResult::FailedNoRollback {
-                    error: reason,
-                    rollback_error: None,
-                };
-            }
-            let result = ExecutionResult::FailedNoRollback {
-                error: "recovery refused because live system state is mixed or unknown".into(),
-                rollback_error: None,
-            };
-            self.record_execution(&command, decision_quality, &authorization, &result);
-            return result;
-        }
-
-        if let Err(reason) = transaction.confirm_recovery_observation_from_journal(
-            transaction.phase(),
-            &observation,
-        ) {
-            return ExecutionResult::FailedNoRollback {
-                error: format!("fresh journal recovery confirmation failed: {reason}"),
-                rollback_error: None,
-            };
-        }
-
         if let Err(reason) = transaction.enter_recovery_required(&observation) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("could not enter explicit recovery state: {reason}"),
