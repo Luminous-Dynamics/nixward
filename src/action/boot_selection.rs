@@ -1306,7 +1306,6 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(evidence.selected_image_path.as_deref(), Some("/boot/EFI/Linux/candidate.efi"));
         assert_eq!(evidence.selected_image_blake3, Some([7; 32]));
     }
-    }
 
     #[test]
     fn systemd_loader_entry_suffix_is_normalized_exactly() {
