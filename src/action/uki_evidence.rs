@@ -153,6 +153,7 @@ pub fn require_uki_candidate_binding(
 ///
 /// Parent traversal and redirected final files are rejected. Canonicalization
 /// must remain inside the supplied boot root.
+#[cfg(feature = "native")]
 pub fn resolve_boot_artifact_path(boot_root: &Path, efi_path: &str) -> Result<PathBuf, String> {
     let root_metadata = fs::symlink_metadata(boot_root).map_err(|error| {
         format!("failed to inspect boot root {}: {error}", boot_root.display())
@@ -302,12 +303,14 @@ mod tests {
         ).is_err());
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn boot_artifact_path_rejects_double_root_escape() {
         let error = resolve_boot_artifact_path(Path::new("/boot"), "//EFI/Linux/candidate.efi")
             .expect_err("double-root path must fail closed");
         assert!(error.contains("absolute") || error.contains("root"));
     }
+    #[cfg(feature = "native")]
     #[test]
     fn boot_artifact_path_rejects_traversal() {
         let error = resolve_boot_artifact_path(Path::new("/boot"), "/EFI/Linux/../evil.efi")

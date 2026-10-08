@@ -1,3 +1,5 @@
+pub mod secure_boot_signature;
+pub mod secure_boot;
 pub mod uki_evidence;
 pub mod boot_selection;
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
