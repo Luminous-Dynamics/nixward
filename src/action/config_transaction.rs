@@ -305,7 +305,7 @@ impl FrozenConfigSource {
         let mut manifest = Vec::new();
         #[cfg(unix)]
         {
-            let (mut root_dir, root_stat) = Self::open_source_root(&root)?;
+            let (mut root_dir, root_stat) = Self::open_source_root(&root, &root_metadata)?;
             Self::walk_descriptor_bound(&mut root_dir, Path::new(""), &mut manifest)?;
             let after_root = Self::fstat_directory(&root_dir, &root)?;
             if !Self::directory_stat_stable(&root_stat, &after_root) {
@@ -473,14 +473,13 @@ impl FrozenConfigSource {
     #[cfg(unix)]
     fn open_source_root(
         root: &Path,
+        expected: &std::fs::Metadata,
     ) -> Result<(nix::dir::Dir, nix::sys::stat::FileStat), String> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
 
-        let expected = std::fs::symlink_metadata(root)
-            .map_err(|error| format!("failed to inspect config source root: {error}"))?;
-        if !expected.is_dir() {
-            return Err("config source root must be a directory".into());
+        if expected.file_type().is_symlink() || !expected.is_dir() {
+            return Err("config source root identity is not a stable directory".into());
         }
 
         let dir = nix::dir::Dir::open(
@@ -2201,6 +2200,28 @@ mod tests {
         let slash_error = FrozenConfigSource::capture(root.path(), "configuration.nix")
             .expect_err("backslash manifest path must fail closed");
         assert!(slash_error.contains("contains '\\'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_source_root_rejects_replaced_identity() {
+        let parent = tempfile::tempdir().unwrap();
+        let original = parent.path().join("source");
+        let replacement = parent.path().join("replacement");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(
+            original.join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        let expected = std::fs::symlink_metadata(&original).unwrap();
+
+        std::fs::rename(&original, &replacement).unwrap();
+        std::fs::create_dir(&original).unwrap();
+
+        let error = FrozenConfigSource::open_source_root(&original, &expected)
+            .expect_err("replacement root must fail closed");
+        assert!(error.contains("changed during descriptor acquisition"));
     }
 
     #[cfg(unix)]
