@@ -20,8 +20,8 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 | Secure Boot firmware state | exact UEFI policy variables | `SecureBoot` + `SetupMode` raw observations | Implemented |
 | firmware trust databases | exact `db`/`dbx` payloads | raw EFI variable digests | Implemented; authorization mapping remains open |
 | PE signature table | exact UKI image | certificate-table offset/size/type/revision/payload digests | Implemented |
-| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, subject-stability recheck | Implemented |
-| Secure Boot signer authorization | exact signer + firmware policy | `db` chain-anchor verification + `dbx` chain-veto evidence; TBS/time semantics still separate | Partially implemented — Issue #17 |
+| certificate-pinned signature verification | exact image + exact verification cert | `sbverify --cert`, exact image/certificate digests, image-stability recheck | Implemented |
+| Secure Boot signer authorization | exact signer + firmware policy | exact X.509 signing-chain identity; `db` anchor verification; `dbx` image-hash and chain-identity vetoes | Partially implemented — Issue #17; timestamp semantics open |
 | external-writer CAS | exact profile state | supported compare-and-set or equivalent privileged boundary | Open — Issue #9 |
 | effective next boot | physical loader selection | bootloader-specific authoritative observation on real host | Open — Issue #8 |
 | physical boot success | exact candidate boot | post-reboot runtime/boot-success evidence | Open — Issue #8 |
@@ -37,6 +37,12 @@ requires exact-head evidence satisfying the predicate's acceptance contract.
 6. Successful `switch-to-configuration boot` is not proof of effective next-boot selection.
 7. Physical reboot success is not post-boot health.
 8. Unknown or unsupported evidence must remain explicit Unknown rather than being coerced into Pass.
+9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
+10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
+11. LoaderEntrySelected establishes current systemd-boot entry identity; it does not establish post-boot health.
+12. A verified current-boot witness remains non-qualified until the expected pre-reboot state and the exact post-reboot witness are captured on the target host.
+13. An X.509 `dbx` certificate veto is valid only when the stored certificate identity matches a certificate in the exact signing chain.
+14. A TBS-hash `dbx` record remains non-vetoing until its EFI_TIME/timestamp semantics are evaluated.
 9. Certificate-chain verification to a `db`/`dbx` anchor does not establish firmware-wide policy equivalence.
 10. A live `db`/`dbx` verification is invalidated if either trust database changes across the verification boundary.
 
