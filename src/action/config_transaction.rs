@@ -262,12 +262,19 @@ fn manifest_relative_path(path: &Path) -> Result<String, String> {
 
 impl FrozenConfigSource {
     pub fn capture(root: impl AsRef<Path>, entrypoint: impl AsRef<Path>) -> Result<Self, String> {
-        let root = root.as_ref().canonicalize().map_err(|error| {
-            format!("failed to canonicalize config source root: {error}")
-        })?;
-        if !root.is_dir() {
+        let root_input = root.as_ref();
+        let root_metadata = std::fs::symlink_metadata(root_input)
+            .map_err(|error| format!("failed to inspect config source root: {error}"))?;
+        if root_metadata.file_type().is_symlink() {
+            return Err("config source root may not be a symbolic link".into());
+        }
+        if !root_metadata.is_dir() {
             return Err("config source root must be a directory".into());
         }
+
+        let root = root_input.canonicalize().map_err(|error| {
+            format!("failed to canonicalize config source root: {error}")
+        })?;
 
         let entrypoint_path = {
             let path = entrypoint.as_ref();
@@ -2049,6 +2056,26 @@ mod tests {
         let slash_error = FrozenConfigSource::capture(root.path(), "configuration.nix")
             .expect_err("backslash manifest path must fail closed");
         assert!(slash_error.contains("contains '\\'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_rejects_symlink_root_alias() {
+        let source = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+
+        let alias = parent.path().join("source-alias");
+        std::os::unix::fs::symlink(source.path(), &alias).unwrap();
+        assert!(
+            FrozenConfigSource::capture(&alias, "configuration.nix")
+                .expect_err("source root symlink must fail closed")
+                .contains("config source root may not be a symbolic link")
+        );
     }
 
     #[cfg(unix)]
