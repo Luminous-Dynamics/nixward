@@ -56,14 +56,22 @@ else:
                 errors.append(f"lockfile-artifact job missing required marker: {marker}")
         if re.search(r"(?m)^    permissions:\n(?:      [^\n]+\n)*      contents: write\s*$", body):
             errors.append("lockfile-artifact job must not have contents: write")
+        if "contents: write" in body:
+            errors.append("lockfile-artifact job must never receive repository write authority")
 
     for job_name in ["validate", "nix"]:
         job = re.search(
             rf"(?ms)^  {job_name}:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
             text,
         )
-        if job and "- lockfile-artifact" not in job.group(0):
-            errors.append(f"{job_name} job must depend on lockfile-artifact for PR qualification")
+        if job:
+            body = job.group(0)
+            if "- lockfile-artifact" not in body:
+                errors.append(f"{job_name} job must declare lockfile-artifact as a dependency")
+            if "Require trusted repository PR" not in body:
+                errors.append(f"{job_name} job must explicitly reject fork pull requests")
+            if "github.event.pull_request.head.repo.full_name" not in body or "github.repository" not in body:
+                errors.append(f"{job_name} job must compare PR head repository with github.repository")
 
     for marker in [
         "nixward-cargo-lock-${{ github.event.pull_request.head.sha }}",
