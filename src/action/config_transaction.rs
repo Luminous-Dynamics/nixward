@@ -884,6 +884,17 @@ impl FrozenConfigSource {
         if !metadata.is_dir() {
             return Err("Nix realization root must be a directory".into());
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let root_mode = metadata.mode() & 0o7777;
+            if root_mode != 0o555 {
+                return Err(format!(
+                    "Nix realization root has unexpected normalized mode {:04o}; expected 0555",
+                    root_mode
+                ));
+            }
+        }
         let canonical = realized_root
             .canonicalize()
             .map_err(|error| format!("failed to canonicalize Nix realization root: {error}"))?;
@@ -2948,9 +2959,14 @@ mod tests {
 
         let source =
             FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
-        source
-            .verify_realization_at(realized_dir.path())
-            .expect("Nix-normalized permissions must be accepted");
+        let verification = source.verify_realization_at(realized_dir.path());
+        // Restore writability before TempDir cleanup, even if the assertion fails.
+        std::fs::set_permissions(
+            realized_dir.path(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        verification.expect("Nix-normalized permissions must be accepted");
     }
 
     #[test]
@@ -2986,17 +3002,82 @@ mod tests {
                 std::fs::Permissions::from_mode(0o444),
             )
             .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path(),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
         }
 
         let source = FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
         source.verify_realization_at(realized_dir.path()).unwrap();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // The realized tree mimics immutable Nix permissions; restore owner
+            // write access before deliberately mutating the fixture.
+            std::fs::set_permissions(
+                realized_dir.path(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested/value.nix"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
         std::fs::write(
             realized_dir.path().join("nested/value.nix"),
             "value = 2;\n",
         )
         .unwrap();
-        assert!(source.verify_realization_at(realized_dir.path()).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                realized_dir.path().join("nested/value.nix"),
+                std::fs::Permissions::from_mode(0o444),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested"),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path(),
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+        }
+        let verification = source.verify_realization_at(realized_dir.path());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                realized_dir.path(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                realized_dir.path().join("nested/value.nix"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        assert!(verification.is_err());
     }
 
     #[test]
