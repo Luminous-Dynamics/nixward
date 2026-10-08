@@ -318,7 +318,10 @@ pub fn derive_direct_trust_disposition(
     if evidence.direct_dbx_image_hash_match {
         return DirectTrustDisposition::ForbiddenByImageHash;
     }
-    if evidence.dbx_records.iter().any(|record| record.kind == SignatureListKind::Unsupported) {
+    if evidence.dbx_records.iter().any(|record| record.kind != SignatureListKind::Sha256ImageHash) {
+        // Certificate and certificate-chain revocation rules can veto an image
+        // independently of its direct SHA-256 hash match. Without chain-aware
+        // evaluation, an authorization conclusion would be unsound.
         return DirectTrustDisposition::UnknownUnsupportedRecord;
     }
     if evidence.direct_db_image_hash_match {
@@ -506,6 +509,22 @@ mod tests {
         let mut dbx = vec![0u8; 28 + 16];
         dbx[16..20].copy_from_slice(&(44u32).to_le_bytes());
         dbx[24..28].copy_from_slice(&16u32.to_le_bytes());
+        let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None, &[])
+            .expect("database matcher");
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::UnknownUnsupportedRecord
+        );
+    }
+    #[test]
+    fn certificate_based_dbx_rules_block_hash_only_authorization() {
+        let image_hash = [8u8; 32];
+        let db = make_sha256_signature_list(image_hash);
+        let mut dbx = vec![0u8; 28 + 17];
+        dbx[16..20].copy_from_slice(&(45u32).to_le_bytes());
+        dbx[24..28].copy_from_slice(&17u32.to_le_bytes());
+        dbx[28..44].fill(0);
+        dbx[44] = 0x30;
         let evidence = match_secure_boot_databases(&db, &dbx, image_hash, None, &[])
             .expect("database matcher");
         assert_eq!(
