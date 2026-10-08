@@ -380,6 +380,96 @@ pub fn parse_grub_environment(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Parse NixOS-generated GRUB menu entries from read-only grub.cfg text.
+///
+/// NixOS emits a menuentry title and a linux command whose init= argument
+/// points at the exact system closure. Titles are accepted only as lookup keys
+/// within this one observed config and duplicate titles fail closed.
+pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry>, String> {
+    let mut entries = BTreeMap::new();
+    let mut current: Option<(String, String, Vec<String>)> = None;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("menuentry ") {
+            if current.is_some() {
+                return Err("nested GRUB menuentry encountered; refusing ambiguous parse".into());
+            }
+            let title = parse_grub_menuentry_title(line)?;
+            current = Some((title, String::new(), Vec::new()));
+            continue;
+        }
+
+        if let Some((title, linux_line, initrds)) = current.as_mut() {
+            if line.starts_with("linux ") || line.starts_with("linuxefi ") || line.starts_with("multiboot ") {
+                *linux_line = line.to_string();
+            } else if line.starts_with("initrd ") || line.starts_with("initrdefi ") {
+                initrds.push(line.to_string());
+            }
+
+            if line == "}" {
+                let (title, linux_line, initrds) = current.take().expect("entry state");
+                let (linux, options) = parse_grub_linux_line(&linux_line)?;
+                let entry = BlsEntry {
+                    entry_id: title.clone(),
+                    title: Some(title.clone()),
+                    version: None,
+                    machine_id: None,
+                    linux,
+                    initrd: initrds,
+                    options: Some(options),
+                    efi: None,
+                    uki: None,
+                    boot_count_state: BootCountState::NotTracked,
+                    tries_left: None,
+                    tries_done: None,
+                };
+                if entries.insert(title.clone(), entry).is_some() {
+                    return Err(format!("duplicate GRUB menuentry title {title}"));
+                }
+            }
+        }
+    }
+
+    if current.is_some() {
+        return Err("unterminated GRUB menuentry".into());
+    }
+    if entries.is_empty() {
+        return Err("no GRUB menuentry blocks found".into());
+    }
+    Ok(entries)
+}
+
+fn parse_grub_menuentry_title(line: &str) -> Result<String, String> {
+    let rest = line.strip_prefix("menuentry ").unwrap_or("").trim_start();
+    if !rest.starts_with('"') {
+        return Err("GRUB menuentry title is not a quoted string".into());
+    }
+    let bytes = rest.as_bytes();
+    for i in 1..bytes.len() {
+        if bytes[i] == b'"' && bytes[i - 1] != b'\\' {
+            return Ok(rest[1..i].to_string());
+        }
+    }
+    Err("unterminated GRUB menuentry title".into())
+}
+
+fn parse_grub_linux_line(line: &str) -> Result<(Option<String>, String), String> {
+    let rest = line
+        .strip_prefix("linux ")
+        .or_else(|| line.strip_prefix("linuxefi "))
+        .or_else(|| line.strip_prefix("multiboot "))
+        .ok_or_else(|| "GRUB menuentry has no Linux boot command".to_string())?
+        .trim();
+    let mut parts = rest.split_whitespace();
+    let kernel = parts
+        .next()
+        .ok_or_else(|| "GRUB Linux boot command has no kernel path".to_string())?
+        .to_string();
+    let options = parts.collect::<Vec<_>>().join(" ");
+    Ok((Some(kernel), options))
+}
+
 /// Resolve a conservative GRUB selection from exact environment/config values.
 ///
 /// A numeric generated default is intentionally rejected: menu position is not
@@ -630,6 +720,32 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         let error = resolve_grub_selection(&environment, Some("0"), &entries)
             .expect_err("numeric menu position must not qualify");
         assert!(error.reason.contains("menu position"));
+    }
+
+    #[test]
+    fn parses_nixos_grub_menuentry_and_exact_init_closure() {
+        let entries = parse_grub_config_entries(
+            r#"menuentry "NixOS - Configuration 42" --class nixos {
+ linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init quiet
+ initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
+}
+"#,
+        )
+        .expect("GRUB fixture parses");
+
+        let entry = entries.get("NixOS - Configuration 42").expect("entry");
+        assert_eq!(
+            super::exact_store_path_from_entry(entry).as_deref(),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+        );
+    }
+
+    #[test]
+    fn duplicate_grub_titles_fail_closed() {
+        let result = parse_grub_config_entries(
+            "menuentry \"same\" {\n linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n}\nmenuentry \"same\" {\n linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n}\n",
+        );
+        assert!(result.is_err());
     }
 
     #[test]
