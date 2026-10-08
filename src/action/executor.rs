@@ -992,9 +992,15 @@ impl NixOSExecutor {
         self
     }
 
-    /// Capture the current NixOS generation for rollback
+    /// Capture the current NixOS generation for rollback.
+    ///
+    /// The read-only helper is still resolved through the same immutable
+    /// executable identity boundary used by privileged commands, so PATH
+    /// shadowing cannot alter the observation primitive.
     pub async fn capture_generation(&mut self) -> anyhow::Result<u32> {
-        let output = Command::new("nixos-rebuild")
+        let nixos_rebuild = Self::trusted_system_executable("nixos-rebuild")
+            .map_err(anyhow::Error::msg)?;
+        let output = Command::new(nixos_rebuild)
             .args(["list-generations"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1106,14 +1112,50 @@ impl NixOSExecutor {
     }
 
     async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
-        let (cmd, args) = command.to_command();
-        Command::new(&cmd)
+        let (_declared_cmd, args) = command.to_command();
+        let executable = Self::trusted_bound_executable(command)?;
+        Command::new(&executable)
             .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
             .map_err(|error| format!("failed to execute command {cmd}: {error}"))
+    }
+
+    fn trusted_bound_executable(command: &NixOSCommand) -> Result<String, String> {
+        let (declared, _) = command.to_command();
+        let path = Path::new(&declared);
+        if !path.is_absolute() {
+            return Self::trusted_system_executable(&declared);
+        }
+
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve bound executable {declared}: {error}"))?;
+        let value = canonical
+            .to_str()
+            .ok_or_else(|| "bound executable path is not valid UTF-8".to_string())?;
+
+        if !value.starts_with("/nix/store/") {
+            return Err(format!(
+                "bound executable {declared} did not resolve to an immutable Nix store path"
+            ));
+        }
+
+        if let NixOSCommand::ActivateSystemClosure { store_path, .. } = command {
+            let expected_root = Path::new(store_path)
+                .canonicalize()
+                .map_err(|error| format!("failed to resolve activation store path: {error}"))?;
+            let expected_executable = expected_root.join("bin/switch-to-configuration");
+            if canonical != expected_executable {
+                return Err(
+                    "activation executable escaped the exact authorized system closure".into(),
+                );
+            }
+        }
+
+        Ok(value.to_string())
     }
 
     fn trusted_system_executable(name: &str) -> Result<String, String> {
@@ -2295,6 +2337,29 @@ mod tests {
         assert!(
             gc.rollback_command().is_none(),
             "GC should not have rollback"
+        );
+    }
+
+    #[test]
+    fn bound_executable_rejects_mutable_absolute_path() {
+        let command = NixOSCommand::Custom {
+            command: "/tmp/nixward-shadow".into(),
+            args: vec![],
+            safety_level: SafetyLevel::SystemCritical,
+        };
+        assert!(NixOSExecutor::trusted_bound_executable(&command).is_err());
+    }
+
+    #[test]
+    fn bound_activation_executable_requires_exact_store_closure() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test".into(),
+            profile_store_path: None,
+            action: SystemActivation::Switch,
+        };
+        assert!(
+            NixOSExecutor::trusted_bound_executable(&command).is_err(),
+            "activation must fail closed when the exact immutable closure is not present"
         );
     }
 
