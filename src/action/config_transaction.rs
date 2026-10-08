@@ -10,7 +10,7 @@
 
 use super::executor::SystemActivation;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
@@ -362,6 +362,60 @@ impl ConfigTransaction {
             observed_profile_closure: None,
         }
     }
+    /// Persist the journal record without exposing a partially written JSON object.
+    ///
+    /// The journal is evidence of transaction intent/state, not an authorization
+    /// capability. A crash-restarted daemon must re-observe live state before
+    /// taking any recovery action.
+    pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        let parent = path
+            .parent()
+            .ok_or_else(|| "transaction journal path has no parent".to_string())?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create transaction journal directory: {error}"))?;
+
+        let encoded = serde_json::to_vec_pretty(self)
+            .map_err(|error| format!("failed to serialize transaction journal: {error}"))?;
+        let temp_name = format!(
+            ".{}.tmp-{}",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "transaction journal filename is invalid UTF-8".to_string())?,
+            std::process::id()
+        );
+        let temp_path = parent.join(temp_name);
+
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|error| format!("failed to create transaction journal candidate: {error}"))?;
+            use std::io::Write;
+            file.write_all(&encoded)
+                .map_err(|error| format!("failed to write transaction journal candidate: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("failed to sync transaction journal candidate: {error}"))?;
+        }
+
+        std::fs::rename(&temp_path, path)
+            .map_err(|error| format!("failed to commit transaction journal: {error}"))?;
+        let parent_dir = std::fs::File::open(parent)
+            .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
+        parent_dir
+            .sync_all()
+            .map_err(|error| format!("failed to sync transaction journal directory: {error}"))?;
+        Ok(())
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
+        let encoded = std::fs::read(path.as_ref())
+            .map_err(|error| format!("failed to read transaction journal: {error}"))?;
+        serde_json::from_slice(&encoded)
+            .map_err(|error| format!("invalid transaction journal: {error}"))
+    }
+
 }
 
 fn decode_digest(value: &str) -> Result<[u8; 32], String> {

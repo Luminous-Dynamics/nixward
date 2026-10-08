@@ -125,8 +125,7 @@ impl ConfigWriter {
     /// Git commits are deliberately outside the authoritative source mutation
     /// primitive. A git backup is an independent history mechanism and cannot
     /// participate in the NixOS activation transaction.
-    #[deprecated(note = "git backups are no longer part of the authoritative config transaction")]
-    pub fn with_git_backup(self, _enabled: bool) -> Self {
+        pub fn with_git_backup(self, _enabled: bool) -> Self {
         self
     }
 
@@ -480,6 +479,18 @@ impl ConfigWriter {
                 "configuration target has no parent",
             )
         })?;
+
+        // ConfigWriter only has authority over direct children of its configured
+        // source root. Reject a caller-supplied patch that points elsewhere,
+        // even when its ChangePlan digest and approval are otherwise valid.
+        let configured_root = self.config_root.canonicalize()?;
+        let target_parent = parent.canonicalize()?;
+        if target_parent != configured_root {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "configuration target is outside the configured authority root",
+            ));
+        }
         let name = target.file_name().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -542,13 +553,29 @@ impl ConfigWriter {
         temp.sync_all()?;
         drop(temp);
 
-        if let Err(error) = std::fs::rename(&temp_path, target) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error);
+        #[cfg(unix)]
+        {
+            nix::fcntl::renameat(
+                Some(parent_file.as_raw_fd()),
+                &temp_name,
+                Some(parent_file.as_raw_fd()),
+                name,
+            )
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
+                std::io::Error::other(format!("descriptor-bound config rename failed: {error}"))
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(error) = std::fs::rename(&temp_path, target) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(error);
+            }
         }
 
         let parent_file = File::open(parent)?;
-        parent_file.sync_all()?;
+
 
         let mut verify_options = OpenOptions::new();
         verify_options.read(true);
@@ -768,6 +795,34 @@ mod tests {
         };
         let result = writer.apply_patch_unchecked(&patch);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_source_rollback_is_phase_bound() {
+        let (_dir, writer) = setup_temp_config(SAMPLE_CONFIG);
+        let machine = MachineBinding::new("test-machine").unwrap();
+        let writer = writer.with_machine_binding(machine.clone());
+        let patch = writer.add_system_package("htop").unwrap();
+        let plan = ChangePlan::config_only(machine, &patch, 60_000).unwrap();
+        let auth =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [3; 32]).unwrap();
+
+        assert!(writer
+            .restore_patch_original_pre_activation_authorized(
+                &patch,
+                &plan,
+                &auth,
+                ConfigTransactionPhase::SourceCommitted,
+            )
+            .is_ok());
+        assert!(writer
+            .restore_patch_original_pre_activation_authorized(
+                &patch,
+                &plan,
+                &auth,
+                ConfigTransactionPhase::ActivationStarted,
+            )
+            .is_err());
     }
 
     #[test]
