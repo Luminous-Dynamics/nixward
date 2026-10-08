@@ -786,13 +786,10 @@ impl SourceRealizationLease {
         })
     }
 
-    /// Mark the retention lease rooted only after independent observation proves
-    /// that the GC-root path resolves to exactly the bound immutable source store path.
     /// Prove the lease is rooted by observing the actual GC-root symlink.
     ///
-    /// Nix treats symlinks under its GC-root namespace as roots of the target
-    /// store path, so the proof is derived from filesystem state rather than a
-    /// caller-provided string claim. citeturn903237search1
+    /// The proof is derived from filesystem state rather than a caller-provided
+    /// string claim.
     pub fn prove_rooted(&mut self) -> Result<(), String> {
         if self.state != SourceRealizationLeaseState::Pending {
             return Err("source realization lease is not pending root proof".into());
@@ -1461,6 +1458,31 @@ mod tests {
                 .expect_err("external entrypoint symlink must fail closed")
                 .contains("escapes source root")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_source_rejects_ambiguous_manifest_path_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+
+        let invalid_utf8 = std::ffi::OsString::from_vec(vec![0xff, b'.', b'n', b'i', b'x']);
+        std::fs::write(root.path().join(&invalid_utf8), b"{}\n").unwrap();
+        let utf8_error = FrozenConfigSource::capture(root.path(), "configuration.nix")
+            .expect_err("non-UTF-8 manifest path must fail closed");
+        assert!(utf8_error.contains("not valid UTF-8"));
+
+        std::fs::remove_file(root.path().join(&invalid_utf8)).unwrap();
+        std::fs::write(root.path().join("foo\\bar.nix"), b"{}\n").unwrap();
+        let slash_error = FrozenConfigSource::capture(root.path(), "configuration.nix")
+            .expect_err("backslash manifest path must fail closed");
+        assert!(slash_error.contains("contains '\\'"));
     }
 
     #[cfg(unix)]
