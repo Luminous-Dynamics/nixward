@@ -16,7 +16,7 @@ use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v1\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v4\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -1803,6 +1803,43 @@ pub enum ActivationWorkerPurpose {
     Activation,
     Recovery,
 }
+/// Durable pre-spawn intent. If present after restart, process creation may have
+/// occurred without a persisted pidfd identity; that uncertainty blocks new mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerLaunchIntent {
+    pub transaction_id: String,
+    pub purpose: ActivationWorkerPurpose,
+    pub executable: String,
+    pub argv_digest: String,
+}
+
+impl WorkerLaunchIntent {
+    pub fn validate_identity(&self) -> Result<(), String> {
+        if decode_digest(&self.transaction_id).is_err() || decode_digest(&self.argv_digest).is_err() {
+            return Err("worker launch intent contains an invalid digest".into());
+        }
+        let executable = std::path::Path::new(&self.executable);
+        if !executable.is_absolute() || !executable.starts_with("/nix/store/") {
+            return Err("worker launch executable is not an absolute Nix store path".into());
+        }
+        let component = executable
+            .strip_prefix("/nix/store/")
+            .map_err(|_| "worker launch executable escaped the Nix store".to_string())?
+            .components()
+            .next()
+            .and_then(|part| match part {
+                std::path::Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+            .ok_or_else(|| "worker launch executable has no store object identity".to_string())?;
+        let store_path = format!("/nix/store/{component}");
+        if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+            return Err("worker launch executable has invalid store identity".into());
+        }
+        Ok(())
+    }
+}
 /// Durable audit identity for the exact process that was spawned for activation.
 /// This record is descriptive after restart; only a fresh pidfd + boot/start-time
 /// check can establish whether that same worker is still live.
@@ -1877,6 +1914,8 @@ pub struct ConfigTransaction {
     candidate_build: Option<CandidateBuildReceipt>,
     #[serde(default)]
     activation_workers: Vec<ActivationWorkerIdentity>,
+    #[serde(default)]
+    pending_worker_launch: Option<WorkerLaunchIntent>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -1888,8 +1927,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v3";
-    pub const VERSION: u16 = 3;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v4";
+    pub const VERSION: u16 = 4;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -1916,6 +1955,7 @@ impl ConfigTransaction {
             candidate_store_path: None,
             candidate_build: None,
             activation_workers: Vec::new(),
+            pending_worker_launch: None,
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -2348,6 +2388,49 @@ impl ConfigTransaction {
         self.candidate_build.as_ref()
     }
 
+    /// Durably record a launch intent before calling spawn().
+    pub fn prepare_worker_launch(&mut self, intent: WorkerLaunchIntent) -> Result<(), String> {
+        intent.validate_identity()?;
+        if intent.transaction_id != self.transaction_id {
+            return Err("worker launch intent belongs to a different transaction".into());
+        }
+        if self.pending_worker_launch.is_some() {
+            return Err("transaction already has an unresolved worker launch intent".into());
+        }
+        let phase_is_valid = match intent.purpose {
+            ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
+            ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
+            ActivationWorkerPurpose::Recovery => self.phase == ConfigTransactionPhase::RecoveryMutationStarted,
+        };
+        if !phase_is_valid {
+            return Err("worker launch intent does not match the durable transaction phase".into());
+        }
+        self.pending_worker_launch = Some(intent);
+        Ok(())
+    }
+
+    /// Cancel only an intent whose spawn syscall returned an error, proving no
+    /// child was created by that invocation. If persistence fails, the durable
+    /// journal retains the intent and recovery remains blocked.
+    pub fn cancel_worker_launch_after_spawn_error(
+        &mut self,
+        purpose: ActivationWorkerPurpose,
+        executable: &str,
+        argv_digest: &str,
+    ) -> Result<(), String> {
+        let pending = self.pending_worker_launch.as_ref()
+            .ok_or_else(|| "no pending worker launch intent exists".to_string())?;
+        if pending.purpose != purpose || pending.executable != executable || pending.argv_digest != argv_digest {
+            return Err("spawn failure does not match the pending worker launch intent".into());
+        }
+        self.pending_worker_launch = None;
+        Ok(())
+    }
+
+    pub fn pending_worker_launch(&self) -> Option<&WorkerLaunchIntent> {
+        self.pending_worker_launch.as_ref()
+    }
+
     /// Persist one worker identity after it has been captured by pidfd and
     /// before awaiting completion. Receipts are append-only history.
     pub fn bind_activation_worker_identity(
@@ -2357,6 +2440,15 @@ impl ConfigTransaction {
         identity.validate_identity()?;
         if identity.transaction_id != self.transaction_id {
             return Err("activation worker identity belongs to a different transaction".into());
+        }
+        let pending = self.pending_worker_launch.as_ref()
+            .ok_or_else(|| "activation worker identity has no durable pre-spawn intent".to_string())?;
+        if pending.transaction_id != identity.transaction_id
+            || pending.purpose != identity.purpose
+            || pending.executable != identity.executable
+            || pending.argv_digest != identity.argv_digest
+        {
+            return Err("activation worker identity does not match the durable pre-spawn intent".into());
         }
         match identity.purpose {
             ActivationWorkerPurpose::ProfileTransition if self.phase != ConfigTransactionPhase::ProfileTransitionStarted => {
@@ -2377,6 +2469,7 @@ impl ConfigTransaction {
         }) {
             return Err("activation worker identity was already recorded".into());
         }
+        self.pending_worker_launch = None;
         self.activation_workers.push(identity);
         Ok(())
     }
@@ -2618,6 +2711,20 @@ impl ConfigTransaction {
             }
         }
 
+        if let Some(intent) = transaction.pending_worker_launch.as_ref() {
+            intent.validate_identity()?;
+            if intent.transaction_id != transaction.transaction_id {
+                return Err("transaction journal pending worker intent belongs to a different transaction".into());
+            }
+            let phase_matches = match intent.purpose {
+                ActivationWorkerPurpose::ProfileTransition => transaction.phase == ConfigTransactionPhase::ProfileTransitionStarted,
+                ActivationWorkerPurpose::Activation => transaction.phase == ConfigTransactionPhase::ActivationStarted,
+                ActivationWorkerPurpose::Recovery => transaction.phase == ConfigTransactionPhase::RecoveryMutationStarted,
+            };
+            if !phase_matches {
+                return Err("transaction journal pending worker intent has an incompatible transaction phase".into());
+            }
+        }
         for worker in &transaction.activation_workers {
             worker.validate_identity()?;
             if worker.transaction_id != transaction.transaction_id {
