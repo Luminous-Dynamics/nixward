@@ -27,6 +27,7 @@ pub enum BootloaderFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SelectionKind {
     OneShot,
+    PreferredDefault,
     PersistentDefault,
     GeneratedDefault,
     Unknown,
@@ -181,40 +182,67 @@ pub fn resolve_systemd_boot_selection(
     persistent_default: Option<&str>,
     entries: &BTreeMap<String, BlsEntry>,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
-    resolve_systemd_boot_selection_with_source(
+    resolve_systemd_boot_selection_with_preferred(
         one_shot_entry,
+        None,
+        persistent_default,
+        entries,
+    )
+}
+
+pub fn resolve_systemd_boot_selection_with_preferred(
+    one_shot_entry: Option<&str>,
+    preferred_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    entries: &BTreeMap<String, BlsEntry>,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
+    resolve_systemd_boot_selection_with_source_and_preferred(
+        one_shot_entry,
+        preferred_entry,
         persistent_default,
         entries,
         "efi:LoaderEntryDefault/loader.conf",
     )
 }
 
-fn resolve_systemd_boot_selection_with_source(
+fn resolve_systemd_boot_selection_with_source_and_preferred(
     one_shot_entry: Option<&str>,
+    preferred_entry: Option<&str>,
     persistent_default: Option<&str>,
     entries: &BTreeMap<String, BlsEntry>,
     persistent_source: &str,
 ) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     let (selection_kind, selected, source) = match one_shot_entry {
         Some(id) if !id.is_empty() => (SelectionKind::OneShot, id, "efi:LoaderEntryOneShot"),
-        _ => match persistent_default {
+        _ => match preferred_entry {
             Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
-                (SelectionKind::PersistentDefault, id, persistent_source)
+                (SelectionKind::PreferredDefault, id, "efi:LoaderEntryPreferred")
             }
             Some(_) => {
                 return Err(UnknownBootSelection {
                     bootloader_family: BootloaderFamily::SystemdBoot,
-                    reason: "persistent default is a pattern rather than an exact selected entry"
+                    reason: "preferred boot entry is a pattern rather than an exact selected entry"
                         .into(),
                 })
             }
-            None => {
-                return Err(UnknownBootSelection {
-                    bootloader_family: BootloaderFamily::SystemdBoot,
-                    reason: "neither one-shot nor exact persistent default selection is observable"
-                        .into(),
-                })
-            }
+            None => match persistent_default {
+                Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
+                    (SelectionKind::PersistentDefault, id, persistent_source)
+                }
+                Some(_) => {
+                    return Err(UnknownBootSelection {
+                        bootloader_family: BootloaderFamily::SystemdBoot,
+                        reason: "persistent default is a pattern rather than an exact selected entry"
+                            .into(),
+                    })
+                }
+                None => {
+                    return Err(UnknownBootSelection {
+                        bootloader_family: BootloaderFamily::SystemdBoot,
+                        reason: "no exact systemd-boot selection state is observable".into(),
+                    })
+                }
+            },
         },
     };
 
@@ -345,6 +373,10 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         bootloader_family: BootloaderFamily::SystemdBoot,
         reason,
     })?;
+    let preferred = read_efi_variable("LoaderEntryPreferred").map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
     let persistent_default = read_efi_variable("LoaderEntryDefault").map_err(|reason| UnknownBootSelection {
         bootloader_family: BootloaderFamily::SystemdBoot,
         reason,
@@ -364,14 +396,16 @@ fn observe_systemd_boot_from_loader(loader_path: &str) -> Result<BootSelectionEv
         }
     };
 
-    let (selected, selection_kind, selection_source) = systemd_effective_selector(
+    let (selected, selection_kind, selection_source) = systemd_effective_selector_with_preferred(
         one_shot.as_deref(),
+        preferred.as_deref(),
         persistent_default.as_deref(),
         persistent_source,
     )?;
 
-    let evidence = match resolve_systemd_boot_selection_with_source(
+    let evidence = match resolve_systemd_boot_selection_with_source_and_preferred(
         one_shot.as_deref(),
+        preferred.as_deref(),
         persistent_default.as_deref(),
         &entries,
         persistent_source,
@@ -506,6 +540,307 @@ pub fn observe_boot_selection_for_candidate(
     Ok(evidence)
 }
 
+/// Read-only witness for the boot that produced the current running OS.
+///
+/// systemd-boot writes LoaderEntrySelected when it boots an entry. The witness
+/// correlates that bootloader fact with the exact NixOS closure named by the
+/// selected entry, /run/current-system, and the kernel init= command-line
+/// binding. This proves a current-boot identity boundary, not service health
+/// or long-term system correctness.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BootWitnessState {
+    Verified,
+    SelectedEntryMismatch,
+    SelectedEntryUnbound,
+    RunningClosureMismatch,
+    CmdlineClosureMismatch,
+    LoaderEntryUnavailable,
+    UnsupportedBootloader,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootWitnessEvidence {
+    pub bootloader_family: BootloaderFamily,
+    pub expected_entry_id: String,
+    pub selected_entry_id: Option<String>,
+    pub selected_entry_source: String,
+    pub expected_closure: String,
+    pub selected_entry_closure: Option<String>,
+    pub running_closure: Option<String>,
+    pub cmdline_closure: Option<String>,
+    pub boot_id: Option<String>,
+    pub state: BootWitnessState,
+    pub observed_at_ms: Option<u64>,
+    pub evidence_digest: Option<[u8; 32]>,
+}
+
+impl BootWitnessEvidence {
+    pub fn with_observation_metadata(mut self, observed_at_ms: u64) -> Result<Self, String> {
+        let preimage = serde_json::to_vec(&(
+            self.bootloader_family,
+            &self.expected_entry_id,
+            &self.selected_entry_id,
+            &self.selected_entry_source,
+            &self.expected_closure,
+            &self.selected_entry_closure,
+            &self.running_closure,
+            &self.cmdline_closure,
+            &self.boot_id,
+            self.state,
+            observed_at_ms,
+        ))
+        .map_err(|error| format!("failed to serialize boot witness evidence: {error}"))?;
+        self.observed_at_ms = Some(observed_at_ms);
+        self.evidence_digest = Some(*blake3::hash(&preimage).as_bytes());
+        Ok(self)
+    }
+}
+
+#[cfg(feature = "native")]
+pub fn observe_current_systemd_boot_witness(
+    expected_entry_id: &str,
+    expected_closure: &str,
+) -> Result<BootWitnessEvidence, UnknownBootSelection> {
+    if !super::execution_intent::is_valid_nix_store_path(expected_closure)
+        || !expected_closure.contains("-nixos-system-")
+    {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "expected boot witness closure is not an exact NixOS system store closure".into(),
+        });
+    }
+
+    let loader_path = run_read_only(["--print-loader-path"])?;
+    let loader_name = Path::new(loader_path.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !loader_name.starts_with("systemd-boot") {
+        return Ok(BootWitnessEvidence {
+            bootloader_family: if loader_name.is_empty() {
+                BootloaderFamily::Unknown
+            } else {
+                BootloaderFamily::Grub
+            },
+            expected_entry_id: expected_entry_id.into(),
+            selected_entry_id: None,
+            selected_entry_source: "efi:LoaderEntrySelected".into(),
+            expected_closure: expected_closure.into(),
+            selected_entry_closure: None,
+            running_closure: None,
+            cmdline_closure: None,
+            boot_id: None,
+            state: if loader_name.is_empty() {
+                BootWitnessState::Unknown
+            } else {
+                BootWitnessState::UnsupportedBootloader
+            },
+            observed_at_ms: None,
+            evidence_digest: None,
+        });
+    }
+
+    let boot_path = PathBuf::from(run_read_only(["-x"])?.trim());
+    if !boot_path.is_absolute() {
+        return Err(UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: "bootctl -x returned a non-absolute BLS root".into(),
+        });
+    }
+
+    let selected_entry_id = match read_efi_variable("LoaderEntrySelected").map_err(|reason| {
+        UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason,
+        }
+    })? {
+        Some(value) if !value.is_empty() => value,
+        _ => {
+            return Ok(BootWitnessEvidence {
+                bootloader_family: BootloaderFamily::SystemdBoot,
+                expected_entry_id: expected_entry_id.into(),
+                selected_entry_id: None,
+                selected_entry_source: "efi:LoaderEntrySelected".into(),
+                expected_closure: expected_closure.into(),
+                selected_entry_closure: None,
+                running_closure: read_current_system_closure().ok(),
+                cmdline_closure: std::fs::read_to_string("/proc/cmdline")
+                    .ok()
+                    .and_then(|cmdline| exact_nixos_system_closure_from_cmdline(&cmdline)),
+                boot_id: read_boot_id().ok(),
+                state: BootWitnessState::LoaderEntryUnavailable,
+                observed_at_ms: None,
+                evidence_digest: None,
+            })
+        }
+    };
+
+    let entries_path = boot_path.join("loader/entries");
+    let entries = read_bls_entries(&entries_path).map_err(|reason| UnknownBootSelection {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        reason,
+    })?;
+
+    let selected_entry_closure = if let Some(entry_key) = resolve_bls_entry_key(&selected_entry_id, &entries) {
+        entries
+            .get(&entry_key)
+            .and_then(exact_store_path_from_entry)
+    } else if is_uki_selector(&selected_entry_id) {
+        let uki_path = resolve_boot_artifact_path(
+            &boot_path,
+            &format!("/EFI/Linux/{selected_entry_id}"),
+        )
+        .map_err(|reason| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason,
+        })?;
+        Some(
+            inspect_uki_file(&uki_path)
+                .map_err(|reason| UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::SystemdBoot,
+                    reason,
+                })?
+                .system_closure,
+        )
+    } else {
+        None
+    };
+
+    let running_closure = read_current_system_closure().ok();
+    let cmdline_closure = std::fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|cmdline| exact_nixos_system_closure_from_cmdline(&cmdline));
+    let boot_id = read_boot_id().ok();
+
+    let state = if selected_entry_id != expected_entry_id {
+        BootWitnessState::SelectedEntryMismatch
+    } else if selected_entry_closure.is_none() {
+        BootWitnessState::SelectedEntryUnbound
+    } else if selected_entry_closure.as_deref() != Some(expected_closure) {
+        BootWitnessState::RunningClosureMismatch
+    } else if running_closure.as_deref() != Some(expected_closure) {
+        BootWitnessState::RunningClosureMismatch
+    } else if cmdline_closure.as_deref() != Some(expected_closure) {
+        BootWitnessState::CmdlineClosureMismatch
+    } else if boot_id.as_deref().is_none_or(str::is_empty) {
+        BootWitnessState::Unknown
+    } else {
+        BootWitnessState::Verified
+    };
+
+    let evidence = BootWitnessEvidence {
+        bootloader_family: BootloaderFamily::SystemdBoot,
+        expected_entry_id: expected_entry_id.into(),
+        selected_entry_id: Some(selected_entry_id),
+        selected_entry_source: "efi:LoaderEntrySelected".into(),
+        expected_closure: expected_closure.into(),
+        selected_entry_closure,
+        running_closure,
+        cmdline_closure,
+        boot_id,
+        state,
+        observed_at_ms: None,
+        evidence_digest: None,
+    };
+
+    let observed_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason: format!("system clock could not produce observation timestamp: {error}"),
+        })?
+        .as_millis() as u64;
+
+    evidence.with_observation_metadata(observed_at_ms).map_err(|reason| {
+        UnknownBootSelection {
+            bootloader_family: BootloaderFamily::SystemdBoot,
+            reason,
+        }
+    })
+}
+
+#[cfg(feature = "native")]
+pub fn require_current_boot_witness(
+    evidence: &BootWitnessEvidence,
+    expected_entry_id: &str,
+    expected_closure: &str,
+) -> Result<(), UnknownBootSelection> {
+    if evidence.expected_entry_id != expected_entry_id || evidence.expected_closure != expected_closure {
+        return Err(UnknownBootSelection {
+            bootloader_family: evidence.bootloader_family,
+            reason: "boot witness is bound to different expected entry/closure inputs".into(),
+        });
+    }
+    if evidence.state != BootWitnessState::Verified {
+        return Err(UnknownBootSelection {
+            bootloader_family: evidence.bootloader_family,
+            reason: format!("current boot witness state is {:?}", evidence.state),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native")]
+fn read_current_system_closure() -> Result<String, String> {
+    let path = Path::new("/run/current-system");
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?;
+    if !metadata.file_type().is_symlink() {
+        return Err(format!("{} is not a symlink", path.display()));
+    }
+    let target = std::fs::read_link(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("/")).join(target)
+    };
+    let target = target
+        .to_str()
+        .ok_or_else(|| "current system target is not UTF-8".to_string())?;
+    if !super::execution_intent::is_valid_nix_store_path(target)
+        || !target.contains("-nixos-system-")
+    {
+        return Err(format!("current system target is not an exact NixOS closure: {target}"));
+    }
+    Ok(target.to_string())
+}
+
+fn exact_nixos_system_closure_from_cmdline(cmdline: &str) -> Option<String> {
+    cmdline.split_whitespace().find_map(|token| {
+        let init = token.strip_prefix("init=")?;
+        let closure = init.strip_suffix("/init")?;
+        if super::execution_intent::is_valid_nix_store_path(closure)
+            && closure.contains("-nixos-system-")
+        {
+            Some(closure.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(feature = "native")]
+fn read_boot_id() -> Result<String, String> {
+    let path = Path::new("/proc/sys/kernel/random/boot_id");
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect boot ID: {error}"))?;
+    if !metadata.file_type().is_file() {
+        return Err("kernel boot ID is not a regular file".into());
+    }
+    let id = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read kernel boot ID: {error}"))?
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return Err("kernel boot ID is empty".into());
+    }
+    Ok(id)
+}
+
 #[cfg(feature = "native")]
 fn candidate_grub_roots(preferred_root: Option<&Path>) -> Vec<PathBuf> {
     let defaults = [
@@ -580,20 +915,43 @@ fn systemd_effective_selector(
     persistent_default: Option<&str>,
     persistent_source: &str,
 ) -> Result<(&str, SelectionKind, &str), UnknownBootSelection> {
+    systemd_effective_selector_with_preferred(
+        one_shot_entry,
+        None,
+        persistent_default,
+        persistent_source,
+    )
+}
+
+fn systemd_effective_selector_with_preferred(
+    one_shot_entry: Option<&str>,
+    preferred_entry: Option<&str>,
+    persistent_default: Option<&str>,
+    persistent_source: &str,
+) -> Result<(&str, SelectionKind, &str), UnknownBootSelection> {
     match one_shot_entry {
         Some(id) if !id.is_empty() => Ok((id, SelectionKind::OneShot, "efi:LoaderEntryOneShot")),
-        _ => match persistent_default {
+        _ => match preferred_entry {
             Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
-                Ok((id, SelectionKind::PersistentDefault, persistent_source))
+                Ok((id, SelectionKind::PreferredDefault, "efi:LoaderEntryPreferred"))
             }
             Some(_) => Err(UnknownBootSelection {
                 bootloader_family: BootloaderFamily::SystemdBoot,
-                reason: "persistent default is a pattern or otherwise non-exact selector".into(),
+                reason: "preferred boot entry is a pattern or otherwise non-exact selector".into(),
             }),
-            None => Err(UnknownBootSelection {
-                bootloader_family: BootloaderFamily::SystemdBoot,
-                reason: "no exact systemd-boot default selector is observable".into(),
-            }),
+            None => match persistent_default {
+                Some(id) if !id.is_empty() && !contains_selection_pattern(id) => {
+                    Ok((id, SelectionKind::PersistentDefault, persistent_source))
+                }
+                Some(_) => Err(UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::SystemdBoot,
+                    reason: "persistent default is a pattern or otherwise non-exact selector".into(),
+                }),
+                None => Err(UnknownBootSelection {
+                    bootloader_family: BootloaderFamily::SystemdBoot,
+                    reason: "no exact systemd-boot selection selector is observable".into(),
+                }),
+            },
         },
     }
 }
@@ -744,26 +1102,27 @@ fn read_bls_entries(entries_path: &Path) -> Result<BTreeMap<String, BlsEntry>, S
 }
 
 #[cfg(feature = "native")]
+const SYSTEMD_BOOT_VARIABLE_GUID: &str =
+    "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
 fn read_efi_variable(name: &str) -> Result<Option<String>, String> {
     let dir = Path::new("/sys/firmware/efi/efivars");
-    let prefix = format!("{}-", name);
-    let mut matches = Vec::new();
-    for item in std::fs::read_dir(dir)
-        .map_err(|error| format!("failed to read EFI variable directory: {error}"))?
-    {
-        let item = item.map_err(|error| format!("failed to enumerate EFI variables: {error}"))?;
-        let file_name = item.file_name();
-        let Some(file_name) = file_name.to_str() else { continue; };
-        if file_name.starts_with(&prefix) {
-            matches.push(item.path());
+    let exact_name = format!("{}-{}", name, SYSTEMD_BOOT_VARIABLE_GUID);
+    let path = dir.join(&exact_name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("EFI variable {} is a symlink", path.display()));
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(format!("EFI variable {} is not a regular file", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("failed to inspect EFI variable {}: {error}", path.display()));
         }
     }
-    if matches.len() > 1 {
-        return Err(format!("EFI variable {name} has multiple vendor instances"));
-    }
-    let Some(path) = matches.into_iter().next() else {
-        return Ok(None);
-    };
+
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("failed to read EFI variable {}: {error}", path.display()))?;
     decode_efivar_string(&bytes).map(Some)
@@ -1164,6 +1523,73 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parsed.tries_done, Some(1));
         assert_eq!(parsed.boot_count_state, BootCountState::Indeterminate);
     }
+
+    #[test]
+    fn preferred_selection_precedes_persistent_default() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "preferred.conf".into(),
+            entry(
+                "preferred.conf",
+                "linux /boot/preferred.efi\noptions init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-preferred/init\n",
+            ),
+        );
+        entries.insert(
+            "default.conf".into(),
+            entry(
+                "default.conf",
+                "linux /boot/default.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-default/init\n",
+            ),
+        );
+        let evidence = resolve_systemd_boot_selection_with_preferred(
+            None,
+            Some("preferred"),
+            Some("default"),
+            &entries,
+        )
+        .expect("preferred selector should win");
+        assert_eq!(evidence.selection_kind, SelectionKind::PreferredDefault);
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("preferred.conf"));
+    }
+
+    #[test]
+    fn oneshot_selection_precedes_preferred_selection() {
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "oneshot.conf".into(),
+            entry(
+                "oneshot.conf",
+                "linux /boot/oneshot.efi\noptions init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-oneshot/init\n",
+            ),
+        );
+        entries.insert(
+            "preferred.conf".into(),
+            entry(
+                "preferred.conf",
+                "linux /boot/preferred.efi\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-preferred/init\n",
+            ),
+        );
+        let evidence = resolve_systemd_boot_selection_with_preferred(
+            Some("oneshot"),
+            Some("preferred"),
+            None,
+            &entries,
+        )
+        .expect("oneshot selector should win");
+        assert_eq!(evidence.selection_kind, SelectionKind::OneShot);
+        assert_eq!(evidence.selected_entry_id.as_deref(), Some("oneshot.conf"));
+    }
+
+    #[test]
+    fn cmdline_exact_init_binding_is_strict() {
+        let cmdline = "quiet init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init";
+        assert_eq!(
+            exact_nixos_system_closure_from_cmdline(cmdline).as_deref(),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate")
+        );
+        assert_eq!(exact_nixos_system_closure_from_cmdline("quiet splash"), None);
+    }
+
 
     #[test]
     fn exact_candidate_binding_comes_from_init_option_not_kernel_artifact() {
