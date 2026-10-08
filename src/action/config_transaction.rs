@@ -736,6 +736,22 @@ impl FrozenConfigSource {
     /// as interchangeable with Nix's NAR hash, which is a separate canonical
     /// whole-tree fingerprint.
     pub fn verify_realization_at(&self, realized_root: impl AsRef<Path>) -> Result<(), String> {
+        let realized_root = realized_root.as_ref();
+        let metadata = std::fs::symlink_metadata(realized_root)
+            .map_err(|error| format!("failed to inspect Nix realization root: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("Nix realization root must not be a symlink alias".into());
+        }
+        if !metadata.is_dir() {
+            return Err("Nix realization root must be a directory".into());
+        }
+        let canonical = realized_root
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize Nix realization root: {error}"))?;
+        if canonical != realized_root {
+            return Err("Nix realization root is not the declared canonical store path".into());
+        }
+
         let observed = Self::capture(realized_root, Path::new(&self.entrypoint))?;
         if observed.root_digest != self.root_digest
             || observed.entrypoint != self.entrypoint
@@ -824,14 +840,33 @@ impl SourceRealizationLease {
         self.validate_identity()?;
 
         let gc_root = std::path::Path::new(&self.gc_root_path);
-        let metadata = std::fs::symlink_metadata(gc_root)
+        let before = std::fs::symlink_metadata(gc_root)
             .map_err(|error| format!("failed to inspect source GC root: {error}"))?;
-        if !metadata.file_type().is_symlink() {
+        if !before.file_type().is_symlink() {
             return Err("source GC root exists but is not a symlink".into());
         }
 
         let target = std::fs::read_link(gc_root)
             .map_err(|error| format!("failed to read source GC root target: {error}"))?;
+
+        let after = std::fs::symlink_metadata(gc_root)
+            .map_err(|error| format!("failed to re-inspect source GC root: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if before.dev() != after.dev()
+                || before.ino() != after.ino()
+                || before.mode() != after.mode()
+                || before.len() != after.len()
+                || before.mtime() != after.mtime()
+                || before.mtime_nsec() != after.mtime_nsec()
+                || before.ctime() != after.ctime()
+                || before.ctime_nsec() != after.ctime_nsec()
+            {
+                return Err("source GC root changed while being observed".into());
+            }
+        }
+
         let resolved = if target.is_absolute() {
             target
         } else {
@@ -1618,6 +1653,32 @@ mod tests {
                 .expect_err("directory symlink must fail closed")
                 .contains("symbolic link")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn realized_root_rejects_symlink_alias() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let realized_dir = tempfile::tempdir().unwrap();
+        let alias_dir = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            source_dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            realized_dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(realized_dir.path(), alias_dir.path().join("store-alias")).unwrap();
+
+        let source = FrozenConfigSource::capture(source_dir.path(), "configuration.nix").unwrap();
+        assert!(source
+            .verify_realization_at(alias_dir.path().join("store-alias"))
+            .expect_err("store symlink alias must fail closed")
+            .contains("must not be a symlink alias"));
     }
 
     #[test]
