@@ -109,6 +109,8 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     let mut sections = Vec::with_capacity(section_count);
     for index in 0..section_count {
         let section = section_table + index * 40;
+        let virtual_size = read_u32(image, section + 8)? as u64;
+        let virtual_address = read_u32(image, section + 12)? as u64;
         let size_of_raw = read_u32(image, section + 16)? as usize;
         let ptr_to_raw = read_u32(image, section + 20)? as usize;
         if size_of_raw == 0 {
@@ -120,19 +122,22 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
         if end > image.len() {
             return Err(format!("PE section [{ptr_to_raw}..{end}] exceeds image size {}", image.len()));
         }
-        sections.push((ptr_to_raw, size_of_raw));
+        let virtual_end = virtual_address
+            .checked_add(virtual_size.max(size_of_raw as u64))
+            .ok_or_else(|| "PE section virtual range overflows".to_string())?;
+        sections.push((virtual_address, virtual_end, ptr_to_raw, size_of_raw));
     }
-    sections.sort_unstable_by_key(|(offset, _)| *offset);
+    sections.sort_unstable_by_key(|(virtual_address, _, _, _)| *virtual_address);
 
-    let mut previous_section_end = size_of_headers;
-    for (ptr_to_raw, size_of_raw) in sections {
+    let mut previous_virtual_end = 0u64;
+    let mut raw_ranges = Vec::new();
+    for (virtual_address, virtual_end, ptr_to_raw, size_of_raw) in sections {
+        if virtual_address < previous_virtual_end {
+            return Err("PE section virtual address ranges overlap or are out of order".into());
+        }
         if ptr_to_raw < size_of_headers {
             return Err("PE section raw data overlaps PE headers".into());
         }
-        if ptr_to_raw < previous_section_end {
-            return Err("PE section raw-data ranges overlap or are out of order".into());
-        }
-
         let end = ptr_to_raw
             .checked_add(size_of_raw)
             .ok_or_else(|| "PE section raw-data range overflows".to_string())?;
@@ -147,8 +152,16 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
             }
         }
 
+        raw_ranges.push((ptr_to_raw, end));
         hasher.update(&image[ptr_to_raw..end]);
-        previous_section_end = end;
+        previous_virtual_end = virtual_end;
+    }
+
+    raw_ranges.sort_unstable();
+    for pair in raw_ranges.windows(2) {
+        if pair[1].0 < pair[0].1 {
+            return Err("PE section raw-data ranges overlap".into());
+        }
     }
 
     // Authenticode hashes the bytes belonging to the PE headers and the
@@ -714,10 +727,14 @@ mod tests {
 
         let first_header = section_table;
         image[first_header..first_header + 8].copy_from_slice(b".text\0\0\0");
+        image[first_header + 8..first_header + 12].copy_from_slice(&(first_size as u32).to_le_bytes());
+        image[first_header + 12..first_header + 16].copy_from_slice(&0x1000u32.to_le_bytes());
         image[first_header + 16..first_header + 20].copy_from_slice(&(first_size as u32).to_le_bytes());
         image[first_header + 20..first_header + 24].copy_from_slice(&(first_offset as u32).to_le_bytes());
         let second_header = section_table + 40;
         image[second_header..second_header + 8].copy_from_slice(b".data\0\0\0");
+        image[second_header + 8..second_header + 12].copy_from_slice(&(second_size as u32).to_le_bytes());
+        image[second_header + 12..second_header + 16].copy_from_slice(&0x2000u32.to_le_bytes());
         image[second_header + 16..second_header + 20].copy_from_slice(&(second_size as u32).to_le_bytes());
         image[second_header + 20..second_header + 24].copy_from_slice(&(second_offset as u32).to_le_bytes());
 
@@ -778,6 +795,31 @@ mod tests {
             authenticode_sha256(&second_section_changed).expect("second-section authenticode hash"),
             first
         );
+    }
+
+    #[test]
+    fn authenticode_hash_rejects_section_address_order_mismatch() {
+        let mut image = pe_with_two_sections_and_overlay();
+        let second_header = 0x170usize;
+        image[second_header + 12..second_header + 16].copy_from_slice(&0x0800u32.to_le_bytes());
+        assert!(authenticode_sha256(&image).is_err());
+    }
+
+    #[test]
+    fn authenticode_hash_allows_nonmonotonic_raw_offsets_when_rvas_are_ordered() {
+        let mut image = pe_with_two_sections_and_overlay();
+        let first_header = 0x148usize;
+        let second_header = 0x170usize;
+
+        image[second_header + 20..second_header + 24]
+            .copy_from_slice(&0x200u32.to_le_bytes());
+        image[first_header + 20..first_header + 24]
+            .copy_from_slice(&0x400u32.to_le_bytes());
+
+        image[0x200..0x300].fill(0x42);
+        image[0x400..0x500].fill(0x41);
+
+        assert!(authenticode_sha256(&image).is_ok());
     }
 
     #[test]
