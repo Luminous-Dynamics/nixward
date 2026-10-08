@@ -627,6 +627,24 @@ fn observe_systemd_uki_from_selection(
         bootloader_family: BootloaderFamily::SystemdBoot,
         reason,
     })?;
+    build_uki_selection_evidence(
+        selected,
+        selection_kind,
+        selection_source,
+        &uki_path,
+        &uki,
+        boot_count_state,
+    )
+}
+
+fn build_uki_selection_evidence(
+    selected: &str,
+    selection_kind: SelectionKind,
+    selection_source: &str,
+    image_path: &Path,
+    uki: &super::uki_evidence::UkiSystemClosureEvidence,
+    boot_count_state: BootCountState,
+) -> Result<BootSelectionEvidence, UnknownBootSelection> {
     if boot_count_state == BootCountState::Bad {
         return Err(UnknownBootSelection {
             bootloader_family: BootloaderFamily::SystemdBoot,
@@ -638,9 +656,9 @@ fn observe_systemd_uki_from_selection(
         selection_kind,
         selected_entry_id: Some(selected.to_string()),
         selected_entry_source: selection_source.to_string(),
-        candidate_closure: uki.system_closure,
+        candidate_closure: uki.system_closure.clone(),
         boot_count_state,
-        selected_image_path: Some(uki_path.display().to_string()),
+        selected_image_path: Some(image_path.display().to_string()),
         selected_image_blake3: Some(uki.image_blake3),
         observed_at_ms: None,
         evidence_digest: None,
@@ -1228,7 +1246,28 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(parse_systemd_loader_default("default candidate\n"), Some("candidate".into()));
     }
     #[test]
-    fn systemd_loader_entry_suffix_is_normalized_exactly() {
+    fn uki_selection_evidence_retains_image_identity_and_closure_binding() {
+        let uki = super::super::uki_evidence::UkiSystemClosureEvidence {
+            image_path: "candidate.efi".into(),
+            image_blake3: [7; 32],
+            cmdline: "init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init".into(),
+            system_closure: Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate".into()),
+        };
+        let evidence = build_uki_selection_evidence(
+            "candidate.efi",
+            SelectionKind::PersistentDefault,
+            "efi:LoaderEntryDefault",
+            Path::new("/boot/EFI/Linux/candidate.efi"),
+            &uki,
+            BootCountState::NotTracked,
+        )
+        .expect("UKI evidence");
+        assert_eq!(evidence.candidate_closure.as_deref(), Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"));
+        assert_eq!(evidence.selected_image_path.as_deref(), Some("/boot/EFI/Linux/candidate.efi"));
+        assert_eq!(evidence.selected_image_blake3, Some([7; 32]));
+    }
+/// Observe systemd-boot selection and require an exact authorized candidate binding.
+
         let mut entries = BTreeMap::new();
         entries.insert(
             "candidate.conf".into(),
