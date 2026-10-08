@@ -1681,6 +1681,12 @@ impl NixOSExecutor {
         if receipt.candidate_store_path != *profile_store_path {
             return Err("transaction candidate does not match selected system profile".into());
         }
+        let expected_installable = authorization
+            .realization_installable()
+            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
+        if receipt.installable != expected_installable {
+            return Err("transaction candidate installable does not match authorization".into());
+        }
         let expected_realization_plan_digest = authorization
             .realization_plan_digest()
             .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
