@@ -5,8 +5,9 @@
 //!
 //! This module deliberately models two different transactional domains:
 //! durable configuration source state and the running NixOS generation.
-//! It contains no privileged mutation itself. It only provides typed state,
-//! immutable source snapshots, and fail-closed classification helpers.
+//! The baseline transaction types contain no activation authority; the native
+//! feature additionally provides the narrowly scoped Nix source
+//! realization and retention primitive.
 
 use super::executor::SystemActivation;
 use std::io::Write;
