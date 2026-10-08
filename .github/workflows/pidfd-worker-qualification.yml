@@ -1,0 +1,103 @@
+name: pidfd-worker-qualification
+
+on:
+  push:
+    branches:
+      - hardening/pidfd-worker-integration-2026-10-09
+  pull_request:
+    branches:
+      - hardening/full-stack-qualification-2026-10-08
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pidfd-worker-qualification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-native-qualification:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact source subject
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+          cargo --version
+
+      - name: Establish exact-head dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.lock ]; then
+            cargo metadata --locked --format-version=1 >/dev/null
+          else
+            cargo generate-lockfile
+          fi
+          test -f Cargo.lock
+          sha256sum Cargo.lock
+
+      - name: Assert exact source head
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$expected"
+
+      - name: Check default native feature set
+        run: cargo check --locked --all-targets
+
+      - name: Check full feature set
+        run: cargo check --locked --all-targets --features full
+
+      - name: Run library tests
+        run: cargo test --locked --lib
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Emit exact-head qualification receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          validated="$(git rev-parse HEAD)"
+          requested="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          test "$validated" = "$requested"
+          cat > pidfd-worker-qualification.json <<JSON
+          {
+            "schema": "luminous-nixward-pidfd-worker-qualification-v1",
+            "validated_commit": "$validated",
+            "requested_commit": "$requested",
+            "rustc": "$(rustc --version)",
+            "cargo": "$(cargo --version)",
+            "cargo_lock_sha256": "$(sha256sum Cargo.lock | cut -d' ' -f1)",
+            "cargo_toml_sha256": "$(sha256sum Cargo.toml | cut -d' ' -f1)",
+            "config_transaction_sha256": "$(sha256sum src/action/config_transaction.rs | cut -d' ' -f1)",
+            "executor_sha256": "$(sha256sum src/action/executor.rs | cut -d' ' -f1)",
+            "workflow_sha256": "$(sha256sum .github/workflows/pidfd-worker-qualification.yml | cut -d' ' -f1)",
+            "status": "all configured compile, test, format, and lint steps passed"
+          }
+          JSON
+
+      - name: Upload qualification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nixward-pidfd-worker-qualification-${{ github.sha }}
+          path: pidfd-worker-qualification.json
+          if-no-files-found: error
+          retention-days: 30
