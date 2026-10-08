@@ -16,7 +16,7 @@ use std::path::Path;
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v2\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -3580,6 +3580,39 @@ mod tests {
         assert!(
             ConfigTransaction::load(&path)
                 .expect_err("tampered frozen source manifest must fail closed")
+                .contains("manifest does not match its root digest")
+        );
+    }
+
+    #[test]
+    fn transaction_load_rejects_entrypoint_swap_under_old_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("other.nix"), "{ other = {}; }\n").unwrap();
+        let source = FrozenConfigSource::capture(dir.path(), "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        transaction.bind_frozen_source(&source).unwrap();
+
+        let path = dir.path().join("transaction.json");
+        transaction.persist_atomic(&path).unwrap();
+        let encoded = std::fs::read(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        value["frozen_source"]["entrypoint"] =
+            serde_json::Value::String("other.nix".into());
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        assert!(
+            ConfigTransaction::load(&path)
+                .expect_err("entrypoint swap must fail closed")
                 .contains("manifest does not match its root digest")
         );
     }
