@@ -732,6 +732,29 @@ fn db_certificate_verification_base_evidence(
 }
 
 #[cfg(feature = "native")]
+fn finalize_image_bound_verification(
+    image_path: &std::path::Path,
+    mut evidence: DbCertificateVerificationEvidence,
+) -> Result<DbCertificateVerificationEvidence, String> {
+    let image = std::fs::read(image_path)
+        .map_err(|error| format!("failed to re-read UKI {} after verification: {error}", image_path.display()))?;
+    let observed_hash = *blake3::hash(&image).as_bytes();
+    if observed_hash != evidence.image_blake3 {
+        evidence.image_chain_certificate_digests.clear();
+        evidence.image_signer_certificate_digests.clear();
+        evidence.verifying_db_certificate = None;
+        evidence.verifying_dbx_certificate = None;
+        evidence.dbx_chain_identity_match = None;
+        evidence.dbx_chain_tbs_hash_match = None;
+        evidence.database_stability = Some(false);
+        evidence.state = DbCertificateVerificationState::ImageChangedDuringVerification;
+        evidence.stderr_blake3 =
+            *blake3::hash(b"exact UKI bytes changed across verification boundary").as_bytes();
+    }
+    Ok(evidence)
+}
+
+#[cfg(feature = "native")]
 fn dbx_x509_record_matches_chain(
     record: &SignatureDatabaseRecord,
     chain: &[super::secure_boot_signature::X509ChainCertificateEvidence],
@@ -830,7 +853,7 @@ pub fn verify_image_against_db_certificates(
     }) {
         evidence.state = DbCertificateVerificationState::ForbiddenByDbxImageHash;
         evidence.stderr_blake3 = *blake3::hash(b"dbx image hash veto").as_bytes();
-        return Ok(evidence);
+        return finalize_image_bound_verification(image_path, evidence);
     }
 
     for record in dbx.iter().filter(|record| {
@@ -842,7 +865,7 @@ pub fn verify_image_against_db_certificates(
             evidence.state = DbCertificateVerificationState::ForbiddenByDbxCertificateChain;
             evidence.stderr_blake3 =
                 *blake3::hash(b"dbx X509 Issuer+Serial+TBS chain match").as_bytes();
-            return Ok(evidence);
+            return finalize_image_bound_verification(image_path, evidence);
         }
     }
 
@@ -850,7 +873,7 @@ pub fn verify_image_against_db_certificates(
         evidence.state = DbCertificateVerificationState::UnknownDbxCertificateRules;
         evidence.stderr_blake3 =
             *blake3::hash(b"unsupported dbx signature rule").as_bytes();
-        return Ok(evidence);
+        return finalize_image_bound_verification(image_path, evidence);
     }
 
     for record in dbx.iter().filter(|record| {
@@ -866,7 +889,7 @@ pub fn verify_image_against_db_certificates(
             evidence.state = DbCertificateVerificationState::PotentialDbxTbsRevocation;
             evidence.stderr_blake3 =
                 *blake3::hash(b"dbx X509 TBS chain match requires timestamp evaluation").as_bytes();
-            return Ok(evidence);
+            return finalize_image_bound_verification(image_path, evidence);
         }
     }
 
@@ -885,7 +908,7 @@ pub fn verify_image_against_db_certificates(
             b"dbx certificate rule cannot be correlated to an image signing chain",
         )
         .as_bytes();
-        return Ok(evidence);
+        return finalize_image_bound_verification(image_path, evidence);
     }
 
     let db_certificates: Vec<(&[u8], [u8; 32])> = db
@@ -1394,6 +1417,51 @@ mod tests {
             .with_observation_metadata(100)
             .expect("evidence");
         assert_ne!(first.evidence_digest, second.evidence_digest);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn final_image_recheck_invalidates_stale_chain_evidence() {
+        let temp = tempfile::NamedTempFile::new().expect("temporary UKI path");
+        std::fs::write(temp.path(), b"initial-image").expect("initial image");
+
+        let initial_hash = *blake3::hash(b"initial-image").as_bytes();
+        let mut evidence = DbCertificateVerificationEvidence {
+            image_blake3: initial_hash,
+            image_authenticode_sha256: [7; 32],
+            image_chain_certificate_digests: vec![[1; 32]],
+            image_signer_certificate_digests: vec![[2; 32]],
+            db_certificate_digests: vec![[3; 32]],
+            dbx_certificate_digests: vec![[4; 32]],
+            verifying_db_certificate: Some([5; 32]),
+            verifying_dbx_certificate: None,
+            dbx_chain_identity_match: Some([6; 32]),
+            dbx_chain_tbs_hash_match: None,
+            db_payload_blake3: Some([8; 32]),
+            dbx_payload_blake3: Some([9; 32]),
+            database_stability: Some(true),
+            state: DbCertificateVerificationState::VerifiedAgainstDbCertificate,
+            verifier: "fixture".into(),
+            stdout_blake3: [10; 32],
+            stderr_blake3: [11; 32],
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+
+        std::fs::write(temp.path(), b"replacement-image").expect("replacement image");
+
+        evidence = finalize_image_bound_verification(temp.path(), evidence)
+            .expect("final image recheck");
+
+        assert_eq!(
+            evidence.state,
+            DbCertificateVerificationState::ImageChangedDuringVerification
+        );
+        assert_eq!(evidence.database_stability, Some(false));
+        assert!(evidence.image_chain_certificate_digests.is_empty());
+        assert!(evidence.image_signer_certificate_digests.is_empty());
+        assert_eq!(evidence.verifying_db_certificate, None);
+        assert_eq!(evidence.dbx_chain_identity_match, None);
     }
 
     #[cfg(feature = "native")]
