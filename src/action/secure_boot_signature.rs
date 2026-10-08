@@ -613,9 +613,18 @@ pub fn verify_pe_signature_with_certificate(
     let image_before = *blake3::hash(&image).as_bytes();
     let certificate_before = *blake3::hash(&certificate).as_bytes();
 
+    let mut image_temp = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("failed to create temporary image file: {error}"))?;
+    use std::io::Write;
+    image_temp
+        .write_all(&image)
+        .map_err(|error| format!("failed to write exact image snapshot: {error}"))?;
+    image_temp
+        .flush()
+        .map_err(|error| format!("failed to flush exact image snapshot: {error}"))?;
+
     let mut certificate_temp = tempfile::NamedTempFile::new()
         .map_err(|error| format!("failed to create temporary certificate file: {error}"))?;
-    use std::io::Write;
     certificate_temp
         .write_all(&certificate)
         .map_err(|error| format!("failed to write exact certificate snapshot: {error}"))?;
@@ -626,7 +635,7 @@ pub fn verify_pe_signature_with_certificate(
     let output = std::process::Command::new("sbverify")
         .args(["--cert"])
         .arg(certificate_temp.path())
-        .arg(image_path)
+        .arg(image_temp.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
