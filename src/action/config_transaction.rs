@@ -77,6 +77,48 @@ pub enum RecoveryObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ProfileTransitionDisposition {
+    /// The exact requested profile is proven active after the profile command.
+    /// This remains true even when the child returned a nonzero status.
+    Committed {
+        process_exit_status: Option<i32>,
+        observed_profile: String,
+    },
+    /// The profile outcome cannot be proven safe from post-state evidence.
+    Indeterminate {
+        process_exit_status: Option<i32>,
+        observed_profile: Option<String>,
+        reason: String,
+    },
+}
+
+pub fn classify_profile_transition_post_state(
+    process_exit_status: Option<i32>,
+    observed_profile: Option<&str>,
+    candidate_profile: &str,
+) -> ProfileTransitionDisposition {
+    match observed_profile {
+        Some(observed) if observed == candidate_profile => {
+            ProfileTransitionDisposition::Committed {
+                process_exit_status,
+                observed_profile: observed.to_string(),
+            }
+        }
+        Some(observed) => ProfileTransitionDisposition::Indeterminate {
+            process_exit_status,
+            observed_profile: Some(observed.to_string()),
+            reason: "system profile did not resolve to the requested immutable candidate".into(),
+        },
+        None => ProfileTransitionDisposition::Indeterminate {
+            process_exit_status,
+            observed_profile: None,
+            reason: "system profile post-state could not be observed".into(),
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ActivationDisposition {
     Activated {
         process_exit_status: Option<i32>,
@@ -551,6 +593,38 @@ mod tests {
             result,
             ActivationDisposition::IndeterminateActivation {
                 observation: RecoveryObservation::PredecessorProvenActive { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn profile_candidate_post_state_dominates_exit_status() {
+        let result = classify_profile_transition_post_state(
+            Some(1),
+            Some(CANDIDATE_PROFILE),
+            CANDIDATE_PROFILE,
+        );
+        assert!(matches!(
+            result,
+            ProfileTransitionDisposition::Committed {
+                process_exit_status: Some(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn profile_mismatch_is_indeterminate_even_on_success() {
+        let result = classify_profile_transition_post_state(
+            Some(0),
+            Some(PREDECESSOR_PROFILE),
+            CANDIDATE_PROFILE,
+        );
+        assert!(matches!(
+            result,
+            ProfileTransitionDisposition::Indeterminate {
+                process_exit_status: Some(0),
                 ..
             }
         ));

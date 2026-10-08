@@ -1136,7 +1136,9 @@ impl NixOSExecutor {
         Ok(value.to_string())
     }
 
-    async fn set_exact_system_profile(profile_store_path: &str) -> Result<(), String> {
+    async fn set_exact_system_profile(
+        profile_store_path: &str,
+    ) -> Result<super::config_transaction::ProfileTransitionDisposition, String> {
         if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
             return Err("system profile target is not a canonical Nix store path".into());
         }
@@ -1155,24 +1157,30 @@ impl NixOSExecutor {
             .await
             .map_err(|error| format!("failed to set exact system profile: {error}"))?;
 
-        if !output.status.success() {
-            return Err(format!(
-                "exact system profile transition failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        let process_exit_status = output.status.code();
+        let observed = match GenerationManager::current_system_profile_closure() {
+            Ok(value) => {
+                return Ok(super::config_transaction::classify_profile_transition_post_state(
+                    process_exit_status,
+                    Some(&value),
+                    profile_store_path,
+                ));
+            }
+            Err(error) => {
+                return Ok(
+                    super::config_transaction::ProfileTransitionDisposition::Indeterminate {
+                        process_exit_status,
+                        observed_profile: None,
+                        reason: format!(
+                            "failed to observe exact system profile transition: {error}; child stderr: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    },
+                );
+            }
+        };
 
-        let observed = GenerationManager::current_system_profile_closure().map_err(|error| {
-            format!("failed to verify exact system profile transition: {error}")
-        })?;
-        if observed != profile_store_path {
-            return Err(format!(
-                "system profile transition resolved to {}, expected {}",
-                observed, profile_store_path
-            ));
-        }
-
-        Ok(())
+        drop(observed);
     }
 
     async fn verify_exact_activation_post_state(
@@ -1383,13 +1391,30 @@ impl NixOSExecutor {
             ..
         } = &rollback_cmd
         {
-            if let Err(reason) = Self::set_exact_system_profile(profile_store_path).await {
-                let exec_result = ExecutionResult::FailedNoRollback {
-                    error,
-                    rollback_error: Some(format!("exact recovery profile transaction failed: {reason}")),
-                };
-                self.record_execution(command, decision_quality, authorization, &exec_result);
-                return Some(exec_result);
+            match Self::set_exact_system_profile(profile_store_path).await {
+                Ok(super::config_transaction::ProfileTransitionDisposition::Committed { .. }) => {}
+                Ok(super::config_transaction::ProfileTransitionDisposition::Indeterminate {
+                    process_exit_status,
+                    observed_profile,
+                    reason,
+                }) => {
+                    let exec_result = ExecutionResult::FailedNoRollback {
+                        error,
+                        rollback_error: Some(format!(
+                            "exact recovery profile transition is indeterminate; exit={process_exit_status:?}, observed={observed_profile:?}: {reason}"
+                        )),
+                    };
+                    self.record_execution(command, decision_quality, authorization, &exec_result);
+                    return Some(exec_result);
+                }
+                Err(reason) => {
+                    let exec_result = ExecutionResult::FailedNoRollback {
+                        error,
+                        rollback_error: Some(format!("exact recovery profile transaction could not start: {reason}")),
+                    };
+                    self.record_execution(command, decision_quality, authorization, &exec_result);
+                    return Some(exec_result);
+                }
             }
         }
 
@@ -1603,13 +1628,30 @@ impl NixOSExecutor {
             ..
         } = &command
         {
-            if let Err(reason) = Self::set_exact_system_profile(profile_store_path).await {
-                let failed = ExecutionResult::FailedNoRollback {
-                    error: format!("system-profile transaction failed before activation: {reason}"),
-                    rollback_error: None,
-                };
-                self.record_execution(&command, decision_quality, &authorization, &failed);
-                return failed;
+            match Self::set_exact_system_profile(profile_store_path).await {
+                Ok(super::config_transaction::ProfileTransitionDisposition::Committed { .. }) => {}
+                Ok(super::config_transaction::ProfileTransitionDisposition::Indeterminate {
+                    process_exit_status,
+                    observed_profile,
+                    reason,
+                }) => {
+                    let failed = ExecutionResult::FailedNoRollback {
+                        error: format!(
+                            "system-profile transaction is indeterminate; exit={process_exit_status:?}, observed={observed_profile:?}: {reason}"
+                        ),
+                        rollback_error: None,
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &failed);
+                    return failed;
+                }
+                Err(reason) => {
+                    let failed = ExecutionResult::FailedNoRollback {
+                        error: format!("system-profile transaction could not start: {reason}"),
+                        rollback_error: None,
+                    };
+                    self.record_execution(&command, decision_quality, &authorization, &failed);
+                    return failed;
+                }
             }
         }
 
