@@ -513,13 +513,13 @@ silently qualify an older validation mirror.
 
 ## Journal-bound pidfd worker identity (2026-10-09)
 
-The transaction journal is versioned to v4 because worker/process evidence changes its
-recovery contract. Profile transitions, candidate activation, and recovery activation use
-one supervised worker path. Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent`
-containing the transaction, worker purpose, immutable executable identity, and argv digest.
-After spawn, it captures the child PID through `pidfd_open`, verifies a stable
-`/proc/<pid>/stat` start-time and boot ID around pidfd acquisition, and atomically replaces
-the pending intent with the concrete worker receipt before waiting for completion.
+The transaction journal is versioned to v5 because both source-entrypoint identity and worker/process evidence change its
+recovery contract. The source digest now commits to the selected entrypoint as well as the
+serialized manifest; journal load recomputes that digest and rejects a mutated entrypoint.
+Profile transitions, candidate activation, and recovery activation use one supervised worker path.
+Before calling `spawn()`, Nixward persists a `WorkerLaunchIntent` containing the transaction,
+worker purpose, immutable executable identity, and executable+argv digest. After spawn, it captures
+the child PID through `pidfd_open`, verifies a stable `/proc/<pid>/stat` start-time and boot ID,
 
 A pidfd is a live kernel handle, not a serialized token. After process restart, Nixward
 does not trust the recorded PID alone: it rechecks the boot ID and process start time, opens
