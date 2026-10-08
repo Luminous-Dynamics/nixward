@@ -119,6 +119,7 @@
           buildInputs = commonBuildInputs ++ [
             rustToolchain
             pkgs.cargo-watch
+            pkgs.sbsigntool
           ];
           nativeBuildInputs = commonNativeBuildInputs;
 
@@ -131,6 +132,7 @@
             echo "  cargo check --all-targets"
             echo "  cargo test"
             echo "  nix flake check"
+            echo "  sbsigntool: sbverify --cert <certificate> <efi-image>"
           '';
         };
       }
