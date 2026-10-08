@@ -755,8 +755,40 @@ mod tests {
         );
     }
     #[test]
+    fn exact_dbx_certificate_match_beats_unevaluated_rules() {
+        let evidence = SignatureDatabaseMatchEvidence {
+            db_records: Vec::new(),
+            dbx_records: vec![SignatureDatabaseRecord {
+                kind: SignatureListKind::X509Certificate,
+                signature_size: 48,
+                signature_data_blake3: [1; 32],
+                owner: [2; 16],
+                image_authenticode_sha256: None,
+                certificate_der_blake3: Some([3; 32]),
+                certificate_der: Some(vec![0x30, 0x01]),
+                certificate_tbs_hash: None,
+                revocation_time: None,
+            }],
+            image_authenticode_sha256: [4; 32],
+            direct_db_authenticode_hash_match: false,
+            direct_dbx_authenticode_hash_match: false,
+            exact_certificate_in_db: false,
+            exact_certificate_in_dbx: true,
+            exact_certificate_tbs_hash_in_db: false,
+            exact_certificate_tbs_hash_in_dbx: false,
+            certificate_chain_authorization: None,
+            observed_at_ms: None,
+            evidence_digest: None,
+        };
+        assert_eq!(
+            derive_direct_trust_disposition(&evidence),
+            DirectTrustDisposition::ExactCertificateInDbx
+        );
+    }
+    #[test]
     fn parses_sha256_signature_database_records() {
         let mut payload = vec![0u8; 28 + 48];
+        payload[..16].copy_from_slice(&EFI_CERT_SHA256_GUID);
         payload[16..20].copy_from_slice(&(76u32).to_le_bytes());
         payload[20..24].copy_from_slice(&0u32.to_le_bytes());
         payload[24..28].copy_from_slice(&48u32.to_le_bytes());
