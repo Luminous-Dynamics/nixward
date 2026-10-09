@@ -156,6 +156,18 @@ mod tests {
     }
 
     #[test]
+    fn parent_eof_before_release_fails_closed() {
+        // This is the state observed if the executor dies before releasing the
+        // gate. No complete token exists, so run_with_args returns before exec.
+        let expected = release_digest(&[0x2au8; 32]);
+        let mut parent_closed = Cursor::new(Vec::<u8>::new());
+        assert!(
+            read_release(&mut parent_closed, &expected).is_err(),
+            "EOF without a complete release token must never authorize payload exec"
+        );
+    }
+
+    #[test]
     fn release_digest_must_be_canonical() {
         let token = [0x12u8; 32];
         assert!(read_release(&mut Cursor::new(token.to_vec()), &release_digest(&token).to_uppercase()).is_err());
