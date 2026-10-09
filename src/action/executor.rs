@@ -1239,10 +1239,10 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    fn activation_argv_digest(args: &[String]) -> String {
+    fn activation_argv_digest(executable: &str, args: &[String]) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V1\0");
-        for argument in args {
+        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
+        for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
             hasher.update(&(argument.len() as u64).to_le_bytes());
             hasher.update(argument.as_bytes());
         }
@@ -1274,7 +1274,7 @@ impl NixOSExecutor {
             boot_id: boot_after,
             start_time_ticks: start_after,
             executable: executable.to_string(),
-            argv_digest: Self::activation_argv_digest(args),
+            argv_digest: Self::activation_argv_digest(executable, args),
         };
         identity.validate_identity()?;
         Ok((identity, pidfd))
@@ -3068,6 +3068,52 @@ impl NixOSExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_argv_digest_binds_executable_and_argument_boundaries() {
+        let args = vec!["switch".to_string(), "test".to_string()];
+        let baseline = NixOSExecutor::activation_argv_digest(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system/bin/switch-to-configuration",
+            &args,
+        );
+        assert_ne!(
+            baseline,
+            NixOSExecutor::activation_argv_digest(
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-system/bin/switch-to-configuration",
+                &args,
+            )
+        );
+        assert_ne!(
+            baseline,
+            NixOSExecutor::activation_argv_digest(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system/bin/switch-to-configuration",
+                &["switch test".to_string()],
+            )
+        );
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn pidfd_worker_liveness_rejects_reused_pid_start_time() {
+        use super::super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+        let pid = std::process::id();
+        let boot_id = NixOSExecutor::current_boot_id().unwrap();
+        let start_time_ticks = NixOSExecutor::proc_start_time_ticks(pid).unwrap().unwrap();
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-test/bin/worker";
+        let identity = ActivationWorkerIdentity {
+            transaction_id: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid,
+            boot_id,
+            start_time_ticks,
+            executable: executable.into(),
+            argv_digest: NixOSExecutor::activation_argv_digest(executable, &["switch".into()]),
+        };
+        assert!(NixOSExecutor::persisted_worker_may_be_live(&identity).unwrap());
+        let mut reused = identity;
+        reused.start_time_ticks = start_time_ticks.saturating_add(1);
+        assert!(!NixOSExecutor::persisted_worker_may_be_live(&reused).unwrap());
+    }
 
     #[test]
     fn test_command_safety_levels() {
