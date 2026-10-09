@@ -108,7 +108,57 @@ else:
         if text.count("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}") != 1:
             errors.append("workflow must map the bootstrap write token exactly once")
 
-    write_permission_sites = re.findall(
+    draft_lockfile = re.search(
+        r"(?ms)^  draft-lockfile-artifact:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+        text,
+    )
+    if not draft_lockfile:
+        errors.append("missing draft exact-run lockfile artifact job")
+    else:
+        body = draft_lockfile.group(0)
+        expected = [
+            "github.ref == 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09'",
+            "ref: ${{ github.sha }}",
+            "cargo generate-lockfile",
+            "cargo metadata --locked --format-version=1",
+            "steps.lockfile_digest.outputs.cargo_lock_sha256",
+            "name: nixward-draft-cargo-lock-${{ github.run_id }}-${{ github.run_attempt }}",
+            "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "contents: read",
+        ]
+        for marker in expected:
+            if marker not in body:
+                errors.append(f"draft lockfile artifact job missing required marker: {marker}")
+        if "contents: write" in body:
+            errors.append("draft lockfile artifact job must not have repository write authority")
+
+    draft_candidate = re.search(
+        r"(?ms)^  draft-candidate-check:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+        text,
+    )
+    if not draft_candidate:
+        errors.append("missing draft candidate checks job")
+    else:
+        body = draft_candidate.group(0)
+        expected = [
+            "- draft-lockfile-artifact",
+            "needs.draft-lockfile-artifact.result == 'success'",
+            "test \"$branch_tip\" = \"$GITHUB_SHA\"",
+            "uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+            "needs.draft-lockfile-artifact.outputs.cargo_lock_sha256",
+            "EXPECTED_CARGO_LOCK_SHA256",
+            "test \"$actual\" = \"$EXPECTED_CARGO_LOCK_SHA256\"",
+            "cargo test --locked --bin nixward-worker-gate",
+            "Draft hardening candidate checks (not qualification)",
+            "it does not issue a qualification receipt",
+        ]
+        for marker in expected:
+            if marker not in body:
+                errors.append(f"draft candidate job missing required marker: {marker}")
+        if "Require committed lockfile" in body or "git ls-files --error-unmatch Cargo.lock" in body:
+            errors.append("draft candidate must consume exact-run lockfile artifact, not require branch mutation")
+
+        write_permission_sites = re.findall(
         r"^      contents: write\s*$",
         text,
         flags=re.M,
