@@ -1101,6 +1101,12 @@ impl NixSourceRealizer {
                         if metadata_error.kind() == std::io::ErrorKind::NotFound
                 );
                 if missing && attempt < 2 {
+                    match std::fs::symlink_metadata(&gc_root_path) {
+                        Ok(_) => cleanup_gc_root_if_target_matches(&gc_root_path, &store_path)
+                            .map_err(|cleanup_error| format!("source object vanished before retention; root cleanup failed: {cleanup_error}"))?,
+                        Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(metadata_error) => return Err(format!("source object vanished before retention and GC-root cleanup could not be safely inspected: {metadata_error}")),
+                    }
                     last_collection_race = Some(error);
                     continue;
                 }
@@ -1114,6 +1120,12 @@ impl NixSourceRealizer {
                         if metadata_error.kind() == std::io::ErrorKind::NotFound
                 );
                 if missing && attempt < 2 {
+                    match std::fs::symlink_metadata(&gc_root_path) {
+                        Ok(_) => cleanup_gc_root_if_target_matches(&gc_root_path, &store_path)
+                            .map_err(|cleanup_error| format!("source object vanished during root establishment; root cleanup failed: {cleanup_error}"))?,
+                        Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(metadata_error) => return Err(format!("source object vanished during root establishment and GC-root cleanup could not be safely inspected: {metadata_error}")),
+                    }
                     last_collection_race = Some(error);
                     continue;
                 }
