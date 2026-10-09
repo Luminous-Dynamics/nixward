@@ -2227,29 +2227,46 @@ impl NixOSExecutor {
             };
         }
 
-        if matches!(
+        let candidate_already_active = matches!(
             observation,
             super::config_transaction::RecoveryObservation::CandidateProvenActive { .. }
-        ) {
+        );
+        let boot_candidate_selected = matches!(
+            observation,
+            super::config_transaction::RecoveryObservation::BootCandidateProven { .. }
+        );
+        if candidate_already_active || boot_candidate_selected {
+            let expected_runtime = if boot_candidate_selected {
+                prior_runtime.as_str()
+            } else {
+                candidate_runtime.as_str()
+            };
             if let Err(reason) = transaction.record_activation_post_state(
                 None,
                 Some(observed_runtime.clone()),
                 Some(observed_profile.clone()),
+                expected_runtime,
             ) {
                 return ExecutionResult::FailedNoRollback {
-                    error: format!("candidate-active recovery could not close transaction: {reason}"),
+                    error: format!("recovery post-state could not close transaction: {reason}"),
                     rollback_error: None,
                 };
             }
             if let Err(reason) = Self::persist_transaction(&transaction, &journal_path) {
                 return ExecutionResult::FailedNoRollback {
                     error: reason,
-                    rollback_error: Some("candidate runtime/profile was proven but durable closure could not be persisted".into()),
+                    rollback_error: Some("candidate/runtime selection was proven but durable closure could not be persisted".into()),
                 };
             }
+            Self::cleanup_terminal_retention(&mut transaction, &journal_path);
+            let stderr = if boot_candidate_selected {
+                "candidate profile is selected for the next boot; predecessor runtime remains active and no recovery mutation was performed"
+            } else {
+                "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed"
+            };
             let result = ExecutionResult::Success {
                 stdout: String::new(),
-                stderr: "candidate runtime and system profile were proven active during recovery; no recovery mutation was performed".into(),
+                stderr: stderr.into(),
                 execution_time_ms: 0,
             };
             self.record_execution(&command, decision_quality, &authorization, &result);
@@ -2682,10 +2699,28 @@ impl NixOSExecutor {
         let runtime = GenerationManager::current_runtime_system_closure().ok();
         let profile = GenerationManager::current_system_profile_closure().ok();
 
+        let expected_runtime = match &command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                action: SystemActivation::Boot,
+                ..
+            } if !authorization.rollback_only => match authorization.recovery_command.as_ref() {
+                Some(NixOSCommand::ActivateSystemClosure { store_path: prior, .. }) => prior.clone(),
+                _ => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: "boot activation has no exact prior-runtime binding".into(),
+                        rollback_error: None,
+                    };
+                }
+            },
+            NixOSCommand::ActivateSystemClosure { store_path, .. } => store_path.clone(),
+            _ => unreachable!("transaction executor accepts exact activation only"),
+        };
         if let Err(reason) = transaction.record_activation_post_state(
             status,
             runtime.clone(),
             profile.clone(),
+            &expected_runtime,
         ) {
             return ExecutionResult::FailedNoRollback {
                 error: format!("activation post-state could not be recorded: {reason}"),
@@ -2704,6 +2739,14 @@ impl NixOSExecutor {
         }
 
         match transaction.phase() {
+            super::config_transaction::ConfigTransactionPhase::BootSelected => {
+                Self::cleanup_terminal_retention(&mut transaction, &journal_path);
+                ExecutionResult::Success {
+                    stdout: String::new(),
+                    stderr: "candidate closure and system profile are selected for the next boot; the current runtime remains on its authorized predecessor".into(),
+                    execution_time_ms: elapsed,
+                }
+            }
             super::config_transaction::ConfigTransactionPhase::Activated => {
                 Self::cleanup_terminal_retention(&mut transaction, &journal_path);
                 match result {
