@@ -526,3 +526,13 @@ The worker receipt distinguishes the declared launcher from the observed `/proc/
 Both `nix store add` and `nix build` clear inherited environment and suppress root user Nix configuration via `NIX_USER_CONF_FILES=/dev/null` and `XDG_CONFIG_HOME=/var/empty`; neither is allowed to inherit `NIX_CONFIG`, `NIX_PATH`, loader variables, or shell startup environment.
 
 Worker purposes are now separate for `ProfileTransition`, `Activation`, `RecoveryProfileTransition`, and `RecoveryActivation`. A receipt carrying one PID + boot ID + process start time cannot be relabeled as a different purpose in the same journal, and recovery admission requires evidence for the phase it is recovering.
+
+## Activation launcher grammar and identity binding (2026-10-09)
+
+The worker verifier now parses the complete NixOS `switch-to-configuration` shell wrapper before it accepts the observed executable/argv pair. It does not merely find a plausible final `exec`: it allows only one direct `exec`, exact argument forwarding, a fixed set of environment exports, no duplicate assignments, no shell substitutions/escapes, and no executable statements before or after the handoff.
+
+The accepted exports include the current Nixpkgs `SYSTEMD` setting in addition to `OUT`, `TOPLEVEL`, `DISTRO_ID`, `INSTALL_BOOTLOADER`, `PRE_SWITCH_CHECK`, and optional `LOCALE_ARCHIVE`. `OUT` and `TOPLEVEL` must match the declared system closure root; helper paths must resolve lexically to canonical Nix store objects. A wrapper that does not satisfy that exact topology is rejected rather than normalized or guessed.
+
+The unit fixture covers the current direct-exec wrapper plus rejection of wrong `OUT`/`TOPLEVEL` binding, mutable helper paths, pre-exec payloads, command substitution, forbidden environment exports, shell `-c` indirection, and argument drift.
+
+Qualification remains evidence-gated: this source review is not a compiler result. Exact-head hosted validation must run the real test matrix before the branch can be classified as qualified.
