@@ -1818,6 +1818,7 @@ pub struct ActivationWorkerIdentity {
     pub start_time_ticks: u64,
     pub executable: String,
     pub argv_digest: String,
+    pub environment_digest: String,
 }
 
 impl ActivationWorkerIdentity {
@@ -1840,6 +1841,9 @@ impl ActivationWorkerIdentity {
         }
         if decode_digest(&self.argv_digest).is_err() {
             return Err("activation worker argv digest is invalid".into());
+        }
+        if decode_digest(&self.environment_digest).is_err() {
+            return Err("activation worker environment digest is invalid".into());
         }
         const STORE_PREFIX: &str = "/nix/store/";
         let executable = std::path::Path::new(&self.executable);
@@ -2739,6 +2743,7 @@ mod tests {
             start_time_ticks: 42,
             executable: executable.into(),
             argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
         }
     }
 
