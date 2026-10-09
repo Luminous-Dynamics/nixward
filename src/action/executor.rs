@@ -1281,6 +1281,37 @@ impl NixOSExecutor {
         hasher.finalize().to_hex().to_string()
     }
 
+    fn validate_observed_invocation(
+        expected_executable: &str,
+        expected_args: &[String],
+        observed_executable: &Path,
+        observed_cmdline: &[u8],
+    ) -> Result<String, String> {
+        if observed_executable != Path::new(expected_executable) {
+            return Err(format!(
+                "spawned worker executable mismatch: expected {expected_executable}, observed {}",
+                observed_executable.display()
+            ));
+        }
+        if observed_cmdline.is_empty() || !observed_cmdline.ends_with(&[0]) {
+            return Err("spawned worker cmdline is empty or lacks its terminating NUL".into());
+        }
+        let mut observed = observed_cmdline
+            .split(|byte| *byte == 0)
+            .map(|argument| argument.to_vec())
+            .collect::<Vec<_>>();
+        if observed.last().is_some_and(Vec::is_empty) {
+            observed.pop();
+        }
+        let mut expected = Vec::with_capacity(expected_args.len() + 1);
+        expected.push(expected_executable.as_bytes().to_vec());
+        expected.extend(expected_args.iter().map(|argument| argument.as_bytes().to_vec()));
+        if observed != expected {
+            return Err("spawned worker /proc cmdline differs from the exact requested executable/argument vector".into());
+        }
+        Ok(Self::activation_argv_digest(expected_executable, expected_args))
+    }
+
     #[cfg(all(feature = "native", target_os = "linux"))]
     fn capture_worker_identity(
         pid: u32,
@@ -1293,6 +1324,18 @@ impl NixOSExecutor {
         let start_before = Self::proc_start_time_ticks(pid)?
             .ok_or_else(|| "activation worker vanished before process identity was captured".to_string())?;
         let pidfd = Self::open_pidfd(pid)?;
+        // A pidfd proves task identity, not the executable/argv it actually entered.
+        // Cross-check the live procfs view before persisting the worker receipt.
+        let observed_executable = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .map_err(|error| format!("failed to observe spawned worker executable: {error}"))?;
+        let observed_cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map_err(|error| format!("failed to observe spawned worker cmdline: {error}"))?;
+        let argv_digest = Self::validate_observed_invocation(
+            executable,
+            args,
+            &observed_executable,
+            &observed_cmdline,
+        )?;
         let start_after = Self::proc_start_time_ticks(pid)?
             .ok_or_else(|| "activation worker vanished while process identity was captured".to_string())?;
         let boot_after = Self::current_boot_id()?;
@@ -1306,7 +1349,7 @@ impl NixOSExecutor {
             boot_id: boot_after,
             start_time_ticks: start_after,
             executable: executable.to_string(),
-            argv_digest: Self::activation_argv_digest(executable, args),
+            argv_digest,
             environment_digest: Self::activation_worker_environment_digest(),
         };
         identity.validate_identity()?;
@@ -3168,6 +3211,39 @@ mod tests {
             NixOSExecutor::activation_worker_environment_digest(),
             NixOSExecutor::environment_digest(NixOSExecutor::activation_worker_environment())
         );
+    }
+
+    #[test]
+    fn worker_receipt_requires_observed_executable_and_exact_proc_cmdline() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system/bin/switch-to-configuration";
+        let args = vec!["switch".to_string(), "test".to_string()];
+        let mut cmdline = Vec::new();
+        cmdline.extend_from_slice(executable.as_bytes());
+        cmdline.push(0);
+        cmdline.extend_from_slice(b"switch");
+        cmdline.push(0);
+        cmdline.extend_from_slice(b"test");
+        cmdline.push(0);
+        let expected_digest = NixOSExecutor::validate_observed_invocation(
+            executable,
+            &args,
+            Path::new(executable),
+            &cmdline,
+        )
+        .unwrap();
+        assert_eq!(expected_digest, NixOSExecutor::activation_argv_digest(executable, &args));
+        assert!(NixOSExecutor::validate_observed_invocation(
+            executable,
+            &args,
+            Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-system/bin/switch-to-configuration"),
+            &cmdline,
+        ).is_err());
+        assert!(NixOSExecutor::validate_observed_invocation(
+            executable,
+            &args,
+            Path::new(executable),
+            b"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system/bin/switch-to-configuration\0switch test\0",
+        ).is_err());
     }
 
     #[test]
