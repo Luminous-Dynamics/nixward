@@ -2701,7 +2701,6 @@ impl NixOSExecutor {
 
         let expected_runtime = match &command {
             NixOSCommand::ActivateSystemClosure {
-                store_path,
                 action: SystemActivation::Boot,
                 ..
             } if !authorization.rollback_only => match authorization.recovery_command.as_ref() {
