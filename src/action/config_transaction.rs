@@ -1069,6 +1069,8 @@ impl NixSourceRealizer {
                 .env("HOME", "/root")
                 .env("LANG", "C")
                 .env("LC_ALL", "C")
+                .env("NIX_USER_CONF_FILES", "/dev/null")
+                .env("XDG_CONFIG_HOME", "/var/empty")
                 .args(["store", "add", "--name", &name])
                 .arg(source_root)
                 .stdout(std::process::Stdio::piped())
