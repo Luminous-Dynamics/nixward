@@ -1620,11 +1620,13 @@ impl NixOSExecutor {
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
-    fn worker_gate_release_token() -> Result<[u8; 32], String> {
-        let mut token = [0u8; 32];
+    fn worker_gate_release_token() -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+        // Zeroizing wipes the token when this function's caller returns, errors,
+        // or its async future is cancelled—unlike a success-path-only fill(0).
+        let mut token = zeroize::Zeroizing::new([0u8; 32]);
         let mut random = File::open("/dev/urandom")
             .map_err(|error| format!("failed to open kernel random source: {error}"))?;
-        std::io::Read::read_exact(&mut random, &mut token)
+        std::io::Read::read_exact(&mut random, &mut *token)
             .map_err(|error| format!("failed to obtain worker-gate release token: {error}"))?;
         Ok(token)
     }
@@ -1654,8 +1656,8 @@ impl NixOSExecutor {
         {
             let transaction_id = transaction.transaction_id().to_string();
             let gate_executable = Self::trusted_worker_gate_executable()?;
-            let mut release_token = Self::worker_gate_release_token()?;
-            let release_digest = Self::worker_gate_release_digest(&release_token);
+            let release_token = Self::worker_gate_release_token()?;
+            let release_digest = Self::worker_gate_release_digest(&*release_token);
             let mut gate_args = vec![
                 "--nixward-worker-gate-v1".to_string(),
                 executable.to_string(),
@@ -1720,7 +1722,7 @@ impl NixOSExecutor {
                 let _ = child.wait().await;
                 return Err("worker gate stdin channel is unavailable; payload was not released".into());
             };
-            if let Err(error) = gate_stdin.write_all(&release_token).await {
+            if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
                 drop(gate_stdin);
                 let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
                 let _ = child.start_kill();
@@ -1730,7 +1732,6 @@ impl NixOSExecutor {
                 ));
             }
             drop(gate_stdin);
-            release_token.fill(0);
 
             let output = child
                 .wait_with_output()
