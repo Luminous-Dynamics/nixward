@@ -4249,6 +4249,62 @@ mod tests {
     }
 
     #[test]
+    fn transaction_load_rejects_v6_journal_without_gate_receipt_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let mut value = serde_json::to_value(transaction).unwrap();
+        value["schema"] = serde_json::Value::String(
+            "luminous-nixward-config-transaction-v6".into(),
+        );
+        value["version"] = serde_json::Value::from(6);
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = ConfigTransaction::load(&path)
+            .expect_err("v6 journals do not contain the v7 gate-release evidence");
+        assert!(
+            error.contains("schema/version mismatch"),
+            "legacy journal must fail closed with a schema incompatibility: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_atomic_journal_persist_preserves_last_committed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        committed.persist_atomic(&path).unwrap();
+        let committed_bytes = std::fs::read(&path).unwrap();
+
+        let mut pending_update = committed.clone();
+        pending_update.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+
+        // Force the O_EXCL temporary-file creation to fail deterministically.
+        // The persistence method must not truncate or otherwise replace the
+        // previously committed journal when it cannot prepare a new candidate.
+        let temp_path = dir
+            .path()
+            .join(format!(".transaction.json.tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, b"occupied-by-fault-injection").unwrap();
+
+        let error = pending_update
+            .persist_atomic(&path)
+            .expect_err("colliding temp entry must make persistence fail closed");
+        assert!(error.contains("failed to create descriptor-bound transaction journal candidate"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            committed_bytes,
+            "failed candidate creation must preserve the prior committed bytes"
+        );
+        assert_eq!(
+            ConfigTransaction::load(&path).unwrap().phase(),
+            ConfigTransactionPhase::Prepared,
+            "failed persistence must not publish the pending phase"
+        );
+    }
+
+    #[test]
     fn transaction_id_binds_source_plan_and_nonce() {
         let first = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         let second = ConfigTransaction::new([1; 32], [2; 32], [4; 32]);
