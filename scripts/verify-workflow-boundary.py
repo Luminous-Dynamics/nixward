@@ -97,6 +97,17 @@ else:
     ):
         errors.append("bootstrap-lockfile job must have contents: write")
 
+    if bootstrap:
+        bootstrap_body = bootstrap.group(0)
+        persist_step = re.search(
+            r"(?ms)^      - name: Persist generated lockfile.*?(?=^      - name:|^  [A-Za-z_][\\w-]*:|\\Z)",
+            bootstrap_body,
+        )
+        if not persist_step or "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in persist_step.group(0):
+            errors.append("lockfile bootstrap must map GITHUB_TOKEN into the persistence step")
+        if text.count("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}") != 1:
+            errors.append("workflow must map the bootstrap write token exactly once")
+
     write_permission_sites = re.findall(
         r"^      contents: write\s*$",
         text,
