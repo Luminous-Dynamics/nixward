@@ -3394,6 +3394,15 @@ mod tests {
             Path::new(target),
             &wrong_cmdline,
         ).is_err());
+
+        let indirect = format!("#!{interpreter}\nexec {interpreter} -c wrapped \"$@\"\n");
+        std::fs::write(&wrapper, indirect).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &forwarded_cmdline,
+        ).is_err(), "shell -c indirection must be rejected");
     }
 
     #[test]
