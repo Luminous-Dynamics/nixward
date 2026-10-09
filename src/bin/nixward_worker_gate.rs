@@ -116,12 +116,15 @@ where
     }
 
     let stdin = io::stdin();
-    read_release(&mut stdin.lock(), &expected_digest)?;
 
     // The child is single-threaded and has already completed the durable receipt
-    // handshake. Use direct exec semantics—never a shell or PATH lookup.
-    let error = Command::new(&target).args(payload_args).exec();
-    Err(format!("worker gate could not exec the bound payload: {error}"))
+    // handshake. The only route to exec passes through this gate: the complete
+    // token must match and the parent must close the pipe (EOF) first. Use direct
+    // exec semantics—never a shell or PATH lookup.
+    release_then(&mut stdin.lock(), &expected_digest, || {
+        let error = Command::new(&target).args(payload_args).exec();
+        Err(format!("worker gate could not exec the bound payload: {error}"))
+    })
 }
 
 fn main() {
@@ -133,6 +136,48 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn irreversible_callback_is_not_invoked_for_invalid_release_frames() {
+        let token = [0x39u8; 32];
+        let digest = release_digest(&token);
+        let mut wrong_token = vec![0x4au8; 32];
+        let mut partial_token = token[..31].to_vec();
+        let mut trailing_bytes = token.to_vec();
+        trailing_bytes.push(0xff);
+
+        for (label, frame, expected, expected_error) in [
+            ("wrong token", wrong_token.as_slice(), digest.as_str(), "does not match"),
+            ("truncated token", partial_token.as_slice(), digest.as_str(), "incomplete"),
+            ("trailing byte", trailing_bytes.as_slice(), digest.as_str(), "trailing bytes"),
+            ("parent EOF", &[][..], digest.as_str(), "incomplete"),
+        ] {
+            let mut reader = Cursor::new(frame.to_vec());
+            let mut callback_called = false;
+            let result = release_then(&mut reader, expected, || {
+                callback_called = true;
+                Ok(())
+            });
+            assert!(result.unwrap_err().contains(expected_error), "{label}");
+            assert!(!callback_called, "irreversible callback ran for {label}");
+        }
+    }
+
+    #[test]
+    fn irreversible_callback_runs_once_after_valid_release_and_propagates_exec_error() {
+        let token = [0xc3u8; 32];
+        let digest = release_digest(&token);
+        let mut reader = Cursor::new(token.to_vec());
+        let mut callback_count = 0usize;
+
+        let result: Result<(), String> = release_then(&mut reader, &digest, || {
+            callback_count += 1;
+            Err("injected exec failure".to_string())
+        });
+
+        assert_eq!(callback_count, 1, "valid release must invoke the callback exactly once");
+        assert_eq!(result.unwrap_err(), "injected exec failure");
+    }
+
     use super::*;
     use std::io::Cursor;
 
