@@ -301,21 +301,23 @@ mod tests {
 
     #[test]
     fn worker_gate_requires_same_package_and_approved_launcher_name() {
-        let current = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
+        let current_cli = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
         let cli = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward");
-        let tui = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-tui/bin/nixward-tui");
-        let daemon = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-daemon/bin/nixward-daemon");
+        let current_tui = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward-tui/bin/nixward-worker-gate");
+        let tui = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward-tui/bin/nixward-tui");
+        let current_daemon = Path::new("/nix/store/cccccccccccccccccccccccccccccccc-nixward-daemon/bin/nixward-worker-gate");
+        let daemon = Path::new("/nix/store/cccccccccccccccccccccccccccccccc-nixward-daemon/bin/nixward-daemon");
         let gate = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
         let unapproved_sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-owner-key");
-        let different_package = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward/bin/nixward");
+        let different_package = Path::new("/nix/store/dddddddddddddddddddddddddddddddd-nixward/bin/nixward");
 
-        assert!(validate_parent_package_images(current, cli).is_ok());
-        assert!(validate_parent_package_images(current, tui).is_ok());
-        assert!(validate_parent_package_images(current, daemon).is_ok());
-        assert!(validate_parent_package_images(current, gate).is_err());
-        assert!(validate_parent_package_images(current, unapproved_sibling).is_err());
-        assert!(validate_parent_package_images(current, different_package).is_err());
-        assert!(validate_parent_package_images(current, Path::new("/usr/bin/bash")).is_err());
+        assert!(validate_parent_package_images(current_cli, cli).is_ok());
+        assert!(validate_parent_package_images(current_tui, tui).is_ok());
+        assert!(validate_parent_package_images(current_daemon, daemon).is_ok());
+        assert!(validate_parent_package_images(current_cli, gate).is_err());
+        assert!(validate_parent_package_images(current_cli, unapproved_sibling).is_err());
+        assert!(validate_parent_package_images(current_cli, different_package).is_err());
+        assert!(validate_parent_package_images(current_cli, Path::new("/usr/bin/bash")).is_err());
     }
 
     #[test]
