@@ -121,6 +121,15 @@ fn nix_store_object(path: &Path) -> Result<String, String> {
     Ok(object.to_string())
 }
 
+fn validate_parent_package_images(current: &Path, parent: &Path) -> Result<(), String> {
+    let current_object = nix_store_object(current)?;
+    let parent_object = nix_store_object(parent)?;
+    if parent_object != current_object {
+        return Err("worker gate parent is not from the same immutable Nixward package".into());
+    }
+    Ok(())
+}
+
 /// The gate is an ordering barrier for Nixward's trusted launcher, not a general
 /// command-execution interface. Refuse direct invocation by a shell or unrelated
 /// executable, which otherwise could choose both the digest and token itself.
@@ -130,18 +139,13 @@ fn validate_trusted_parent_package() -> Result<(), String> {
         .map_err(|error| format!("worker gate cannot resolve its own executable: {error}"))?
         .canonicalize()
         .map_err(|error| format!("worker gate cannot canonicalize its executable: {error}"))?;
-    let current_object = nix_store_object(&current)?;
     let parent_pid = unsafe { nix::libc::getppid() };
     if parent_pid <= 1 {
         return Err("worker gate has no live Nixward launcher parent".into());
     }
     let parent = std::fs::read_link(format!("/proc/{parent_pid}/exe"))
         .map_err(|error| format!("worker gate cannot inspect launcher parent executable: {error}"))?;
-    let parent_object = nix_store_object(&parent)?;
-    if parent_object != current_object {
-        return Err("worker gate parent is not from the same immutable Nixward package".into());
-    }
-    Ok(())
+    validate_parent_package_images(&current, &parent)
 }
 
 fn run_with_args<I>(args: I) -> Result<(), String>
@@ -288,9 +292,9 @@ mod tests {
         let current = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
         let sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward");
         let other = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward/bin/nixward");
-        assert_eq!(nix_store_object(current).unwrap(), nix_store_object(sibling).unwrap());
-        assert_ne!(nix_store_object(current).unwrap(), nix_store_object(other).unwrap());
-        assert!(nix_store_object(Path::new("/usr/bin/bash")).is_err());
+        assert!(validate_parent_package_images(current, sibling).is_ok());
+        assert!(validate_parent_package_images(current, other).is_err());
+        assert!(validate_parent_package_images(current, Path::new("/usr/bin/bash")).is_err());
     }
 
     #[test]
