@@ -24,6 +24,7 @@ use std::os::fd::AsRawFd;
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -1272,13 +1273,7 @@ impl NixOSExecutor {
     }
 
     fn activation_argv_digest(executable: &str, args: &[String]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
-        for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
-            hasher.update(&(argument.len() as u64).to_le_bytes());
-            hasher.update(argument.as_bytes());
-        }
-        hasher.finalize().to_hex().to_string()
+        super::config_transaction::activation_argv_digest(executable, args)
     }
 
     fn canonical_store_executable_lexical(path: &str) -> bool {
@@ -1478,6 +1473,9 @@ impl NixOSExecutor {
         purpose: super::config_transaction::ActivationWorkerPurpose,
         executable: &str,
         args: &[String],
+        payload_executable: &str,
+        payload_args: &[String],
+        release_challenge_digest: &str,
     ) -> Result<(super::config_transaction::ActivationWorkerIdentity, OwnedFd), String> {
         let boot_before = Self::current_boot_id()?;
         let start_before = Self::proc_start_time_ticks(pid)?
@@ -1531,6 +1529,10 @@ impl NixOSExecutor {
             executable: executable.to_string(),
             process_image,
             argv_digest,
+            payload_executable: payload_executable.to_string(),
+            payload_args: payload_args.to_vec(),
+            release_challenge_digest: release_challenge_digest.to_string(),
+            payload_argv_digest: Self::activation_argv_digest(payload_executable, payload_args),
             environment_digest: Self::activation_worker_environment_digest(),
         };
         identity.validate_identity()?;
@@ -1573,6 +1575,68 @@ impl NixOSExecutor {
         Err("activation worker recovery requires Linux pidfd support".into())
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn trusted_worker_gate_executable() -> Result<String, String> {
+        let current = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve current Nixward executable: {error}"))?
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize current Nixward executable: {error}"))?;
+        Self::validate_store_backed_executable(&current, "current Nixward executable")?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| "current Nixward executable has no parent directory".to_string())?;
+        let entry = parent.join("nixward-worker-gate");
+        let metadata = std::fs::symlink_metadata(&entry)
+            .map_err(|error| format!("trusted Nixward worker gate is unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("trusted Nixward worker gate must be a regular sibling executable".into());
+        }
+        let gate = entry
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize Nixward worker gate: {error}"))?;
+        Self::validate_store_backed_executable(&gate, "Nixward worker gate")?;
+        let current_object = current
+            .strip_prefix("/nix/store/")
+            .ok_or_else(|| "current Nixward executable is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "current Nixward executable has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        let gate_object = gate
+            .strip_prefix("/nix/store/")
+            .map_err(|_| "Nixward worker gate is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "Nixward worker gate has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        if current_object != gate_object {
+            return Err("Nixward worker gate is not in the exact current executable store object".into());
+        }
+        gate.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Nixward worker gate path is not valid UTF-8".into())
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_token() -> Result<[u8; 32], String> {
+        let mut token = [0u8; 32];
+        let mut random = File::open("/dev/urandom")
+            .map_err(|error| format!("failed to open kernel random source: {error}"))?;
+        std::io::Read::read_exact(&mut random, &mut token)
+            .map_err(|error| format!("failed to obtain worker-gate release token: {error}"))?;
+        Ok(token)
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_digest(token: &[u8; 32]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-worker-gate-release-v1\0");
+        hasher.update(token);
+        hasher.finalize().to_hex().to_string()
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
@@ -1585,19 +1649,47 @@ impl NixOSExecutor {
             let _ = (executable, args, transaction, journal_path, purpose);
             return Err("transaction worker execution requires Linux pidfd support".into());
         }
+
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let mut child = Command::new(executable);
-            child.env_clear();
+            let gate_executable = Self::trusted_worker_gate_executable()?;
+            let mut release_token = Self::worker_gate_release_token()?;
+            let release_digest = Self::worker_gate_release_digest(&release_token);
+            let mut gate_args = vec![
+                "--nixward-worker-gate-v1".to_string(),
+                executable.to_string(),
+                release_digest,
+            ];
+            gate_args.extend(args.iter().cloned());
+
+            let mut command = Command::new(&gate_executable);
+            command.env_clear();
             for &(name, value) in Self::activation_worker_environment() {
-                child.env(name, value);
+                command.env(name, value);
             }
-            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-            let mut child = child.spawn()
-                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
-            let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
-            let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
+            command
+                .args(&gate_args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .map_err(|error| format!("failed to spawn inert transaction worker gate: {error}"))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| "transaction worker gate has no process id".to_string())?;
+            let (identity, pidfd) = match Self::capture_worker_identity(
+                pid,
+                &transaction_id,
+                purpose,
+                &gate_executable,
+                &gate_args,
+                executable,
+                args,
+                &release_digest,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     let _ = child.start_kill();
@@ -1615,17 +1707,43 @@ impl NixOSExecutor {
                 let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(format!("worker identity could not be persisted; worker was killed best-effort: {error}"));
+                return Err(format!(
+                    "worker gate receipt could not be persisted; payload was not released: {error}"
+                ));
             }
-            let output = child.wait_with_output().await
-                .map_err(|error| format!("failed waiting for transaction worker {executable}: {error}"))?;
+
+            // The payload remains blocked until its pidfd, exact gate argv,
+            // payload digest, and transaction binding are durable.
+            let Some(mut gate_stdin) = child.stdin.take() else {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err("worker gate stdin channel is unavailable; payload was not released".into());
+            };
+            if let Err(error) = gate_stdin.write_all(&release_token).await {
+                drop(gate_stdin);
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!(
+                    "worker gate release token could not be delivered; payload was not intentionally released: {error}"
+                ));
+            }
+            drop(gate_stdin);
+            release_token.fill(0);
+
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|error| format!("failed waiting for gated transaction worker {executable}: {error}"))?;
             if !Self::pidfd_exited(&pidfd)? {
                 return Err("transaction worker wait completed without pidfd exit evidence".into());
             }
             Ok(output)
         }
     }
-    async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
+
+        async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
         let (declared_cmd, args) = command.to_command();
         let executable = Self::trusted_bound_executable(command)?;
         Command::new(&executable)

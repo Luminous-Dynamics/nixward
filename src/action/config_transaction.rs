@@ -16,10 +16,22 @@ use std::path::{Path, PathBuf};
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v4\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Canonical length-framed argv digest shared by launch receipts and recovery
+/// verification. Argument boundaries are preserved; concatenation is not enough.
+pub(super) fn activation_argv_digest(executable: &str, args: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
+    for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
+        hasher.update(&(argument.len() as u64).to_le_bytes());
+        hasher.update(argument.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1833,11 +1845,19 @@ pub struct ActivationWorkerIdentity {
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
-    /// Declared launcher from the authorized command.
+    /// Immutable Nixward worker-gate executable reserved before payload release.
     pub executable: String,
-    /// Actual kernel process image observed through /proc/<pid>/exe.
+    /// Kernel image observed while the gate was waiting for durable release.
+    /// The same process then execs payload_executable without changing PID/start time.
     pub process_image: String,
+    /// Exact gate invocation digest, including the payload selector and gate challenge digest.
     pub argv_digest: String,
+    /// Exact payload executable and arguments that the gate is permitted to exec.
+    pub payload_executable: String,
+    pub payload_args: Vec<String>,
+    /// Domain-separated digest of the one-time release token, not the token itself.
+    pub release_challenge_digest: String,
+    pub payload_argv_digest: String,
     pub environment_digest: String,
 }
 
@@ -1865,7 +1885,59 @@ impl ActivationWorkerIdentity {
         if decode_digest(&self.environment_digest).is_err() {
             return Err("activation worker environment digest is invalid".into());
         }
+        if decode_digest(&self.payload_argv_digest).is_err() {
+            return Err("activation worker payload argv digest is invalid".into());
+        }
+        if decode_digest(&self.release_challenge_digest).is_err() {
+            return Err("activation worker release challenge digest is invalid".into());
+        }
+        if self.payload_args.iter().any(|argument| argument.contains('\0')) {
+            return Err("activation worker payload argv contains a NUL byte".into());
+        }
+        if activation_argv_digest(&self.payload_executable, &self.payload_args)
+            != self.payload_argv_digest
+        {
+            return Err("activation worker payload argv digest does not bind the recorded arguments".into());
+        }
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            self.payload_executable.clone(),
+            self.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(self.payload_args.iter().cloned());
+        if activation_argv_digest(&self.executable, &gate_args) != self.argv_digest {
+            return Err("activation worker gate argv digest does not bind its challenge and payload".into());
+        }
         const STORE_PREFIX: &str = "/nix/store/";
+        let payload = std::path::Path::new(&self.payload_executable);
+        if !payload.is_absolute() || !self.payload_executable.starts_with(STORE_PREFIX) {
+            return Err("activation worker payload executable is not an absolute Nix store path".into());
+        }
+        let payload_relative = self.payload_executable
+            .strip_prefix(STORE_PREFIX)
+            .ok_or_else(|| "activation worker payload executable escaped the Nix store".to_string())?;
+        let mut payload_components = payload_relative.split('/');
+        let payload_store_component = payload_components
+            .next()
+            .ok_or_else(|| "activation worker payload executable has no store object component".to_string())?;
+        let payload_store_path = format!("{STORE_PREFIX}{payload_store_component}");
+        if !super::execution_intent::is_valid_nix_store_path(&payload_store_path) {
+            return Err("activation worker payload executable has an invalid Nix store identity".into());
+        }
+        let payload_suffix = payload_components.collect::<Vec<_>>();
+        if payload_suffix.is_empty()
+            || payload_suffix.iter().any(|component| {
+                component.is_empty()
+                    || *component == "."
+                    || *component == ".."
+                    || component.chars().any(char::is_control)
+            })
+        {
+            return Err("activation worker payload executable path has empty, traversal, or control components".into());
+        }
+        if format!("{STORE_PREFIX}{payload_store_component}/{}", payload_suffix.join("/")) != self.payload_executable {
+            return Err("activation worker payload executable path is not in canonical lexical form".into());
+        }
         let executable = std::path::Path::new(&self.executable);
         if !executable.is_absolute() || !self.executable.starts_with(STORE_PREFIX) {
             return Err("activation worker executable is not an absolute Nix store path".into());
@@ -1930,6 +2002,9 @@ impl ActivationWorkerIdentity {
         let canonical = format!("{STORE_PREFIX}{store_component}/{}", suffix.join("/"));
         if canonical != self.executable {
             return Err("activation worker executable path is not in canonical lexical form".into());
+        }
+        if self.process_image != self.executable {
+            return Err("activation worker receipt was not captured while the inert gate image was active".into());
         }
         Ok(())
     }
@@ -2116,8 +2191,8 @@ fn validate_journal_path_binding(path: &Path, transaction_id: &str) -> Result<()
 
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v6";
-    pub const VERSION: u16 = 6;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
+    pub const VERSION: u16 = 7;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2998,6 +3073,14 @@ mod tests {
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
 
     fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
         ActivationWorkerIdentity {
             transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             purpose: ActivationWorkerPurpose::Activation,
@@ -3006,9 +3089,38 @@ mod tests {
             start_time_ticks: 42,
             executable: executable.into(),
             process_image: executable.into(),
-            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            argv_digest: activation_argv_digest(executable, &gate_args),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            payload_executable: executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: activation_argv_digest(executable, &payload_args),
         }
+    }
+
+    #[test]
+    fn activation_worker_payload_argv_digest_rejects_argument_drift() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut identity = worker_identity_for_test(executable);
+        identity.validate_identity().unwrap();
+        identity.payload_args.push("different-argument".into());
+        assert!(
+            identity.validate_identity().is_err(),
+            "a persisted worker receipt must bind the exact payload argument vector"
+        );
+    }
+
+    #[test]
+    fn activation_worker_receipt_binds_release_challenge() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let mut identity = worker_identity_for_test(executable);
+        identity.validate_identity().unwrap();
+        identity.release_challenge_digest =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        assert!(
+            identity.validate_identity().is_err(),
+            "the gate argv digest must bind the exact one-time release challenge"
+        );
     }
 
     #[test]
@@ -3016,6 +3128,14 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.phase = ConfigTransactionPhase::RecoveryMutationStarted;
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let payload_args = vec!["profile-transition-test".to_string()];
+        let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
         let identity = ActivationWorkerIdentity {
             transaction_id: transaction.transaction_id().to_string(),
             purpose: ActivationWorkerPurpose::RecoveryProfileTransition,
@@ -3024,8 +3144,12 @@ mod tests {
             start_time_ticks: 42,
             executable: executable.into(),
             process_image: executable.into(),
-            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            argv_digest: activation_argv_digest(executable, &gate_args),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            payload_executable: executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: activation_argv_digest(executable, &payload_args),
         };
         transaction.bind_activation_worker_identity(identity.clone()).unwrap();
         let mut relabelled = identity;

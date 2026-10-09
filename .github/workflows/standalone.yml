@@ -235,6 +235,9 @@ jobs:
       - name: Run library tests
         run: cargo test --locked --lib
 
+      - name: Run worker-gate protocol tests
+        run: cargo test --locked --bin nixward-worker-gate
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

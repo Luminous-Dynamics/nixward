@@ -517,7 +517,7 @@ Recovery reacquires a pidfd for each recorded worker and checks boot identity an
 
 The invocation digest covers the executable and each length-framed argument, including boundaries. The process environment is cleared and rebuilt from a fixed allow-list (`HOME`, locale, `NIX_USER_CONF_FILES`, `PATH`, terminal/color, and XDG config). The environment digest is stored with the worker receipt so the exact launch policy is auditable. NixOS's generated activation script establishes its own PATH from declared system dependencies; the worker PATH is only the launcher environment, not a substitute for that build-time dependency closure.
 
-The transaction journal schema is now `luminous-nixward-config-transaction-v6`. Worker receipts without the required environment digest and observed process image are intentionally invalid; the executor will not silently promote an older incomplete receipt to current worker authority.
+The transaction journal schema is now `luminous-nixward-config-transaction-v7`. Worker receipts without the required environment digest and observed process image are intentionally invalid; the executor will not silently promote an older incomplete receipt to current worker authority.
 
 Qualification is still contingent on a completed hosted run for the exact synchronized hardening/validation head. Pidfd semantics are grounded in Linux `pidfd_open(2)` (stable task handle and pollable exit indication) and the current Rust/Tokio process APIs; the implementation uses the Linux syscall path because Rust's standard-library pidfd wrapper remains experimental.
 
@@ -558,3 +558,32 @@ This is a source-level architectural change, not a qualification receipt. The
 hardening and validation PR heads must remain exactly synchronized, and the
 exact head still requires completed hosted compiler/test evidence before a
 qualified status can be claimed.
+
+## Parent-gated worker launch (2026-10-09)
+
+Privileged profile-transition, activation, and recovery workers now use the
+immutable `nixward-worker-gate` sibling installed with the Nixward executable.
+The executor starts only this inert gate. It captures the gate's PID, boot ID,
+start-time ticks, pidfd, exact gate argv digest, payload executable and exact
+argument vector/digest, release-challenge digest, and fixed environment digest,
+binds the receipt to the transaction, and fsyncs
+the journal before it sends a one-time random release token.
+
+The gate accepts exactly one 32-byte token whose domain-separated BLAKE3 digest
+matches the challenge in its argv, followed by EOF. Partial frames, wrong
+tokens, trailing bytes, malformed args, non-store targets, and noncanonical
+payload paths fail closed. On success it invokes the exact payload with direct
+`exec`, not a shell or PATH lookup. The same process retains its PID/start-time
+identity across `exec`; if the parent exits before release, the pipe closes and
+the gate exits without running the privileged payload.
+
+This closes the pre-receipt execution window for workers routed through the
+gate, subject to the gate binary and package co-installation being exact. It
+does not itself prove successful activation: the worker receipt still has to
+be durable, the pidfd identity must remain consistent, and runtime/profile
+post-state observation and terminal journal persistence remain required.
+
+The launch-gate protocol has unit tests for exact release token, digest
+canonicality, truncation, and trailing bytes. As with all changes here, those
+tests and the full compiler/test matrix must complete on the exact subject
+before it may be qualified.
