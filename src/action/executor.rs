@@ -1372,7 +1372,10 @@ impl NixOSExecutor {
             if !seen_exports.insert(name.to_string()) {
                 return Err(format!("NixOS wrapper assigns environment variable more than once: {name}"));
             }
-            if value.contains(['\n', '\r', '\0']) {
+            if value
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r' | '\0'))
+            {
                 return Err("NixOS wrapper environment assignment contains a control delimiter".into());
             }
 
@@ -3467,6 +3470,17 @@ mod tests {
             Path::new(target),
             &forwarded_cmdline,
         ).is_err(), "pre-exec shell statements must be rejected");
+
+        let forbidden_export = format!(
+            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport TOPLEVEL='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install'\nexport PRE_SWITCH_CHECK='/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check'\nexport LD_PRELOAD='/tmp/evil.so'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, forbidden_export).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &forwarded_cmdline,
+        ).is_err(), "forbidden environment exports must be rejected");
 
         let env_expansion = format!(
             "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport TOPLEVEL='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport DISTRO_ID='$(touch /tmp/nixward-wrapper-payload)'\nexport INSTALL_BOOTLOADER='/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install'\nexport PRE_SWITCH_CHECK='/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check'\nexec -a \"$0\" {target} \"$@\"\n"
