@@ -1428,17 +1428,38 @@ impl NixOSExecutor {
             .ok_or_else(|| "activation worker vanished before process identity was captured".to_string())?;
         let pidfd = Self::open_pidfd(pid)?;
         // A pidfd proves task identity, not the executable/argv it actually entered.
-        // Cross-check the live procfs view before persisting the worker receipt.
-        let observed_executable = std::fs::read_link(format!("/proc/{pid}/exe"))
-            .map_err(|error| format!("failed to observe spawned worker executable: {error}"))?;
-        let observed_cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
-            .map_err(|error| format!("failed to observe spawned worker cmdline: {error}"))?;
-        let (argv_digest, process_image) = Self::validate_observed_invocation(
-            executable,
-            args,
-            &observed_executable,
-            &observed_cmdline,
-        )?;
+        // The NixOS wrapper may exec its native target between separate procfs reads;
+        // take bounded observations while holding the same pidfd and start-time identity.
+        let mut observed_invocation = None;
+        let mut last_invocation_error = None;
+        for attempt in 0..4 {
+            let observation = (|| -> Result<(String, String), String> {
+                let observed_executable = std::fs::read_link(format!("/proc/{pid}/exe"))
+                    .map_err(|error| format!("failed to observe spawned worker executable: {error}"))?;
+                let observed_cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .map_err(|error| format!("failed to observe spawned worker cmdline: {error}"))?;
+                Self::validate_observed_invocation(
+                    executable,
+                    args,
+                    &observed_executable,
+                    &observed_cmdline,
+                )
+            })();
+            match observation {
+                Ok(value) => { observed_invocation = Some(value); break; }
+                Err(error) => {
+                    last_invocation_error = Some(error);
+                    if attempt == 3 || Self::pidfd_exited(&pidfd)? { break; }
+                    std::thread::yield_now();
+                }
+            }
+        }
+        let (argv_digest, process_image) = observed_invocation.ok_or_else(|| {
+            format!(
+                "could not prove spawned worker executable/argv within bounded procfs observations: {}",
+                last_invocation_error.unwrap_or_else(|| "no stable invocation observation".into())
+            )
+        })?;
         let start_after = Self::proc_start_time_ticks(pid)?
             .ok_or_else(|| "activation worker vanished while process identity was captured".to_string())?;
         let boot_after = Self::current_boot_id()?;
