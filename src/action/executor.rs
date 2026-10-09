@@ -1366,7 +1366,7 @@ impl NixOSExecutor {
             let transaction_id = transaction.transaction_id().to_string();
             let mut child = Command::new(executable);
             child.env_clear();
-            for (name, value) in Self::activation_worker_environment() {
+            for &(name, value) in Self::activation_worker_environment() {
                 child.env(name, value);
             }
             child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -3147,6 +3147,15 @@ impl NixOSExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_digest_is_order_independent_but_value_sensitive() {
+        let a = [("HOME", "/root"), ("PATH", "/run/current-system/sw/bin")];
+        let b = [("PATH", "/run/current-system/sw/bin"), ("HOME", "/root")];
+        let changed = [("HOME", "/tmp"), ("PATH", "/run/current-system/sw/bin")];
+        assert_eq!(NixOSExecutor::environment_digest(&a), NixOSExecutor::environment_digest(&b));
+        assert_ne!(NixOSExecutor::environment_digest(&a), NixOSExecutor::environment_digest(&changed));
+    }
 
     #[test]
     fn activation_worker_environment_is_allow_listed_and_digest_bound() {
