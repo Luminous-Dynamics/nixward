@@ -100,7 +100,7 @@ else:
     if bootstrap:
         bootstrap_body = bootstrap.group(0)
         persist_step = re.search(
-            r"(?ms)^      - name: Persist generated lockfile.*?(?=^      - name:|^  [A-Za-z_][\\w-]*:|\\Z)",
+            r"(?ms)^      - name: Persist generated lockfile.*?(?=^      - name:|^  [A-Za-z_][\w-]*:|\Z)",
             bootstrap_body,
         )
         if not persist_step or "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in persist_step.group(0):
