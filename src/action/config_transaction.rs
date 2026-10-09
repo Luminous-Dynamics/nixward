@@ -1621,6 +1621,8 @@ impl NixCandidateBuilder {
             .env("HOME", "/root")
             .env("LANG", "C")
             .env("LC_ALL", "C")
+            .env("NIX_USER_CONF_FILES", "/dev/null")
+            .env("XDG_CONFIG_HOME", "/var/empty")
             .args([
                 "build",
                 "--no-link",
