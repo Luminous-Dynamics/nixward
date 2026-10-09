@@ -1346,10 +1346,13 @@ impl NixOSExecutor {
         if targets.len() != 1 { return Err("activation wrapper must exec exactly one immutable Nix store target".into()); }
         let (target_index, target) = targets[0];
         let prefix = &tokens[..target_index];
-        if prefix != ["exec"] && prefix != ["exec", "-a", "$0"] {
+        let prefix_is_supported = (prefix.len() == 1 && prefix[0] == "exec")
+            || (prefix.len() == 3 && prefix[0] == "exec" && prefix[1] == "-a" && prefix[2] == "$0");
+        if !prefix_is_supported {
             return Err("activation wrapper uses an unsupported exec prefix".into());
         }
-        if tokens[target_index + 1..] != ["$@"] {
+        let suffix = &tokens[target_index + 1..];
+        if suffix.len() != 1 || suffix[0] != "$@" {
             return Err("activation wrapper must forward the original arguments exactly as \"$@\"".into());
         }
         if !Self::canonical_store_executable_lexical(target) {
