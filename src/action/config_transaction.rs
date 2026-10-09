@@ -3437,6 +3437,23 @@ mod tests {
     }
 
     #[test]
+    fn recovery_mutation_post_state_trusts_proven_predecessor_over_exit_status() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        let prior = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-prior";
+        tx.record_recovery_post_state(
+            prior,
+            prior,
+            Some(23),
+            Some(prior.into()),
+            Some(prior.into()),
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::Recovered);
+        assert_eq!(tx.process_exit_status, Some(23));
+    }
+
+    #[test]
     fn mixed_recovery_observation_requires_recovery() {
         let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         tx.phase = ConfigTransactionPhase::ActivationStarted;
