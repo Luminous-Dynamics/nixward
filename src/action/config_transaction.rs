@@ -1818,7 +1818,10 @@ pub struct ActivationWorkerIdentity {
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
+    /// Declared launcher from the authorized command.
     pub executable: String,
+    /// Actual kernel process image observed through /proc/<pid>/exe.
+    pub process_image: String,
     pub argv_digest: String,
     pub environment_digest: String,
 }
@@ -1851,6 +1854,36 @@ impl ActivationWorkerIdentity {
         let executable = std::path::Path::new(&self.executable);
         if !executable.is_absolute() || !self.executable.starts_with(STORE_PREFIX) {
             return Err("activation worker executable is not an absolute Nix store path".into());
+        }
+        let process_image = std::path::Path::new(&self.process_image);
+        if !process_image.is_absolute() || !self.process_image.starts_with(STORE_PREFIX) {
+            return Err("activation worker observed process image is not an absolute Nix store path".into());
+        }
+        let image_relative = self
+            .process_image
+            .strip_prefix(STORE_PREFIX)
+            .ok_or_else(|| "activation worker process image escaped the Nix store".to_string())?;
+        let mut image_components = image_relative.split('/');
+        let image_store_component = image_components
+            .next()
+            .ok_or_else(|| "activation worker process image has no store component".to_string())?;
+        let image_store_path = format!("{STORE_PREFIX}{image_store_component}");
+        if !super::execution_intent::is_valid_nix_store_path(&image_store_path) {
+            return Err("activation worker process image has an invalid Nix store identity".into());
+        }
+        let image_suffix = image_components.collect::<Vec<_>>();
+        if image_suffix.is_empty()
+            || image_suffix.iter().any(|component| {
+                component.is_empty()
+                    || *component == "."
+                    || *component == ".."
+                    || component.chars().any(char::is_control)
+            })
+        {
+            return Err("activation worker process image contains unsafe path components".into());
+        }
+        if format!("{STORE_PREFIX}{image_store_component}/{}", image_suffix.join("/")) != self.process_image {
+            return Err("activation worker process image is not in canonical lexical form".into());
         }
 
         // Validate the complete lexical path. Checking only the first component
@@ -1914,8 +1947,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v4";
-    pub const VERSION: u16 = 4;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v5";
+    pub const VERSION: u16 = 5;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2744,6 +2777,7 @@ mod tests {
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
             executable: executable.into(),
+            process_image: executable.into(),
             argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
         }
