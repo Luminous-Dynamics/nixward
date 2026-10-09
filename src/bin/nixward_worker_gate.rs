@@ -196,7 +196,52 @@ mod tests {
     }
 
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn unix_stream_release_protocol_requires_real_peer_eof() {
+        let token = [0x83u8; 32];
+        let digest = release_digest(&token);
+
+        // Use a real kernel-backed stream rather than Cursor so EOF framing is
+        // exercised through the same Read implementation shape as the gate's
+        // stdin pipe. Dropping the writer models a parent closing its pipe.
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.write_all(&token).unwrap();
+        drop(writer);
+        let mut calls = 0usize;
+        let result = release_then(&mut reader, &digest, || {
+            calls += 1;
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls, 1, "valid token plus peer EOF invokes exactly once");
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        writer.write_all(&token[..31]).unwrap();
+        drop(writer);
+        let mut calls = 0usize;
+        let result = release_then(&mut reader, &digest, || {
+            calls += 1;
+            Ok(())
+        });
+        assert!(result.unwrap_err().contains("incomplete"));
+        assert_eq!(calls, 0, "short pipe frame must not release");
+
+        let (mut writer, mut reader) = UnixStream::pair().unwrap();
+        let mut trailing = token.to_vec();
+        trailing.push(0x01);
+        writer.write_all(&trailing).unwrap();
+        drop(writer);
+        let mut calls = 0usize;
+        let result = release_then(&mut reader, &digest, || {
+            calls += 1;
+            Ok(())
+        });
+        assert!(result.unwrap_err().contains("trailing bytes"));
+        assert_eq!(calls, 0, "trailing pipe bytes must not release");
+    }
 
     #[test]
     fn release_requires_exact_one_time_token_and_eof() {
