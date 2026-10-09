@@ -139,6 +139,9 @@ fn validate_parent_package_images(current: &Path, parent: &Path) -> Result<(), S
     if !TRUSTED_LAUNCHERS.contains(&parent_name) {
         return Err("worker gate parent is not an approved Nixward launcher executable".into());
     }
+    if parent.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("bin")) {
+        return Err("worker gate parent is not in the approved Nixward bin directory".into());
+    }
     Ok(())
 }
 
@@ -309,6 +312,7 @@ mod tests {
         let daemon = Path::new("/nix/store/cccccccccccccccccccccccccccccccc-nixward-daemon/bin/nixward-daemon");
         let gate = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
         let unapproved_sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-owner-key");
+        let launcher_outside_bin = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/libexec/nixward");
         let different_package = Path::new("/nix/store/dddddddddddddddddddddddddddddddd-nixward/bin/nixward");
 
         assert!(validate_parent_package_images(current_cli, cli).is_ok());
@@ -316,6 +320,7 @@ mod tests {
         assert!(validate_parent_package_images(current_daemon, daemon).is_ok());
         assert!(validate_parent_package_images(current_cli, gate).is_err());
         assert!(validate_parent_package_images(current_cli, unapproved_sibling).is_err());
+        assert!(validate_parent_package_images(current_cli, launcher_outside_bin).is_err());
         assert!(validate_parent_package_images(current_cli, different_package).is_err());
         assert!(validate_parent_package_images(current_cli, Path::new("/usr/bin/bash")).is_err());
     }
