@@ -71,6 +71,8 @@ jobs:
 
       - name: Persist generated lockfile
         if: steps.lockfile.outputs.needed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
