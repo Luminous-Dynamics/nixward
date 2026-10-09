@@ -1,12 +1,12 @@
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
-//! NixOS Configuration Writer — Atomic Modifications with Backup
+//! NixOS Configuration Writer — Atomic Authorized Source Mutation
 //!
 //! Provides safe, atomic configuration file modifications:
 //! - Reads existing config via the parser layer
-//! - Creates a git-tracked backup before any write
-//! - Writes atomically via temp file + rename
+//! - Commits only exact authorized source bytes
+//! - Writes atomically via descriptor-relative temporary file + rename
 //! - Validates syntax with `nix-instantiate --parse` before committing
 //!
 //! This module does NOT execute system commands. Real writes require a
@@ -15,8 +15,41 @@
 //! capability-authorized executor under the same covenant.
 
 use super::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
+use super::config_transaction::ConfigTransactionPhase;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs::OpenOptions;
+#[cfg(not(unix))]
+use std::fs::File;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct OwnedConfigFd(i32);
+
+#[cfg(unix)]
+impl Drop for OwnedConfigFd {
+    fn drop(&mut self) {
+        let _ = nix::unistd::close(self.0);
+    }
+}
+
+/// Semantic state of the durable source replacement attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteCommitState {
+    /// No durable replacement was attempted (noop or dry-run).
+    NotAttempted,
+    /// The replacement was atomically installed and post-state was proven.
+    Committed,
+    /// A replacement was attempted and the final durable/observed state cannot be proven.
+    Indeterminate,
+}
 
 /// Result of a config write operation.
 #[derive(Debug, Clone)]
@@ -29,6 +62,8 @@ pub struct WriteResult {
     pub changed: bool,
     /// Diff between old and new content (unified format).
     pub diff: String,
+    /// Durable source commit state. Never infer this from `Result::Err` alone.
+    pub commit_state: WriteCommitState,
 }
 
 /// A pending config modification (not yet applied).
@@ -84,8 +119,8 @@ impl ConfigPatch {
 pub struct ConfigWriter {
     /// Root directory for NixOS config (default: /etc/nixos).
     config_root: PathBuf,
-    /// Whether to create git backups before writes.
-    git_backup: bool,
+    /// Durable Nixward coordination state. Must remain outside the frozen source tree.
+    state_root: PathBuf,
     /// Whether to validate syntax before writing.
     validate: bool,
     /// Dry-run mode: produce patches without writing.
@@ -100,7 +135,7 @@ impl ConfigWriter {
     pub fn new() -> Self {
         Self {
             config_root: PathBuf::from("/etc/nixos"),
-            git_backup: true,
+            state_root: PathBuf::from("/var/lib/nixward"),
             validate: true,
             dry_run: false,
             machine_binding_override: None,
@@ -113,9 +148,19 @@ impl ConfigWriter {
         self
     }
 
-    /// Enable or disable git backup.
-    pub fn with_git_backup(mut self, enabled: bool) -> Self {
-        self.git_backup = enabled;
+    /// Legacy compatibility no-op.
+    ///
+    /// Git commits are deliberately outside the authoritative source mutation
+    /// primitive. A git backup is an independent history mechanism and cannot
+    /// participate in the NixOS activation transaction.
+    pub fn with_git_backup(self, _enabled: bool) -> Self {
+        self
+    }
+
+    /// Set the durable Nixward coordination state root.
+    /// This path is intentionally outside the Nix source tree.
+    pub fn with_state_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.state_root = root.into();
         self
     }
 
@@ -337,29 +382,26 @@ impl ConfigWriter {
             ));
         }
 
-        let result = self.apply_patch_unchecked(patch)?;
-        if !self.dry_run && result.changed {
-            let written = std::fs::read_to_string(&patch.target)?;
-            if written != patch.modified {
-                return Err(std::io::Error::other(
-                    "configuration post-state does not match authorized patch",
-                ));
-            }
-        }
-        Ok(result)
+        self.apply_patch_unchecked(patch)
     }
 
-    /// Restore the exact pre-state covered by the same ChangePlan.
+    /// Restore the exact pre-state only while the transaction is still before activation.
     ///
-    /// Restoration is allowed only while the file still equals the plan's
-    /// authorized post-state, preventing rollback from clobbering a concurrent
-    /// operator change.
-    pub fn restore_patch_original_authorized(
+    /// Once NixOS activation begins, changing the durable source file cannot
+    /// roll back the running system and is therefore rejected at this API boundary.
+    pub fn restore_patch_original_pre_activation_authorized(
         &self,
         patch: &ConfigPatch,
         plan: &ChangePlan,
         authorization: &ChangeAuthorization,
+        phase: ConfigTransactionPhase,
     ) -> Result<(), std::io::Error> {
+        if !phase.permits_source_rollback() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "source rollback is forbidden once NixOS activation has started",
+            ));
+        }
         authorization
             .validate_plan_binding(plan)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e))?;
@@ -381,24 +423,16 @@ impl ConfigWriter {
             return Ok(());
         }
 
-        let current = std::fs::read_to_string(&patch.target)?;
-        if current != patch.modified {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "configuration changed after authorized write; refusing rollback overwrite",
-            ));
+        match self.atomic_replace_config(&patch.target, &patch.modified, &patch.original)? {
+            WriteCommitState::Committed => Ok(()),
+            WriteCommitState::NotAttempted => Err(std::io::Error::other(
+                "rollback source replacement was not attempted",
+            )),
+            WriteCommitState::Indeterminate => Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "rollback source replacement became indeterminate after mutation attempt",
+            )),
         }
-
-        let temp_path = patch.target.with_extension("nix.rollback.tmp");
-        std::fs::write(&temp_path, &patch.original)?;
-        std::fs::rename(&temp_path, &patch.target)?;
-        let restored = std::fs::read_to_string(&patch.target)?;
-        if restored != patch.original {
-            return Err(std::io::Error::other(
-                "configuration rollback post-state verification failed",
-            ));
-        }
-        Ok(())
     }
 
     /// Validate and render the result of a patch without mutating disk.
@@ -409,6 +443,7 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: false,
                 diff: String::new(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
         Self::validate_content_structure(&patch.original, &patch.modified)?;
@@ -417,6 +452,7 @@ impl ConfigWriter {
             backup_path: None,
             changed: true,
             diff: patch.diff(),
+            commit_state: WriteCommitState::NotAttempted,
         })
     }
 
@@ -430,6 +466,7 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: false,
                 diff: String::new(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
 
@@ -442,37 +479,363 @@ impl ConfigWriter {
                 backup_path: None,
                 changed: true,
                 diff: patch.diff(),
+                commit_state: WriteCommitState::NotAttempted,
             });
         }
 
-        // Validate syntax
         if self.validate {
             Self::validate_nix_syntax(&patch.modified)?;
         }
 
-        // Create git backup
-        let backup_path = if self.git_backup {
-            self.git_commit_backup(&patch.target, &patch.description)?
-        } else {
-            None
-        };
-
-        // Atomic write: write to temp file, then rename
-        let temp_path = patch.target.with_extension("nix.tmp");
-        std::fs::write(&temp_path, &patch.modified)?;
-        std::fs::rename(&temp_path, &patch.target)?;
+        // The file mutation primitive has no git, shell, or NixOS activation
+        // side effects. Those belong to separate transactional domains.
+        let commit_state =
+            self.atomic_replace_config(&patch.target, &patch.original, &patch.modified)?;
 
         Ok(WriteResult {
             path: patch.target.clone(),
-            backup_path,
+            backup_path: None,
             changed: true,
             diff: patch.diff(),
+            commit_state,
         })
+    }
+
+    /// Replace one configuration file using a descriptor-anchored source-root
+    /// directory, no-follow target access, an exclusive candidate created through
+    /// openat, durable candidate data, renameat, parent-directory synchronization,
+    /// and read-back verification.
+    ///
+    /// The compare-and-set remains advisory against writers that bypass
+    /// Nixward's own coordination lock; that external-writer gap stays explicit.
+    fn atomic_replace_config(
+        &self,
+        target: &Path,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<WriteCommitState, std::io::Error> {
+        let parent = target.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration target has no parent",
+            )
+        })?;
+
+        // ConfigWriter only has authority over direct children of its configured
+        // source root. Reject a caller-supplied patch that points elsewhere,
+        // even when its ChangePlan digest and approval are otherwise valid.
+        let configured_root = self.config_root.canonicalize()?;
+        let target_parent = parent.canonicalize()?;
+        if target_parent != configured_root {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "configuration target is outside the configured authority root",
+            ));
+        }
+
+        let name = target.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "configuration target has no filename",
+            )
+        })?;
+
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_name = format!(
+            ".nixward-config-{}-{}-{}.tmp",
+            std::process::id(),
+            counter,
+            name.to_string_lossy()
+        );
+
+        #[cfg(unix)]
+        {
+            use nix::fcntl::{flock, openat, renameat, FlockArg, OFlag};
+            use nix::sys::stat::Mode;
+            use nix::unistd::{fsync, read, unlinkat, write, UnlinkatFlags};
+
+            let mut parent_options = OpenOptions::new();
+            parent_options.read(true);
+            parent_options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let parent_file = parent_options.open(&parent)?;
+            let configured_stat = std::fs::metadata(&configured_root)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let opened_parent_stat = parent_file.metadata()?;
+                if configured_stat.dev() != opened_parent_stat.dev()
+                    || configured_stat.ino() != opened_parent_stat.ino()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "configuration authority root changed during descriptor acquisition",
+                    ));
+                }
+            }
+            let parent_fd = parent_file.as_raw_fd();
+
+            // Coordination state is intentionally outside config_root so frozen
+            // source snapshots contain only intended Nix configuration inputs.
+            let state_root = self.state_root.canonicalize().map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to canonicalize Nixward state root: {error}"
+                ))
+            })?;
+            if state_root == configured_root {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Nixward state root must not equal the config source root",
+                ));
+            }
+            if !state_root.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Nixward state root is not a directory",
+                ));
+            }
+            let mut state_options = OpenOptions::new();
+            state_options.read(true);
+            state_options.custom_flags(
+                nix::libc::O_DIRECTORY
+                    | nix::libc::O_NOFOLLOW
+                    | nix::libc::O_CLOEXEC,
+            );
+            let state_dir = state_options.open(&state_root)?;
+            let state_fd = state_dir.as_raw_fd();
+
+            // The lock is descriptor-bound to the dedicated state directory,
+            // never to the mutable configuration source namespace.
+            let lock_fd = openat(
+                state_fd,
+                "config-write.lock",
+                OFlag::O_RDWR
+                    | OFlag::O_CREAT
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to create descriptor-bound config lock: {error}"
+                ))
+            })?;
+
+            let lock_fd = OwnedConfigFd(lock_fd);
+            flock(lock_fd.0, FlockArg::LockExclusive).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to acquire config mutation lock: {error}"
+                ))
+            })?;
+
+            let target_fd = openat(
+                parent_fd,
+                name,
+                OFlag::O_RDONLY
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to open configuration target through authority descriptor: {error}"
+                ))
+            })?;
+            let target_fd = OwnedConfigFd(target_fd);
+            let target_stat = nix::sys::stat::fstat(target_fd.0).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to stat configuration target descriptor: {error}"
+                ))
+            })?;
+            if target_stat.st_mode & nix::libc::S_IFMT != nix::libc::S_IFREG {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "configuration target is not a regular file",
+                ));
+            }
+
+            let mut current_bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                match read(target_fd.0, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => current_bytes.extend_from_slice(&buffer[..count]),
+                    Err(error) => {
+                        return Err(std::io::Error::other(format!(
+                            "failed to read configuration target descriptor: {error}"
+                        )))
+                    }
+                }
+            }
+            let current = std::str::from_utf8(&current_bytes).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("configuration target is not valid UTF-8: {error}"),
+                )
+            })?;
+            if current != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "configuration changed during transaction; refusing stale replacement",
+                ));
+            }
+
+            let temp_fd = openat(
+                parent_fd,
+                &temp_name,
+                OFlag::O_RDWR
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW,
+                Mode::from_bits_truncate(0o600),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to create descriptor-bound config candidate: {error}"
+                ))
+            })?;
+            let temp_fd = OwnedConfigFd(temp_fd);
+
+            let mut offset = 0;
+            let bytes = replacement.as_bytes();
+            while offset < bytes.len() {
+                let written = write(temp_fd.0, &bytes[offset..]).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "failed to write descriptor-bound config candidate: {error}"
+                    ))
+                })?;
+                if written == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "descriptor-bound config candidate write made no progress",
+                    ));
+                }
+                offset += written;
+            }
+
+            fsync(temp_fd.0).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to sync descriptor-bound config candidate: {error}"
+                ))
+            })?;
+            nix::sys::stat::fchmod(
+                temp_fd.0,
+                Mode::from_bits_truncate(target_stat.st_mode & 0o7777),
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to preserve configuration permissions: {error}"
+                ))
+            })?;
+            fsync(temp_fd.0).map_err(|error| {
+                std::io::Error::other(format!(
+                    "failed to resync descriptor-bound config candidate: {error}"
+                ))
+            })?;
+
+            renameat(
+                Some(parent_fd),
+                &temp_name,
+                Some(parent_fd),
+                name,
+            )
+            .map_err(|error| {
+                let _ = unlinkat(
+                    Some(parent_fd),
+                    &temp_name,
+                    UnlinkatFlags::NoRemoveDir,
+                );
+                std::io::Error::other(format!(
+                    "descriptor-bound config rename failed: {error}"
+                ))
+            })?;
+
+            if fsync(parent_fd).is_err() {
+                return Ok(WriteCommitState::Indeterminate);
+            }
+
+            let verify_fd = match openat(
+                parent_fd,
+                name,
+                OFlag::O_RDONLY
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            ) {
+                Ok(fd) => fd,
+                Err(_error) => return Ok(WriteCommitState::Indeterminate),
+            };
+            let verify_fd = OwnedConfigFd(verify_fd);
+            let mut observed_bytes = Vec::new();
+            loop {
+                match read(verify_fd.0, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => observed_bytes.extend_from_slice(&buffer[..count]),
+                    Err(_error) => {
+                        return Ok(WriteCommitState::Indeterminate);
+                    }
+                }
+            }
+            if observed_bytes != bytes {
+                return Ok(WriteCommitState::Indeterminate);
+            }
+            Ok(WriteCommitState::Committed)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            let temp_path = parent.join(&temp_name);
+            let mut temp = options.open(&temp_path)?;
+            temp.write_all(replacement.as_bytes())?;
+            temp.flush()?;
+            temp.sync_all()?;
+            std::fs::rename(&temp_path, target)?;
+            let parent_file = File::open(parent)?;
+            if parent_file.sync_all().is_err() {
+                return Ok(WriteCommitState::Indeterminate);
+            }
+            Ok(WriteCommitState::Committed)
+        }
+    }
+
+    fn trusted_system_executable(name: &str) -> Result<String, std::io::Error> {
+        if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "trusted system executable name is invalid",
+            ));
+        }
+        let path = Path::new("/run/current-system/sw/bin").join(name);
+        let canonical = std::fs::canonicalize(&path)?;
+        let value = canonical.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "trusted system executable path is not valid UTF-8",
+            )
+        })?;
+        if !value.starts_with("/nix/store/")
+            || canonical.file_name().and_then(|v| v.to_str()) != Some(name)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "system executable did not resolve into an immutable Nix store object",
+            ));
+        }
+        Ok(value.to_string())
     }
 
     /// Validate Nix syntax using nix-instantiate --parse.
     fn validate_nix_syntax(content: &str) -> Result<(), std::io::Error> {
-        let mut child = Command::new("nix-instantiate")
+        let executable = Self::trusted_system_executable("nix-instantiate")?;
+        let mut child = Command::new(executable)
             .args(["--parse", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -494,66 +857,6 @@ impl ConfigWriter {
                     String::from_utf8_lossy(&output.stderr)
                 ),
             ));
-        }
-
-        Ok(())
-    }
-
-    /// Create a git commit backup of the config directory.
-    fn git_commit_backup(
-        &self,
-        path: &Path,
-        message: &str,
-    ) -> Result<Option<PathBuf>, std::io::Error> {
-        // Check if config root is a git repo
-        let git_dir = self.config_root.join(".git");
-        if !git_dir.exists() {
-            // Initialize git repo
-            let status = Command::new("git")
-                .args(["init"])
-                .current_dir(&self.config_root)
-                .status()?;
-            if !status.success() {
-                return Ok(None);
-            }
-        }
-
-        // Stage the file
-        let rel_path = path.strip_prefix(&self.config_root).unwrap_or(path);
-
-        let _ = Command::new("git")
-            .args(["add", &rel_path.display().to_string()])
-            .current_dir(&self.config_root)
-            .status();
-
-        // Commit
-        let commit_msg = format!("nixward backup: {message}");
-        let _ = Command::new("git")
-            .args(["commit", "-m", &commit_msg, "--allow-empty"])
-            .current_dir(&self.config_root)
-            .status();
-
-        Ok(Some(self.config_root.join(".git")))
-    }
-
-    /// Restore from the last git backup.
-    ///
-    /// `git_commit_backup` commits the file's BEFORE-state immediately
-    /// before each write, so the most recent backup commit (`HEAD`) already
-    /// holds the content to restore to — not `HEAD~1`, which skips one
-    /// change too far back and, on the very first restore (only one backup
-    /// commit exists yet, no parent), fails outright with "unknown revision
-    /// HEAD~1". Found via a real integration test against the non-dry-run
-    /// write path — see SYMTHAEA_NIXOS_MANAGEMENT_IMPROVEMENT_PLAN_2026-07-26.md
-    /// Phase 2.
-    fn restore_last_backup(&self) -> Result<(), std::io::Error> {
-        let status = Command::new("git")
-            .args(["checkout", "HEAD", "--", "."])
-            .current_dir(&self.config_root)
-            .status()?;
-
-        if !status.success() {
-            return Err(std::io::Error::other("git restore failed"));
         }
 
         Ok(())
@@ -649,12 +952,19 @@ mod tests {
     }
 
     #[test]
+    fn write_commit_state_is_fail_closed() {
+        assert_ne!(WriteCommitState::Indeterminate, WriteCommitState::Committed);
+        assert_eq!(WriteCommitState::NotAttempted, WriteCommitState::NotAttempted);
+    }
+
+    #[test]
     fn test_dry_run_apply() {
         let (dir, writer) = setup_temp_config(SAMPLE_CONFIG);
         let patch = writer.add_system_package("htop").unwrap();
         let result = writer.apply_patch_unchecked(&patch).unwrap();
         assert!(result.changed);
         assert!(!result.diff.is_empty());
+        assert_eq!(result.commit_state, WriteCommitState::NotAttempted);
 
         // Original file should be unchanged in dry-run
         let content = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
@@ -734,6 +1044,66 @@ mod tests {
     }
 
     #[test]
+    fn test_authority_root_rejects_outside_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("configuration.nix"), SAMPLE_CONFIG).unwrap();
+        std::fs::write(outside.path().join("other.nix"), SAMPLE_CONFIG).unwrap();
+
+        let writer = ConfigWriter::new()
+            .with_config_root(dir.path())
+            .with_dry_run(false)
+            .with_validate(false)
+            .with_machine_binding_override("test-machine".into());
+        let patch = ConfigPatch {
+            target: outside.path().join("other.nix"),
+            original: SAMPLE_CONFIG.to_string(),
+            modified: SAMPLE_CONFIG.replace("firefox", "htop"),
+            description: "outside root".into(),
+        };
+        let machine = MachineBinding::new("test-machine").unwrap();
+        let plan = ChangePlan::config_only(machine, &patch, 60_000).unwrap();
+        let auth =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [3; 32]).unwrap();
+
+        assert!(writer
+            .apply_patch_authorized(&patch, &plan, &auth)
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("other.nix")).unwrap(),
+            SAMPLE_CONFIG
+        );
+    }
+
+    #[test]
+    fn test_source_rollback_is_phase_bound() {
+        let (_dir, writer) = setup_temp_config(SAMPLE_CONFIG);
+        let machine = MachineBinding::new("test-machine").unwrap();
+        let writer = writer.with_machine_binding(machine.clone());
+        let patch = writer.add_system_package("htop").unwrap();
+        let plan = ChangePlan::config_only(machine, &patch, 60_000).unwrap();
+        let auth =
+            ChangeAuthorization::from_verified_approval(&plan, "test-owner", [3; 32]).unwrap();
+
+        assert!(writer
+            .restore_patch_original_pre_activation_authorized(
+                &patch,
+                &plan,
+                &auth,
+                ConfigTransactionPhase::SourceCommitted,
+            )
+            .is_ok());
+        assert!(writer
+            .restore_patch_original_pre_activation_authorized(
+                &patch,
+                &plan,
+                &auth,
+                ConfigTransactionPhase::ActivationStarted,
+            )
+            .is_err());
+    }
+
+    #[test]
     fn test_authorized_patch_rejects_plan_or_machine_drift() {
         let (dir, writer) = setup_temp_config(SAMPLE_CONFIG);
         let machine = MachineBinding::new("test-machine").unwrap();
@@ -793,6 +1163,7 @@ mod tests {
         let machine = MachineBinding::new("transaction-test-machine").unwrap();
         let mut writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(false)
             .with_dry_run(false)
             .with_machine_binding(machine.clone());
@@ -812,7 +1183,7 @@ mod tests {
         );
 
         writer
-            .restore_patch_original_authorized(&patch, &plan, &auth)
+            .restore_patch_original_pre_activation_authorized(&patch, &plan, &auth, ConfigTransactionPhase::SourceCommitted)
             .unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("configuration.nix")).unwrap(),
@@ -827,6 +1198,7 @@ mod tests {
         let machine = MachineBinding::new("transaction-test-machine").unwrap();
         let mut writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(false)
             .with_dry_run(false)
             .with_machine_binding(machine.clone());
@@ -845,7 +1217,7 @@ mod tests {
         )
         .unwrap();
         let error = writer
-            .restore_patch_original_authorized(&patch, &plan, &auth)
+            .restore_patch_original_pre_activation_authorized(&patch, &plan, &auth, ConfigTransactionPhase::SourceCommitted)
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
@@ -872,15 +1244,12 @@ mod tests {
     // rather than fail the whole matrix on an environment gap unrelated to
     // the code under test.
     fn nix_instantiate_available() -> bool {
-        Command::new("nix-instantiate")
-            .arg("--version")
-            .output()
-            .is_ok()
+        Path::new("/run/current-system/sw/bin/nix-instantiate").exists()
     }
 
     fn setup_temp_config_live(
         content: &str,
-        git_backup: bool,
+        _git_backup: bool,
     ) -> Option<(tempfile::TempDir, ConfigWriter)> {
         if !nix_instantiate_available() {
             eprintln!(
@@ -894,6 +1263,7 @@ mod tests {
         fs::write(dir.path().join("configuration.nix"), content).unwrap();
         let writer = ConfigWriter::new()
             .with_config_root(dir.path())
+            .with_state_root(dir.path().parent().unwrap())
             .with_git_backup(git_backup)
             .with_dry_run(false);
         Some((dir, writer))
@@ -907,7 +1277,12 @@ mod tests {
         let patch = writer.add_system_package("htop").unwrap();
         let result = writer.apply_patch_unchecked(&patch).unwrap();
         assert!(result.changed);
+        assert_eq!(result.commit_state, WriteCommitState::Committed);
 
+        assert!(
+            !dir.path().join("config-write.lock").exists(),
+            "transaction coordination state must not be created in the frozen source root"
+        );
         let on_disk = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
         assert!(
             on_disk.contains("pkgs.htop"),
@@ -945,87 +1320,6 @@ mod tests {
         // the write.
         let on_disk = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
         assert_eq!(on_disk, SAMPLE_CONFIG);
-    }
-
-    #[test]
-    fn test_apply_patch_creates_real_git_backup() {
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-        let patch = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch).unwrap();
-
-        assert!(
-            dir.path().join(".git").exists(),
-            "git repo should be initialized"
-        );
-        let log = Command::new("git")
-            .args(["log", "--oneline"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let log_str = String::from_utf8_lossy(&log.stdout);
-        assert_eq!(
-            log_str.lines().count(),
-            1,
-            "exactly one backup commit should exist after one apply, got: {log_str}"
-        );
-        assert!(log_str.contains("nixward backup"));
-    }
-
-    #[test]
-    fn test_restore_last_backup_recovers_immediately_prior_content() {
-        // Regression test for a real off-by-one bug found while writing
-        // this integration suite: git_commit_backup() commits the
-        // BEFORE-state of the file right before each write, so the most
-        // recent backup commit (HEAD) already holds the content to restore
-        // to. restore_last_backup() used to check out HEAD~1 instead, which
-        // skips one change too far back, and on the very first restore
-        // (only one commit exists, no parent) failed outright with
-        // "unknown revision HEAD~1".
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-
-        let patch = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch).unwrap();
-        let after_first_apply = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert!(after_first_apply.contains("pkgs.htop"));
-
-        writer
-            .restore_last_backup()
-            .expect("restore must succeed even with only one backup commit");
-
-        let restored = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_eq!(
-            restored, SAMPLE_CONFIG,
-            "restoring the last backup must recover the content from immediately before the last apply"
-        );
-    }
-
-    #[test]
-    fn test_restore_last_backup_after_two_applies() {
-        let Some((dir, writer)) = setup_temp_config_live(SAMPLE_CONFIG, true) else {
-            return;
-        };
-
-        let patch1 = writer.add_system_package("htop").unwrap();
-        writer.apply_patch_unchecked(&patch1).unwrap();
-        let after_first = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-
-        let patch2 = writer
-            .set_option("services.openssh.enable", "false")
-            .unwrap();
-        writer.apply_patch_unchecked(&patch2).unwrap();
-        let after_second = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_ne!(after_first, after_second);
-
-        writer.restore_last_backup().unwrap();
-        let restored = fs::read_to_string(dir.path().join("configuration.nix")).unwrap();
-        assert_eq!(
-            restored, after_first,
-            "restoring after the second apply must recover the state from right after the first apply, not the original"
-        );
     }
 
     #[test]
