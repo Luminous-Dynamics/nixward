@@ -1013,6 +1013,38 @@ impl Default for NixOSExecutor {
 }
 
 impl NixOSExecutor {
+    /// Explicit environment for privileged transaction workers. Ambient Nix, loader,
+    /// shell, locale and PATH variables are intentionally not inherited.
+    fn activation_worker_environment() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("HOME", "/root"),
+            ("LANG", "C"),
+            ("LC_ALL", "C"),
+            ("NIX_USER_CONF_FILES", "/dev/null"),
+            ("PATH", "/run/current-system/sw/bin:/run/current-system/sw/sbin:/run/wrappers/bin"),
+            ("SYSTEMD_COLORS", "0"),
+            ("TERM", "dumb"),
+            ("XDG_CONFIG_HOME", "/var/empty"),
+        ]
+    }
+
+    fn environment_digest(pairs: &[(&str, &str)]) -> String {
+        let mut canonical = pairs.to_vec();
+        canonical.sort_unstable_by(|left, right| left.0.cmp(right.0).then(left.1.cmp(right.1)));
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"NIXWARD_WORKER_ENVIRONMENT_V1\0");
+        for (name, value) in canonical {
+            hasher.update(&(name.len() as u64).to_le_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(&(value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn activation_worker_environment_digest() -> String {
+        Self::environment_digest(Self::activation_worker_environment())
+    }
     pub fn new() -> Self {
         Self {
             current_generation: None,
@@ -1275,6 +1307,7 @@ impl NixOSExecutor {
             start_time_ticks: start_after,
             executable: executable.to_string(),
             argv_digest: Self::activation_argv_digest(executable, args),
+            environment_digest: Self::activation_worker_environment_digest(),
         };
         identity.validate_identity()?;
         Ok((identity, pidfd))
@@ -1332,6 +1365,10 @@ impl NixOSExecutor {
         {
             let transaction_id = transaction.transaction_id().to_string();
             let mut child = Command::new(executable);
+            child.env_clear();
+            for (name, value) in Self::activation_worker_environment() {
+                child.env(name, value);
+            }
             child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
             let mut child = child.spawn()
                 .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
@@ -3112,6 +3149,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn activation_worker_environment_is_allow_listed_and_digest_bound() {
+        let environment = NixOSExecutor::activation_worker_environment();
+        assert!(environment.iter().any(|(name, value)| *name == "PATH" && value.starts_with("/run/current-system/sw/bin")));
+        for forbidden in ["LD_PRELOAD", "LD_LIBRARY_PATH", "NIX_PATH", "NIX_CONFIG", "BASH_ENV", "ENV", "PYTHONPATH", "GIT_CONFIG_COUNT"] {
+            assert!(!environment.iter().any(|(name, _)| *name == forbidden), "forbidden inherited key remains in allow-list: {forbidden}");
+        }
+        assert_eq!(
+            NixOSExecutor::activation_worker_environment_digest(),
+            NixOSExecutor::environment_digest(NixOSExecutor::activation_worker_environment())
+        );
+    }
+
+    #[test]
     fn activation_argv_digest_binds_executable_and_argument_boundaries() {
         let args = vec!["switch".to_string(), "test".to_string()];
         let baseline = NixOSExecutor::activation_argv_digest(
@@ -3150,6 +3200,7 @@ mod tests {
             start_time_ticks,
             executable: executable.into(),
             argv_digest: NixOSExecutor::activation_argv_digest(executable, &["switch".into()]),
+            environment_digest: NixOSExecutor::activation_worker_environment_digest(),
         };
         assert!(NixOSExecutor::persisted_worker_may_be_live(&identity).unwrap());
         let mut reused = identity;
