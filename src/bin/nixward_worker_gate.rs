@@ -124,10 +124,20 @@ fn nix_store_object(path: &Path) -> Result<String, String> {
 }
 
 fn validate_parent_package_images(current: &Path, parent: &Path) -> Result<(), String> {
+    const TRUSTED_LAUNCHERS: [&str; 3] = ["nixward", "nixward-tui", "nixward-daemon"];
+
     let current_object = nix_store_object(current)?;
     let parent_object = nix_store_object(parent)?;
     if parent_object != current_object {
         return Err("worker gate parent is not from the same immutable Nixward package".into());
+    }
+
+    let parent_name = parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "worker gate parent executable name is not valid UTF-8".to_string())?;
+    if !TRUSTED_LAUNCHERS.contains(&parent_name) {
+        return Err("worker gate parent is not an approved Nixward launcher executable".into());
     }
     Ok(())
 }
@@ -290,12 +300,21 @@ mod tests {
     }
 
     #[test]
-    fn worker_gate_parent_package_identity_is_exact() {
+    fn worker_gate_requires_same_package_and_approved_launcher_name() {
         let current = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
-        let sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward");
-        let other = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward/bin/nixward");
-        assert!(validate_parent_package_images(current, sibling).is_ok());
-        assert!(validate_parent_package_images(current, other).is_err());
+        let cli = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward");
+        let tui = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-tui/bin/nixward-tui");
+        let daemon = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-daemon/bin/nixward-daemon");
+        let gate = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
+        let unapproved_sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-owner-key");
+        let different_package = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward/bin/nixward");
+
+        assert!(validate_parent_package_images(current, cli).is_ok());
+        assert!(validate_parent_package_images(current, tui).is_ok());
+        assert!(validate_parent_package_images(current, daemon).is_ok());
+        assert!(validate_parent_package_images(current, gate).is_err());
+        assert!(validate_parent_package_images(current, unapproved_sibling).is_err());
+        assert!(validate_parent_package_images(current, different_package).is_err());
         assert!(validate_parent_package_images(current, Path::new("/usr/bin/bash")).is_err());
     }
 
