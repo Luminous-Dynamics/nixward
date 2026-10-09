@@ -1912,8 +1912,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v3";
-    pub const VERSION: u16 = 3;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v4";
+    pub const VERSION: u16 = 4;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2745,6 +2745,15 @@ mod tests {
             argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
         }
+    }
+
+    #[test]
+    fn activation_worker_identity_rejects_missing_environment_binding() {
+        let mut identity = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/bin/nixos-rebuild",
+        );
+        identity.environment_digest.clear();
+        assert!(identity.validate_identity().is_err());
     }
 
     #[test]
