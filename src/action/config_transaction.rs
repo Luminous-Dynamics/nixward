@@ -2702,10 +2702,13 @@ impl ConfigTransaction {
                 ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
                 }
-                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
-                ActivationWorkerPurpose::Recovery if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::RecoveryProfileTransition
+                | ActivationWorkerPurpose::RecoveryActivation
+                    if !matches!(transaction.phase, ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::Recovered) =>
+                {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
             }
