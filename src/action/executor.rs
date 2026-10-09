@@ -3426,6 +3426,24 @@ mod tests {
         assert_eq!(image, target);
         assert_eq!(digest, NixOSExecutor::activation_argv_digest(&wrapper_text, &args));
 
+        let wrong_root = format!(
+            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-other-system'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, &wrong_root).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).is_err(), "OUT/TOPLEVEL drift from the exact executable closure must be rejected");
+
+        let mutable_helper = format!(
+            "#!{interpreter}\nexport OUT='{root}'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='/tmp/pre-switch-check'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, &mutable_helper).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).is_err(), "mutable helper paths must be rejected");
+
+        std::fs::write(&wrapper, &valid_wrapper).unwrap();
+
         let mut interpreter_cmdline = Vec::new();
         interpreter_cmdline.extend_from_slice(interpreter.as_bytes());
         interpreter_cmdline.push(0);
