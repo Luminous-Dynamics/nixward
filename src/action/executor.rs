@@ -1281,35 +1281,132 @@ impl NixOSExecutor {
         hasher.finalize().to_hex().to_string()
     }
 
+    fn canonical_store_executable_lexical(path: &str) -> bool {
+        const PREFIX: &str = "/nix/store/";
+        let Some(relative) = path.strip_prefix(PREFIX) else { return false; };
+        let mut components = relative.split('/');
+        let Some(store_component) = components.next() else { return false; };
+        if !super::execution_intent::is_valid_nix_store_path(&format!("{PREFIX}{store_component}")) {
+            return false;
+        }
+        let suffix = components.collect::<Vec<_>>();
+        if suffix.is_empty() || suffix.iter().any(|part| {
+            part.is_empty() || *part == "." || *part == ".." || part.chars().any(char::is_control)
+        }) {
+            return false;
+        }
+        format!("{PREFIX}{store_component}/{}", suffix.join("/")) == path
+    }
+
+    fn observed_argv(cmdline: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        if cmdline.is_empty() || !cmdline.ends_with(&[0]) {
+            return Err("spawned worker cmdline is empty or lacks its terminating NUL".into());
+        }
+        let mut observed = cmdline.split(|byte| *byte == 0).map(|argument| argument.to_vec()).collect::<Vec<_>>();
+        if observed.last().is_some_and(Vec::is_empty) { observed.pop(); }
+        if observed.is_empty() || observed.iter().any(Vec::is_empty) {
+            return Err("spawned worker cmdline contains an empty argument".into());
+        }
+        Ok(observed)
+    }
+
+    fn expected_wrapper_shebang(executable: &str) -> Result<Option<(String, Option<String>)>, String> {
+        let bytes = std::fs::read(executable).map_err(|error| format!("failed to read declared worker launcher: {error}"))?;
+        if !bytes.starts_with(b"#!") { return Ok(None); }
+        if bytes.len() > 256 * 1024 {
+            return Err("NixOS activation wrapper is unexpectedly large".into());
+        }
+        let content = std::str::from_utf8(&bytes).map_err(|error| format!("activation wrapper is not UTF-8: {error}"))?;
+        let first = content.lines().next().ok_or_else(|| "activation wrapper has no shebang line".to_string())?;
+        let body = first.strip_prefix("#!").ok_or_else(|| "activation wrapper shebang is malformed".to_string())?.trim_start();
+        let split = body.find(char::is_whitespace).unwrap_or(body.len());
+        let interpreter = &body[..split];
+        let optional = body[split..].trim();
+        if !Self::canonical_store_executable_lexical(interpreter) {
+            return Err("activation wrapper interpreter is not a canonical Nix store executable".into());
+        }
+        Ok(Some((interpreter.to_string(), if optional.is_empty() { None } else { Some(optional.to_string()) })))
+    }
+
+    fn expected_nix_wrapper_target(executable: &str) -> Result<Option<String>, String> {
+        let bytes = std::fs::read(executable).map_err(|error| format!("failed to read declared worker wrapper: {error}"))?;
+        if !bytes.starts_with(b"#!") { return Ok(None); }
+        if bytes.len() > 256 * 1024 {
+            return Err("NixOS activation wrapper is unexpectedly large".into());
+        }
+        let content = std::str::from_utf8(&bytes).map_err(|error| format!("activation wrapper is not UTF-8: {error}"))?;
+        let exec_lines = content.lines().map(str::trim).filter(|line| line.starts_with("exec ")).collect::<Vec<_>>();
+        if exec_lines.len() != 1 { return Err("NixOS activation wrapper must contain exactly one direct exec line".into()); }
+        let tokens = exec_lines[0].split_whitespace().map(|token| token.trim_matches(['\'', '"'])).collect::<Vec<_>>();
+        if tokens.first() != Some(&"exec") { return Err("activation wrapper exec line is malformed".into()); }
+        let targets = tokens.iter().enumerate().filter(|(_, token)| token.starts_with("/nix/store/")).collect::<Vec<_>>();
+        if targets.len() != 1 { return Err("activation wrapper must exec exactly one immutable Nix store target".into()); }
+        let (target_index, target) = targets[0];
+        let prefix = &tokens[..target_index];
+        if prefix != ["exec"] && prefix != ["exec", "-a", "$0"] {
+            return Err("activation wrapper uses an unsupported exec prefix".into());
+        }
+        if tokens[target_index + 1..] != ["$@"] {
+            return Err("activation wrapper must forward the original arguments exactly as \"$@\"".into());
+        }
+        if !Self::canonical_store_executable_lexical(target) {
+            return Err("activation wrapper target is not a canonical Nix store executable".into());
+        }
+        Ok(Some((*target).to_string()))
+    }
+
     fn validate_observed_invocation(
         expected_executable: &str,
         expected_args: &[String],
         observed_executable: &Path,
         observed_cmdline: &[u8],
-    ) -> Result<String, String> {
-        if observed_executable != Path::new(expected_executable) {
-            return Err(format!(
-                "spawned worker executable mismatch: expected {expected_executable}, observed {}",
-                observed_executable.display()
+    ) -> Result<(String, String), String> {
+        let observed = Self::observed_argv(observed_cmdline)?;
+        let expected_argv = std::iter::once(expected_executable.as_bytes().to_vec())
+            .chain(expected_args.iter().map(|argument| argument.as_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        if observed_executable == Path::new(expected_executable) && observed == expected_argv {
+            return Ok((
+                Self::activation_argv_digest(expected_executable, expected_args),
+                expected_executable.to_string(),
             ));
         }
-        if observed_cmdline.is_empty() || !observed_cmdline.ends_with(&[0]) {
-            return Err("spawned worker cmdline is empty or lacks its terminating NUL".into());
+
+        // NixOS wraps switch-to-configuration-ng with a small immutable shell
+        // launcher that exports closure-bound values and then execs the Rust
+        // binary. Accept only that constrained direct-exec form; never general
+        // shell expansion or PATH-based indirection.
+        let shebang = Self::expected_wrapper_shebang(expected_executable)?
+            .ok_or_else(|| "observed process image differs from a native declared executable".to_string())?;
+        let target = Self::expected_nix_wrapper_target(expected_executable)?
+            .ok_or_else(|| "script launcher is not a supported immutable Nix wrapper".to_string())?;
+        if observed_executable == Path::new(&target) {
+            let observed_with_launcher_argv0 = expected_argv.clone();
+            let observed_with_target_argv0 = std::iter::once(target.as_bytes().to_vec())
+                .chain(expected_args.iter().map(|argument| argument.as_bytes().to_vec()))
+                .collect::<Vec<_>>();
+            if observed != observed_with_launcher_argv0 && observed != observed_with_target_argv0 {
+                return Err("Nix wrapper process cmdline does not match the exact forwarded argument vector".into());
+            }
+            return Ok((
+                Self::activation_argv_digest(expected_executable, expected_args),
+                target,
+            ));
         }
-        let mut observed = observed_cmdline
-            .split(|byte| *byte == 0)
-            .map(|argument| argument.to_vec())
-            .collect::<Vec<_>>();
-        if observed.last().is_some_and(Vec::is_empty) {
-            observed.pop();
+
+        if observed_executable == Path::new(&shebang.0) {
+            let mut expected_script_argv = vec![shebang.0.as_bytes().to_vec()];
+            if let Some(optional) = &shebang.1 { expected_script_argv.push(optional.as_bytes().to_vec()); }
+            expected_script_argv.push(expected_executable.as_bytes().to_vec());
+            expected_script_argv.extend(expected_args.iter().map(|argument| argument.as_bytes().to_vec()));
+            if observed == expected_script_argv {
+                return Ok((
+                    Self::activation_argv_digest(expected_executable, expected_args),
+                    shebang.0,
+                ));
+            }
         }
-        let mut expected = Vec::with_capacity(expected_args.len() + 1);
-        expected.push(expected_executable.as_bytes().to_vec());
-        expected.extend(expected_args.iter().map(|argument| argument.as_bytes().to_vec()));
-        if observed != expected {
-            return Err("spawned worker /proc cmdline differs from the exact requested executable/argument vector".into());
-        }
-        Ok(Self::activation_argv_digest(expected_executable, expected_args))
+        Err(format!("spawned worker process image/argv did not match declared executable or its constrained Nix wrapper: image={}, argv_count={}", observed_executable.display(), observed.len()))
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
@@ -1330,7 +1427,7 @@ impl NixOSExecutor {
             .map_err(|error| format!("failed to observe spawned worker executable: {error}"))?;
         let observed_cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
             .map_err(|error| format!("failed to observe spawned worker cmdline: {error}"))?;
-        let argv_digest = Self::validate_observed_invocation(
+        let (argv_digest, process_image) = Self::validate_observed_invocation(
             executable,
             args,
             &observed_executable,
@@ -1349,6 +1446,7 @@ impl NixOSExecutor {
             boot_id: boot_after,
             start_time_ticks: start_after,
             executable: executable.to_string(),
+            process_image,
             argv_digest,
             environment_digest: Self::activation_worker_environment_digest(),
         };
@@ -3224,7 +3322,7 @@ mod tests {
         cmdline.push(0);
         cmdline.extend_from_slice(b"test");
         cmdline.push(0);
-        let expected_digest = NixOSExecutor::validate_observed_invocation(
+        let (expected_digest, process_image) = NixOSExecutor::validate_observed_invocation(
             executable,
             &args,
             Path::new(executable),
@@ -3232,6 +3330,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(expected_digest, NixOSExecutor::activation_argv_digest(executable, &args));
+        assert_eq!(process_image, executable);
         assert!(NixOSExecutor::validate_observed_invocation(
             executable,
             &args,
@@ -3284,6 +3383,7 @@ mod tests {
             boot_id,
             start_time_ticks,
             executable: executable.into(),
+            process_image: executable.into(),
             argv_digest: NixOSExecutor::activation_argv_digest(executable, &["switch".into()]),
             environment_digest: NixOSExecutor::activation_worker_environment_digest(),
         };
