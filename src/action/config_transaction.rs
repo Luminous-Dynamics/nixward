@@ -1819,7 +1819,8 @@ impl CandidateBuildReceipt {
 pub enum ActivationWorkerPurpose {
     ProfileTransition,
     Activation,
-    Recovery,
+    RecoveryProfileTransition,
+    RecoveryActivation,
 }
 /// Durable audit identity for the exact process that was spawned for activation.
 /// This record is descriptive after restart; only a fresh pidfd + boot/start-time
@@ -1961,8 +1962,8 @@ pub struct ConfigTransaction {
 }
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v5";
-    pub const VERSION: u16 = 5;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v6";
+    pub const VERSION: u16 = 6;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2437,17 +2438,20 @@ impl ConfigTransaction {
             ActivationWorkerPurpose::Activation if self.phase != ConfigTransactionPhase::ActivationStarted => {
                 return Err("activation worker identity requires durable ActivationStarted".into());
             }
-            ActivationWorkerPurpose::Recovery if self.phase != ConfigTransactionPhase::RecoveryMutationStarted => {
+            ActivationWorkerPurpose::RecoveryProfileTransition
+            | ActivationWorkerPurpose::RecoveryActivation
+                if self.phase != ConfigTransactionPhase::RecoveryMutationStarted =>
+            {
                 return Err("recovery worker identity requires durable RecoveryMutationStarted".into());
             }
             _ => {}
         }
         if self.activation_workers.iter().any(|existing| {
-            existing.purpose == identity.purpose
-                && existing.pid == identity.pid
+            existing.pid == identity.pid
+                && existing.boot_id == identity.boot_id
                 && existing.start_time_ticks == identity.start_time_ticks
         }) {
-            return Err("activation worker identity was already recorded".into());
+            return Err("process identity was already recorded; a worker cannot be relabeled across phases".into());
         }
         self.activation_workers.push(identity);
         Ok(())
@@ -2795,6 +2799,28 @@ mod tests {
             argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
         }
+    }
+
+    #[test]
+    fn activation_worker_process_identity_cannot_be_relabelled_between_phases() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::RecoveryMutationStarted;
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let identity = ActivationWorkerIdentity {
+            transaction_id: transaction.transaction_id().to_string(),
+            purpose: ActivationWorkerPurpose::RecoveryProfileTransition,
+            pid: 123,
+            boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            start_time_ticks: 42,
+            executable: executable.into(),
+            process_image: executable.into(),
+            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+        };
+        transaction.bind_activation_worker_identity(identity.clone()).unwrap();
+        let mut relabelled = identity;
+        relabelled.purpose = ActivationWorkerPurpose::RecoveryActivation;
+        assert!(transaction.bind_activation_worker_identity(relabelled).is_err());
     }
 
     #[test]
