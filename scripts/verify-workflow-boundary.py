@@ -157,8 +157,18 @@ else:
         for marker in expected:
             if marker not in body:
                 errors.append(f"draft candidate job missing required marker: {marker}")
-        if "Require committed lockfile" in body or "git ls-files --error-unmatch Cargo.lock" in body:
-            errors.append("draft candidate must consume exact-run lockfile artifact, not require branch mutation")
+        # The lockfile is created in the ephemeral CI workspace from the exact-run
+        # artifact. Intent-to-add makes it visible to Git-backed Nix flake sources;
+        # it does not commit or push the generated file to the branch.
+        if "Require committed lockfile" in body:
+            errors.append("draft candidate must not require Cargo.lock to be committed")
+
+        if "git add --intent-to-add -f Cargo.lock" not in body:
+            errors.append("draft candidate must expose its exact-run lockfile to Git-backed flake evaluation")
+        if "git ls-files --error-unmatch Cargo.lock" not in body:
+            errors.append("draft candidate must verify Git visibility of the exact-run lockfile")
+        if "git commit" in body or "git push" in body:
+            errors.append("draft candidate must not commit or push the generated lockfile")
 
         write_permission_sites = re.findall(
         r"^      contents: write\s*$",
