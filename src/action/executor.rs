@@ -1367,6 +1367,30 @@ impl NixOSExecutor {
             return Err("NixOS activation wrapper is unexpectedly large".into());
         }
         let content = std::str::from_utf8(&bytes).map_err(|error| format!("activation wrapper is not UTF-8: {error}"))?;
+        let exports = Self::validate_nix_wrapper_body(content)?;
+        let expected_root = Path::new(executable)
+            .parent()
+            .and_then(Path::parent)
+            .and_then(|path| path.to_str())
+            .ok_or_else(|| "activation wrapper is not located directly under a system closure bin directory".to_string())?;
+        for name in ["OUT", "TOPLEVEL"] {
+            if exports.get(name).map(String::as_str) != Some(expected_root) {
+                return Err(format!("NixOS wrapper {name} does not bind to the exact declared system closure"));
+            }
+        }
+        for name in ["INSTALL_BOOTLOADER", "PRE_SWITCH_CHECK", "SYSTEMD"] {
+            let path = exports.get(name).map(String::as_str).unwrap_or_default();
+            if !(super::execution_intent::is_valid_nix_store_path(path)
+                || Self::canonical_store_executable_lexical(path))
+            {
+                return Err(format!("NixOS wrapper {name} is not bound to a canonical Nix store object"));
+            }
+        }
+        if let Some(locale_archive) = exports.get("LOCALE_ARCHIVE") {
+            if !Self::canonical_store_executable_lexical(locale_archive) {
+                return Err("NixOS wrapper LOCALE_ARCHIVE is not bound to a canonical Nix store object".into());
+            }
+        }
         let exec_lines = content.lines().map(str::trim).filter(|line| line.starts_with("exec ")).collect::<Vec<_>>();
         if exec_lines.len() != 1 { return Err("NixOS activation wrapper must contain exactly one direct exec line".into()); }
         let tokens = exec_lines[0]
