@@ -9,8 +9,8 @@
 //! Approval evidence is then bound to the digest of that whole plan.
 
 use super::config_writer::ConfigPatch;
-use super::execution_intent::VerifiedExecutionBundle;
-use super::executor::NixOSCommand;
+use super::execution_intent::{is_valid_nix_store_path, VerifiedExecutionBundle};
+use super::executor::{NixOSCommand, SystemActivation};
 use crate::authority_signature::VerifiedSignatureEvidence;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -145,8 +145,17 @@ impl ConfigMutationBinding {
 pub struct RollbackBinding {
     /// Exact configuration bytes to restore are identified by this digest.
     config_restore_digest: Option<[u8; 32]>,
-    /// Exact structured rollback command, if the primary command provides one.
+    /// Exact structured rollback/recovery command.
     command_digest: Option<[u8; 32]>,
+    /// Exact prior running NixOS system closure observed before authorization.
+    #[serde(default)]
+    prior_system_closure: Option<String>,
+    /// Exact prior selected system-profile closure observed before authorization.
+    #[serde(default)]
+    prior_system_profile_closure: Option<String>,
+    /// Exact activation action used to restore the prior state.
+    #[serde(default)]
+    recovery_action: Option<SystemActivation>,
 }
 
 impl RollbackBinding {
@@ -156,6 +165,18 @@ impl RollbackBinding {
 
     pub fn command_digest(&self) -> Option<[u8; 32]> {
         self.command_digest
+    }
+
+    pub fn prior_system_closure(&self) -> Option<&str> {
+        self.prior_system_closure.as_deref()
+    }
+
+    pub fn prior_system_profile_closure(&self) -> Option<&str> {
+        self.prior_system_profile_closure.as_deref()
+    }
+
+    pub fn recovery_action(&self) -> Option<SystemActivation> {
+        self.recovery_action
     }
 }
 
@@ -179,6 +200,26 @@ impl ChangePlan {
         command: Option<NixOSCommand>,
         ttl_ms: u64,
     ) -> Result<Self, String> {
+        Self::build_with_system_recovery(
+            machine,
+            config_mutation,
+            command,
+            None,
+            None,
+            None,
+            ttl_ms,
+        )
+    }
+
+    fn build_with_system_recovery(
+        machine: MachineBinding,
+        config_mutation: Option<ConfigMutationBinding>,
+        command: Option<NixOSCommand>,
+        prior_system_closure: Option<String>,
+        prior_system_profile_closure: Option<String>,
+        recovery_action: Option<SystemActivation>,
+        ttl_ms: u64,
+    ) -> Result<Self, String> {
         if config_mutation.is_none() && command.is_none() {
             return Err("change plan must contain a config mutation or command".into());
         }
@@ -188,14 +229,74 @@ impl ChangePlan {
             ));
         }
 
+        let exact_recovery = match command.as_ref() {
+            Some(NixOSCommand::ActivateSystemClosure { .. }) => {
+                let prior = prior_system_closure.ok_or_else(|| {
+                    "exact system closure activation requires an exact prior system closure"
+                        .to_string()
+                })?;
+                if !is_valid_nix_store_path(&prior) {
+                    return Err(
+                        "prior system closure must be one canonical immutable /nix/store path"
+                            .into(),
+                    );
+                }
+                let profile = prior_system_profile_closure.ok_or_else(|| {
+                    "exact system closure activation requires an exact prior system-profile closure"
+                        .to_string()
+                })?;
+                if !is_valid_nix_store_path(&profile) {
+                    return Err(
+                        "prior system-profile closure must be one canonical immutable /nix/store path"
+                            .into(),
+                    );
+                }
+                let action = recovery_action.ok_or_else(|| {
+                    "exact system closure activation requires a recovery action".to_string()
+                })?;
+                Some((prior, profile, action))
+            }
+            Some(_) | None => {
+                if prior_system_closure.is_some()
+                    || prior_system_profile_closure.is_some()
+                    || recovery_action.is_some()
+                {
+                    return Err(
+                        "exact system recovery binding is only valid for ActivateSystemClosure plans"
+                            .into(),
+                    );
+                }
+                None
+            }
+        };
+
         let issued_at_ms = now_ms();
         let expires_at_ms = issued_at_ms.saturating_add(ttl_ms);
+        let recovery_command = exact_recovery.as_ref().map(
+            |(store_path, profile_store_path, action)| NixOSCommand::ActivateSystemClosure {
+                store_path: store_path.clone(),
+                profile_store_path: profile_store_path.clone(),
+                action: *action,
+            },
+        );
         let rollback = RollbackBinding {
             config_restore_digest: config_mutation.as_ref().map(|c| c.original_digest),
-            command_digest: command
+            command_digest: recovery_command
                 .as_ref()
-                .and_then(NixOSCommand::rollback_command)
-                .map(|rollback| rollback.command_digest()),
+                .map(NixOSCommand::command_digest)
+                .or_else(|| {
+                    command
+                        .as_ref()
+                        .and_then(NixOSCommand::rollback_command)
+                        .map(|rollback| rollback.command_digest())
+                }),
+            prior_system_closure: exact_recovery
+                .as_ref()
+                .map(|(store_path, _, _)| store_path.clone()),
+            prior_system_profile_closure: exact_recovery
+                .as_ref()
+                .map(|(_, profile_store_path, _)| profile_store_path.clone()),
+            recovery_action: exact_recovery.as_ref().map(|(_, _, action)| *action),
         };
 
         let nonce = Self::fresh_nonce(
@@ -223,6 +324,27 @@ impl ChangePlan {
         ttl_ms: u64,
     ) -> Result<Self, String> {
         Self::build(machine, None, Some(command), ttl_ms)
+    }
+
+    /// Construct an exact system-closure plan whose recovery is bound to the
+    /// precise system closure observed before authorization.
+    pub fn command_only_with_system_recovery(
+        machine: MachineBinding,
+        command: NixOSCommand,
+        prior_system_closure: impl Into<String>,
+        prior_system_profile_closure: impl Into<String>,
+        recovery_action: SystemActivation,
+        ttl_ms: u64,
+    ) -> Result<Self, String> {
+        Self::build_with_system_recovery(
+            machine,
+            None,
+            Some(command),
+            Some(prior_system_closure.into()),
+            Some(prior_system_profile_closure.into()),
+            Some(recovery_action),
+            ttl_ms,
+        )
     }
 
     pub fn config_only(
@@ -308,6 +430,42 @@ impl ChangePlan {
         self.expires_at_ms
     }
 
+    fn validate_exact_recovery_binding(&self) -> Result<(), String> {
+        let Some(NixOSCommand::ActivateSystemClosure { .. }) = self.command.as_ref() else {
+            return Ok(());
+        };
+        let Some(prior) = self.rollback.prior_system_closure() else {
+            return Err(
+                "ActivateSystemClosure plan is missing exact prior system closure recovery binding"
+                    .into(),
+            );
+        };
+        let Some(profile) = self.rollback.prior_system_profile_closure() else {
+            return Err(
+                "ActivateSystemClosure plan is missing exact prior system-profile recovery binding"
+                    .into(),
+            );
+        };
+        let Some(action) = self.rollback.recovery_action() else {
+            return Err("ActivateSystemClosure plan is missing exact recovery action".into());
+        };
+        if !is_valid_nix_store_path(prior) || !is_valid_nix_store_path(profile) {
+            return Err("ActivateSystemClosure recovery closure is not a canonical Nix store path".into());
+        }
+        let expected = NixOSCommand::ActivateSystemClosure {
+            store_path: prior.to_string(),
+            profile_store_path: profile.to_string(),
+            action,
+        };
+        if self.rollback.command_digest() != Some(expected.command_digest()) {
+            return Err(
+                "ActivateSystemClosure recovery digest does not match the exact prior closure"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Validate the plan against an explicit wall-clock instant.
     ///
     /// Plans arriving from an external caller must not become executable before
@@ -318,6 +476,7 @@ impl ChangePlan {
         if self.version != 1 {
             return Err("unsupported change plan version".into());
         }
+        self.validate_exact_recovery_binding()?;
         if self.expires_at_ms <= self.issued_at_ms {
             return Err("change plan has an invalid freshness window".into());
         }
@@ -423,6 +582,7 @@ pub struct ChangeAuthorization {
     approval_evidence_kind: ApprovalEvidenceKind,
     execution_intent_digest: Option<[u8; 32]>,
     realization_plan_digest: Option<[u8; 32]>,
+    realization_installable: Option<String>,
     authority_signer_key_id: Option<String>,
     authority_challenge_blake3: Option<String>,
     authority_replay_key: Option<String>,
@@ -452,6 +612,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::GeneralChange,
             execution_intent_digest: None,
             realization_plan_digest: None,
+            realization_installable: None,
             authority_signer_key_id: None,
             authority_challenge_blake3: None,
             authority_replay_key: None,
@@ -480,8 +641,12 @@ impl ChangeAuthorization {
             "execution-intent authorization requires an executable command".to_string()
         })?;
         match command {
-            NixOSCommand::ActivateSystemClosure { store_path, .. }
-                if store_path == bundle.expected_out_path() => {}
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                ..
+            } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path() => {}
             NixOSCommand::ActivateSystemClosure { .. } => {
                 return Err("system closure differs from the verified realization plan".into());
             }
@@ -505,6 +670,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::ExecutionIntent,
             execution_intent_digest: Some(bundle.intent_digest()),
             realization_plan_digest: Some(bundle.realization_plan_digest()),
+            realization_installable: Some(bundle.installable().to_string()),
             authority_signer_key_id: None,
             authority_challenge_blake3: None,
             authority_replay_key: None,
@@ -568,6 +734,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::AuthoritySignature,
             execution_intent_digest: None,
             realization_plan_digest: None,
+            realization_installable: None,
             authority_signer_key_id: Some(evidence.signer_key_id.clone()),
             authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
             authority_replay_key: Some(evidence.replay_key.clone()),
@@ -594,8 +761,12 @@ impl ChangeAuthorization {
             "execution-intent authority requires an executable command".to_string()
         })?;
         match command {
-            NixOSCommand::ActivateSystemClosure { store_path, .. }
-                if store_path == bundle.expected_out_path() => {}
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                ..
+            } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path() => {}
             NixOSCommand::ActivateSystemClosure { .. } => {
                 return Err("system closure differs from the verified realization plan".into());
             }
@@ -612,6 +783,7 @@ impl ChangeAuthorization {
             approval_evidence_kind: ApprovalEvidenceKind::ExecutionIntentAuthority,
             execution_intent_digest: Some(bundle.intent_digest()),
             realization_plan_digest: Some(bundle.realization_plan_digest()),
+            realization_installable: Some(bundle.installable().to_string()),
             authority_signer_key_id: Some(evidence.signer_key_id.clone()),
             authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
             authority_replay_key: Some(evidence.replay_key.clone()),
@@ -645,8 +817,9 @@ impl ChangeAuthorization {
             && self.authority_challenge_blake3.is_some()
             && self.authority_replay_key.is_some()
             && self.authority_subject_blake3.is_some();
-        let has_execution_intent =
-            self.execution_intent_digest.is_some() && self.realization_plan_digest.is_some();
+        let has_execution_intent = self.execution_intent_digest.is_some()
+            && self.realization_plan_digest.is_some()
+            && self.realization_installable.is_some();
         let shape_is_valid = match self.approval_evidence_kind {
             ApprovalEvidenceKind::GeneralChange => !has_authority && !has_execution_intent,
             ApprovalEvidenceKind::ExecutionIntent => !has_authority && has_execution_intent,
@@ -683,6 +856,10 @@ impl ChangeAuthorization {
 
     pub fn realization_plan_digest(&self) -> Option<[u8; 32]> {
         self.realization_plan_digest
+    }
+
+    pub fn realization_installable(&self) -> Option<&str> {
+        self.realization_installable.as_deref()
     }
 
     pub fn authority_signer_key_id(&self) -> Option<&str> {
@@ -809,6 +986,57 @@ mod tests {
             ChangeAuthorization::from_verified_approval(&first, "test-owner", [7; 32]).unwrap();
         assert!(auth.validate_plan(&first).is_ok());
         assert!(auth.validate_plan(&second).is_err());
+    }
+
+    #[test]
+    fn exact_system_recovery_binding_captures_prior_closure() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
+            action: SystemActivation::Switch,
+        };
+        let plan = ChangePlan::command_only_with_system_recovery(
+            MachineBinding::new("machine-a").unwrap(),
+            command,
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            SystemActivation::Switch,
+            60_000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.rollback().prior_system_closure(),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
+        );
+        assert_eq!(
+            plan.rollback().prior_system_profile_closure(),
+            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
+        );
+        assert_eq!(
+            plan.rollback().recovery_action(),
+            Some(SystemActivation::Switch)
+        );
+        assert!(plan.validate_fresh().is_ok());
+    }
+
+    #[test]
+    fn exact_system_activation_without_recovery_binding_is_rejected() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            profile_store_path: Some(
+                "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-test".into(),
+            ),
+            action: SystemActivation::Switch,
+        };
+        assert!(ChangePlan::command_only(
+            MachineBinding::new("machine-a").unwrap(),
+            command,
+            60_000,
+        )
+        .is_err());
     }
 
     #[test]

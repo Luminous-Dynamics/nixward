@@ -7,7 +7,8 @@
 //! Natural language is the primary interface — subcommands exist
 //! as convenience shortcuts for common goals.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 /// nixward: A conscious NixOS management tool.
 ///
@@ -49,8 +50,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub phi: Option<f64>,
 
-    /// Explicitly approve the exact modifying command requested on this invocation.
-    /// Has no effect on read-only commands.
+    /// Approve an exact modifying command when the host execution policy permits it.
+    /// This never bypasses policy or cryptographic exact-realization requirements.
     #[arg(long, global = true)]
     pub approve: bool,
 
@@ -85,7 +86,10 @@ pub enum Command {
         limit: usize,
     },
 
-    /// Rebuild the NixOS system.
+    /// Preview a NixOS rebuild candidate.
+    ///
+    /// Direct nixos-rebuild system mutation is not permitted through this command.
+    /// Privileged activation must use an exact realized closure via ActivateSystemClosure.
     Rebuild {
         /// Rebuild mode.
         #[arg(value_enum, default_value = "switch")]
@@ -98,10 +102,31 @@ pub enum Command {
         extra_args: Vec<String>,
     },
 
+    /// Prepare or activate an exact realized NixOS system closure.
+    ///
+    /// The prepare phase verifies the framework execution-intent/realization-plan
+    /// pair and emits an immutable ChangePlan plus detached authority challenge.
+    /// The challenge can be signed offline with nixward-owner-key. Activation
+    /// re-verifies the complete evidence chain before executing the exact store
+    /// closure's switch-to-configuration action.
+    Closure {
+        #[command(subcommand)]
+        op: ClosureCommand,
+    },
+
     /// Roll back to a previous generation.
     Rollback {
         /// Specific generation number (default: previous).
         generation: Option<u32>,
+    },
+
+    /// Verify a UKI against the live Secure Boot db/dbx policy evidence.
+    ///
+    /// This is read-only: it does not modify EFI variables, firmware keys, or the image.
+    VerifySecureBoot {
+        /// Exact EFI/UKI image path to verify.
+        #[arg(long)]
+        image: PathBuf,
     },
 
     /// Observe the current system state.
@@ -223,14 +248,88 @@ pub enum Command {
 }
 
 /// Rebuild modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RebuildMode {
-    /// Apply and make default boot entry.
+    /// Candidate/preview mode; privileged switch activation is blocked.
     Switch,
-    /// Apply temporarily (no boot entry).
+    /// Candidate/preview mode; privileged test activation is blocked.
     Test,
-    /// Set as default for next boot only.
+    /// Candidate/preview mode; privileged boot activation is blocked.
     Boot,
+}
+
+/// Activation actions for one already-realized NixOS system closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ClosureAction {
+    /// Make the realized closure current.
+    Switch,
+    /// Test the realized closure without making it the boot default.
+    Test,
+    /// Make the realized closure the next boot entry.
+    Boot,
+}
+
+impl ClosureAction {
+    pub fn to_system_activation(self) -> nixward::action::SystemActivation {
+        match self {
+            Self::Switch => nixward::action::SystemActivation::Switch,
+            Self::Test => nixward::action::SystemActivation::Test,
+            Self::Boot => nixward::action::SystemActivation::Boot,
+        }
+    }
+}
+
+/// Exact-realization preparation/activation commands.
+#[derive(Subcommand, Debug)]
+pub enum ClosureCommand {
+    /// Verify an exact framework execution-intent/realization pair and emit
+    /// an immutable activation plan plus detached authority challenge.
+    Prepare {
+        /// Canonical framework execution-intent JSON.
+        #[arg(long)]
+        intent: PathBuf,
+        /// Canonical Nix realization-plan JSON.
+        #[arg(long)]
+        realization_plan: PathBuf,
+        /// Activation action for the exact realized closure.
+        #[arg(value_enum, default_value = "switch")]
+        action: ClosureAction,
+        /// Framework Holon identity as a 64-character hex digest.
+        #[arg(long)]
+        holon_id: String,
+        /// Output path for the serialized ChangePlan.
+        #[arg(long)]
+        plan_out: PathBuf,
+        /// Output path for the detached authority challenge.
+        #[arg(long)]
+        challenge_out: PathBuf,
+        /// Authorization TTL in milliseconds.
+        #[arg(long, default_value_t = 60_000)]
+        ttl_ms: u64,
+    },
+
+    /// Verify a signed exact-realization authority and activate the immutable
+    /// NixOS system closure named by the realization plan.
+    Activate {
+        /// Canonical framework execution-intent JSON.
+        #[arg(long)]
+        intent: PathBuf,
+        /// Canonical Nix realization-plan JSON.
+        #[arg(long)]
+        realization_plan: PathBuf,
+        /// Serialized ChangePlan produced by closure prepare.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Detached authority signature produced by nixward-owner-key sign.
+        #[arg(long)]
+        signature: PathBuf,
+        /// JSON authority trust policy containing the trusted signing key.
+        #[arg(long)]
+        policy: PathBuf,
+        /// Framework Holon identity as a 64-character hex digest.
+        #[arg(long)]
+        holon_id: String,
+    },
 }
 
 /// Observation domains.
@@ -248,6 +347,14 @@ pub enum ObserveDomain {
     Hardware,
     /// Flake inputs.
     Flakes,
+    /// Effective next-boot selection evidence (read-only).
+    BootSelection,
+    /// Firmware Secure Boot policy state (read-only).
+    SecureBoot,
+    /// Raw UEFI Secure Boot db/dbx evidence (read-only).
+    SecureBootDatabases,
+    /// Unified Secure Boot state + db/dbx snapshot (read-only).
+    SecureBootSnapshot,
 }
 
 /// Flake subcommands.
@@ -355,6 +462,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_secure_boot_verification() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "verify-secure-boot",
+            "--image",
+            "/boot/EFI/Linux/nixos.efi",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::VerifySecureBoot { image }) if image == PathBuf::from("/boot/EFI/Linux/nixos.efi")
+        ));
+    }
+
+    #[test]
     fn test_parse_search_subcommand() {
         let cli = Cli::parse_from(["nixward", "search", "editor"]);
         assert!(matches!(cli.command, Some(Command::Search { .. })));
@@ -368,6 +489,34 @@ mod tests {
         } else {
             panic!("Expected Rebuild command");
         }
+    }
+
+    #[test]
+    fn test_parse_exact_closure_prepare() {
+        let cli = Cli::parse_from([
+            "nixward",
+            "closure",
+            "prepare",
+            "--intent",
+            "intent.json",
+            "--realization-plan",
+            "plan.json",
+            "--holon-id",
+            "11",
+            "--plan-out",
+            "change.json",
+            "--challenge-out",
+            "challenge.json",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Closure {
+                op: ClosureCommand::Prepare {
+                    action: ClosureAction::Switch,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]

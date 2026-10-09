@@ -213,7 +213,15 @@ impl PlanExecutor {
 
         for i in (0..completed).rev() {
             if let Some(rollback_cmd) = self.steps[i].command.rollback_command() {
-                let rb_result = match self.steps[i]
+                if matches!(rollback_cmd, NixOSCommand::ActivateSystemClosure { .. }) {
+                    failures.push((
+                        i,
+                        "exact system rollback requires the durable ConfigTransaction execution boundary"
+                            .into(),
+                    ));
+                    continue;
+                }
+                let rb_result = match self.steps[i].command.rollback_command() {
                     .authorization
                     .as_ref()
                     .and_then(|auth| auth.for_rollback(&rollback_cmd).ok())
