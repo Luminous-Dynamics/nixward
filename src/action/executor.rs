@@ -3396,30 +3396,33 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
         let dir = tempfile::tempdir().unwrap();
-        let wrapper = dir.path().join("switch-to-configuration");
+        let system_root = dir.path().join("system");
+        let bin_dir = system_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let wrapper = bin_dir.join("switch-to-configuration");
+        let root = system_root.to_string_lossy().to_string();
+        let wrapper_text = wrapper.to_string_lossy().to_string();
         let interpreter = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash/bin/bash";
         let target = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
-        let script = format!(
-            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexec -a \"$0\" {target} \"$@\"\n"
+        let install_bootloader = "/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install";
+        let pre_switch_check = "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check";
+        let systemd = "/nix/store/ffffffffffffffffffffffffffffffff-systemd";
+        let valid_wrapper = format!(
+            "#!{interpreter}\nexport OUT='{root}'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
         );
-        std::fs::write(&wrapper, script).unwrap();
-        let wrapper_text = wrapper.to_string_lossy().to_string();
+        std::fs::write(&wrapper, &valid_wrapper).unwrap();
         let args = vec!["switch".to_string()];
-
         let mut forwarded_cmdline = Vec::new();
         forwarded_cmdline.extend_from_slice(wrapper_text.as_bytes());
         forwarded_cmdline.push(0);
         forwarded_cmdline.extend_from_slice(b"switch");
         forwarded_cmdline.push(0);
         let (digest, image) = NixOSExecutor::validate_observed_invocation(
-            &wrapper_text,
-            &args,
-            Path::new(target),
-            &forwarded_cmdline,
-        )
-        .unwrap();
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).unwrap();
         assert_eq!(image, target);
         assert_eq!(digest, NixOSExecutor::activation_argv_digest(&wrapper_text, &args));
 
@@ -3431,12 +3434,8 @@ mod tests {
         interpreter_cmdline.extend_from_slice(b"switch");
         interpreter_cmdline.push(0);
         let (digest_before_exec, image_before_exec) = NixOSExecutor::validate_observed_invocation(
-            &wrapper_text,
-            &args,
-            Path::new(interpreter),
-            &interpreter_cmdline,
-        )
-        .unwrap();
+            &wrapper_text, &args, Path::new(interpreter), &interpreter_cmdline,
+        ).unwrap();
         assert_eq!(image_before_exec, interpreter);
         assert_eq!(digest_before_exec, digest);
 
@@ -3446,19 +3445,37 @@ mod tests {
         wrong_cmdline.extend_from_slice(b"switch --impure");
         wrong_cmdline.push(0);
         assert!(NixOSExecutor::validate_observed_invocation(
-            &wrapper_text,
-            &args,
-            Path::new(target),
-            &wrong_cmdline,
+            &wrapper_text, &args, Path::new(target), &wrong_cmdline,
         ).is_err());
+
+        let pre_exec_payload = format!(
+            "#!{interpreter}\nexport OUT='{root}'\n/usr/bin/touch /tmp/nixward-wrapper-payload\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, pre_exec_payload).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).is_err(), "pre-exec statements must be rejected");
+
+        let env_expansion = format!(
+            "#!{interpreter}\nexport OUT='{root}'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='$(touch /tmp/nixward-wrapper-payload)'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, env_expansion).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).is_err(), "command substitution in exports must be rejected");
+
+        let forbidden_export = format!(
+            "#!{interpreter}\nexport OUT='{root}'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexport LD_PRELOAD='/tmp/evil.so'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, forbidden_export).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
+        ).is_err(), "forbidden environment exports must be rejected");
 
         let indirect = format!("#!{interpreter}\nexec {interpreter} -c wrapped \"$@\"\n");
         std::fs::write(&wrapper, indirect).unwrap();
         assert!(NixOSExecutor::validate_observed_invocation(
-            &wrapper_text,
-            &args,
-            Path::new(target),
-            &forwarded_cmdline,
+            &wrapper_text, &args, Path::new(target), &forwarded_cmdline,
         ).is_err(), "shell -c indirection must be rejected");
     }
 
