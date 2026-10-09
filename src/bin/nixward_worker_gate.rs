@@ -31,9 +31,11 @@ fn read_release<R: Read>(reader: &mut R, expected_digest: &str) -> Result<(), St
         return Err("worker gate release digest is not canonical lowercase hexadecimal".into());
     }
 
-    let mut token = [0u8; 32];
+    // The release token is a short-lived capability. Wipe the child-side
+    // copy on every return path, including malformed frames and read errors.
+    let mut token = zeroize::Zeroizing::new([0u8; 32]);
     reader
-        .read_exact(&mut token)
+        .read_exact(&mut token[..])
         .map_err(|error| format!("worker gate release token is incomplete: {error}"))?;
 
     // EOF is part of the frame. The parent closes the one-way pipe after the
