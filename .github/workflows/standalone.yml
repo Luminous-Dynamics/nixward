@@ -282,6 +282,94 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+
+  draft-candidate-check:
+    name: Draft hardening candidate checks (not qualification)
+    needs:
+      - bootstrap-lockfile
+      - lockfile-artifact
+    # This job gives the dedicated implementation branch real compiler/test
+    # feedback without emitting a qualification receipt or changing the
+    # qualification-only validate/provenance rules.
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09' && needs.bootstrap-lockfile.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out draft candidate branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref_name }}
+
+      - name: Bind tests to the current draft branch tip
+        id: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "${GITHUB_REF_NAME}"
+          tested_commit="$(git rev-parse HEAD)"
+          branch_tip="$(git rev-parse FETCH_HEAD)"
+          test "$tested_commit" = "$branch_tip"
+          echo "tested_commit=$tested_commit" >> "$GITHUB_OUTPUT"
+          echo "Draft candidate source tested: $tested_commit" >> "$GITHUB_STEP_SUMMARY"
+          echo "This is candidate CI only; it does not issue a qualification receipt." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+          cargo --version
+
+      - name: Verify workflow authority boundary
+        run: python3 scripts/verify-workflow-boundary.py
+
+      - name: Verify immutable action pins
+        run: python3 scripts/verify-action-pins.py
+
+      - name: Verify standalone filesystem boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Require committed lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+
+      - name: Check default feature set
+        run: cargo check --locked --all-targets
+
+      - name: Check full native feature set
+        run: cargo check --locked --all-targets --features full
+
+      - name: Run library tests
+        run: cargo test --locked --lib
+
+      - name: Run worker-gate protocol tests
+        run: cargo test --locked --bin nixward-worker-gate
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - name: Check locked flake
+        run: nix flake check --no-update-lock-file --no-write-lock-file
+
+      - name: Build CLI, TUI, and daemon packages
+        run: nix build .#nixward .#nixward-tui .#nixward-daemon --no-update-lock-file --no-write-lock-file
+
   nix:
     name: Nix packaging
     needs:
