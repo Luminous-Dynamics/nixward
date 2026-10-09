@@ -2054,7 +2054,10 @@ impl ConfigTransaction {
     ) -> Result<(), String> {
         if !matches!(
             self.phase,
-            ConfigTransactionPhase::ActivationStarted
+            ConfigTransactionPhase::ProfileTransitionStarted
+                | ConfigTransactionPhase::ProfileCommitted
+                | ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::ActivationStarted
                 | ConfigTransactionPhase::IndeterminateActivation
                 | ConfigTransactionPhase::RecoveryObservation
                 | ConfigTransactionPhase::RecoveryRequired
@@ -3396,6 +3399,41 @@ mod tests {
         assert!(transaction
             .advance(ConfigTransactionPhase::FailedBeforeActivation)
             .is_err());
+    }
+
+    #[test]
+    fn activation_post_state_closes_exact_candidate_even_on_nonzero_exit() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::ActivationStarted;
+        let receipt = test_candidate_receipt();
+        tx.candidate_store_path = Some(receipt.candidate_store_path.clone());
+        tx.candidate_build = Some(receipt.clone());
+        tx.record_activation_post_state(
+            Some(17),
+            Some(receipt.candidate_store_path.clone()),
+            Some(receipt.candidate_store_path.clone()),
+            &receipt.candidate_store_path,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::Activated);
+    }
+
+    #[test]
+    fn boot_activation_post_state_records_boot_selected() {
+        let mut tx = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        tx.phase = ConfigTransactionPhase::RecoveryObservation;
+        let receipt = test_candidate_receipt();
+        tx.candidate_store_path = Some(receipt.candidate_store_path.clone());
+        tx.candidate_build = Some(receipt.clone());
+        let prior = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-prior";
+        tx.record_activation_post_state(
+            Some(0),
+            Some(prior.into()),
+            Some(receipt.candidate_store_path.clone()),
+            prior,
+        )
+        .unwrap();
+        assert_eq!(tx.phase(), ConfigTransactionPhase::BootSelected);
     }
 
     #[test]
