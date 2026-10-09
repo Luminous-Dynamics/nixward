@@ -88,6 +88,23 @@ fn valid_store_executable(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Run the irreversible operation only after the complete, authenticated
+/// release frame has been consumed. Keeping this boundary generic makes the
+/// no-callback-on-failure property directly testable without executing a real
+/// NixOS activation payload in unit tests.
+fn release_then<R, T, F>(
+    reader: &mut R,
+    expected_digest: &str,
+    on_release: F,
+) -> Result<T, String>
+where
+    R: Read,
+    F: FnOnce() -> Result<T, String>,
+{
+    read_release(reader, expected_digest)?;
+    on_release()
+}
+
 fn run_with_args<I>(args: I) -> Result<(), String>
 where
     I: IntoIterator<Item = OsString>,
@@ -140,8 +157,8 @@ mod tests {
     fn irreversible_callback_is_not_invoked_for_invalid_release_frames() {
         let token = [0x39u8; 32];
         let digest = release_digest(&token);
-        let mut wrong_token = vec![0x4au8; 32];
-        let mut partial_token = token[..31].to_vec();
+        let wrong_token = vec![0x4au8; 32];
+        let partial_token = token[..31].to_vec();
         let mut trailing_bytes = token.to_vec();
         trailing_bytes.push(0xff);
 
