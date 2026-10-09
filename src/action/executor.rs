@@ -3399,7 +3399,15 @@ mod tests {
         let interpreter = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash/bin/bash";
         let target = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
         let script = format!(
-            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexec -a \"$0\" {target} \"$@\"\n"
+            concat!(
+                "#!{interpreter}\n",
+                "export OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\n",
+                "export TOPLEVEL='/nix/store/cccccccccccccccccccccccccccccccc-system'\n",
+                "export DISTRO_ID='nixos'\n",
+                "export INSTALL_BOOTLOADER='/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install'\n",
+                "export PRE_SWITCH_CHECK='/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check'\n",
+                "exec -a \"$0\" {target} \"$@\"\n"
+            )
         );
         std::fs::write(&wrapper, script).unwrap();
         let wrapper_text = wrapper.to_string_lossy().to_string();
@@ -3448,6 +3456,28 @@ mod tests {
             Path::new(target),
             &wrong_cmdline,
         ).is_err());
+
+        let pre_exec_payload = format!(
+            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\n/usr/bin/touch /tmp/nixward-wrapper-payload\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, pre_exec_payload).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &forwarded_cmdline,
+        ).is_err(), "pre-exec shell statements must be rejected");
+
+        let env_expansion = format!(
+            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport TOPLEVEL='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexport DISTRO_ID='$(touch /tmp/nixward-wrapper-payload)'\nexport INSTALL_BOOTLOADER='/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install'\nexport PRE_SWITCH_CHECK='/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, env_expansion).unwrap();
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &forwarded_cmdline,
+        ).is_err(), "shell substitutions in environment literals must be rejected");
 
         let indirect = format!("#!{interpreter}\nexec {interpreter} -c wrapped \"$@\"\n");
         std::fs::write(&wrapper, indirect).unwrap();
