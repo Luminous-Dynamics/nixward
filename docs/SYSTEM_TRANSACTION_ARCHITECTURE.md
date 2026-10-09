@@ -508,3 +508,15 @@ The validation PR is also topology-bound: its hosted validation job fetches
 `hardening/full-stack-qualification-2026-10-08` and requires its live SHA to equal the
 validation PR head before qualification proceeds. A moving hardening branch therefore cannot
 silently qualify an older validation mirror.
+
+## Pidfd-backed worker receipts and launch environment (2026-10-09)
+
+Exact profile-transition, activation, and recovery children are spawned through the journal-aware worker runner. Before waiting for process completion, the runner opens a Linux pidfd, cross-checks `/proc/<pid>/stat` start time across acquisition, records the boot ID + PID + start-time + exact executable + invocation digest + environment digest, appends the receipt to the transaction, and fsyncs the journal.
+
+Recovery reacquires a pidfd for each recorded worker and checks boot identity and process start time both before and after acquisition. A matching live worker blocks further mutation; missing pidfd support or an ambiguous observation fails closed. PID alone is never treated as a stable process identity.
+
+The invocation digest covers the executable and each length-framed argument, including boundaries. The process environment is cleared and rebuilt from a fixed allow-list (`HOME`, locale, `NIX_USER_CONF_FILES`, `PATH`, terminal/color, and XDG config). The environment digest is stored with the worker receipt so the exact launch policy is auditable. NixOS's generated activation script establishes its own PATH from declared system dependencies; the worker PATH is only the launcher environment, not a substitute for that build-time dependency closure.
+
+The transaction journal schema is now `luminous-nixward-config-transaction-v4`. Worker receipts without the required environment digest are intentionally invalid; the executor will not silently promote an older incomplete receipt to current worker authority.
+
+Qualification is still contingent on a completed hosted run for the exact synchronized hardening/validation head. Pidfd semantics are grounded in Linux `pidfd_open(2)` (stable task handle and pollable exit indication) and the current Rust/Tokio process APIs; the implementation uses the Linux syscall path because Rust's standard-library pidfd wrapper remains experimental.
