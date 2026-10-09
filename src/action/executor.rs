@@ -1337,7 +1337,10 @@ impl NixOSExecutor {
         let content = std::str::from_utf8(&bytes).map_err(|error| format!("activation wrapper is not UTF-8: {error}"))?;
         let exec_lines = content.lines().map(str::trim).filter(|line| line.starts_with("exec ")).collect::<Vec<_>>();
         if exec_lines.len() != 1 { return Err("NixOS activation wrapper must contain exactly one direct exec line".into()); }
-        let tokens = exec_lines[0].split_whitespace().map(|token| token.trim_matches(['\'', '"'])).collect::<Vec<_>>();
+        let tokens = exec_lines[0]
+            .split_whitespace()
+            .map(|token| token.trim_matches(|character| character == '\'' || character == '"'))
+            .collect::<Vec<_>>();
         if tokens.first() != Some(&"exec") { return Err("activation wrapper exec line is malformed".into()); }
         let targets = tokens.iter().enumerate().filter(|(_, token)| token.starts_with("/nix/store/")).collect::<Vec<_>>();
         if targets.len() != 1 { return Err("activation wrapper must exec exactly one immutable Nix store target".into()); }
@@ -3309,6 +3312,64 @@ mod tests {
             NixOSExecutor::activation_worker_environment_digest(),
             NixOSExecutor::environment_digest(NixOSExecutor::activation_worker_environment())
         );
+    }
+
+    #[test]
+    fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapper = dir.path().join("switch-to-configuration");
+        let interpreter = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash/bin/bash";
+        let target = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
+        let script = format!(
+            "#!{interpreter}\nexport OUT='/nix/store/cccccccccccccccccccccccccccccccc-system'\nexec -a \"$0\" {target} \"$@\"\n"
+        );
+        std::fs::write(&wrapper, script).unwrap();
+        let wrapper_text = wrapper.to_string_lossy().to_string();
+        let args = vec!["switch".to_string()];
+
+        let mut forwarded_cmdline = Vec::new();
+        forwarded_cmdline.extend_from_slice(wrapper_text.as_bytes());
+        forwarded_cmdline.push(0);
+        forwarded_cmdline.extend_from_slice(b"switch");
+        forwarded_cmdline.push(0);
+        let (digest, image) = NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &forwarded_cmdline,
+        )
+        .unwrap();
+        assert_eq!(image, target);
+        assert_eq!(digest, NixOSExecutor::activation_argv_digest(&wrapper_text, &args));
+
+        let mut interpreter_cmdline = Vec::new();
+        interpreter_cmdline.extend_from_slice(interpreter.as_bytes());
+        interpreter_cmdline.push(0);
+        interpreter_cmdline.extend_from_slice(wrapper_text.as_bytes());
+        interpreter_cmdline.push(0);
+        interpreter_cmdline.extend_from_slice(b"switch");
+        interpreter_cmdline.push(0);
+        let (digest_before_exec, image_before_exec) = NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(interpreter),
+            &interpreter_cmdline,
+        )
+        .unwrap();
+        assert_eq!(image_before_exec, interpreter);
+        assert_eq!(digest_before_exec, digest);
+
+        let mut wrong_cmdline = Vec::new();
+        wrong_cmdline.extend_from_slice(wrapper_text.as_bytes());
+        wrong_cmdline.push(0);
+        wrong_cmdline.extend_from_slice(b"switch --impure");
+        wrong_cmdline.push(0);
+        assert!(NixOSExecutor::validate_observed_invocation(
+            &wrapper_text,
+            &args,
+            Path::new(target),
+            &wrong_cmdline,
+        ).is_err());
     }
 
     #[test]
