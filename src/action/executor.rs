@@ -2201,7 +2201,7 @@ impl NixOSExecutor {
         let safety = command.safety_level();
         if self.dry_run {
             return ExecutionResult::Blocked {
-                reason: "dry-run mode cannot mint or consume a journal-owned recovery capability; no journal mutation or worker spawn was attempted".into(),
+                reason: "dry-run mode cannot issue recovery authority or mutate the journal".into(),
                 safety_level: safety,
             };
         }
@@ -2226,7 +2226,12 @@ impl NixOSExecutor {
             Ok(value) => value,
             Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-        self.recover_journaled_transaction(capability, decision_quality, transaction_interlock).await
+        self.recover_journaled_transaction(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
     }
 
     async fn recover_journaled_transaction(
@@ -2235,7 +2240,13 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
         _transaction_interlock: NixwardTransactionInterlock,
     ) -> ExecutionResult {
-        let (journal_path, transaction_id_owned, command, authorization, mut transaction) = capability.into_parts();
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
         let transaction_id = transaction_id_owned.as_str();
         let safety = command.safety_level();
         let phase = transaction.phase();
@@ -2618,7 +2629,7 @@ impl NixOSExecutor {
         }
     }
 
-        pub async fn execute_authorized_with_transaction(
+    pub async fn execute_authorized_with_transaction(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
@@ -2628,7 +2639,7 @@ impl NixOSExecutor {
         let safety = command.safety_level();
         if self.dry_run {
             return ExecutionResult::Blocked {
-                reason: "dry-run mode cannot mint or consume a journal-owned activation capability; no journal mutation or worker spawn was attempted".into(),
+                reason: "dry-run mode cannot issue activation authority or mutate the journal".into(),
                 safety_level: safety,
             };
         }
@@ -2653,7 +2664,12 @@ impl NixOSExecutor {
             Ok(value) => value,
             Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-        self.execute_journaled_activation(capability, decision_quality, transaction_interlock).await
+        self.execute_journaled_activation(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
     }
 
     async fn execute_journaled_activation(
@@ -2662,7 +2678,13 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
         _transaction_interlock: NixwardTransactionInterlock,
     ) -> ExecutionResult {
-        let (journal_path, transaction_id_owned, command, authorization, mut transaction) = capability.into_parts();
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
         let transaction_id = transaction_id_owned.as_str();
         let safety = command.safety_level();
         // Journal loads deliberately lose historical Rooted authority. Re-establish
@@ -2919,7 +2941,7 @@ impl NixOSExecutor {
         }
     }
 
-        pub async fn execute_authorized(
+    pub async fn execute_authorized(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
@@ -3268,7 +3290,10 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(activation, ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")),
+            matches!(
+                activation,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
             "dry-run activation must reject before journal validation or mutation"
         );
 
@@ -3281,7 +3306,10 @@ mod tests {
             )
             .await;
         assert!(
-            matches!(recovery, ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")),
+            matches!(
+                recovery,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
             "dry-run recovery must reject before journal validation or mutation"
         );
     }

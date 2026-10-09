@@ -1982,7 +1982,9 @@ impl JournalOwnedActivationCapability {
         authorization: ExecutionAuthorization,
     ) -> Result<Self, String> {
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
-            return Err("journal activation capability is restricted to exact system closure activation".into());
+            return Err(
+                "journal activation capability is restricted to exact system closure activation".into(),
+            );
         }
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return Err(reason);
@@ -1990,8 +1992,9 @@ impl JournalOwnedActivationCapability {
         authorization.validate_for(&command)?;
         let journal_path = journal_path.as_ref().to_path_buf();
         validate_journal_path_binding(&journal_path, &transaction_id)?;
-        let transaction = ConfigTransaction::load(&journal_path)
-            .map_err(|error| format!("activation capability requires a valid durable journal: {error}"))?;
+        let transaction = ConfigTransaction::load(&journal_path).map_err(|error| {
+            format!("activation capability requires a valid durable journal: {error}")
+        })?;
         transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
         if transaction.phase() != ConfigTransactionPhase::SourceCommitted {
             return Err(format!(
@@ -1999,13 +2002,31 @@ impl JournalOwnedActivationCapability {
                 transaction.phase()
             ));
         }
-        Ok(Self { journal_path, transaction_id, command, authorization, transaction })
+        Ok(Self {
+            journal_path,
+            transaction_id,
+            command,
+            authorization,
+            transaction,
+        })
     }
 
     pub(super) fn into_parts(
         self,
-    ) -> (PathBuf, String, NixOSCommand, ExecutionAuthorization, ConfigTransaction) {
-        (self.journal_path, self.transaction_id, self.command, self.authorization, self.transaction)
+    ) -> (
+        PathBuf,
+        String,
+        NixOSCommand,
+        ExecutionAuthorization,
+        ConfigTransaction,
+    ) {
+        (
+            self.journal_path,
+            self.transaction_id,
+            self.command,
+            self.authorization,
+            self.transaction,
+        )
     }
 }
 
@@ -2028,7 +2049,9 @@ impl JournalOwnedRecoveryCapability {
         authorization: ExecutionAuthorization,
     ) -> Result<Self, String> {
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
-            return Err("journal recovery capability is restricted to exact system closure activation".into());
+            return Err(
+                "journal recovery capability is restricted to exact system closure activation".into(),
+            );
         }
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return Err(reason);
@@ -2036,8 +2059,9 @@ impl JournalOwnedRecoveryCapability {
         authorization.validate_for_recovery(&command)?;
         let journal_path = journal_path.as_ref().to_path_buf();
         validate_journal_path_binding(&journal_path, &transaction_id)?;
-        let transaction = ConfigTransaction::load(&journal_path)
-            .map_err(|error| format!("recovery capability requires a valid durable journal: {error}"))?;
+        let transaction = ConfigTransaction::load(&journal_path).map_err(|error| {
+            format!("recovery capability requires a valid durable journal: {error}")
+        })?;
         transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
         if !matches!(
             transaction.phase(),
@@ -2055,13 +2079,31 @@ impl JournalOwnedRecoveryCapability {
                 transaction.phase()
             ));
         }
-        Ok(Self { journal_path, transaction_id, command, authorization, transaction })
+        Ok(Self {
+            journal_path,
+            transaction_id,
+            command,
+            authorization,
+            transaction,
+        })
     }
 
     pub(super) fn into_parts(
         self,
-    ) -> (PathBuf, String, NixOSCommand, ExecutionAuthorization, ConfigTransaction) {
-        (self.journal_path, self.transaction_id, self.command, self.authorization, self.transaction)
+    ) -> (
+        PathBuf,
+        String,
+        NixOSCommand,
+        ExecutionAuthorization,
+        ConfigTransaction,
+    ) {
+        (
+            self.journal_path,
+            self.transaction_id,
+            self.command,
+            self.authorization,
+            self.transaction,
+        )
     }
 }
 
