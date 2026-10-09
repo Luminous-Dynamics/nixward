@@ -4249,7 +4249,7 @@ mod tests {
     }
 
     #[test]
-    fn transaction_load_rejects_v6_journal_without_gate_receipt_fields() {
+    fn transaction_load_rejects_v6_schema_version_even_when_fields_parse() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transaction.json");
         let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
@@ -4261,7 +4261,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let error = ConfigTransaction::load(&path)
-            .expect_err("v6 journals do not contain the v7 gate-release evidence");
+            .expect_err("the v6 schema/version must never be accepted as v7");
         assert!(
             error.contains("schema/version mismatch"),
             "legacy journal must fail closed with a schema incompatibility: {error}"
