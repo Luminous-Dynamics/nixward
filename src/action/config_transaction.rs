@@ -2807,6 +2807,19 @@ mod tests {
     }
 
     #[test]
+    fn activation_worker_process_image_rejects_store_path_traversal() {
+        let mut identity = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/bin/nixos-rebuild",
+        );
+        identity.process_image =
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-bash/../../tmp/evil".into();
+        assert!(
+            identity.validate_identity().is_err(),
+            "observed process-image path traversal must fail closed"
+        );
+    }
+
+    #[test]
     fn activation_worker_executable_accepts_canonical_store_path() {
         let identity = worker_identity_for_test(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-rebuild/bin/nixos-rebuild",
