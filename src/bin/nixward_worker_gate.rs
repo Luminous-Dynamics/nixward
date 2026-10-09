@@ -105,10 +105,50 @@ where
     on_release()
 }
 
+fn nix_store_object(path: &Path) -> Result<String, String> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| "worker gate process image path is not valid UTF-8".to_string())?;
+    let object = text
+        .strip_prefix("/nix/store/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|object| !object.is_empty())
+        .ok_or_else(|| "worker gate process image is not a Nix store object".to_string())?;
+    let store_path = format!("/nix/store/{object}");
+    if !nixward::action::execution_intent::is_valid_nix_store_path(&store_path) {
+        return Err("worker gate process image has an invalid Nix store object identity".into());
+    }
+    Ok(object.to_string())
+}
+
+/// The gate is an ordering barrier for Nixward's trusted launcher, not a general
+/// command-execution interface. Refuse direct invocation by a shell or unrelated
+/// executable, which otherwise could choose both the digest and token itself.
+/// This is defense in depth, not isolation from a compromised Nixward process.
+fn validate_trusted_parent_package() -> Result<(), String> {
+    let current = std::env::current_exe()
+        .map_err(|error| format!("worker gate cannot resolve its own executable: {error}"))?
+        .canonicalize()
+        .map_err(|error| format!("worker gate cannot canonicalize its executable: {error}"))?;
+    let current_object = nix_store_object(&current)?;
+    let parent_pid = unsafe { nix::libc::getppid() };
+    if parent_pid <= 1 {
+        return Err("worker gate has no live Nixward launcher parent".into());
+    }
+    let parent = std::fs::read_link(format!("/proc/{parent_pid}/exe"))
+        .map_err(|error| format!("worker gate cannot inspect launcher parent executable: {error}"))?;
+    let parent_object = nix_store_object(&parent)?;
+    if parent_object != current_object {
+        return Err("worker gate parent is not from the same immutable Nixward package".into());
+    }
+    Ok(())
+}
+
 fn run_with_args<I>(args: I) -> Result<(), String>
 where
     I: IntoIterator<Item = OsString>,
 {
+    validate_trusted_parent_package()?;
     let mut args = args.into_iter();
     let mode = args
         .next()
@@ -241,6 +281,16 @@ mod tests {
         });
         assert!(result.unwrap_err().contains("trailing bytes"));
         assert_eq!(calls, 0, "trailing pipe bytes must not release");
+    }
+
+    #[test]
+    fn worker_gate_parent_package_identity_is_exact() {
+        let current = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward-worker-gate");
+        let sibling = Path::new("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward/bin/nixward");
+        let other = Path::new("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixward/bin/nixward");
+        assert_eq!(nix_store_object(current).unwrap(), nix_store_object(sibling).unwrap());
+        assert_ne!(nix_store_object(current).unwrap(), nix_store_object(other).unwrap());
+        assert!(nix_store_object(Path::new("/usr/bin/bash")).is_err());
     }
 
     #[test]
