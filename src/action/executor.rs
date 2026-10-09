@@ -2298,7 +2298,8 @@ impl NixOSExecutor {
                     };
                 }
             super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
-                if !has_purpose(ActivationWorkerPurpose::Recovery) => {
+                if !has_purpose(ActivationWorkerPurpose::RecoveryProfileTransition)
+                    && !has_purpose(ActivationWorkerPurpose::RecoveryActivation) => {
                     return ExecutionResult::FailedNoRollback {
                         error: "recovery worker identity is absent after RecoveryMutationStarted; refusing to guess whether a recovery process is still running".into(),
                         rollback_error: None,
@@ -2547,7 +2548,7 @@ impl NixOSExecutor {
             prior_profile,
             &mut transaction,
             &journal_path,
-            super::config_transaction::ActivationWorkerPurpose::Recovery,
+            super::config_transaction::ActivationWorkerPurpose::RecoveryProfileTransition,
         ).await {
             Ok(disposition) => match disposition {
                 super::config_transaction::ProfileTransitionDisposition::Committed { .. } => {}
@@ -2592,7 +2593,7 @@ impl NixOSExecutor {
             &args,
             &mut transaction,
             &journal_path,
-            super::config_transaction::ActivationWorkerPurpose::Recovery,
+            super::config_transaction::ActivationWorkerPurpose::RecoveryActivation,
         ).await;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
