@@ -109,7 +109,7 @@ else:
             errors.append("workflow must map the bootstrap write token exactly once")
 
     draft_lockfile = re.search(
-        r"(?ms)^  draft-lockfile-artifact:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+        r"(?ms)^  draft-lockfile-artifact:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
     if not draft_lockfile:
@@ -133,7 +133,7 @@ else:
             errors.append("draft lockfile artifact job must not have repository write authority")
 
     draft_candidate = re.search(
-        r"(?ms)^  draft-candidate-check:.*?(?=^  [A-Za-z_][\\w-]*:|\\Z)",
+        r"(?ms)^  draft-candidate-check:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
         text,
     )
     if not draft_candidate:
@@ -149,6 +149,8 @@ else:
             "EXPECTED_CARGO_LOCK_SHA256",
             "test \"$actual\" = \"$EXPECTED_CARGO_LOCK_SHA256\"",
             "cargo test --locked --bin nixward-worker-gate",
+            "git add --intent-to-add -f Cargo.lock",
+            "git ls-files --error-unmatch Cargo.lock",
             "Draft hardening candidate checks (not qualification)",
             "it does not issue a qualification receipt",
         ]

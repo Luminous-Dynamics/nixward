@@ -433,6 +433,13 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Stage exact-run lockfile for Git-backed flake source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add --intent-to-add -f Cargo.lock
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
         with:
