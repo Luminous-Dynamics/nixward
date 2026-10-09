@@ -9,10 +9,10 @@
 //! feature additionally provides the narrowly scoped Nix source
 //! realization and retention primitive.
 
-use super::executor::SystemActivation;
+use super::executor::{ExecutionAuthorization, HostExecutionPolicy, NixOSCommand, SystemActivation};
 use std::io::Write;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
@@ -1961,6 +1961,118 @@ pub struct ConfigTransaction {
     recovery_observed: bool,
 }
 
+
+/// Ephemeral, non-serializable authority issued only after the durable journal
+/// revalidates command, authorization bindings, retention, and transaction phase.
+/// It is intentionally not Clone; the executor consumes it through one narrow path.
+#[must_use = "journal-owned activation capabilities must be consumed by the journaled executor"]
+pub(super) struct JournalOwnedActivationCapability {
+    journal_path: PathBuf,
+    transaction_id: String,
+    command: NixOSCommand,
+    authorization: ExecutionAuthorization,
+    transaction: ConfigTransaction,
+}
+
+impl JournalOwnedActivationCapability {
+    pub(super) fn issue(
+        journal_path: impl AsRef<Path>,
+        transaction_id: String,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+    ) -> Result<Self, String> {
+        if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            return Err("journal activation capability is restricted to exact system closure activation".into());
+        }
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return Err(reason);
+        }
+        authorization.validate_for(&command)?;
+        let journal_path = journal_path.as_ref().to_path_buf();
+        validate_journal_path_binding(&journal_path, &transaction_id)?;
+        let transaction = ConfigTransaction::load(&journal_path)
+            .map_err(|error| format!("activation capability requires a valid durable journal: {error}"))?;
+        transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
+        if transaction.phase() != ConfigTransactionPhase::SourceCommitted {
+            return Err(format!(
+                "journal activation capability requires SourceCommitted, observed {:?}",
+                transaction.phase()
+            ));
+        }
+        Ok(Self { journal_path, transaction_id, command, authorization, transaction })
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (PathBuf, String, NixOSCommand, ExecutionAuthorization, ConfigTransaction) {
+        (self.journal_path, self.transaction_id, self.command, self.authorization, self.transaction)
+    }
+}
+
+/// Recovery authority has a different type and admission policy from new activation.
+/// It cannot be substituted for a fresh activation capability or issued at a terminal phase.
+#[must_use = "journal-owned recovery capabilities must be consumed by the recovery executor"]
+pub(super) struct JournalOwnedRecoveryCapability {
+    journal_path: PathBuf,
+    transaction_id: String,
+    command: NixOSCommand,
+    authorization: ExecutionAuthorization,
+    transaction: ConfigTransaction,
+}
+
+impl JournalOwnedRecoveryCapability {
+    pub(super) fn issue(
+        journal_path: impl AsRef<Path>,
+        transaction_id: String,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+    ) -> Result<Self, String> {
+        if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            return Err("journal recovery capability is restricted to exact system closure activation".into());
+        }
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return Err(reason);
+        }
+        authorization.validate_for_recovery(&command)?;
+        let journal_path = journal_path.as_ref().to_path_buf();
+        validate_journal_path_binding(&journal_path, &transaction_id)?;
+        let transaction = ConfigTransaction::load(&journal_path)
+            .map_err(|error| format!("recovery capability requires a valid durable journal: {error}"))?;
+        transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
+        if !matches!(
+            transaction.phase(),
+            ConfigTransactionPhase::ProfileTransitionStarted
+                | ConfigTransactionPhase::ProfileCommitted
+                | ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::RecoveryMutationStarted
+        ) {
+            return Err(format!(
+                "journal recovery capability is not permitted for transaction phase {:?}",
+                transaction.phase()
+            ));
+        }
+        Ok(Self { journal_path, transaction_id, command, authorization, transaction })
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (PathBuf, String, NixOSCommand, ExecutionAuthorization, ConfigTransaction) {
+        (self.journal_path, self.transaction_id, self.command, self.authorization, self.transaction)
+    }
+}
+
+fn validate_journal_path_binding(path: &Path, transaction_id: &str) -> Result<(), String> {
+    if path.file_stem().and_then(|value| value.to_str()) != Some(transaction_id) {
+        return Err("journal path does not bind the exact transaction id".into());
+    }
+    Ok(())
+}
+
+
 impl ConfigTransaction {
     pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v6";
     pub const VERSION: u16 = 6;
@@ -2419,6 +2531,59 @@ impl ConfigTransaction {
 
     pub fn candidate_build(&self) -> Option<&CandidateBuildReceipt> {
         self.candidate_build.as_ref()
+    }
+
+    /// Revalidate the durable transaction against the exact activation command
+    /// and cryptographically verified execution evidence. This is the sole shared
+    /// journal-owned binding check used to issue activation/recovery capabilities.
+    pub(super) fn validate_activation_binding(
+        &self,
+        transaction_id: &str,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+    ) -> Result<(), String> {
+        if self.transaction_id() != transaction_id {
+            return Err("loaded transaction id does not match the requested transaction".into());
+        }
+        let authorization_plan = authorization
+            .change_plan_digest()
+            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
+        if self.plan_digest()? != authorization_plan {
+            return Err("loaded transaction plan digest does not match execution authorization".into());
+        }
+        let NixOSCommand::ActivateSystemClosure {
+            store_path,
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = command
+        else {
+            return Err("transaction journal binding requires exact system closure activation".into());
+        };
+        let receipt = self
+            .candidate_build()
+            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
+        receipt.verify_retention()?;
+        if receipt.candidate_store_path != *store_path {
+            return Err("transaction candidate does not match activation closure".into());
+        }
+        if receipt.candidate_store_path != *profile_store_path {
+            return Err("transaction candidate does not match selected system profile".into());
+        }
+        let expected_installable = authorization
+            .realization_installable()
+            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
+        if receipt.installable != expected_installable {
+            return Err("transaction candidate installable does not match authorization".into());
+        }
+        let expected_realization_plan_digest = authorization
+            .realization_plan_digest()
+            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        if expected_realization_plan_digest.as_deref()
+            != Some(receipt.realization_plan_digest.as_str())
+        {
+            return Err("transaction realization-plan identity does not match authorization".into());
+        }
+        Ok(())
     }
 
     /// Persist one worker identity after it has been captured by pidfd and

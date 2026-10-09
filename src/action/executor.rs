@@ -822,7 +822,7 @@ impl ExecutionAuthorization {
         self.authority_subject_blake3.as_deref()
     }
 
-    fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("recovery authorization is bound to a different command".into());
         }
@@ -861,7 +861,7 @@ impl ExecutionAuthorization {
         Ok(())
     }
 
-    fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("authorization is bound to a different command".into());
         }
@@ -2150,56 +2150,6 @@ impl NixOSExecutor {
             .with_extension("json"))
     }
 
-    fn validate_transaction_for_exact_activation(
-        transaction: &super::config_transaction::ConfigTransaction,
-        transaction_id: &str,
-        command: &NixOSCommand,
-        authorization: &ExecutionAuthorization,
-    ) -> Result<(), String> {
-        if transaction.transaction_id() != transaction_id {
-            return Err("loaded transaction id does not match the requested transaction".into());
-        }
-        let authorization_plan = authorization
-            .change_plan_digest()
-            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
-        if transaction.plan_digest()? != authorization_plan {
-            return Err("loaded transaction plan digest does not match execution authorization".into());
-        }
-        let NixOSCommand::ActivateSystemClosure {
-            store_path,
-            profile_store_path: Some(profile_store_path),
-            ..
-        } = command
-        else {
-            return Err("transaction journal binding requires exact system closure activation".into());
-        };
-        let receipt = transaction
-            .candidate_build()
-            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
-        receipt.verify_retention()?;
-        if receipt.candidate_store_path != *store_path {
-            return Err("transaction candidate does not match activation closure".into());
-        }
-        if receipt.candidate_store_path != *profile_store_path {
-            return Err("transaction candidate does not match selected system profile".into());
-        }
-        let expected_installable = authorization
-            .realization_installable()
-            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
-        if receipt.installable != expected_installable {
-            return Err("transaction candidate installable does not match authorization".into());
-        }
-        let expected_realization_plan_digest = authorization
-            .realization_plan_digest()
-            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-        if expected_realization_plan_digest.as_deref()
-            != Some(receipt.realization_plan_digest.as_str())
-        {
-            return Err("transaction realization-plan identity does not match authorization".into());
-        }
-        Ok(())
-    }
-
     fn persist_transaction(
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
@@ -2249,88 +2199,45 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
         let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot mint or consume a journal-owned recovery capability; no journal mutation or worker spawn was attempted".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction recovery is restricted to exact system closure activation".into(),
                 safety_level: safety,
             };
         }
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-        if let Err(reason) = authorization.validate_for_recovery(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let _transaction_interlock = match NixwardTransactionInterlock::acquire() {
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
             Ok(lock) => lock,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(value) => value,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("transaction recovery requires a valid durable journal: {reason}"),
-                        safety_level: safety,
-                    };
-                }
-            };
-
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
+        let capability = match super::config_transaction::JournalOwnedRecoveryCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-        if !matches!(
-            transaction.phase(),
-            super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
-                | super::config_transaction::ConfigTransactionPhase::ProfileCommitted
-                | super::config_transaction::ConfigTransactionPhase::ActivationStarted
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateProfileTransition
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateActivation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryRequired
-                | super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
-        ) {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction phase {:?} is not an explicit recovery phase",
-                    transaction.phase()
-                ),
-                safety_level: safety,
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.recover_journaled_transaction(capability, decision_quality, transaction_interlock).await
+    }
 
+    async fn recover_journaled_transaction(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedRecoveryCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (journal_path, transaction_id_owned, command, authorization, mut transaction) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         let phase = transaction.phase();
         let workers = transaction.activation_worker_identities();
         let has_purpose = |purpose| workers.iter().any(|worker| worker.purpose == purpose);
@@ -2711,88 +2618,53 @@ impl NixOSExecutor {
         }
     }
 
-    pub async fn execute_authorized_with_transaction(
+        pub async fn execute_authorized_with_transaction(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
         transaction_id: impl AsRef<str>,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot mint or consume a journal-owned activation capability; no journal mutation or worker spawn was attempted".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction-aware execution is restricted to exact system closure activation".into(),
-                safety_level: command.safety_level(),
+                safety_level: safety,
             };
         }
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: command.safety_level(),
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-        if let Err(reason) = authorization.validate_for(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-
-        let _transaction_interlock = if !self.dry_run {
-            match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => Some(lock),
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason,
-                        safety_level: command.safety_level(),
-                    };
-                }
-            }
-        } else {
-            None
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
+            Ok(lock) => lock,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(transaction) => transaction,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("exact activation requires a valid durable transaction journal: {reason}"),
-                        safety_level: command.safety_level(),
-                    };
-                }
-            };
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
+        let capability = match super::config_transaction::JournalOwnedActivationCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.execute_journaled_activation(capability, decision_quality, transaction_interlock).await
+    }
 
-        if transaction.phase() != super::config_transaction::ConfigTransactionPhase::SourceCommitted {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction journal is at {:?}; exact activation requires SourceCommitted or an explicit recovery operation",
-                    transaction.phase()
-                ),
-                safety_level: command.safety_level(),
-            };
-        }
-
+    async fn execute_journaled_activation(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedActivationCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (journal_path, transaction_id_owned, command, authorization, mut transaction) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         // Journal loads deliberately lose historical Rooted authority. Re-establish
         // significance only if the current machine still proves the exact authorized
         // predecessor runtime/profile, not merely because the journal said so.
@@ -3047,7 +2919,7 @@ impl NixOSExecutor {
         }
     }
 
-    pub async fn execute_authorized(
+        pub async fn execute_authorized(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
@@ -3372,6 +3244,47 @@ impl NixOSExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transactional_activation_and_recovery_fail_closed_in_dry_run() {
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into(),
+            profile_store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into()),
+            action: SystemActivation::Switch,
+        };
+        let unrelated_read_only = NixOSCommand::Search {
+            query: "dry-run guard regression".into(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&unrelated_read_only).unwrap();
+
+        let activation = executor
+            .execute_authorized_with_transaction(
+                command.clone(),
+                authorization.clone(),
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(activation, ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")),
+            "dry-run activation must reject before journal validation or mutation"
+        );
+
+        let recovery = executor
+            .recover_authorized_transaction(
+                command,
+                authorization,
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(recovery, ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")),
+            "dry-run recovery must reject before journal validation or mutation"
+        );
+    }
 
     #[test]
     fn environment_digest_is_order_independent_but_value_sensitive() {

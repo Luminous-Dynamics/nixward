@@ -536,3 +536,25 @@ The accepted exports include the current Nixpkgs `SYSTEMD` setting in addition t
 The unit fixture covers the current direct-exec wrapper plus rejection of wrong `OUT`/`TOPLEVEL` binding, mutable helper paths, pre-exec payloads, command substitution, forbidden environment exports, shell `-c` indirection, and argument drift.
 
 Qualification remains evidence-gated: this source review is not a compiler result. Exact-head hosted validation must run the real test matrix before the branch can be classified as qualified.
+
+## Journal-owned activation capability (2026-10-09)
+
+The public activation and recovery entry points treat command, signed
+authorization, and transaction ID as inputs to journal admission, not as a
+standalone execution capability. A shared journal validator binds the
+transaction identity and plan digest to the retained candidate receipt, exact
+installable selector, realization-plan digest, selected profile, and permitted
+phase before an ephemeral capability can be issued. The mutation routines
+accept only their corresponding non-cloneable, non-serializable capability
+while the transaction interlock remains held. Primary activation and recovery
+use different capability types so recovery admission cannot be relabelled as
+new activation.
+
+Dry-run mode now rejects both privileged entry points before journal loading,
+transition, or worker spawn. Dry-run is a non-mutating preview, not a
+transactional activation success.
+
+This is a source-level architectural change, not a qualification receipt. The
+hardening and validation PR heads must remain exactly synchronized, and the
+exact head still requires completed hosted compiler/test evidence before a
+qualified status can be claimed.
