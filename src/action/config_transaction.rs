@@ -2826,7 +2826,7 @@ impl ConfigTransaction {
         self.persist_atomic_classified_with_hook(path.as_ref(), |_| Ok(()))
     }
 
-    fn persist_atomic_classified_with_hook<F>(
+    pub(super) fn persist_atomic_classified_with_hook<F>
         &self,
         path: &Path,
         mut boundary_hook: F,
@@ -3030,9 +3030,7 @@ impl ConfigTransaction {
                 ));
             }
             fsync(parent_fd).map_err(|error| {
-                format!(
-                    "journal rename already published, but parent-directory synchronization failed; current visibility does not prove crash durability: {error}"
-                )
+                format!("parent-directory synchronization failed: {error}")
             })?;
 
             return Ok(());
@@ -3058,13 +3056,11 @@ impl ConfigTransaction {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(format!("failed to commit transaction journal: {error}"));
             }
-            boundary_hook(JournalPersistBoundary::DirectorySync).map_err(|error| {
-                format!("journal rename already published; parent-directory durability is indeterminate: {error}")
-            })?;
+            boundary_hook(JournalPersistBoundary::DirectorySync)?;
             let parent_dir = std::fs::File::open(parent)
                 .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
             parent_dir.sync_all().map_err(|error| {
-                format!("failed to sync transaction journal directory: {error}")
+                format!("parent-directory synchronization failed: {error}")
             })?;
             Ok(())
         }
