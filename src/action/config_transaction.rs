@@ -4506,6 +4506,103 @@ mod tests {
         }
     }
 
+    /// Child entrypoint used by the parent test below. The environment switch
+    /// exists only in the test binary; production builds have no crash hook.
+    #[cfg(unix)]
+    #[test]
+    fn journal_persistence_termination_child() {
+        let Ok(stage) = std::env::var("NIXWARD_TEST_JOURNAL_CRASH_STAGE") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(
+            std::env::var_os("NIXWARD_TEST_JOURNAL_CRASH_PATH")
+                .expect("parent test supplies a journal path"),
+        );
+        let fail_at = match stage.as_str() {
+            "CandidateWrite" => JournalPersistBoundary::CandidateWrite,
+            "DirectorySync" => JournalPersistBoundary::DirectorySync,
+            other => panic!("unsupported test crash stage: {other}"),
+        };
+
+        let mut pending = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        pending.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+        let _ = pending.persist_atomic_classified_with_hook(&path, |boundary| {
+            if boundary == fail_at {
+                // Simulate abrupt process termination at this named boundary:
+                // no Rust cleanup/destructors are allowed to run.
+                std::process::exit(86);
+            }
+            Ok(())
+        });
+        panic!("child did not reach the requested journal crash boundary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_subprocess_termination_reopens_old_or_published_journal_by_checkpoint() {
+        use std::process::Command;
+
+        for (stage, expect_published) in [
+            ("CandidateWrite", false),
+            ("DirectorySync", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transaction.json");
+            let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+            committed.persist_atomic(&path).unwrap();
+            let committed_bytes = std::fs::read(&path).unwrap();
+
+            let executable = std::env::current_exe().expect("test executable path");
+            let mut child = Command::new(executable)
+                .arg("journal_persistence_termination_child")
+                .arg("--nocapture")
+                .env("NIXWARD_TEST_JOURNAL_CRASH_STAGE", stage)
+                .env("NIXWARD_TEST_JOURNAL_CRASH_PATH", &path)
+                .spawn()
+                .expect("spawn the isolated persistence child");
+            let child_pid = child.id();
+            let status = child.wait().expect("wait for abrupt child termination");
+            assert_eq!(
+                status.code(),
+                Some(86),
+                "child failed to terminate at {stage} as expected"
+            );
+
+            // Re-open through the same schema-validating reader recovery uses.
+            let reopened = ConfigTransaction::load(&path)
+                .expect("journal remains readable after child process termination");
+            let candidate_path = dir
+                .path()
+                .join(format!(".transaction.json.tmp-{child_pid}"));
+            if expect_published {
+                assert_ne!(
+                    std::fs::read(&path).unwrap(),
+                    committed_bytes,
+                    "post-rename termination must expose the newly published file in the live namespace"
+                );
+                assert_eq!(reopened.phase(), ConfigTransactionPhase::InputFrozen);
+                assert!(
+                    !candidate_path.exists(),
+                    "rename should have consumed the candidate name before termination"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    committed_bytes,
+                    "pre-rename termination must preserve the previous journal bytes"
+                );
+                assert_eq!(reopened.phase(), ConfigTransactionPhase::Prepared);
+                assert!(
+                    candidate_path.exists(),
+                    "abrupt exit during a partial write should leave the candidate for parent cleanup"
+                );
+                std::fs::remove_file(&candidate_path)
+                    .expect("parent removes the abandoned temporary candidate");
+                assert!(!candidate_path.exists());
+            }
+        }
+    }
+
     #[test]
     fn transaction_id_binds_source_plan_and_nonce() {
         let first = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
