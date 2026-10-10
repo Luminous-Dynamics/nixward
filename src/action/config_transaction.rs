@@ -2886,9 +2886,15 @@ impl ConfigTransaction {
 
             let write_result = (|| -> Result<(), String> {
                 let mut written = 0usize;
+                let write_boundary_offset = (encoded.len() / 2).max(1);
                 let mut checked_write_boundary = false;
                 while written < encoded.len() {
-                    match write(temp_fd, &encoded[written..]) {
+                    let write_end = if checked_write_boundary {
+                        encoded.len()
+                    } else {
+                        write_boundary_offset
+                    };
+                    match write(temp_fd, &encoded[written..write_end]) {
                         Ok(0) => {
                             return Err(
                                 "descriptor-bound transaction journal write made no progress"
@@ -2897,7 +2903,9 @@ impl ConfigTransaction {
                         }
                         Ok(count) => {
                             written += count;
-                            if !checked_write_boundary {
+                            if !checked_write_boundary && written >= write_boundary_offset {
+                                // Inject after the first half has reached the temporary file,
+                                // before the remainder is written or the file is synchronized.
                                 boundary_hook(JournalPersistBoundary::CandidateWrite)?;
                                 checked_write_boundary = true;
                             }
