@@ -24,6 +24,7 @@ use std::os::fd::AsRawFd;
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -822,7 +823,7 @@ impl ExecutionAuthorization {
         self.authority_subject_blake3.as_deref()
     }
 
-    fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("recovery authorization is bound to a different command".into());
         }
@@ -861,7 +862,7 @@ impl ExecutionAuthorization {
         Ok(())
     }
 
-    fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("authorization is bound to a different command".into());
         }
@@ -1272,13 +1273,7 @@ impl NixOSExecutor {
     }
 
     fn activation_argv_digest(executable: &str, args: &[String]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
-        for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
-            hasher.update(&(argument.len() as u64).to_le_bytes());
-            hasher.update(argument.as_bytes());
-        }
-        hasher.finalize().to_hex().to_string()
+        super::config_transaction::activation_argv_digest(executable, args)
     }
 
     fn canonical_store_executable_lexical(path: &str) -> bool {
@@ -1478,6 +1473,9 @@ impl NixOSExecutor {
         purpose: super::config_transaction::ActivationWorkerPurpose,
         executable: &str,
         args: &[String],
+        payload_executable: &str,
+        payload_args: &[String],
+        release_challenge_digest: &str,
     ) -> Result<(super::config_transaction::ActivationWorkerIdentity, OwnedFd), String> {
         let boot_before = Self::current_boot_id()?;
         let start_before = Self::proc_start_time_ticks(pid)?
@@ -1531,6 +1529,10 @@ impl NixOSExecutor {
             executable: executable.to_string(),
             process_image,
             argv_digest,
+            payload_executable: payload_executable.to_string(),
+            payload_args: payload_args.to_vec(),
+            release_challenge_digest: release_challenge_digest.to_string(),
+            payload_argv_digest: Self::activation_argv_digest(payload_executable, payload_args),
             environment_digest: Self::activation_worker_environment_digest(),
         };
         identity.validate_identity()?;
@@ -1573,6 +1575,70 @@ impl NixOSExecutor {
         Err("activation worker recovery requires Linux pidfd support".into())
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn trusted_worker_gate_executable() -> Result<String, String> {
+        let current = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve current Nixward executable: {error}"))?
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize current Nixward executable: {error}"))?;
+        Self::validate_store_backed_executable(&current, "current Nixward executable")?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| "current Nixward executable has no parent directory".to_string())?;
+        let entry = parent.join("nixward-worker-gate");
+        let metadata = std::fs::symlink_metadata(&entry)
+            .map_err(|error| format!("trusted Nixward worker gate is unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("trusted Nixward worker gate must be a regular sibling executable".into());
+        }
+        let gate = entry
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize Nixward worker gate: {error}"))?;
+        Self::validate_store_backed_executable(&gate, "Nixward worker gate")?;
+        let current_object = current
+            .strip_prefix("/nix/store/")
+            .ok_or_else(|| "current Nixward executable is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "current Nixward executable has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        let gate_object = gate
+            .strip_prefix("/nix/store/")
+            .map_err(|_| "Nixward worker gate is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "Nixward worker gate has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        if current_object != gate_object {
+            return Err("Nixward worker gate is not in the exact current executable store object".into());
+        }
+        gate.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Nixward worker gate path is not valid UTF-8".into())
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_token() -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+        // Zeroizing wipes the token when this function's caller returns, errors,
+        // or its async future is cancelled—unlike a success-path-only fill(0).
+        let mut token = zeroize::Zeroizing::new([0u8; 32]);
+        let mut random = File::open("/dev/urandom")
+            .map_err(|error| format!("failed to open kernel random source: {error}"))?;
+        std::io::Read::read_exact(&mut random, &mut *token)
+            .map_err(|error| format!("failed to obtain worker-gate release token: {error}"))?;
+        Ok(token)
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_digest(token: &[u8; 32]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-worker-gate-release-v1\0");
+        hasher.update(token);
+        hasher.finalize().to_hex().to_string()
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
@@ -1585,19 +1651,47 @@ impl NixOSExecutor {
             let _ = (executable, args, transaction, journal_path, purpose);
             return Err("transaction worker execution requires Linux pidfd support".into());
         }
+
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let mut child = Command::new(executable);
-            child.env_clear();
+            let gate_executable = Self::trusted_worker_gate_executable()?;
+            let release_token = Self::worker_gate_release_token()?;
+            let release_digest = Self::worker_gate_release_digest(&*release_token);
+            let mut gate_args = vec![
+                "--nixward-worker-gate-v1".to_string(),
+                executable.to_string(),
+                release_digest,
+            ];
+            gate_args.extend(args.iter().cloned());
+
+            let mut command = Command::new(&gate_executable);
+            command.env_clear();
             for &(name, value) in Self::activation_worker_environment() {
-                child.env(name, value);
+                command.env(name, value);
             }
-            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-            let mut child = child.spawn()
-                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
-            let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
-            let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
+            command
+                .args(&gate_args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .map_err(|error| format!("failed to spawn inert transaction worker gate: {error}"))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| "transaction worker gate has no process id".to_string())?;
+            let (identity, pidfd) = match Self::capture_worker_identity(
+                pid,
+                &transaction_id,
+                purpose,
+                &gate_executable,
+                &gate_args,
+                executable,
+                args,
+                &release_digest,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     let _ = child.start_kill();
@@ -1615,17 +1709,45 @@ impl NixOSExecutor {
                 let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(format!("worker identity could not be persisted; worker was killed best-effort: {error}"));
+                return Err(format!(
+                    "worker gate receipt could not be persisted; payload was not released: {error}"
+                ));
             }
-            let output = child.wait_with_output().await
-                .map_err(|error| format!("failed waiting for transaction worker {executable}: {error}"))?;
+
+            // The payload remains blocked until its pidfd, exact gate argv,
+            // payload digest, and transaction binding are durable.
+            let Some(mut gate_stdin) = child.stdin.take() else {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err("worker gate stdin channel is unavailable; payload was not released".into());
+            };
+            if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
+                drop(gate_stdin);
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!(
+                    "worker gate release token could not be delivered; payload was not intentionally released: {error}"
+                ));
+            }
+            drop(gate_stdin);
+            // The release token is no longer needed once EOF has been sent.
+            // Zeroize it before waiting for a potentially long-running activation.
+            drop(release_token);
+
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|error| format!("failed waiting for gated transaction worker {executable}: {error}"))?;
             if !Self::pidfd_exited(&pidfd)? {
                 return Err("transaction worker wait completed without pidfd exit evidence".into());
             }
             Ok(output)
         }
     }
-    async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
+
+        async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
         let (declared_cmd, args) = command.to_command();
         let executable = Self::trusted_bound_executable(command)?;
         Command::new(&executable)
@@ -2150,56 +2272,6 @@ impl NixOSExecutor {
             .with_extension("json"))
     }
 
-    fn validate_transaction_for_exact_activation(
-        transaction: &super::config_transaction::ConfigTransaction,
-        transaction_id: &str,
-        command: &NixOSCommand,
-        authorization: &ExecutionAuthorization,
-    ) -> Result<(), String> {
-        if transaction.transaction_id() != transaction_id {
-            return Err("loaded transaction id does not match the requested transaction".into());
-        }
-        let authorization_plan = authorization
-            .change_plan_digest()
-            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
-        if transaction.plan_digest()? != authorization_plan {
-            return Err("loaded transaction plan digest does not match execution authorization".into());
-        }
-        let NixOSCommand::ActivateSystemClosure {
-            store_path,
-            profile_store_path: Some(profile_store_path),
-            ..
-        } = command
-        else {
-            return Err("transaction journal binding requires exact system closure activation".into());
-        };
-        let receipt = transaction
-            .candidate_build()
-            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
-        receipt.verify_retention()?;
-        if receipt.candidate_store_path != *store_path {
-            return Err("transaction candidate does not match activation closure".into());
-        }
-        if receipt.candidate_store_path != *profile_store_path {
-            return Err("transaction candidate does not match selected system profile".into());
-        }
-        let expected_installable = authorization
-            .realization_installable()
-            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
-        if receipt.installable != expected_installable {
-            return Err("transaction candidate installable does not match authorization".into());
-        }
-        let expected_realization_plan_digest = authorization
-            .realization_plan_digest()
-            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-        if expected_realization_plan_digest.as_deref()
-            != Some(receipt.realization_plan_digest.as_str())
-        {
-            return Err("transaction realization-plan identity does not match authorization".into());
-        }
-        Ok(())
-    }
-
     fn persist_transaction(
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
@@ -2249,88 +2321,56 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
         let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot issue recovery authority or mutate the journal".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction recovery is restricted to exact system closure activation".into(),
                 safety_level: safety,
             };
         }
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-        if let Err(reason) = authorization.validate_for_recovery(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let _transaction_interlock = match NixwardTransactionInterlock::acquire() {
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
             Ok(lock) => lock,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(value) => value,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("transaction recovery requires a valid durable journal: {reason}"),
-                        safety_level: safety,
-                    };
-                }
-            };
-
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
+        let capability = match super::config_transaction::JournalOwnedRecoveryCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-        if !matches!(
-            transaction.phase(),
-            super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
-                | super::config_transaction::ConfigTransactionPhase::ProfileCommitted
-                | super::config_transaction::ConfigTransactionPhase::ActivationStarted
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateProfileTransition
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateActivation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryRequired
-                | super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
-        ) {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction phase {:?} is not an explicit recovery phase",
-                    transaction.phase()
-                ),
-                safety_level: safety,
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.recover_journaled_transaction(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
+    }
 
+    async fn recover_journaled_transaction(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedRecoveryCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         let phase = transaction.phase();
         let workers = transaction.activation_worker_identities();
         let has_purpose = |purpose| workers.iter().any(|worker| worker.purpose == purpose);
@@ -2718,81 +2758,57 @@ impl NixOSExecutor {
         transaction_id: impl AsRef<str>,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot issue activation authority or mutate the journal".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction-aware execution is restricted to exact system closure activation".into(),
-                safety_level: command.safety_level(),
+                safety_level: safety,
             };
         }
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: command.safety_level(),
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-        if let Err(reason) = authorization.validate_for(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-
-        let _transaction_interlock = if !self.dry_run {
-            match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => Some(lock),
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason,
-                        safety_level: command.safety_level(),
-                    };
-                }
-            }
-        } else {
-            None
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
+            Ok(lock) => lock,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(transaction) => transaction,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("exact activation requires a valid durable transaction journal: {reason}"),
-                        safety_level: command.safety_level(),
-                    };
-                }
-            };
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
+        let capability = match super::config_transaction::JournalOwnedActivationCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.execute_journaled_activation(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
+    }
 
-        if transaction.phase() != super::config_transaction::ConfigTransactionPhase::SourceCommitted {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction journal is at {:?}; exact activation requires SourceCommitted or an explicit recovery operation",
-                    transaction.phase()
-                ),
-                safety_level: command.safety_level(),
-            };
-        }
-
+    async fn execute_journaled_activation(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedActivationCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         // Journal loads deliberately lose historical Rooted authority. Re-establish
         // significance only if the current machine still proves the exact authorized
         // predecessor runtime/profile, not merely because the journal said so.
@@ -3373,6 +3389,53 @@ impl NixOSExecutor {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn transactional_activation_and_recovery_fail_closed_in_dry_run() {
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into(),
+            profile_store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into()),
+            action: SystemActivation::Switch,
+        };
+        let unrelated_read_only = NixOSCommand::Search {
+            query: "dry-run guard regression".into(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&unrelated_read_only).unwrap();
+
+        let activation = executor
+            .execute_authorized_with_transaction(
+                command.clone(),
+                authorization.clone(),
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                activation,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
+            "dry-run activation must reject before journal validation or mutation"
+        );
+
+        let recovery = executor
+            .recover_authorized_transaction(
+                command,
+                authorization,
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                recovery,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
+            "dry-run recovery must reject before journal validation or mutation"
+        );
+    }
+
     #[test]
     fn environment_digest_is_order_independent_but_value_sensitive() {
         let a = [("HOME", "/root"), ("PATH", "/run/current-system/sw/bin")];
@@ -3395,7 +3458,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
         let dir = tempfile::tempdir().unwrap();

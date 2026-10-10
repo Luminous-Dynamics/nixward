@@ -28,6 +28,11 @@ path = "src/bin/nixward_daemon.rs"
 required-features = ["daemon"]
 
 [[bin]]
+name = "nixward-worker-gate"
+path = "src/bin/nixward_worker_gate.rs"
+required-features = ["native"]
+
+[[bin]]
 name = "nixward-release-sign"
 path = "src/bin/nixward_release_sign.rs"
 
@@ -48,6 +53,7 @@ tokio = { version = "1.35", features = ["full"], optional = true }
 
 # WASM-safe
 blake3 = "1.5"
+zeroize = "1.8"
 sha2 = "0.10"
 petgraph = { version = "0.6", features = ["serde-1"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -9,17 +9,29 @@
 //! feature additionally provides the narrowly scoped Nix source
 //! realization and retention primitive.
 
-use super::executor::SystemActivation;
+use super::executor::{ExecutionAuthorization, HostExecutionPolicy, NixOSCommand, SystemActivation};
 use std::io::Write;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SOURCE_DOMAIN: &[u8] = b"nixward-frozen-config-source-v2\0";
 const ENTRY_DOMAIN: &[u8] = b"nixward-frozen-config-entry-v1\0";
-const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v3\0";
+const TX_DOMAIN: &[u8] = b"nixward-config-transaction-v4\0";
 
 fn digest_hex(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Canonical length-framed argv digest shared by launch receipts and recovery
+/// verification. Argument boundaries are preserved; concatenation is not enough.
+pub(super) fn activation_argv_digest(executable: &str, args: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
+    for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
+        hasher.update(&(argument.len() as u64).to_le_bytes());
+        hasher.update(argument.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1833,11 +1845,19 @@ pub struct ActivationWorkerIdentity {
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
-    /// Declared launcher from the authorized command.
+    /// Immutable Nixward worker-gate executable reserved before payload release.
     pub executable: String,
-    /// Actual kernel process image observed through /proc/<pid>/exe.
+    /// Kernel image observed while the gate was waiting for durable release.
+    /// The same process then execs payload_executable without changing PID/start time.
     pub process_image: String,
+    /// Exact gate invocation digest, including the payload selector and gate challenge digest.
     pub argv_digest: String,
+    /// Exact payload executable and arguments that the gate is permitted to exec.
+    pub payload_executable: String,
+    pub payload_args: Vec<String>,
+    /// Domain-separated digest of the one-time release token, not the token itself.
+    pub release_challenge_digest: String,
+    pub payload_argv_digest: String,
     pub environment_digest: String,
 }
 
@@ -1865,7 +1885,59 @@ impl ActivationWorkerIdentity {
         if decode_digest(&self.environment_digest).is_err() {
             return Err("activation worker environment digest is invalid".into());
         }
+        if decode_digest(&self.payload_argv_digest).is_err() {
+            return Err("activation worker payload argv digest is invalid".into());
+        }
+        if decode_digest(&self.release_challenge_digest).is_err() {
+            return Err("activation worker release challenge digest is invalid".into());
+        }
+        if self.payload_args.iter().any(|argument| argument.contains('\0')) {
+            return Err("activation worker payload argv contains a NUL byte".into());
+        }
+        if activation_argv_digest(&self.payload_executable, &self.payload_args)
+            != self.payload_argv_digest
+        {
+            return Err("activation worker payload argv digest does not bind the recorded arguments".into());
+        }
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            self.payload_executable.clone(),
+            self.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(self.payload_args.iter().cloned());
+        if activation_argv_digest(&self.executable, &gate_args) != self.argv_digest {
+            return Err("activation worker gate argv digest does not bind its challenge and payload".into());
+        }
         const STORE_PREFIX: &str = "/nix/store/";
+        let payload = std::path::Path::new(&self.payload_executable);
+        if !payload.is_absolute() || !self.payload_executable.starts_with(STORE_PREFIX) {
+            return Err("activation worker payload executable is not an absolute Nix store path".into());
+        }
+        let payload_relative = self.payload_executable
+            .strip_prefix(STORE_PREFIX)
+            .ok_or_else(|| "activation worker payload executable escaped the Nix store".to_string())?;
+        let mut payload_components = payload_relative.split('/');
+        let payload_store_component = payload_components
+            .next()
+            .ok_or_else(|| "activation worker payload executable has no store object component".to_string())?;
+        let payload_store_path = format!("{STORE_PREFIX}{payload_store_component}");
+        if !super::execution_intent::is_valid_nix_store_path(&payload_store_path) {
+            return Err("activation worker payload executable has an invalid Nix store identity".into());
+        }
+        let payload_suffix = payload_components.collect::<Vec<_>>();
+        if payload_suffix.is_empty()
+            || payload_suffix.iter().any(|component| {
+                component.is_empty()
+                    || *component == "."
+                    || *component == ".."
+                    || component.chars().any(char::is_control)
+            })
+        {
+            return Err("activation worker payload executable path has empty, traversal, or control components".into());
+        }
+        if format!("{STORE_PREFIX}{payload_store_component}/{}", payload_suffix.join("/")) != self.payload_executable {
+            return Err("activation worker payload executable path is not in canonical lexical form".into());
+        }
         let executable = std::path::Path::new(&self.executable);
         if !executable.is_absolute() || !self.executable.starts_with(STORE_PREFIX) {
             return Err("activation worker executable is not an absolute Nix store path".into());
@@ -1931,6 +2003,9 @@ impl ActivationWorkerIdentity {
         if canonical != self.executable {
             return Err("activation worker executable path is not in canonical lexical form".into());
         }
+        if self.process_image != self.executable {
+            return Err("activation worker receipt was not captured while the inert gate image was active".into());
+        }
         Ok(())
     }
 }
@@ -1961,9 +2036,173 @@ pub struct ConfigTransaction {
     recovery_observed: bool,
 }
 
+
+/// Ephemeral, non-serializable authority issued only after the durable journal
+/// revalidates command, authorization bindings, retention, and transaction phase.
+/// It is intentionally not Clone; the executor consumes it through one narrow path.
+#[must_use = "journal-owned activation capabilities must be consumed by the journaled executor"]
+pub(super) struct JournalOwnedActivationCapability {
+    journal_path: PathBuf,
+    transaction_id: String,
+    command: NixOSCommand,
+    authorization: ExecutionAuthorization,
+    transaction: ConfigTransaction,
+}
+
+impl JournalOwnedActivationCapability {
+    pub(super) fn issue(
+        journal_path: impl AsRef<Path>,
+        transaction_id: String,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+    ) -> Result<Self, String> {
+        if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            return Err(
+                "journal activation capability is restricted to exact system closure activation".into(),
+            );
+        }
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return Err(reason);
+        }
+        authorization.validate_for(&command)?;
+        let journal_path = journal_path.as_ref().to_path_buf();
+        validate_journal_path_binding(&journal_path, &transaction_id)?;
+        let transaction = ConfigTransaction::load(&journal_path).map_err(|error| {
+            format!("activation capability requires a valid durable journal: {error}")
+        })?;
+        transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
+        if transaction.phase() != ConfigTransactionPhase::SourceCommitted {
+            return Err(format!(
+                "journal activation capability requires SourceCommitted, observed {:?}",
+                transaction.phase()
+            ));
+        }
+        Ok(Self {
+            journal_path,
+            transaction_id,
+            command,
+            authorization,
+            transaction,
+        })
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        PathBuf,
+        String,
+        NixOSCommand,
+        ExecutionAuthorization,
+        ConfigTransaction,
+    ) {
+        (
+            self.journal_path,
+            self.transaction_id,
+            self.command,
+            self.authorization,
+            self.transaction,
+        )
+    }
+}
+
+/// Recovery authority has a different type and admission policy from new activation.
+/// It cannot be substituted for a fresh activation capability or issued at a terminal phase.
+#[must_use = "journal-owned recovery capabilities must be consumed by the recovery executor"]
+pub(super) struct JournalOwnedRecoveryCapability {
+    journal_path: PathBuf,
+    transaction_id: String,
+    command: NixOSCommand,
+    authorization: ExecutionAuthorization,
+    transaction: ConfigTransaction,
+}
+
+impl JournalOwnedRecoveryCapability {
+    pub(super) fn issue(
+        journal_path: impl AsRef<Path>,
+        transaction_id: String,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+    ) -> Result<Self, String> {
+        if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
+            return Err(
+                "journal recovery capability is restricted to exact system closure activation".into(),
+            );
+        }
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return Err(reason);
+        }
+        authorization.validate_for_recovery(&command)?;
+        let journal_path = journal_path.as_ref().to_path_buf();
+        validate_journal_path_binding(&journal_path, &transaction_id)?;
+        let transaction = ConfigTransaction::load(&journal_path).map_err(|error| {
+            format!("recovery capability requires a valid durable journal: {error}")
+        })?;
+        transaction.validate_activation_binding(&transaction_id, &command, &authorization)?;
+        if !matches!(
+            transaction.phase(),
+            ConfigTransactionPhase::ProfileTransitionStarted
+                | ConfigTransactionPhase::ProfileCommitted
+                | ConfigTransactionPhase::ActivationStarted
+                | ConfigTransactionPhase::IndeterminateProfileTransition
+                | ConfigTransactionPhase::IndeterminateActivation
+                | ConfigTransactionPhase::RecoveryObservation
+                | ConfigTransactionPhase::RecoveryRequired
+                | ConfigTransactionPhase::RecoveryMutationStarted
+        ) {
+            return Err(format!(
+                "journal recovery capability is not permitted for transaction phase {:?}",
+                transaction.phase()
+            ));
+        }
+        Ok(Self {
+            journal_path,
+            transaction_id,
+            command,
+            authorization,
+            transaction,
+        })
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        PathBuf,
+        String,
+        NixOSCommand,
+        ExecutionAuthorization,
+        ConfigTransaction,
+    ) {
+        (
+            self.journal_path,
+            self.transaction_id,
+            self.command,
+            self.authorization,
+            self.transaction,
+        )
+    }
+}
+
+fn validate_journal_path_binding(path: &Path, transaction_id: &str) -> Result<(), String> {
+    if path.file_stem().and_then(|value| value.to_str()) != Some(transaction_id) {
+        return Err("journal path does not bind the exact transaction id".into());
+    }
+    Ok(())
+}
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalPersistBoundary {
+    CandidateCreate,
+    CandidateWrite,
+    CandidateSync,
+    CandidateClose,
+    Rename,
+    DirectorySync,
+}
+
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v6";
-    pub const VERSION: u16 = 6;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
+    pub const VERSION: u16 = 7;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2421,6 +2660,59 @@ impl ConfigTransaction {
         self.candidate_build.as_ref()
     }
 
+    /// Revalidate the durable transaction against the exact activation command
+    /// and cryptographically verified execution evidence. This is the sole shared
+    /// journal-owned binding check used to issue activation/recovery capabilities.
+    pub(super) fn validate_activation_binding(
+        &self,
+        transaction_id: &str,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+    ) -> Result<(), String> {
+        if self.transaction_id() != transaction_id {
+            return Err("loaded transaction id does not match the requested transaction".into());
+        }
+        let authorization_plan = authorization
+            .change_plan_digest()
+            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
+        if self.plan_digest()? != authorization_plan {
+            return Err("loaded transaction plan digest does not match execution authorization".into());
+        }
+        let NixOSCommand::ActivateSystemClosure {
+            store_path,
+            profile_store_path: Some(profile_store_path),
+            ..
+        } = command
+        else {
+            return Err("transaction journal binding requires exact system closure activation".into());
+        };
+        let receipt = self
+            .candidate_build()
+            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
+        receipt.verify_retention()?;
+        if receipt.candidate_store_path != *store_path {
+            return Err("transaction candidate does not match activation closure".into());
+        }
+        if receipt.candidate_store_path != *profile_store_path {
+            return Err("transaction candidate does not match selected system profile".into());
+        }
+        let expected_installable = authorization
+            .realization_installable()
+            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
+        if receipt.installable != expected_installable {
+            return Err("transaction candidate installable does not match authorization".into());
+        }
+        let expected_realization_plan_digest = authorization
+            .realization_plan_digest()
+            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
+        if expected_realization_plan_digest.as_deref()
+            != Some(receipt.realization_plan_digest.as_str())
+        {
+            return Err("transaction realization-plan identity does not match authorization".into());
+        }
+        Ok(())
+    }
+
     /// Persist one worker identity after it has been captured by pidfd and
     /// before awaiting completion. Receipts are append-only history.
     pub fn bind_activation_worker_identity(
@@ -2492,8 +2784,39 @@ impl ConfigTransaction {
             .release_retention()
     }
 
+    /// Atomically publish this journal via a same-directory rename.
+    ///
+    /// A failure before rename preserves the prior target. Once rename succeeds,
+    /// a later directory-sync error does not undo publication and must not be
+    /// interpreted as proof that the previous journal is still current. Callers
+    /// must reconcile by reading the journal and freshly observing runtime/profile
+    /// state before deciding what mutation or recovery is permitted.
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let path = path.as_ref();
+        self.persist_atomic_with_hook(path.as_ref(), |_| Ok(()))
+    }
+
+    #[cfg(unix)]
+    fn persist_atomic_with_fault(
+        &self,
+        path: impl AsRef<Path>,
+        fail_at: JournalPersistBoundary,
+    ) -> Result<(), String> {
+        self.persist_atomic_with_hook(path.as_ref(), |boundary| {
+            if boundary == fail_at {
+                Err(format!("injected persistence failure at {boundary:?}"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn persist_atomic_with_hook<F>(&self, path: &Path, mut boundary_hook: F) -> Result<(), String>
+    where
+        F: FnMut(JournalPersistBoundary) -> Result<(), String>,
+    {
+        #[cfg(not(unix))]
+        let _ = &mut boundary_hook;
+
         let parent = path
             .parent()
             .ok_or_else(|| "transaction journal path has no parent".to_string())?;
@@ -2542,6 +2865,9 @@ impl ConfigTransaction {
             let temp_name_c = CString::new(temp_name.as_bytes())
                 .map_err(|_| "transaction journal temporary filename contains an embedded NUL".to_string())?;
 
+            boundary_hook(JournalPersistBoundary::CandidateCreate)
+                .map_err(|error| format!("failed before transaction journal candidate creation: {error}"))?;
+
             let temp_fd = openat(
                 parent_fd,
                 temp_name_c.as_c_str(),
@@ -2560,15 +2886,30 @@ impl ConfigTransaction {
 
             let write_result = (|| -> Result<(), String> {
                 let mut written = 0usize;
+                let write_boundary_offset = (encoded.len() / 2).max(1);
+                let mut checked_write_boundary = false;
                 while written < encoded.len() {
-                    match write(temp_fd, &encoded[written..]) {
+                    let write_end = if checked_write_boundary {
+                        encoded.len()
+                    } else {
+                        write_boundary_offset
+                    };
+                    match write(temp_fd, &encoded[written..write_end]) {
                         Ok(0) => {
                             return Err(
                                 "descriptor-bound transaction journal write made no progress"
                                     .into(),
                             );
                         }
-                        Ok(count) => written += count,
+                        Ok(count) => {
+                            written += count;
+                            if !checked_write_boundary && written >= write_boundary_offset {
+                                // Inject after the first half has reached the temporary file,
+                                // before the remainder is written or the file is synchronized.
+                                boundary_hook(JournalPersistBoundary::CandidateWrite)?;
+                                checked_write_boundary = true;
+                            }
+                        }
                         Err(Errno::EINTR) => continue,
                         Err(error) => {
                             return Err(format!(
@@ -2577,6 +2918,7 @@ impl ConfigTransaction {
                         }
                     }
                 }
+                boundary_hook(JournalPersistBoundary::CandidateSync)?;
                 fsync(temp_fd).map_err(|error| {
                     format!(
                         "failed to sync descriptor-bound transaction journal candidate: {error}"
@@ -2585,18 +2927,36 @@ impl ConfigTransaction {
                 Ok(())
             })();
 
+            let close_boundary_result = if write_result.is_ok() {
+                boundary_hook(JournalPersistBoundary::CandidateClose)
+            } else {
+                Ok(())
+            };
             let close_result = close(temp_fd);
             if let Err(error) = write_result {
                 let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
                 let _ = close_result;
                 return Err(error);
             }
-            close_result.map_err(|error| {
+            if let Err(error) = close_result {
                 let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
-                format!(
+                return Err(format!(
                     "failed to close descriptor-bound transaction journal candidate: {error}"
-                )
-            })?;
+                ));
+            }
+            if let Err(error) = close_boundary_result {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed at transaction journal close boundary before publication: {error}"
+                ));
+            }
+
+            if let Err(error) = boundary_hook(JournalPersistBoundary::Rename) {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed before transaction journal publication rename: {error}"
+                ));
+            }
 
             if let Err(error) = renameat(
                 Some(parent_fd),
@@ -2610,9 +2970,14 @@ impl ConfigTransaction {
                 ));
             }
 
+            if let Err(error) = boundary_hook(JournalPersistBoundary::DirectorySync) {
+                return Err(format!(
+                    "journal rename already published; parent-directory durability is indeterminate: {error}"
+                ));
+            }
             fsync(parent_fd).map_err(|error| {
                 format!(
-                    "failed to sync transaction journal directory after rename: {error}"
+                    "journal rename already published, but parent-directory synchronization failed; current visibility does not prove crash durability: {error}"
                 )
             })?;
 
@@ -2791,6 +3156,14 @@ mod tests {
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
 
     fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
         ActivationWorkerIdentity {
             transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             purpose: ActivationWorkerPurpose::Activation,
@@ -2799,9 +3172,38 @@ mod tests {
             start_time_ticks: 42,
             executable: executable.into(),
             process_image: executable.into(),
-            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            argv_digest: activation_argv_digest(executable, &gate_args),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            payload_executable: executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: activation_argv_digest(executable, &payload_args),
         }
+    }
+
+    #[test]
+    fn activation_worker_payload_argv_digest_rejects_argument_drift() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut identity = worker_identity_for_test(executable);
+        identity.validate_identity().unwrap();
+        identity.payload_args.push("different-argument".into());
+        assert!(
+            identity.validate_identity().is_err(),
+            "a persisted worker receipt must bind the exact payload argument vector"
+        );
+    }
+
+    #[test]
+    fn activation_worker_receipt_binds_release_challenge() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let mut identity = worker_identity_for_test(executable);
+        identity.validate_identity().unwrap();
+        identity.release_challenge_digest =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".into();
+        assert!(
+            identity.validate_identity().is_err(),
+            "the gate argv digest must bind the exact one-time release challenge"
+        );
     }
 
     #[test]
@@ -2809,6 +3211,14 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.phase = ConfigTransactionPhase::RecoveryMutationStarted;
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let payload_args = vec!["profile-transition-test".to_string()];
+        let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
         let identity = ActivationWorkerIdentity {
             transaction_id: transaction.transaction_id().to_string(),
             purpose: ActivationWorkerPurpose::RecoveryProfileTransition,
@@ -2817,8 +3227,12 @@ mod tests {
             start_time_ticks: 42,
             executable: executable.into(),
             process_image: executable.into(),
-            argv_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            argv_digest: activation_argv_digest(executable, &gate_args),
             environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            payload_executable: executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: activation_argv_digest(executable, &payload_args),
         };
         transaction.bind_activation_worker_identity(identity.clone()).unwrap();
         let mut relabelled = identity;
@@ -3915,6 +4329,131 @@ mod tests {
             transaction.candidate_store_path(),
             Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test")
         );
+    }
+
+    #[test]
+    fn transaction_load_rejects_v6_schema_version_even_when_fields_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let mut value = serde_json::to_value(transaction).unwrap();
+        value["schema"] = serde_json::Value::String(
+            "luminous-nixward-config-transaction-v6".into(),
+        );
+        value["version"] = serde_json::Value::from(6);
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = ConfigTransaction::load(&path)
+            .expect_err("the v6 schema/version must never be accepted as v7");
+        assert!(
+            error.contains("schema/version mismatch"),
+            "legacy journal must fail closed with a schema incompatibility: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_atomic_journal_persist_preserves_last_committed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        committed.persist_atomic(&path).unwrap();
+        let committed_bytes = std::fs::read(&path).unwrap();
+
+        let mut pending_update = committed.clone();
+        pending_update.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+
+        // Force the O_EXCL temporary-file creation to fail deterministically.
+        // The persistence method must not truncate or otherwise replace the
+        // previously committed journal when it cannot prepare a new candidate.
+        let temp_path = dir
+            .path()
+            .join(format!(".transaction.json.tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, b"occupied-by-fault-injection").unwrap();
+
+        let error = pending_update
+            .persist_atomic(&path)
+            .expect_err("colliding temp entry must make persistence fail closed");
+        assert!(error.contains("failed to create descriptor-bound transaction journal candidate"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            committed_bytes,
+            "failed candidate creation must preserve the prior committed bytes"
+        );
+        assert_eq!(
+            ConfigTransaction::load(&path).unwrap().phase(),
+            ConfigTransactionPhase::Prepared,
+            "failed persistence must not publish the pending phase"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_journal_persist_faults_distinguish_pre_and_post_publication() {
+        let boundaries = [
+            JournalPersistBoundary::CandidateCreate,
+            JournalPersistBoundary::CandidateWrite,
+            JournalPersistBoundary::CandidateSync,
+            JournalPersistBoundary::CandidateClose,
+            JournalPersistBoundary::Rename,
+            JournalPersistBoundary::DirectorySync,
+        ];
+
+        for boundary in boundaries {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transaction.json");
+            let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+            committed.persist_atomic(&path).unwrap();
+            let committed_bytes = std::fs::read(&path).unwrap();
+
+            let mut pending_update = committed.clone();
+            pending_update.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+
+            let error = pending_update
+                .persist_atomic_with_fault(&path, boundary)
+                .expect_err("injected boundary failure must be returned");
+            assert!(
+                error.contains(&format!("injected persistence failure at {boundary:?}")),
+                "unexpected error at {boundary:?}: {error}"
+            );
+
+            let temp_path = dir
+                .path()
+                .join(format!(".transaction.json.tmp-{}", std::process::id()));
+            assert!(
+                !temp_path.exists(),
+                "candidate temporary entry must not remain after {boundary:?}"
+            );
+
+            let observed_bytes = std::fs::read(&path).unwrap();
+            let observed = ConfigTransaction::load(&path).unwrap();
+            if boundary == JournalPersistBoundary::DirectorySync {
+                assert_ne!(
+                    observed_bytes, committed_bytes,
+                    "rename has published the new journal even though directory sync failed"
+                );
+                assert_eq!(
+                    observed.phase(),
+                    ConfigTransactionPhase::InputFrozen,
+                    "the new phase is visible after the post-rename failure"
+                );
+                assert!(
+                    error.contains("journal rename already published")
+                        && error.contains("durability is indeterminate"),
+                    "post-publication error must name the durability uncertainty: {error}"
+                );
+            } else {
+                assert_eq!(
+                    observed_bytes, committed_bytes,
+                    "pre-rename failure at {boundary:?} must preserve prior bytes"
+                );
+                assert_eq!(
+                    observed.phase(),
+                    ConfigTransactionPhase::Prepared,
+                    "pre-rename failure at {boundary:?} must preserve prior phase"
+                );
+            }
+        }
     }
 
     #[test]
