@@ -3024,11 +3024,8 @@ impl ConfigTransaction {
                 ));
             }
 
-            if let Err(error) = boundary_hook(JournalPersistBoundary::DirectorySync) {
-                return Err(format!(
-                    "journal rename already published; parent-directory durability is indeterminate: {error}"
-                ));
-            }
+            boundary_hook(JournalPersistBoundary::DirectorySync)
+                .map_err(|error| format!("parent-directory synchronization hook failed: {error}"))?;
             fsync(parent_fd).map_err(|error| {
                 format!("parent-directory synchronization failed: {error}")
             })?;
