@@ -3494,6 +3494,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pre_publication_journal_error_remains_classified_before_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        committed.persist_atomic(&path).unwrap();
+        let committed_bytes = std::fs::read(&path).unwrap();
+        let mut pending = committed.clone();
+        pending.advance(super::super::config_transaction::ConfigTransactionPhase::InputFrozen).unwrap();
+
+        let message = NixOSExecutor::persist_transaction_with_hook(
+            &pending,
+            &path,
+            |boundary| {
+                if boundary == super::super::config_transaction::JournalPersistBoundary::CandidateCreate {
+                    Err("injected failure before create".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("pre-publication fault must return an error");
+
+        assert!(message.contains("before publication"));
+        assert!(!message.contains("rename already published"));
+        assert_eq!(std::fs::read(&path).unwrap(), committed_bytes);
+        assert_eq!(
+            super::super::config_transaction::ConfigTransaction::load(&path).unwrap().phase(),
+            super::super::config_transaction::ConfigTransactionPhase::Prepared
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn post_publication_journal_error_reads_back_state_and_requires_fresh_observation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transaction.json");
