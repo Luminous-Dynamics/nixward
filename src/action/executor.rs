@@ -3459,7 +3459,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
         let dir = tempfile::tempdir().unwrap();
         let system_root = dir.path().join("system");
