@@ -2200,6 +2200,27 @@ pub(super) enum JournalPersistBoundary {
     DirectorySync,
 }
 
+/// Structured publication state; callers should not infer this from diagnostic strings.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum JournalPersistFailure {
+    BeforePublication(String),
+    AfterPublication(String),
+}
+
+impl std::fmt::Display for JournalPersistFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BeforePublication(error) => {
+                write!(f, "journal persistence failed before publication: {error}")
+            }
+            Self::AfterPublication(error) => {
+                write!(f, "journal rename already published; parent-directory durability is indeterminate: {error}")
+            }
+        }
+    }
+}
+
+
 impl ConfigTransaction {
     pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
     pub const VERSION: u16 = 7;
@@ -2792,7 +2813,42 @@ impl ConfigTransaction {
     /// must reconcile by reading the journal and freshly observing runtime/profile
     /// state before deciding what mutation or recovery is permitted.
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        self.persist_atomic_with_hook(path.as_ref(), |_| Ok(()))
+        self.persist_atomic_classified(path.as_ref())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Preserve publication state as a type rather than requiring callers to
+    /// search an error string for a marker.
+    pub(super) fn persist_atomic_classified(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), JournalPersistFailure> {
+        self.persist_atomic_classified_with_hook(path.as_ref(), |_| Ok(()))
+    }
+
+    fn persist_atomic_classified_with_hook<F>(
+        &self,
+        path: &Path,
+        mut boundary_hook: F,
+    ) -> Result<(), JournalPersistFailure>
+    where
+        F: FnMut(JournalPersistBoundary) -> Result<(), String>,
+    {
+        let published = std::cell::Cell::new(false);
+        self.persist_atomic_with_hook(path, |boundary| {
+            // Both implementations call this only after a successful rename.
+            if boundary == JournalPersistBoundary::DirectorySync {
+                published.set(true);
+            }
+            boundary_hook(boundary)
+        })
+        .map_err(|error| {
+            if published.get() {
+                JournalPersistFailure::AfterPublication(error)
+            } else {
+                JournalPersistFailure::BeforePublication(error)
+            }
+        })
     }
 
     #[cfg(all(test, unix))]
@@ -2801,22 +2857,20 @@ impl ConfigTransaction {
         path: impl AsRef<Path>,
         fail_at: JournalPersistBoundary,
     ) -> Result<(), String> {
-        self.persist_atomic_with_hook(path.as_ref(), |boundary| {
+        self.persist_atomic_classified_with_hook(path.as_ref(), |boundary| {
             if boundary == fail_at {
                 Err(format!("injected persistence failure at {boundary:?}"))
             } else {
                 Ok(())
             }
         })
+        .map_err(|error| error.to_string())
     }
 
     fn persist_atomic_with_hook<F>(&self, path: &Path, mut boundary_hook: F) -> Result<(), String>
     where
         F: FnMut(JournalPersistBoundary) -> Result<(), String>,
     {
-        #[cfg(not(unix))]
-        let _ = &mut boundary_hook;
-
         let parent = path
             .parent()
             .ok_or_else(|| "transaction journal path has no parent".to_string())?;
@@ -3004,6 +3058,9 @@ impl ConfigTransaction {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(format!("failed to commit transaction journal: {error}"));
             }
+            boundary_hook(JournalPersistBoundary::DirectorySync).map_err(|error| {
+                format!("journal rename already published; parent-directory durability is indeterminate: {error}")
+            })?;
             let parent_dir = std::fs::File::open(parent)
                 .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
             parent_dir.sync_all().map_err(|error| {
