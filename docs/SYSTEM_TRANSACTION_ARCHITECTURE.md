@@ -598,17 +598,23 @@ These are distinct failure states:
 The Unix-test-only hook and checkpoint tests now cover six named control-flow
 boundaries: before candidate creation, after a deterministic first-half write,
 before candidate fsync, at the close boundary, before rename, and after rename
-but before parent-directory fsync. The post-publication executor regression uses
-the actual injected directory-sync-boundary error and compares read-back against
-the intended state; a second regression exercises read-back mismatch. These tests
-have not yet been compiled or executed. The injected close/rename/sync-boundary
-errors are application-level failpoints, not evidence that the corresponding
-kernel syscalls themselves returned errors; the close path still closes the real
-descriptor for cleanup, and the rename failpoint stops before calling rename.
-Subprocess termination/reopen tests on supported Linux filesystems remain
-required, as does any stronger fault model needed to support a power-loss claim.
-Tests must assert both the returned disposition and the bytes/phase actually read
-back; they must not assume that every returned error means the old journal survived.
+but before parent-directory fsync. The executor tests exercise typed
+`BeforePublication` and `AfterPublication` outcomes, the actual injected
+directory-sync-boundary error, a validating journal read-back comparison, and
+read-back mismatch. A separate subprocess test exits without Rust cleanup at
+the partial-write boundary and after rename/before parent-directory fsync, then
+reopens the journal through the validating loader. It expects the previous
+journal before rename and the new journal to be visible after rename, and cleans
+up an abandoned candidate left by the partial-write child. These tests have not
+yet been compiled or executed. The subprocess test models process termination
+only: it does not discard the kernel page cache, simulate power loss, or prove
+durability across reboot. The injected close/rename/sync-boundary errors are
+application-level failpoints, not evidence that the corresponding kernel syscalls
+themselves returned errors; the close path still closes the real descriptor for
+cleanup, and the rename failpoint stops before calling rename. Stronger fault
+models remain required for any power-loss claim. Tests must assert both the
+returned disposition and the bytes/phase actually read back; they must not assume
+that every returned error means the old journal survived.
 
 ## Parent-gated worker launch (2026-10-09)
 
