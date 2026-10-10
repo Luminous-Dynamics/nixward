@@ -559,6 +559,40 @@ hardening and validation PR heads must remain exactly synchronized, and the
 exact head still requires completed hosted compiler/test evidence before a
 qualified status can be claimed.
 
+## Transaction journal persistence boundary (2026-10-10)
+
+On Unix, `ConfigTransaction::persist_atomic` writes a same-directory candidate
+through a descriptor opened relative to the canonical parent directory. The
+candidate is created with exclusive/no-follow flags and mode `0600`, completely
+written, file-synchronized, closed, atomically renamed over the journal target,
+and followed by parent-directory synchronization. Descriptor-relative operations
+reduce path substitution risk; the rename is the publication point, while the
+directory sync is the durability boundary for that name.
+
+These are distinct failure states:
+
+- **Before rename:** an ordinary candidate-create/write/file-sync/close/rename
+  failure should leave the previously committed journal target in place. The
+  existing regression test proves one specific case: an occupied PID-derived
+  temporary filename makes exclusive creation fail without changing the prior
+  journal bytes or phase.
+- **After rename, before confirmed directory sync:** the new journal may already
+  be visible even though `persist_atomic` returns an error. That error must not
+  be interpreted as proof that the previous bytes remain authoritative; the
+  replacement is published, but crash durability of the directory entry is
+  uncertain. Callers/recovery must treat the outcome as indeterminate and
+  reconcile the on-disk journal with independently observed runtime/profile state.
+- **After successful directory sync:** the implementation has completed the
+  intended file-data and directory-entry synchronization sequence. This is not,
+  by itself, evidence that the whole activation transaction succeeded.
+
+The current collision test is not power-loss testing and does not inject errors
+at every persistence boundary. Still-required evidence includes deterministic
+fault injection before rename and after rename/before directory sync, plus
+subprocess termination/reopen tests on the supported Linux filesystems. Tests
+must assert both the returned disposition and the bytes/phase actually read back;
+they must not assume that every returned error means the old journal survived.
+
 ## Parent-gated worker launch (2026-10-09)
 
 Privileged profile-transition, activation, and recovery workers now use the
