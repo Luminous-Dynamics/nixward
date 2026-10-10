@@ -2191,7 +2191,7 @@ fn validate_journal_path_binding(path: &Path, transaction_id: &str) -> Result<()
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JournalPersistBoundary {
+pub(super) enum JournalPersistBoundary {
     CandidateCreate,
     CandidateWrite,
     CandidateSync,
@@ -2796,7 +2796,7 @@ impl ConfigTransaction {
     }
 
     #[cfg(unix)]
-    fn persist_atomic_with_fault(
+    pub(super) fn persist_atomic_with_fault(
         &self,
         path: impl AsRef<Path>,
         fail_at: JournalPersistBoundary,
