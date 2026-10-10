@@ -2300,7 +2300,10 @@ impl NixOSExecutor {
             Ok(value) => value,
             Err(read_error) => {
                 return format!(
-                    "journal rename was reported as published, but read-back failed ({read_error});                      publication and current journal state require reconciliation; no further mutation                      is permitted until a later recovery attempt validates the journal and freshly                      observes runtime/profile state. Original persistence error: {persistence_error}"
+                    "journal rename was reported as published, but read-back failed ({read_error}); \
+                     publication and current journal state require reconciliation; no further mutation \
+                     is permitted until a later recovery attempt validates the journal and freshly \
+                     observes runtime/profile state. Original persistence error: {persistence_error}"
                 );
             }
         };
@@ -3455,7 +3458,7 @@ mod tests {
     fn post_publication_journal_error_reads_back_state_and_requires_fresh_observation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transaction.json");
-        let transaction = super::super::action::config_transaction::ConfigTransaction::new(
+        let transaction = super::super::config_transaction::ConfigTransaction::new(
             [1; 32],
             [2; 32],
             [3; 32],
@@ -3477,12 +3480,12 @@ mod tests {
     fn post_publication_journal_error_fails_closed_on_readback_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("transaction.json");
-        let intended = super::super::action::config_transaction::ConfigTransaction::new(
+        let intended = super::super::config_transaction::ConfigTransaction::new(
             [1; 32],
             [2; 32],
             [3; 32],
         );
-        let other = super::super::action::config_transaction::ConfigTransaction::new(
+        let other = super::super::config_transaction::ConfigTransaction::new(
             [4; 32],
             [5; 32],
             [6; 32],
