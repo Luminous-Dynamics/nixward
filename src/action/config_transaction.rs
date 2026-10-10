@@ -2795,7 +2795,7 @@ impl ConfigTransaction {
         self.persist_atomic_with_hook(path.as_ref(), |_| Ok(()))
     }
 
-    #[cfg(unix)]
+    #[cfg(all(test, unix))]
     pub(super) fn persist_atomic_with_fault(
         &self,
         path: impl AsRef<Path>,
