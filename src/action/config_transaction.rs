@@ -2190,6 +2190,16 @@ fn validate_journal_path_binding(path: &Path, transaction_id: &str) -> Result<()
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalPersistBoundary {
+    CandidateCreate,
+    CandidateWrite,
+    CandidateSync,
+    CandidateClose,
+    Rename,
+    DirectorySync,
+}
+
 impl ConfigTransaction {
     pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
     pub const VERSION: u16 = 7;
@@ -2774,8 +2784,39 @@ impl ConfigTransaction {
             .release_retention()
     }
 
+    /// Atomically publish this journal via a same-directory rename.
+    ///
+    /// A failure before rename preserves the prior target. Once rename succeeds,
+    /// a later directory-sync error does not undo publication and must not be
+    /// interpreted as proof that the previous journal is still current. Callers
+    /// must reconcile by reading the journal and freshly observing runtime/profile
+    /// state before deciding what mutation or recovery is permitted.
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
-        let path = path.as_ref();
+        self.persist_atomic_with_hook(path.as_ref(), |_| Ok(()))
+    }
+
+    #[cfg(unix)]
+    fn persist_atomic_with_fault(
+        &self,
+        path: impl AsRef<Path>,
+        fail_at: JournalPersistBoundary,
+    ) -> Result<(), String> {
+        self.persist_atomic_with_hook(path.as_ref(), |boundary| {
+            if boundary == fail_at {
+                Err(format!("injected persistence failure at {boundary:?}"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn persist_atomic_with_hook<F>(&self, path: &Path, mut boundary_hook: F) -> Result<(), String>
+    where
+        F: FnMut(JournalPersistBoundary) -> Result<(), String>,
+    {
+        #[cfg(not(unix))]
+        let _ = &mut boundary_hook;
+
         let parent = path
             .parent()
             .ok_or_else(|| "transaction journal path has no parent".to_string())?;
@@ -2824,6 +2865,9 @@ impl ConfigTransaction {
             let temp_name_c = CString::new(temp_name.as_bytes())
                 .map_err(|_| "transaction journal temporary filename contains an embedded NUL".to_string())?;
 
+            boundary_hook(JournalPersistBoundary::CandidateCreate)
+                .map_err(|error| format!("failed before transaction journal candidate creation: {error}"))?;
+
             let temp_fd = openat(
                 parent_fd,
                 temp_name_c.as_c_str(),
@@ -2842,6 +2886,7 @@ impl ConfigTransaction {
 
             let write_result = (|| -> Result<(), String> {
                 let mut written = 0usize;
+                let mut checked_write_boundary = false;
                 while written < encoded.len() {
                     match write(temp_fd, &encoded[written..]) {
                         Ok(0) => {
@@ -2850,7 +2895,13 @@ impl ConfigTransaction {
                                     .into(),
                             );
                         }
-                        Ok(count) => written += count,
+                        Ok(count) => {
+                            written += count;
+                            if !checked_write_boundary {
+                                boundary_hook(JournalPersistBoundary::CandidateWrite)?;
+                                checked_write_boundary = true;
+                            }
+                        }
                         Err(Errno::EINTR) => continue,
                         Err(error) => {
                             return Err(format!(
@@ -2859,6 +2910,7 @@ impl ConfigTransaction {
                         }
                     }
                 }
+                boundary_hook(JournalPersistBoundary::CandidateSync)?;
                 fsync(temp_fd).map_err(|error| {
                     format!(
                         "failed to sync descriptor-bound transaction journal candidate: {error}"
@@ -2867,18 +2919,36 @@ impl ConfigTransaction {
                 Ok(())
             })();
 
+            let close_boundary_result = if write_result.is_ok() {
+                boundary_hook(JournalPersistBoundary::CandidateClose)
+            } else {
+                Ok(())
+            };
             let close_result = close(temp_fd);
             if let Err(error) = write_result {
                 let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
                 let _ = close_result;
                 return Err(error);
             }
-            close_result.map_err(|error| {
+            if let Err(error) = close_result {
                 let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
-                format!(
+                return Err(format!(
                     "failed to close descriptor-bound transaction journal candidate: {error}"
-                )
-            })?;
+                ));
+            }
+            if let Err(error) = close_boundary_result {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed at transaction journal close boundary before publication: {error}"
+                ));
+            }
+
+            if let Err(error) = boundary_hook(JournalPersistBoundary::Rename) {
+                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed before transaction journal publication rename: {error}"
+                ));
+            }
 
             if let Err(error) = renameat(
                 Some(parent_fd),
@@ -2892,9 +2962,14 @@ impl ConfigTransaction {
                 ));
             }
 
+            if let Err(error) = boundary_hook(JournalPersistBoundary::DirectorySync) {
+                return Err(format!(
+                    "journal rename already published; parent-directory durability is indeterminate: {error}"
+                ));
+            }
             fsync(parent_fd).map_err(|error| {
                 format!(
-                    "failed to sync transaction journal directory after rename: {error}"
+                    "journal rename already published, but parent-directory synchronization failed; current visibility does not prove crash durability: {error}"
                 )
             })?;
 
@@ -4302,6 +4377,75 @@ mod tests {
             ConfigTransactionPhase::Prepared,
             "failed persistence must not publish the pending phase"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_journal_persist_faults_distinguish_pre_and_post_publication() {
+        let boundaries = [
+            JournalPersistBoundary::CandidateCreate,
+            JournalPersistBoundary::CandidateWrite,
+            JournalPersistBoundary::CandidateSync,
+            JournalPersistBoundary::CandidateClose,
+            JournalPersistBoundary::Rename,
+            JournalPersistBoundary::DirectorySync,
+        ];
+
+        for boundary in boundaries {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transaction.json");
+            let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+            committed.persist_atomic(&path).unwrap();
+            let committed_bytes = std::fs::read(&path).unwrap();
+
+            let mut pending_update = committed.clone();
+            pending_update.advance(ConfigTransactionPhase::InputFrozen).unwrap();
+
+            let error = pending_update
+                .persist_atomic_with_fault(&path, boundary)
+                .expect_err("injected boundary failure must be returned");
+            assert!(
+                error.contains(&format!("injected persistence failure at {boundary:?}")),
+                "unexpected error at {boundary:?}: {error}"
+            );
+
+            let temp_path = dir
+                .path()
+                .join(format!(".transaction.json.tmp-{}", std::process::id()));
+            assert!(
+                !temp_path.exists(),
+                "candidate temporary entry must not remain after {boundary:?}"
+            );
+
+            let observed_bytes = std::fs::read(&path).unwrap();
+            let observed = ConfigTransaction::load(&path).unwrap();
+            if boundary == JournalPersistBoundary::DirectorySync {
+                assert_ne!(
+                    observed_bytes, committed_bytes,
+                    "rename has published the new journal even though directory sync failed"
+                );
+                assert_eq!(
+                    observed.phase(),
+                    ConfigTransactionPhase::InputFrozen,
+                    "the new phase is visible after the post-rename failure"
+                );
+                assert!(
+                    error.contains("journal rename already published")
+                        && error.contains("durability is indeterminate"),
+                    "post-publication error must name the durability uncertainty: {error}"
+                );
+            } else {
+                assert_eq!(
+                    observed_bytes, committed_bytes,
+                    "pre-rename failure at {boundary:?} must preserve prior bytes"
+                );
+                assert_eq!(
+                    observed.phase(),
+                    ConfigTransactionPhase::Prepared,
+                    "pre-rename failure at {boundary:?} must preserve prior phase"
+                );
+            }
+        }
     }
 
     #[test]
