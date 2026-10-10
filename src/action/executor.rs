@@ -1732,6 +1732,9 @@ impl NixOSExecutor {
                 ));
             }
             drop(gate_stdin);
+            // The release token is no longer needed once EOF has been sent.
+            // Zeroize it before waiting for a potentially long-running activation.
+            drop(release_token);
 
             let output = child
                 .wait_with_output()
