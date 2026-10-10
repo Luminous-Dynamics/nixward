@@ -3479,6 +3479,7 @@ impl NixOSExecutor {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn post_publication_journal_error_reads_back_state_and_requires_fresh_observation() {
         let dir = tempfile::tempdir().unwrap();
