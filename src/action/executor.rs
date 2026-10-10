@@ -3463,12 +3463,17 @@ mod tests {
             [2; 32],
             [3; 32],
         );
-        transaction.persist_atomic(&path).unwrap();
+        let persistence_error = transaction
+            .persist_atomic_with_fault(
+                &path,
+                super::super::config_transaction::JournalPersistBoundary::DirectorySync,
+            )
+            .expect_err("injected directory-sync failure must be reported after rename");
 
         let message = NixOSExecutor::post_publication_persist_error(
             &transaction,
             &path,
-            "journal rename already published; parent-directory durability is indeterminate: injected",
+            &persistence_error,
         );
         assert!(message.contains("read-back confirms transaction"));
         assert!(message.contains("directory durability remains indeterminate"));
