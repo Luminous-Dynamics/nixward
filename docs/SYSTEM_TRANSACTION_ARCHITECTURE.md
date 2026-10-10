@@ -580,14 +580,17 @@ These are distinct failure states:
   be visible even though `persist_atomic` returns an error. That error must not
   be interpreted as proof that the previous bytes remain authoritative; the
   replacement is published, but crash durability of the directory entry is
-  uncertain. The central executor recognizes the post-publication error,
-  reloads the journal with schema validation, and compares the full serialized
-  state against the intended transaction. Matching read-back proves current
-  visibility only. A mismatch or read-back failure is reported as ambiguous and
-  fails closed. The current call authorizes no further mutation; a later recovery
-  attempt must freshly observe runtime and selected-profile state before choosing
-  any recovery action. The synchronous error handler does not itself perform
-  those live runtime/profile observations.
+  uncertain. The persistence API classifies failures as typed
+  `JournalPersistFailure::BeforePublication` or
+  `JournalPersistFailure::AfterPublication`; the executor branches on the enum
+  rather than parsing a diagnostic substring. It reloads the journal with schema
+  validation and compares the full serialized state against the intended
+  transaction. Matching read-back proves current visibility only. A mismatch or
+  read-back failure is reported as ambiguous and fails closed. The current call
+  authorizes no further mutation; a later recovery attempt must freshly observe
+  runtime and selected-profile state before choosing any recovery action. The
+  synchronous error handler does not itself perform those live runtime/profile
+  observations.
 - **After successful directory sync:** the implementation has completed the
   intended file-data and directory-entry synchronization sequence. This is not,
   by itself, evidence that the whole activation transaction succeeded.
