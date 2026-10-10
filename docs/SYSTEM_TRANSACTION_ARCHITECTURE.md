@@ -580,18 +580,32 @@ These are distinct failure states:
   be visible even though `persist_atomic` returns an error. That error must not
   be interpreted as proof that the previous bytes remain authoritative; the
   replacement is published, but crash durability of the directory entry is
-  uncertain. Callers/recovery must treat the outcome as indeterminate and
-  reconcile the on-disk journal with independently observed runtime/profile state.
+  uncertain. The central executor recognizes the post-publication error,
+  reloads the journal with schema validation, and compares the full serialized
+  state against the intended transaction. Matching read-back proves current
+  visibility only. A mismatch or read-back failure is reported as ambiguous and
+  fails closed. The current call authorizes no further mutation; a later recovery
+  attempt must freshly observe runtime and selected-profile state before choosing
+  any recovery action. The synchronous error handler does not itself perform
+  those live runtime/profile observations.
 - **After successful directory sync:** the implementation has completed the
   intended file-data and directory-entry synchronization sequence. This is not,
   by itself, evidence that the whole activation transaction succeeded.
 
-The current collision test is not power-loss testing and does not inject errors
-at every persistence boundary. Still-required evidence includes deterministic
-fault injection before rename and after rename/before directory sync, plus
-subprocess termination/reopen tests on the supported Linux filesystems. Tests
-must assert both the returned disposition and the bytes/phase actually read back;
-they must not assume that every returned error means the old journal survived.
+The Unix-test-only hook and checkpoint tests now cover six named control-flow
+boundaries: before candidate creation, after a deterministic first-half write,
+before candidate fsync, at the close boundary, before rename, and after rename
+but before parent-directory fsync. The post-publication executor regression uses
+the actual injected directory-sync-boundary error and compares read-back against
+the intended state; a second regression exercises read-back mismatch. These tests
+have not yet been compiled or executed. The injected close/rename/sync-boundary
+errors are application-level failpoints, not evidence that the corresponding
+kernel syscalls themselves returned errors; the close path still closes the real
+descriptor for cleanup, and the rename failpoint stops before calling rename.
+Subprocess termination/reopen tests on supported Linux filesystems remain
+required, as does any stronger fault model needed to support a power-loss claim.
+Tests must assert both the returned disposition and the bytes/phase actually read
+back; they must not assume that every returned error means the old journal survived.
 
 ## Parent-gated worker launch (2026-10-09)
 
