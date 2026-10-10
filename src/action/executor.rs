@@ -2276,12 +2276,25 @@ impl NixOSExecutor {
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
     ) -> Result<(), String> {
-        match transaction.persist_atomic(path) {
+        Self::persist_transaction_with_hook(transaction, path, |_| Ok(()))
+    }
+
+    fn persist_transaction_with_hook<F>(
+        transaction: &super::config_transaction::ConfigTransaction,
+        path: &Path,
+        boundary_hook: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(super::config_transaction::JournalPersistBoundary) -> Result<(), String>,
+    {
+        match transaction.persist_atomic_classified_with_hook(path, boundary_hook) {
             Ok(()) => Ok(()),
-            Err(error) if error.contains("journal rename already published") => {
+            Err(super::config_transaction::JournalPersistFailure::BeforePublication(error)) => {
+                Err(format!("durable transaction journal update failed before publication: {error}"))
+            }
+            Err(super::config_transaction::JournalPersistFailure::AfterPublication(error)) => {
                 Err(Self::post_publication_persist_error(transaction, path, &error))
             }
-            Err(error) => Err(format!("durable transaction journal update failed before publication: {error}")),
         }
     }
 
@@ -3489,18 +3502,18 @@ mod tests {
             [2; 32],
             [3; 32],
         );
-        let persistence_error = transaction
-            .persist_atomic_with_fault(
-                &path,
-                super::super::config_transaction::JournalPersistBoundary::DirectorySync,
-            )
-            .expect_err("injected directory-sync failure must be reported after rename");
-
-        let message = NixOSExecutor::post_publication_persist_error(
+        let message = NixOSExecutor::persist_transaction_with_hook(
             &transaction,
             &path,
-            &persistence_error,
-        );
+            |boundary| {
+                if boundary == super::super::config_transaction::JournalPersistBoundary::DirectorySync {
+                    Err("injected persistence failure at DirectorySync".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("injected directory-sync failure must be reported after rename");
         assert!(message.contains("read-back confirms transaction"));
         assert!(message.contains("directory durability remains indeterminate"));
         assert!(message.contains("freshly observe runtime and system-profile state"));
