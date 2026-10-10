@@ -2276,9 +2276,71 @@ impl NixOSExecutor {
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
     ) -> Result<(), String> {
-        transaction
-            .persist_atomic(path)
-            .map_err(|error| format!("durable transaction journal update failed: {error}"))
+        match transaction.persist_atomic(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.contains("journal rename already published") => {
+                Err(Self::post_publication_persist_error(transaction, path, &error))
+            }
+            Err(error) => Err(format!("durable transaction journal update failed before publication: {error}")),
+        }
+    }
+
+    /// Explain and verify an error that occurred after the journal rename.
+    ///
+    /// A readable journal matching the intended state establishes current
+    /// visibility only. The failed directory sync still leaves durability
+    /// uncertain, so this call must stop and a later recovery attempt must make
+    /// fresh runtime/profile observations before any further mutation.
+    fn post_publication_persist_error(
+        transaction: &super::config_transaction::ConfigTransaction,
+        path: &Path,
+        persistence_error: &str,
+    ) -> String {
+        let observed = match super::config_transaction::ConfigTransaction::load(path) {
+            Ok(value) => value,
+            Err(read_error) => {
+                return format!(
+                    "journal rename was reported as published, but read-back failed ({read_error});                      publication and current journal state require reconciliation; no further mutation                      is permitted until a later recovery attempt validates the journal and freshly                      observes runtime/profile state. Original persistence error: {persistence_error}"
+                );
+            }
+        };
+
+        let expected_value = match serde_json::to_value(transaction) {
+            Ok(value) => value,
+            Err(encode_error) => {
+                return format!(
+                    "journal rename was reported as published, but intended-state comparison failed                      ({encode_error}); observed transaction {} phase {:?}; fail closed and require                      fresh runtime/profile observations before any further mutation. Original                      persistence error: {persistence_error}",
+                    observed.transaction_id(),
+                    observed.phase(),
+                );
+            }
+        };
+        let observed_value = match serde_json::to_value(&observed) {
+            Ok(value) => value,
+            Err(encode_error) => {
+                return format!(
+                    "journal rename was reported as published, but read-back comparison failed                      ({encode_error}); observed transaction {} phase {:?}; fail closed and require                      fresh runtime/profile observations before any further mutation. Original                      persistence error: {persistence_error}",
+                    observed.transaction_id(),
+                    observed.phase(),
+                );
+            }
+        };
+
+        if expected_value == observed_value {
+            format!(
+                "journal rename was published and read-back confirms transaction {} phase {:?} is                  currently visible, but directory durability remains indeterminate. This call                  authorizes no subsequent mutation; a later recovery attempt must freshly observe                  runtime and system-profile state before deciding what is safe. Original persistence                  error: {persistence_error}",
+                observed.transaction_id(),
+                observed.phase(),
+            )
+        } else {
+            format!(
+                "journal rename was reported as published, but read-back does not match the intended                  transaction {} phase {:?}; observed transaction {} phase {:?}. State is ambiguous:                  fail closed and require journal reconciliation plus fresh runtime/profile observations                  before any further mutation. Original persistence error: {persistence_error}",
+                transaction.transaction_id(),
+                transaction.phase(),
+                observed.transaction_id(),
+                observed.phase(),
+            )
+        }
     }
 
     fn cleanup_terminal_retention(
@@ -3388,6 +3450,54 @@ impl NixOSExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_publication_journal_error_reads_back_state_and_requires_fresh_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let transaction = super::super::action::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        transaction.persist_atomic(&path).unwrap();
+
+        let message = NixOSExecutor::post_publication_persist_error(
+            &transaction,
+            &path,
+            "journal rename already published; parent-directory durability is indeterminate: injected",
+        );
+        assert!(message.contains("read-back confirms transaction"));
+        assert!(message.contains("directory durability remains indeterminate"));
+        assert!(message.contains("freshly observe runtime and system-profile state"));
+        assert!(message.contains("no subsequent mutation"));
+    }
+
+    #[test]
+    fn post_publication_journal_error_fails_closed_on_readback_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let intended = super::super::action::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        let other = super::super::action::config_transaction::ConfigTransaction::new(
+            [4; 32],
+            [5; 32],
+            [6; 32],
+        );
+        other.persist_atomic(&path).unwrap();
+
+        let message = NixOSExecutor::post_publication_persist_error(
+            &intended,
+            &path,
+            "journal rename already published; parent-directory durability is indeterminate: injected",
+        );
+        assert!(message.contains("read-back does not match the intended"));
+        assert!(message.contains("State is ambiguous"));
+        assert!(message.contains("fail closed"));
+    }
 
     #[tokio::test]
     async fn transactional_activation_and_recovery_fail_closed_in_dry_run() {
