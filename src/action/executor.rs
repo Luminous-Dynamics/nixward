@@ -2312,9 +2312,15 @@ impl NixOSExecutor {
             Ok(value) => value,
             Err(encode_error) => {
                 return format!(
-                    "journal rename was reported as published, but intended-state comparison failed                      ({encode_error}); observed transaction {} phase {:?}; fail closed and require                      fresh runtime/profile observations before any further mutation. Original                      persistence error: {persistence_error}",
+                    concat!(
+                        "journal rename was reported as published, but intended-state comparison failed ({}); ",
+                        "observed transaction {} phase {:?}; fail closed and require fresh runtime/profile ",
+                        "observations before any further mutation. Original persistence error: {}"
+                    ),
+                    encode_error,
                     observed.transaction_id(),
                     observed.phase(),
+                    persistence_error,
                 );
             }
         };
@@ -2322,26 +2328,45 @@ impl NixOSExecutor {
             Ok(value) => value,
             Err(encode_error) => {
                 return format!(
-                    "journal rename was reported as published, but read-back comparison failed                      ({encode_error}); observed transaction {} phase {:?}; fail closed and require                      fresh runtime/profile observations before any further mutation. Original                      persistence error: {persistence_error}",
+                    concat!(
+                        "journal rename was reported as published, but read-back comparison failed ({}); ",
+                        "observed transaction {} phase {:?}; fail closed and require fresh runtime/profile ",
+                        "observations before any further mutation. Original persistence error: {}"
+                    ),
+                    encode_error,
                     observed.transaction_id(),
                     observed.phase(),
+                    persistence_error,
                 );
             }
         };
 
         if expected_value == observed_value {
             format!(
-                "journal rename was published and read-back confirms transaction {} phase {:?} is                  currently visible, but directory durability remains indeterminate. This call                  authorizes no subsequent mutation; a later recovery attempt must freshly observe                  runtime and system-profile state before deciding what is safe. Original persistence                  error: {persistence_error}",
+                concat!(
+                    "journal rename was published and read-back confirms transaction {} phase {:?} is ",
+                    "currently visible, but directory durability remains indeterminate. This call ",
+                    "authorizes no subsequent mutation; a later recovery attempt must freshly observe ",
+                    "runtime and system-profile state before deciding what is safe. Original persistence ",
+                    "error: {}"
+                ),
                 observed.transaction_id(),
                 observed.phase(),
+                persistence_error,
             )
         } else {
             format!(
-                "journal rename was reported as published, but read-back does not match the intended                  transaction {} phase {:?}; observed transaction {} phase {:?}. State is ambiguous:                  fail closed and require journal reconciliation plus fresh runtime/profile observations                  before any further mutation. Original persistence error: {persistence_error}",
+                concat!(
+                    "journal rename was reported as published, but read-back does not match the intended ",
+                    "transaction {} phase {:?}; observed transaction {} phase {:?}. State is ambiguous: ",
+                    "fail closed and require journal reconciliation plus fresh runtime/profile observations ",
+                    "before any further mutation. Original persistence error: {}"
+                ),
                 transaction.transaction_id(),
                 transaction.phase(),
                 observed.transaction_id(),
                 observed.phase(),
+                persistence_error,
             )
         }
     }
