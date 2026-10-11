@@ -620,6 +620,11 @@ mod tests {
             .unwrap()
     }
 
+    fn raw_ai_proposal_output(plan: &ChangePlan) -> Vec<u8> {
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        serde_json::to_vec_pretty(&intent).unwrap()
+    }
+
     fn ai_proposal(plan: &ChangePlan) -> AiProposalBinding {
         let output = ai_proposal_output(plan);
         AiProposalBinding::new(
@@ -784,6 +789,105 @@ mod tests {
         assert!(result
             .unwrap_err()
             .contains("AI proposal output intent does not exactly match the ChangePlan"));
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+    }
+
+    #[test]
+    fn resolved_ai_proposal_commits_raw_output_and_resolver_receipt_before_validation() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let evidence = tx
+            .record_validation_with_resolved_ai_proposal(
+                &plan,
+                [32; 32],
+                "resolved and validated model proposal",
+                &proposal,
+                &resolution,
+                &raw,
+                &canonical,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(evidence.validation_evidence_digest(), [32; 32]);
+        assert_eq!(
+            evidence.resolution_receipt_digest(),
+            resolution.digest().unwrap()
+        );
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        let decoded: AiProposalResolvedValidationEvidence =
+            serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.validate_for(&plan, &proposal, &resolution).is_ok());
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&decoded.digest().unwrap())
+        );
+        assert!(tx.validate_wire().is_ok());
+
+        // Even resolved evidence is not authority.
+        assert!(tx.authorization.is_none());
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+    }
+
+    #[test]
+    fn resolved_ai_proposal_rejects_raw_response_substitution_without_state_change() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+        let mut substituted_raw = raw.clone();
+        substituted_raw.push(b' '); // Same parsed intent, different exact source bytes.
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_resolved_ai_proposal(
+            &plan,
+            [32; 32],
+            "resolved and validated model proposal",
+            &proposal,
+            &resolution,
+            &substituted_raw,
+            &canonical,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result.unwrap_err().contains("resolution receipt validation failed"));
         assert_eq!(tx.phase, TransactionPhase::Planned);
         assert!(tx.validation.is_none());
         assert!(tx.authorization.is_none());
