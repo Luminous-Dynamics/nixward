@@ -694,6 +694,31 @@ mod tests {
     }
 
     #[test]
+    fn structured_proposal_output_binds_exact_config_patch() {
+        let machine = MachineBinding::new("machine-a").unwrap();
+        let patch = crate::action::config_writer::ConfigPatch {
+            target: PathBuf::from("/etc/nixos/configuration.nix"),
+            original: "{ }".into(),
+            modified: "{ services.openssh.enable = true; }".into(),
+            description: "enable OpenSSH".into(),
+        };
+        let plan = ChangePlan::config_only(machine.clone(), &patch, 60_000).unwrap();
+        let output = AiProposalOutputIntent::new(&machine, Some(&patch), None).unwrap();
+        assert!(output.validate_for_plan(&plan).is_ok());
+
+        let changed_patch = crate::action::config_writer::ConfigPatch {
+            modified: "{ services.openssh.enable = false; }".into(),
+            ..patch.clone()
+        };
+        let mismatched =
+            AiProposalOutputIntent::new(&machine, Some(&changed_patch), None).unwrap();
+        assert_eq!(
+            mismatched.validate_for_plan(&plan),
+            Err(AiProposalBindingError::ProposalOutputPlanMismatch)
+        );
+    }
+
+    #[test]
     fn proposal_output_fixture_is_canonical_and_resolves_exact_plan() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
