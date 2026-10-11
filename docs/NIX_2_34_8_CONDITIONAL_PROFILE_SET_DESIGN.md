@@ -20,6 +20,34 @@ In upstream Nix [2.34.8 `opSet`](https://github.com/NixOS/nix/blob/2.34.8/src/ni
 
 The candidate should not take a long-lived profile lock during a build/download. The safe linearization boundary is after realization, immediately before rechecking expected-old state and publishing the new generation.
 
+### Cross-check against newer Nix releases and current development source
+
+The finding is not confined to Nixward's locked 2.34.8 baseline. As of
+2026-10-11, Nix 2.35.2 is the latest tagged Nix release visible in the
+[official Nix container version list](https://github.com/NixOS/nix/pkgs/container/nix/versions?filters%5Bversion_type%5D=tagged)
+and the source was checked directly:
+
+- Nix 2.35.2 [`opSet`](https://github.com/NixOS/nix/blob/2.35.2/src/nix/nix-env/nix-env.cc#L758-L800)
+  still builds first and then calls `createGeneration`/`switchLink` without
+  acquiring `lockProfile` or `optimisticLockProfile` in that path.
+- Its [`createUserEnv`](https://github.com/NixOS/nix/blob/2.35.2/src/nix/nix-env/user-env.cc#L161-L177)
+  continues to lock and check the optimistic token before generation creation
+  and switch; its
+  [profile-lock helpers](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/profiles.cc#L235-L281)
+  remain distinct operations.
+
+I also checked the newer development revision selected by the current upstream
+nixpkgs branch snapshot
+[`a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3`](https://github.com/NixOS/nixpkgs/blob/a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3/pkgs/tools/package-management/nix/default.nix#L196-L234).
+That source pins Nix revision
+[`979a87c97bef7b96cd4ec4b142188089851e47ad`](https://github.com/NixOS/nix/tree/979a87c97bef7b96cd4ec4b142188089851e47ad)
+as `2.36pre20261010_979a87c9`; the same `opSet` sequence appears at
+[lines 759–801](https://github.com/NixOS/nix/blob/979a87c97bef7b96cd4ec4b142188089851e47ad/src/nix/nix-env/nix-env.cc#L759-L801).
+Thus the gap persists in the locked 2.34.8 baseline, the 2.35.2 release tag,
+and this inspected 2.36 development snapshot. This remains a bounded source
+audit—not proof for all downstream-patched builds, Nix profile APIs, wrappers,
+or direct filesystem writers.
+
 ## 2. Source-audited writer matrix
 
 This matrix covers the named upstream Nix 2.34.8 legacy paths inspected for this design. It is not an exhaustive claim about every Nix CLI command, wrapper, distribution patch, or direct filesystem writer.
