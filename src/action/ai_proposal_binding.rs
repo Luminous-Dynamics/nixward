@@ -843,6 +843,131 @@ impl AiProposalValidationEvidence {
     }
 }
 
+/// Validation envelope for a proposal whose raw provider response was resolved
+/// by the built-in JSON resolver and linked to a plan.
+///
+/// Persist this envelope with the referenced AiProposalResolutionReceipt,
+/// AiProposalBinding, raw response, canonical intent, and ordinary validation
+/// evidence. Its digest can occupy the existing ValidationReceipt digest slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiProposalResolvedValidationEvidence {
+    schema_version: u16,
+    #[serde(with = "serde_hex_32")]
+    plan_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    validation_evidence_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    proposal_binding_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    resolution_receipt_digest: [u8; 32],
+}
+
+const AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_DOMAIN: &[u8] =
+    b"nixward-ai-proposal-resolved-validation-evidence-v1\0";
+
+impl AiProposalResolvedValidationEvidence {
+    pub fn new(
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+    ) -> Result<Self, AiProposalBindingError> {
+        proposal.validate_for_plan(plan)?;
+        resolution.validate_for_plan(plan)?;
+        if validation_evidence_digest == [0; 32] {
+            return Err(AiProposalBindingError::MissingDigest("validation evidence"));
+        }
+        let evidence = Self {
+            schema_version: AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+            plan_digest: plan.digest(),
+            validation_evidence_digest,
+            proposal_binding_digest: proposal.digest()?,
+            resolution_receipt_digest: resolution.digest()?,
+        };
+        evidence.validate_shape()?;
+        Ok(evidence)
+    }
+
+    /// Check that the persisted evidence envelope joins these exact components.
+    ///
+    /// The resolution receipt must separately be checked against raw response and
+    /// canonical intent bytes using AiProposalResolutionReceipt::validate_against_artifacts.
+    pub fn validate_for(
+        &self,
+        plan: &ChangePlan,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_shape()?;
+        if self.plan_digest != plan.digest() {
+            return Err(AiProposalBindingError::PlanBindingMismatch);
+        }
+        proposal.validate_for_plan(plan)?;
+        resolution.validate_for_plan(plan)?;
+        if self.proposal_binding_digest != proposal.digest()? {
+            return Err(AiProposalBindingError::ProposalBindingMismatch);
+        }
+        if self.resolution_receipt_digest != resolution.digest()? {
+            return Err(AiProposalBindingError::ResolutionReceiptMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
+        self.validate_shape()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_DOMAIN);
+        hasher.update(&self.schema_version.to_le_bytes());
+        hasher.update(&self.plan_digest);
+        hasher.update(&self.validation_evidence_digest);
+        hasher.update(&self.proposal_binding_digest);
+        hasher.update(&self.resolution_receipt_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    pub fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub fn validation_evidence_digest(&self) -> [u8; 32] {
+        self.validation_evidence_digest
+    }
+
+    pub fn proposal_binding_digest(&self) -> [u8; 32] {
+        self.proposal_binding_digest
+    }
+
+    pub fn resolution_receipt_digest(&self) -> [u8; 32] {
+        self.resolution_receipt_digest
+    }
+
+    fn validate_shape(&self) -> Result<(), AiProposalBindingError> {
+        if self.schema_version != AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION {
+            return Err(
+                AiProposalBindingError::UnsupportedResolvedValidationEvidenceSchemaVersion(
+                    self.schema_version,
+                ),
+            );
+        }
+        for (name, digest) in [
+            ("resolved plan", &self.plan_digest),
+            ("resolved validation evidence", &self.validation_evidence_digest),
+            ("resolved proposal binding", &self.proposal_binding_digest),
+            ("resolution receipt", &self.resolution_receipt_digest),
+        ] {
+            if *digest == [0; 32] {
+                return Err(AiProposalBindingError::MissingDigest(name));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
