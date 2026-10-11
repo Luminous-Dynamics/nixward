@@ -21,6 +21,10 @@ use thiserror::Error;
 
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_OUTPUT_SCHEMA_VERSION: u16 = 1;
+pub const AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION: u16 = 1;
+pub const AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+pub const AI_PROPOSAL_JSON_RESOLVER_ID: &str = "nixward.ai-proposal-json-resolver";
+pub const AI_PROPOSAL_JSON_RESOLVER_VERSION: u16 = 1;
 const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
 const AI_PROPOSAL_ARTIFACT_DOMAIN: &[u8] = b"nixward-ai-proposal-artifact-v1\0";
 
@@ -57,6 +61,8 @@ pub enum ProposalArtifactKind {
     ProposalOutput,
     VerifierArtifact,
     EvaluationEvidence,
+    RawModelOutput,
+    ResolverSource,
 }
 
 impl ProposalArtifactKind {
@@ -68,6 +74,8 @@ impl ProposalArtifactKind {
             Self::ProposalOutput => b"proposal-output",
             Self::VerifierArtifact => b"verifier-artifact",
             Self::EvaluationEvidence => b"evaluation-evidence",
+            Self::RawModelOutput => b"raw-model-output",
+            Self::ResolverSource => b"resolver-source",
         }
     }
 }
@@ -137,6 +145,12 @@ pub enum AiProposalBindingError {
     InvalidProposalOutput(String),
     #[error("AI proposal output intent does not exactly match the ChangePlan")]
     ProposalOutputPlanMismatch,
+    #[error("unsupported AI proposal resolution receipt schema version: {0}")]
+    UnsupportedResolutionReceiptSchemaVersion(u16),
+    #[error("AI proposal resolution receipt does not match the supplied raw response, resolver source, output, or plan")]
+    ResolutionReceiptMismatch,
+    #[error("unsupported AI proposal resolved validation evidence schema version: {0}")]
+    UnsupportedResolvedValidationEvidenceSchemaVersion(u16),
 }
 
 
