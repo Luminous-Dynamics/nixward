@@ -84,6 +84,8 @@ pub enum AiProposalBindingError {
     UnsupportedSchemaVersion(u16),
     #[error("missing or zero {0} digest")]
     MissingDigest(&'static str),
+    #[error("required {0} artifact bytes must not be empty")]
+    EmptyArtifactBytes(&'static str),
     #[error("AI proposal binding refers to a different change plan")]
     PlanBindingMismatch,
 }
@@ -97,22 +99,47 @@ impl AiProposalBinding {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         plan: &ChangePlan,
-        model_artifact_digest: [u8; 32],
-        input_digest: [u8; 32],
-        policy_digest: [u8; 32],
-        proposal_output_digest: [u8; 32],
-        verifier_artifact_digest: [u8; 32],
-        evaluation_evidence_digest: [u8; 32],
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        proposal_output_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
     ) -> Result<Self, AiProposalBindingError> {
+        for (label, bytes) in [
+            ("model artifact", model_artifact_bytes),
+            ("input", input_canonical_bytes),
+            ("policy", policy_canonical_bytes),
+            ("proposal output", proposal_output_canonical_bytes),
+            ("verifier artifact", verifier_artifact_bytes),
+            ("evaluation evidence", evaluation_evidence_canonical_bytes),
+        ] {
+            if bytes.is_empty() {
+                return Err(AiProposalBindingError::EmptyArtifactBytes(label));
+            }
+        }
+
         let binding = Self {
             schema_version: AI_PROPOSAL_BINDING_SCHEMA_VERSION,
             plan_digest: plan.digest(),
-            model_artifact_digest,
-            input_digest,
-            policy_digest,
-            proposal_output_digest,
-            verifier_artifact_digest,
-            evaluation_evidence_digest,
+            model_artifact_digest: digest_artifact(
+                ProposalArtifactKind::ModelArtifact,
+                model_artifact_bytes,
+            ),
+            input_digest: digest_artifact(ProposalArtifactKind::Input, input_canonical_bytes),
+            policy_digest: digest_artifact(ProposalArtifactKind::Policy, policy_canonical_bytes),
+            proposal_output_digest: digest_artifact(
+                ProposalArtifactKind::ProposalOutput,
+                proposal_output_canonical_bytes,
+            ),
+            verifier_artifact_digest: digest_artifact(
+                ProposalArtifactKind::VerifierArtifact,
+                verifier_artifact_bytes,
+            ),
+            evaluation_evidence_digest: digest_artifact(
+                ProposalArtifactKind::EvaluationEvidence,
+                evaluation_evidence_canonical_bytes,
+            ),
         };
         binding.validate_shape()?;
         Ok(binding)
@@ -223,12 +250,12 @@ mod tests {
     fn binding(plan: &ChangePlan) -> AiProposalBinding {
         AiProposalBinding::new(
             plan,
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            [4; 32],
-            [5; 32],
-            [6; 32],
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"canonical-proposal-output-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
         )
         .unwrap()
     }
@@ -301,6 +328,25 @@ mod tests {
         assert_eq!(
             evidence.digest(),
             Err(AiProposalBindingError::MissingDigest("evaluation evidence"))
+        );
+    }
+
+    #[test]
+    fn required_artifact_bytes_cannot_be_omitted() {
+        let plan = plan("machine-a");
+        let result = AiProposalBinding::new(
+            &plan,
+            b"",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"canonical-proposal-output-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert_eq!(
+            result,
+            Err(AiProposalBindingError::EmptyArtifactBytes("model artifact"))
         );
     }
 
