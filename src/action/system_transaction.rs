@@ -8,7 +8,9 @@
 //! receipts so the installer, management UI, and remote transports can
 //! exchange one stable, digest-addressed transaction vocabulary.
 
-use super::ai_proposal_binding::{AiProposalBinding, AiProposalValidationEvidence};
+use super::ai_proposal_binding::{
+    AiProposalBinding, AiProposalOutputIntent, AiProposalValidationEvidence,
+};
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use serde::{Deserialize, Serialize};
 
@@ -548,13 +550,21 @@ mod tests {
         ChangeAuthorization::from_verified_approval(plan, "test-owner", [7; 32]).unwrap()
     }
 
+    fn ai_proposal_output(plan: &ChangePlan) -> Vec<u8> {
+        AiProposalOutputIntent::new(plan.machine(), None, plan.command())
+            .unwrap()
+            .canonical_bytes()
+            .unwrap()
+    }
+
     fn ai_proposal(plan: &ChangePlan) -> AiProposalBinding {
+        let output = ai_proposal_output(plan);
         AiProposalBinding::new(
             plan,
             b"model-artifact-v1",
             b"canonical-input-v1",
             b"canonical-policy-v1",
-            b"canonical-proposal-output-v1",
+            &output,
             b"verifier-artifact-v1",
             b"canonical-evaluation-evidence-v1",
         )
@@ -615,7 +625,7 @@ mod tests {
                 b"model-artifact-v1",
                 b"canonical-input-v1",
                 b"canonical-policy-v1",
-                b"canonical-proposal-output-v1",
+                &ai_proposal_output(&plan),
                 b"verifier-artifact-v1",
                 b"canonical-evaluation-evidence-v1",
             )
@@ -659,7 +669,7 @@ mod tests {
             b"SUBSTITUTED-model-artifact",
             b"canonical-input-v1",
             b"canonical-policy-v1",
-            b"canonical-proposal-output-v1",
+            &ai_proposal_output(&plan),
             b"verifier-artifact-v1",
             b"canonical-evaluation-evidence-v1",
         );
