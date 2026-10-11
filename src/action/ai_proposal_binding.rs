@@ -330,14 +330,20 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_schema_version_is_rejected_even_after_deserialization() {
+    fn unsupported_schema_version_is_rejected_after_deserialization() {
         let plan = plan("machine-a");
-        let mut evidence = binding(&plan);
-        evidence.schema_version = AI_PROPOSAL_BINDING_SCHEMA_VERSION + 1;
+        let evidence = binding(&plan);
+        let unsupported_version = AI_PROPOSAL_BINDING_SCHEMA_VERSION + 1;
+        let mut value = serde_json::to_value(evidence).unwrap();
+        value["schema_version"] = serde_json::json!(unsupported_version);
+        let decoded: AiProposalBinding = serde_json::from_value(value).unwrap();
 
         assert_eq!(
-            evidence.validate_for_plan(&plan),
-            Err(AiProposalBindingError::UnsupportedSchemaVersion(2))
+            decoded.validate_for_plan(&plan),
+            Err(AiProposalBindingError::UnsupportedSchemaVersion(
+                unsupported_version
+            ))
         );
     }
+}
 }
