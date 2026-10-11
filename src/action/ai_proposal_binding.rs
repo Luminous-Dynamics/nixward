@@ -330,6 +330,7 @@ impl AiProposalValidationEvidence {
         validation_evidence_digest: [u8; 32],
         proposal: &AiProposalBinding,
     ) -> Result<Self, AiProposalBindingError> {
+        proposal.validate_for_plan(plan)?;
         if validation_evidence_digest == [0; 32] {
             return Err(AiProposalBindingError::MissingDigest("validation evidence"));
         }
@@ -352,6 +353,7 @@ impl AiProposalValidationEvidence {
         if self.plan_digest != plan.digest() {
             return Err(AiProposalBindingError::PlanBindingMismatch);
         }
+        proposal.validate_for_plan(plan)?;
         if self.proposal_binding_digest != proposal.digest()? {
             return Err(AiProposalBindingError::ProposalBindingMismatch);
         }
@@ -610,6 +612,17 @@ mod tests {
         assert_eq!(decoded, original);
         assert!(decoded.validate_for(&plan, &proposal).is_ok());
         assert_eq!(decoded.digest().unwrap(), original.digest().unwrap());
+    }
+
+    #[test]
+    fn validation_evidence_envelope_rejects_mismatched_proposal_at_construction() {
+        let plan = plan("machine-a");
+        let other_plan = plan("machine-b");
+        let other_proposal = binding(&other_plan);
+        assert_eq!(
+            AiProposalValidationEvidence::new(&plan, [21; 32], &other_proposal),
+            Err(AiProposalBindingError::PlanBindingMismatch)
+        );
     }
 
     #[test]
