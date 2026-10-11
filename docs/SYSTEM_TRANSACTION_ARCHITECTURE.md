@@ -169,11 +169,16 @@ Only the already-authorized exact command/patch/capability may execute.
 For an exact NixOS system closure activation, Nixward first takes its
 cross-process transaction interlock before the final pre-state validation. The
 authorized profile target is then set and verified, after which the exact
-closure's `switch-to-configuration` action is invoked. Nixward does not hold
-the Nix profile lock across the child activation: `nix-env --set` owns its
-profile lock for its own mutation, while `switch-to-configuration` uses its
-own activation lock. This keeps the interlocks composable rather than creating
-self-deadlock. The executor must not reinterpret the approved request,
+closure's `switch-to-configuration` action is invoked. Nixward's cross-process transaction interlock is distinct from Nix's
+operation-specific profile and activation locks. **Do not assume
+`nix-env --set` owns the profile lock:** upstream Nix 2.34.8's `opSet` path
+calls `createGeneration` and `switchLink` without acquiring
+`lockProfile`/`optimisticLockProfile`
+([source](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801)).
+`switch-to-configuration` has a separate activation boundary; it does not
+retroactively serialize the profile write. These boundaries must remain
+separate in the model until a supported conditional profile transition is
+implemented. The executor must not reinterpret the approved request,
 substitute an ambient generation selector, or silently redirect the profile
 target.
 
@@ -381,17 +386,18 @@ transition, immutable `switch-to-configuration` execution, and
 post-state verification/recovery. This serializes Nixward-owned transactions;
 it does not, by itself, serialize every external writer.
 
-**Do not assume that `nix-env --set` supplies a native profile lock.** In the
-upstream Nix `2.28.5` source, `opSet` calls `createGeneration` followed by
-`switchLink` without calling `lockProfile` or `optimisticLockProfile`
-([pinned source](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)).
-Other profile operations such as `switchGeneration` explicitly call
-`lockProfile`, and the current profiles header documents both exclusive and
-optimistic profile-lock helpers. Locking must therefore be audited per operation
-and per deployed Nix version. Nixward must record each target's exact Nix
-version/build and matching source before relying on any native writer-lock
-claim; the `2.28.5` finding is not proof that every currently deployed version
-has identical internals.
+**Do not assume that `nix-env --set` supplies a native profile lock.**
+Both the older upstream Nix `2.28.5` source
+([audit](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765))
+and the Nix `2.34.8` source selected by this branch's locked nixpkgs baseline
+([audit](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801))
+show `opSet` calling `createGeneration` followed by `switchLink` without
+calling `lockProfile` or `optimisticLockProfile` in that path. Other profile
+operations such as `switchGeneration` explicitly call `lockProfile`. Locking
+must therefore be audited per operation and per deployed Nix version. Nixward
+must record each target's exact Nix version/build and matching source before
+relying on any native writer-lock claim; the Nix 2.34.8 finding still does not
+prove every target runs the same build.
 
 The worker launcher still performs a fresh exact profile observation
 immediately before releasing the gated worker. That check is not atomic with
