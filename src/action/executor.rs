@@ -3583,7 +3583,7 @@ mod tests {
             let disposition =
                 super::super::config_transaction::classify_profile_transition_post_state(
                     Some(0),
-                    Some(&post_state),
+                    Some(post_state.as_str()),
                     candidate,
                 );
             (post_state, disposition)
@@ -3639,7 +3639,7 @@ mod tests {
             let disposition =
                 super::super::config_transaction::classify_profile_transition_post_state(
                     Some(0),
-                    Some(&observed),
+                    Some(observed.as_str()),
                     candidate,
                 );
             let activation_started = matches!(
