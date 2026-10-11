@@ -69,12 +69,19 @@ pub fn digest_artifact(kind: ProposalArtifactKind, bytes: &[u8]) -> [u8; 32] {
 #[serde(deny_unknown_fields)]
 pub struct AiProposalBinding {
     schema_version: u16,
+    #[serde(with = "serde_hex_32")]
     plan_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     model_artifact_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     input_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     policy_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     proposal_output_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     verifier_artifact_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     evaluation_evidence_digest: [u8; 32],
 }
 
@@ -315,12 +322,57 @@ pub const AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 const AI_PROPOSAL_VALIDATION_EVIDENCE_DOMAIN: &[u8] =
     b"nixward-ai-proposal-validation-evidence-v1\0";
 
+/// Stable lowercase-hex JSON encoding for fixed-width content digests.
+mod serde_hex_32 {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let encoded: String = value.iter().map(|byte| format!("{byte:02x}")).collect();
+        serializer.serialize_str(&encoded)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(D::Error::custom(
+                "digest must be 64 lowercase hexadecimal characters",
+            ));
+        }
+
+        let mut digest = [0u8; 32];
+        for (index, slot) in digest.iter_mut().enumerate() {
+            let high = (encoded.as_bytes()[index * 2] as char)
+                .to_digit(16)
+                .ok_or_else(|| D::Error::custom("invalid digest encoding"))?;
+            let low = (encoded.as_bytes()[index * 2 + 1] as char)
+                .to_digit(16)
+                .ok_or_else(|| D::Error::custom("invalid digest encoding"))?;
+            *slot = ((high << 4) | low) as u8;
+        }
+        Ok(digest)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiProposalValidationEvidence {
     schema_version: u16,
+    #[serde(with = "serde_hex_32")]
     plan_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     validation_evidence_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
     proposal_binding_digest: [u8; 32],
 }
 
@@ -644,6 +696,28 @@ mod tests {
             evidence.validate_for(&plan, &different_proposal),
             Err(AiProposalBindingError::ProposalBindingMismatch)
         );
+    }
+
+    #[test]
+    fn validation_evidence_fixture_uses_lowercase_hex_digests() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/ai-proposal-validation-evidence-v1.json"
+        ));
+        let parsed: AiProposalValidationEvidence = serde_json::from_str(raw).unwrap();
+        let encoded = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(
+            parsed.schema_version(),
+            AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION
+        );
+        assert_eq!(encoded["plan_digest"].as_str().unwrap().len(), 64);
+        assert_eq!(
+            encoded["validation_evidence_digest"].as_str().unwrap().len(),
+            64
+        );
+        assert_eq!(encoded["proposal_binding_digest"].as_str().unwrap().len(), 64);
+        assert!(parsed.digest().is_ok());
     }
 
     #[test]
