@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_digest_is_rejected_even_after_deserialization() {
+    fn zero_digest_is_rejected_during_validation() {
         let plan = plan("machine-a");
         let mut evidence = binding(&plan);
         evidence.evaluation_evidence_digest = [0; 32];
