@@ -52,11 +52,18 @@ The current source tree moved the legacy `nix-env` implementation to
   exhibited the same relevant sequence: generation creation followed by
   `switchLink`, without an explicit profile lock in `opSet`.
 
-This is no longer just an inference from a historical release: the hole is
-present in the **2.34.8 source selected by the current flake's locked
-nixpkgs package aliases**. It remains version-bounded. The host's actual Nix
-executable and source revision must still be captured on each supported target
-before making target-wide claims.
+This is present in the **2.34.8 source selected by the current flake's locked
+nixpkgs package aliases**, and the subsequent source check found the same
+`opSet` sequence in Nix 2.35.2 and in upstream development commit
+[`979a87c97bef7b96cd4ec4b142188089851e47ad`](https://github.com/NixOS/nix/blob/979a87c97bef7b96cd4ec4b142188089851e47ad/src/nix/nix-env/nix-env.cc#L759-L801),
+packaged by nixpkgs commit
+[`a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3`](https://github.com/NixOS/nixpkgs/blob/a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3/pkgs/tools/package-management/nix/default.nix#L196-L234)
+as `2.36pre20261010_979a87c9`. The [Nix 2.35.2 release source](https://github.com/NixOS/nix/blob/2.35.2/src/nix/nix-env/nix-env.cc#L758-L800)
+also calls `createGeneration` then `switchLink` without acquiring the profile
+lock in `opSet`. This cross-version result reinforces the finding but is not
+a substitute for the exact deployed build's source/patch audit. The host's
+actual Nix executable and source revision must still be captured on each
+supported target before making target-wide claims.
 
 ### Consequence for the implementation plan
 
