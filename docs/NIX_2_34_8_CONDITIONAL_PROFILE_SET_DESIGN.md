@@ -161,7 +161,93 @@ separate test that is never invoked by Meson.
 
 The core concurrency tests require explicit channels/FIFOs or a dedicated test seam, not timing sleeps as the only oracle. Every test must assert both the command result and filesystem/profile/generation state.
 
-## 6. Nixward integration requirements
+## 6. Profile CAS is not the full activation transaction
+
+A correct conditional profile update fixes a **profile mutation** race, but it
+does not by itself close the full profile-to-runtime race tracked by Nixward
+Issue #9. The update lock is normally released when `nix-env --set` exits;
+activation follows as a separate command.
+
+This is not just hypothetical architecture. In the inspected nixpkgs source
+snapshot, `nixos-rebuild-ng`'s `set_profile()` calls
+`nix-env -p <profile> --set <path_to_config>`, while
+`switch_to_configuration()` separately invokes
+`<path_to_config>/bin/switch-to-configuration <action>`:
+[set operation](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/ni/nixos-rebuild-ng/src/nixos_rebuild/nix.py#L687-L755).
+The NixOS `switch-to-configuration-ng` implementation independently locks
+`/run/nixos/switch-to-configuration.lock` around activation
+([pinned source](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/sw/switch-to-configuration-ng/src/main.rs#L1809-L1821)).
+That serializes competing activation executions, but it does not hold the
+selected system-profile lock from profile publication through activation.
+A rebuild can therefore publish a different profile while another already
+selected closure is waiting for, or running under, the activation lock.
+
+### Required end-to-end linearization boundary
+
+To claim the profile/runtime pair belongs to one transaction, the transaction
+must preserve this ordering as one managed critical section:
+
+1. Acquire a system-profile mutation lease using the same lock inode and
+   locking semantics respected by supported profile writers.
+2. Observe and compare expected-old closure under that lease.
+3. Create/select the candidate generation and switch the system profile.
+4. Keep the lease held while invoking the exact immutable candidate
+   `switch-to-configuration` action and collecting its result.
+5. Read back the selected profile and running closure while the lease still
+   prevents a cooperating writer from changing the profile.
+6. Commit the transaction disposition, then release/remove the lock using
+   stale-lock semantics compatible with Nix's `PathLocks`.
+
+An ordinary `nix-env --set --expected-profile-closure …` process that exits
+before activation cannot by itself meet steps 4–5. An unrelated activation lock
+is not a substitute for a profile lock. Nor is a Nixward-only lock sufficient
+unless every in-scope external writer is required to honor it.
+
+### Integration paths that must participate
+
+The source audit found NixOS-managed callers as well as Nix itself. At minimum,
+the implementation/rollout plan must account for:
+
+- Nixward's exact-system transition and its gated activation/recovery flow.
+- `nixos-rebuild-ng`'s profile-set plus activation sequence.
+- Any legacy `nixos-rebuild` path still shipped by supported deployments.
+- NixOS self-deployment/system services that run `nix-env --set` then
+  `switch-to-configuration` separately (for example the source match in
+  [`nixos/modules/services/system/self-deploy.nix`](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/nixos/modules/services/system/self-deploy.nix)).
+- Auto-upgrade or third-party system managers that can change the same profile.
+
+Two plausible engineering directions are left open for an upstream design review:
+
+- **Native transaction/lease API:** add a Nix-supported profile transaction lease
+  that keeps the actual profile lock alive across conditional set, activation,
+  and read-back. Nixward and supported rebuild frontends consume the lease
+  through a validated inherited-FD/API contract. The lease must preserve
+  `PathLocks` stale-lock/deletion rules; an ad hoc `flock` copy that ignores
+  inode replacement is not acceptable.
+- **One transaction owner:** move profile mutation and activation behind a
+  single privileged system-deployment coordinator, and migrate every supported
+  profile-changing frontend to it. Direct/root bypass remains out of scope,
+  but any unintegrated supported frontend must be listed as an unresolved path.
+
+Do not prematurely choose an FD hand-off protocol without proving its inode,
+exclusive-lock, lifetime, close-on-exec, stale-file, and error-cleanup semantics.
+The conditional `opSet` feature remains useful, but is only a sub-primitive
+until one of these end-to-end approaches is proven.
+
+### New mandatory interleaving test
+
+Add a test that pauses transaction A *after its conditional profile publication
+and before A invokes activation*, then requests a conflicting profile update
+and activation through transaction B. B must not change the selected profile
+until A has completed activation and state read-back; after A releases its
+lease, B must re-read its expected-old closure and either proceed against the
+new state or refuse. Assert profile closure, runtime closure, activation order,
+and generation/root inventory—not just both process exit codes. Run a second
+case with an unintegrated legacy writer and verify the guarantee is not claimed
+for that path. Use a controlled temporary system-profile-shaped test fixture,
+never the host's live system profile.
+
+## 7. Nixward integration requirements
 
 This upstream feature does not by itself prove Nixward uses it safely. Nixward integration must:
 
@@ -174,12 +260,12 @@ This upstream feature does not by itself prove Nixward uses it safely. Nixward i
 
 The Nixward daemon remains unprivileged. Any privileged mutation authority must be an explicitly separate service or a carefully constrained supported call path, with its own authorization/threat model. A coordinator that simply wraps an unmodified `nix-env --set` remains coordination, not CAS.
 
-## 7. Explicit residual boundaries
+## 8. Explicit residual boundaries
 
 - A process with root authority can bypass the supported Nix command and directly manipulate system state. This design excludes a deliberately hostile root actor; it cannot make root subordinate to a root-owned service.
 - Newer `nix profile` commands, downstream patches, custom profile paths and external management tools are outside the guarantee until audited against the same lock.
 - The finding is anchored to upstream Nix tag 2.34.8 and the current Nixward locked nixpkgs package alias. Record `nix --version`, the exact Nix store path/build identity, selected `nix.package`, and source/patch set on each deployment.
-- The patch, the controlled upstream tests, Nixward integration tests, and hosted qualification have not been implemented or executed by this document.
+- The patch, the controlled upstream tests, Nixward integration tests, the end-to-end profile-lock lease or shared transaction owner, and hosted qualification have not been implemented or executed by this document.
 
 ## Source references
 
