@@ -881,6 +881,11 @@ impl AiProposalResolvedValidationEvidence {
             raw_model_output_bytes,
             canonical_intent_bytes,
         )?;
+        if proposal.proposal_output_digest()
+            != digest_artifact(ProposalArtifactKind::ProposalOutput, canonical_intent_bytes)
+        {
+            return Err(AiProposalBindingError::ArtifactDigestMismatch("proposal output"));
+        }
         if validation_evidence_digest == [0; 32] {
             return Err(AiProposalBindingError::MissingDigest("validation evidence"));
         }
@@ -917,6 +922,11 @@ impl AiProposalResolvedValidationEvidence {
             raw_model_output_bytes,
             canonical_intent_bytes,
         )?;
+        if proposal.proposal_output_digest()
+            != digest_artifact(ProposalArtifactKind::ProposalOutput, canonical_intent_bytes)
+        {
+            return Err(AiProposalBindingError::ArtifactDigestMismatch("proposal output"));
+        }
         if self.proposal_binding_digest != proposal.digest()? {
             return Err(AiProposalBindingError::ProposalBindingMismatch);
         }
