@@ -90,6 +90,10 @@ pub enum AiProposalBindingError {
     ArtifactDigestMismatch(&'static str),
     #[error("AI proposal binding refers to a different change plan")]
     PlanBindingMismatch,
+    #[error("AI proposal validation evidence refers to a different proposal binding")]
+    ProposalBindingMismatch,
+    #[error("unsupported AI proposal validation evidence schema version: {0}")]
+    UnsupportedValidationEvidenceSchemaVersion(u16),
 }
 
 impl AiProposalBinding {
@@ -289,6 +293,111 @@ impl AiProposalBinding {
             ("proposal output", &self.proposal_output_digest),
             ("verifier artifact", &self.verifier_artifact_digest),
             ("evaluation evidence", &self.evaluation_evidence_digest),
+        ] {
+            if *digest == [0; 32] {
+                return Err(AiProposalBindingError::MissingDigest(name));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Versioned join between ordinary validation evidence and one AI proposal.
+///
+/// The digest of this envelope is stored in Nixward's existing
+/// SystemTransaction validation receipt. This keeps the wire transaction shape
+/// unchanged while making its validation-evidence digest commit to both the
+/// ordinary validation evidence and the exact AI proposal provenance.
+///
+/// The envelope is correlation/evidence metadata only. It is not an approval,
+/// signature, proof verification result, or execution capability.
+pub const AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+const AI_PROPOSAL_VALIDATION_EVIDENCE_DOMAIN: &[u8] =
+    b"nixward-ai-proposal-validation-evidence-v1\\0";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiProposalValidationEvidence {
+    schema_version: u16,
+    plan_digest: [u8; 32],
+    validation_evidence_digest: [u8; 32],
+    proposal_binding_digest: [u8; 32],
+}
+
+impl AiProposalValidationEvidence {
+    pub fn new(
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        proposal: &AiProposalBinding,
+    ) -> Result<Self, AiProposalBindingError> {
+        if validation_evidence_digest == [0; 32] {
+            return Err(AiProposalBindingError::MissingDigest("validation evidence"));
+        }
+        let evidence = Self {
+            schema_version: AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+            plan_digest: plan.digest(),
+            validation_evidence_digest,
+            proposal_binding_digest: proposal.digest()?,
+        };
+        evidence.validate_shape()?;
+        Ok(evidence)
+    }
+
+    pub fn validate_for(
+        &self,
+        plan: &ChangePlan,
+        proposal: &AiProposalBinding,
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_shape()?;
+        if self.plan_digest != plan.digest() {
+            return Err(AiProposalBindingError::PlanBindingMismatch);
+        }
+        if self.proposal_binding_digest != proposal.digest()? {
+            return Err(AiProposalBindingError::ProposalBindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Content digest to place in SystemTransaction::ValidationReceipt.
+    pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
+        self.validate_shape()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AI_PROPOSAL_VALIDATION_EVIDENCE_DOMAIN);
+        hasher.update(&self.schema_version.to_le_bytes());
+        hasher.update(&self.plan_digest);
+        hasher.update(&self.validation_evidence_digest);
+        hasher.update(&self.proposal_binding_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    pub fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub fn validation_evidence_digest(&self) -> [u8; 32] {
+        self.validation_evidence_digest
+    }
+
+    pub fn proposal_binding_digest(&self) -> [u8; 32] {
+        self.proposal_binding_digest
+    }
+
+    fn validate_shape(&self) -> Result<(), AiProposalBindingError> {
+        if self.schema_version != AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION {
+            return Err(
+                AiProposalBindingError::UnsupportedValidationEvidenceSchemaVersion(
+                    self.schema_version,
+                ),
+            );
+        }
+        for (name, digest) in [
+            ("plan", &self.plan_digest),
+            ("validation evidence", &self.validation_evidence_digest),
+            ("proposal binding", &self.proposal_binding_digest),
         ] {
             if *digest == [0; 32] {
                 return Err(AiProposalBindingError::MissingDigest(name));
