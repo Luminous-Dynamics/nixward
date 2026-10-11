@@ -16,6 +16,7 @@ use thiserror::Error;
 
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
 const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
+const AI_PROPOSAL_ARTIFACT_DOMAIN: &[u8] = b"nixward-ai-proposal-artifact-v1\0";
 
 /// Artifact classes used to domain-separate proposal provenance digests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
