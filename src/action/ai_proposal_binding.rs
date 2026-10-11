@@ -727,8 +727,8 @@ mod tests {
 
         let non_schema_field =
             String::from_utf8(encoded.clone()).unwrap().replace(
-                "\\"json\\":true",
-                "\\"json\\":true,\\"untrusted_extra\\":1",
+                "\"json\":true",
+                "\"json\":true,\"untrusted_extra\":1",
             );
         assert!(AiProposalOutputIntent::from_json_bytes(non_schema_field.as_bytes()).is_err());
     }
