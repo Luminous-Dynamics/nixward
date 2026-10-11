@@ -341,11 +341,11 @@ fn embedded_resolver_source_digest() -> [u8; 32] {
 impl AiProposalResolutionReceipt {
     /// Run the built-in strict JSON resolver over the raw provider response.
     ///
-    /// The raw response is hashed before parsing; successful parsing is then
-    /// normalized to the exact canonical schema-v1 intent representation and
-    /// checked against the provided ChangePlan. Returns the receipt and those
-    /// canonical bytes. Free-form natural-language responses are intentionally
-    /// not interpreted by this resolver.
+    /// The raw model-output JSON payload is hashed before parsing; this is the
+    /// model-produced content, not its surrounding provider HTTP/API envelope.
+    /// Successful parsing is normalized to the exact canonical schema-v1 intent
+    /// and checked against the provided ChangePlan. Free-form natural-language
+    /// responses are intentionally not interpreted by this resolver.
     pub fn resolve_provider_json(
         plan: &ChangePlan,
         raw_model_output_bytes: &[u8],
