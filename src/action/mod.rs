@@ -9,6 +9,7 @@
 //! exact-command scoped and rollback-bound.
 
 pub mod authority_approval;
+pub mod ai_proposal_binding;
 pub mod authority_replay;
 pub mod change_covenant;
 pub mod config_writer;
@@ -22,6 +23,7 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 
+pub use ai_proposal_binding::{AiProposalBinding, AiProposalBindingError};
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,
