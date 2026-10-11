@@ -313,7 +313,7 @@ impl AiProposalBinding {
 /// signature, proof verification result, or execution capability.
 pub const AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 const AI_PROPOSAL_VALIDATION_EVIDENCE_DOMAIN: &[u8] =
-    b"nixward-ai-proposal-validation-evidence-v1\\0";
+    b"nixward-ai-proposal-validation-evidence-v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -596,6 +596,41 @@ mod tests {
         let encoded = serde_json::to_string(&binding(&plan)).unwrap();
         let with_unknown = encoded.trim_end_matches('}').to_owned() + ",\"unexpected\":true}";
         assert!(serde_json::from_str::<AiProposalBinding>(&with_unknown).is_err());
+    }
+
+    #[test]
+    fn validation_evidence_envelope_round_trips_and_binds_components() {
+        let plan = plan("machine-a");
+        let proposal = binding(&plan);
+        let original =
+            AiProposalValidationEvidence::new(&plan, [21; 32], &proposal).unwrap();
+        let encoded = serde_json::to_vec(&original).unwrap();
+        let decoded: AiProposalValidationEvidence = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, original);
+        assert!(decoded.validate_for(&plan, &proposal).is_ok());
+        assert_eq!(decoded.digest().unwrap(), original.digest().unwrap());
+    }
+
+    #[test]
+    fn validation_evidence_envelope_rejects_plan_and_proposal_substitution() {
+        let plan = plan("machine-a");
+        let other_plan = plan("machine-b");
+        let proposal = binding(&plan);
+        let evidence =
+            AiProposalValidationEvidence::new(&plan, [21; 32], &proposal).unwrap();
+
+        assert_eq!(
+            evidence.validate_for(&other_plan, &proposal),
+            Err(AiProposalBindingError::PlanBindingMismatch)
+        );
+
+        let mut different_proposal = proposal.clone();
+        different_proposal.policy_digest = [77; 32];
+        assert_eq!(
+            evidence.validate_for(&plan, &different_proposal),
+            Err(AiProposalBindingError::ProposalBindingMismatch)
+        );
     }
 
     #[test]
