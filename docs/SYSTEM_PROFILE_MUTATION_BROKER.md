@@ -141,6 +141,41 @@ Separate the **unprivileged observer/recommender** from the **privileged mutatio
 5. **Activation remains separate.** Profile selection is not proof of a running-generation transition. Activation still uses the immutable closure, gated worker receipt, exact argv/environment checks, runtime/profile re-observation, and transaction-owned journal.
 6. **Recovery is a new conditional request.** Recovery re-observes runtime and profile, validates the transaction's allow-set, and asks the same native conditional-update primitive to select the bound predecessor only if the expected current profile still matches. A mismatch is not overwritten; it becomes an explicit recovery refusal.
 
+### CAS versus end-to-end system activation
+
+A profile-level conditional update is a necessary sub-primitive, not closure of
+Issue #9. The lock in `nix-env --set` would normally be released when that
+process exits, while activation is launched separately. The pinned nixpkgs
+snapshot shows `nixos-rebuild-ng` calling `nix-env -p <profile> --set
+<path_to_config>` and then calling the candidate's `switch-to-configuration`
+as a distinct step ([source](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/ni/nixos-rebuild-ng/src/nixos_rebuild/nix.py#L687-L755)).
+The `switch-to-configuration-ng` activation lock at
+`/run/nixos/switch-to-configuration.lock` serializes activations, not profile
+writers ([source](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/sw/switch-to-configuration-ng/src/main.rs#L1809-L1821)).
+
+Consequently, after A conditionally selects candidate A and releases the profile
+lock, B can select candidate B before A starts activation. A then might activate
+A while the selected profile names B. An immediate profile recheck narrows but
+does not eliminate the final check-to-activation gap. Do not describe native
+CAS alone as end-to-end transaction isolation.
+
+To close that gap for cooperating supported writers, the transaction owner
+must hold a profile mutation lease from expected-old comparison and generation
+publication through exact activation and profile/runtime read-back, or every
+supported frontend must participate in one privileged system-deployment
+coordinator. Any Nix profile-lock lease/FD handoff needs explicit proof of
+inode identity, exclusive ownership, descriptor inheritance, lease lifetime,
+stale lock-file handling, cleanup and error behavior. Nixward's unprivileged
+observer daemon must not be silently turned into that privileged owner.
+Unintegrated frontends and direct root bypass remain explicit residuals.
+
+At minimum, acceptance tests must pause A after profile publication but before
+activation, race B's profile transition/activation, and assert the selected
+profile, running closure, activation order, generation links and GC-root
+inventory throughout read-back. If B is not blocked or forced to re-observe
+after A releases, the end-to-end guarantee fails even if the profile CAS test
+passes.
+
 ### Error contract
 
 Use closed, typed outcomes instead of parsing strings:
