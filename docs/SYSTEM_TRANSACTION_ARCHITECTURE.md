@@ -116,7 +116,9 @@ Nixward's `record_validation_with_ai_proposal` path rechecks the proposal
 binding against the exact plan and supplied artifact bytes before changing the
 transaction to `Validated`. It then records the envelope digest in the existing
 validation receipt and returns the typed envelope so the caller can persist it
-alongside the referenced evidence.
+alongside the referenced evidence. Digest fields use strict 64-character
+lowercase hexadecimal JSON strings; see
+`docs/fixtures/ai-proposal-validation-evidence-v1.json` for the wire shape.
 
 This preserves the existing transaction wire shape and does not add a new
 authorization primitive. Provenance is not approval: the normal detached
