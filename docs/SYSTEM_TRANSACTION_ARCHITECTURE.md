@@ -619,6 +619,54 @@ models remain required for any power-loss claim. Tests must assert both the
 returned disposition and the bytes/phase actually read back; they must not assume
 that every returned error means the old journal survived.
 
+## Deterministic profile race interleavings (2026-10-11)
+
+The profile race suite now encodes the distinct outcomes with channel barriers
+rather than sleeps:
+
+- `nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions`
+  runs actor A and actor B on separate threads. B cannot acquire Nixward's
+  interlock while A holds it, and can acquire it after A explicitly releases.
+  This establishes Nixward-to-Nixward exclusion only.
+- `external_writer_between_profile_guard_and_nix_env_set_is_a_reproducible_non_cas_counterexample`
+  pauses actor A after the production exact-profile precondition helper accepts
+  the prior state, lets an unrelated actor change the profile, and only then
+  allows the simulated non-CAS profile-set operation to target the candidate.
+  The resulting read-back can equal the candidate and the current classifier
+  can say `Committed`. That assertion is deliberately a counterexample oracle,
+  not a claim of safety: the final state does not establish that no external
+  writer intervened. It makes the remaining issue executable and reviewable.
+- `external_writer_after_child_exit_produces_indeterminate_readback_and_blocks_activation`
+  lets the simulated child finish, places an unrelated profile write at a
+  channel barrier before read-back, and requires the production classifier to
+  return `Indeterminate` and the modeled activation callback to remain
+  uninvoked.
+- `recovery_rejects_foreign_runtime_profile_pair_before_mutation_callback`
+  uses the production recovery allow-set validator and requires zero subsequent
+  recovery-mutation callback invocations for a foreign runtime/profile pair.
+
+The interleaving tests use in-memory state to control the scheduling boundary;
+they do not invoke the live system profile, `nix-env`, or the activation
+artifact, and they are not a kernel-level concurrency or privilege-isolation
+proof. They intentionally distinguish cases the current implementation can
+detect from the pre-check-to-write case it cannot detect without a shared
+conditional-update or mutation-broker boundary.
+
+The [Nix profile manual](https://nix.dev/manual/nix/2.35/package-management/profiles.html)
+describes the final profile symlink switch as atomic on Unix. Atomic
+replacement prevents a partially written link from being observed; by itself
+it does not compare the previous target with a caller-supplied expected value.
+The [`nix-env --set` reference](https://nix.dev/manual/nix/2.28/command-ref/nix-env/set)
+documents setting a profile to a specified derivation, not a caller-supplied
+expected-old-value conditional operation. These references support keeping the
+CAS gap explicit; they do not rule out other platform-specific designs that
+would need their own review and tests.
+
+The Rust tests above are authored, but have not been compiled or executed in
+this environment. Static review cannot be represented as a passing test.
+Keep Issue #9 open until the harness is run and the pre-check-to-write gap is
+either closed for the stated threat model or explicitly accepted as a residual.
+
 ## Parent-gated worker launch (2026-10-09)
 
 Privileged profile-transition, activation, and recovery workers now use the
