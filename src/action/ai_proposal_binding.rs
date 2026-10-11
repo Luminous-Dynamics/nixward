@@ -148,7 +148,7 @@ impl AiProposalOutputIntent {
         command: Option<&NixOSCommand>,
     ) -> Result<Self, AiProposalBindingError> {
         let config_patch = config_patch
-            .map(|patch| {
+            .map(|patch| -> Result<AiProposalOutputConfigPatch, AiProposalBindingError> {
                 let target = patch.target.to_str().ok_or_else(|| {
                     AiProposalBindingError::InvalidProposalOutput(
                         "configuration target path is not valid UTF-8".into(),
@@ -220,7 +220,7 @@ impl AiProposalOutputIntent {
         let machine = MachineBinding::new(self.machine_id.clone())
             .map_err(AiProposalBindingError::InvalidProposalOutput)?;
         let patch = self.config_patch.as_ref().map(|patch| ConfigPatch {
-            target: PathBuf::from(&patch.target),
+            target: PathBuf::from(patch.target.as_str()),
             original: patch.original.clone(),
             modified: patch.modified.clone(),
             description: patch.description.clone(),
