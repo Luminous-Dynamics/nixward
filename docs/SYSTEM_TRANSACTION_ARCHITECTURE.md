@@ -149,18 +149,19 @@ envelope and the referenced artifacts/evidence needed to resolve its digest.
 For consumers that need to evidence the *raw-response-to-structure* step, the
 higher-assurance path is `AiProposalResolutionReceipt` plus
 `SystemTransaction::record_validation_with_resolved_ai_proposal`:
-the built-in JSON resolver hashes the exact provider-response bytes, identifies
-the resolver contract and embedded resolver-source bytes, canonicalizes the
-typed intent, checks that intent against the exact plan, and emits a receipt
-joining the raw response digest, source digest, canonical-intent digest, and
-plan digest. The resolved validation envelope then commits the resolution
-receipt digest alongside ordinary validation evidence and the proposal binding
-in the existing transaction receipt.
+the built-in JSON resolver hashes the exact model-produced JSON content bytes
+(not the surrounding provider HTTP/API envelope), identifies the resolver
+contract and embedded resolver-source bytes, canonicalizes the typed intent,
+checks that intent against the exact plan, and emits a receipt joining the raw
+model-output digest, source digest, canonical-intent digest, and plan digest.
+The resolved validation envelope commits the receipt digest alongside ordinary
+validation evidence and the proposal binding in the existing transaction receipt.
 
-Only structured provider JSON matching schema v1 is supported; this component
-does not infer commands from free-form prose. Persist the raw response, canonical
-intent, resolution receipt, resolved validation envelope, proposal binding, and
-referenced evidence. Interchange fixtures are in
+Only structured model-output JSON matching schema v1 is supported; this
+component does not extract content from provider-specific response envelopes or
+infer commands from free-form prose. Persist the exact model-output bytes,
+canonical intent, resolution receipt, resolved validation envelope, proposal
+binding, and referenced evidence. Interchange fixtures are in
 [docs/fixtures/ai-proposal-resolution-receipt-v1.json](fixtures/ai-proposal-resolution-receipt-v1.json)
 and
 [docs/fixtures/ai-proposal-resolved-validation-evidence-v1.json](fixtures/ai-proposal-resolved-validation-evidence-v1.json).
