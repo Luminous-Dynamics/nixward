@@ -86,6 +86,8 @@ pub enum AiProposalBindingError {
     MissingDigest(&'static str),
     #[error("required {0} artifact bytes must not be empty")]
     EmptyArtifactBytes(&'static str),
+    #[error("{0} artifact digest does not match the supplied bytes")]
+    ArtifactDigestMismatch(&'static str),
     #[error("AI proposal binding refers to a different change plan")]
     PlanBindingMismatch,
 }
@@ -153,6 +155,72 @@ impl AiProposalBinding {
         self.validate_shape()?;
         if self.plan_digest != plan.digest() {
             return Err(AiProposalBindingError::PlanBindingMismatch);
+        }
+        Ok(())
+    }
+
+    /// Verify this decoded envelope against the exact plan and referenced bytes.
+    ///
+    /// Structured inputs must be supplied in the same canonical encoding used
+    /// when the binding was created. This checks byte-to-digest correspondence;
+    /// it does not verify the truth, safety, or cryptographic validity of content.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_against_artifacts(
+        &self,
+        plan: &ChangePlan,
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        proposal_output_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_for_plan(plan)?;
+
+        for (label, kind, bytes, expected_digest) in [
+            (
+                "model artifact",
+                ProposalArtifactKind::ModelArtifact,
+                model_artifact_bytes,
+                &self.model_artifact_digest,
+            ),
+            (
+                "input",
+                ProposalArtifactKind::Input,
+                input_canonical_bytes,
+                &self.input_digest,
+            ),
+            (
+                "policy",
+                ProposalArtifactKind::Policy,
+                policy_canonical_bytes,
+                &self.policy_digest,
+            ),
+            (
+                "proposal output",
+                ProposalArtifactKind::ProposalOutput,
+                proposal_output_canonical_bytes,
+                &self.proposal_output_digest,
+            ),
+            (
+                "verifier artifact",
+                ProposalArtifactKind::VerifierArtifact,
+                verifier_artifact_bytes,
+                &self.verifier_artifact_digest,
+            ),
+            (
+                "evaluation evidence",
+                ProposalArtifactKind::EvaluationEvidence,
+                evaluation_evidence_canonical_bytes,
+                &self.evaluation_evidence_digest,
+            ),
+        ] {
+            if bytes.is_empty() {
+                return Err(AiProposalBindingError::EmptyArtifactBytes(label));
+            }
+            if *expected_digest != digest_artifact(kind, bytes) {
+                return Err(AiProposalBindingError::ArtifactDigestMismatch(label));
+            }
         }
         Ok(())
     }
@@ -328,6 +396,51 @@ mod tests {
         assert_eq!(
             evidence.digest(),
             Err(AiProposalBindingError::MissingDigest("evaluation evidence"))
+        );
+    }
+
+    #[test]
+    fn decoded_binding_checks_every_artifact_against_supplied_bytes() {
+        let plan = plan("machine-a");
+        let evidence = binding(&plan);
+        assert!(evidence
+            .validate_against_artifacts(
+                &plan,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"canonical-proposal-output-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            )
+            .is_ok());
+
+        assert_eq!(
+            evidence.validate_against_artifacts(
+                &plan,
+                b"model-artifact-substituted",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"canonical-proposal-output-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            ),
+            Err(AiProposalBindingError::ArtifactDigestMismatch("model artifact"))
+        );
+
+        let mut tampered = evidence.clone();
+        tampered.input_digest = [99; 32];
+        assert_eq!(
+            tampered.validate_against_artifacts(
+                &plan,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"canonical-proposal-output-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            ),
+            Err(AiProposalBindingError::ArtifactDigestMismatch("input"))
         );
     }
 
