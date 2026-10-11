@@ -727,6 +727,14 @@ concurrency test is claimed. Keep Issue #9 open until the native conditional
 transition is implemented and the acceptance matrix runs against an isolated
 temporary profile with the exact packaged Nix.
 
+The follow-on
+[`NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md`](NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md)
+audits the adjacent legacy writer paths, specifies a proposed conditional
+`--set` contract inside Nix's profile lock, and enumerates the upstream
+functional/interleaving tests needed to prove it. This remains a design only:
+no Nix patch or test execution is claimed. Newer `nix profile` paths and other
+host-side writers still require their own source audit.
+
 ## Parent-gated worker launch (2026-10-09)
 
 Privileged profile-transition, activation, and recovery workers now use the
