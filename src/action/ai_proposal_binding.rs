@@ -4,13 +4,13 @@
 
 //! Provenance binding between an AI proposal and one exact Nixward ChangePlan.
 //!
-//! This module binds content digests; it does not verify an AI proof, assert that
-//! inputs are true, decide whether a policy is appropriate, prove that a proposal
-//! semantically entails the resulting ChangePlan, or grant execution authority.
-//! Callers must independently verify referenced artifacts/evidence and the
-//! proposal-to-plan derivation, then use the existing ChangeAuthorization and
-//! enforcement path for privileged actions. A binding from another plan must
-//! never be reused for this plan.
+//! This module binds content digests and validates the structured, canonical
+//! proposal intent against one exact ChangePlan. It does not verify an AI proof,
+//! assert that inputs are true, decide whether a policy is appropriate, or prove
+//! that free-form model text was faithfully converted to that intent. Callers
+//! must independently validate that conversion and referenced artifacts/evidence,
+//! then use the existing ChangeAuthorization and enforcement path for privileged
+//! actions. A binding from another plan must never be reused for this plan.
 
 use super::change_covenant::{ChangePlan, MachineBinding};
 use super::config_writer::ConfigPatch;
@@ -266,9 +266,10 @@ impl AiProposalOutputIntent {
 impl AiProposalBinding {
     /// Bind AI provenance to the exact, already-constructed ChangePlan.
     ///
-    /// This is a provenance constructor, not a proof verifier. The meaning and
-    /// origin of each supplied digest must be documented by the caller.
-    /// evaluation_evidence_digest does not imply that evidence has been checked.
+    /// Proposal-output bytes must be a canonical AiProposalOutputIntent v1 and
+    /// the embedded machine/config/command intent must match this plan. This is
+    /// not a proof verifier: other artifact meaning, input truth, policy quality,
+    /// evaluation validity, and upstream parsing fidelity remain separate checks.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         plan: &ChangePlan,
@@ -336,8 +337,9 @@ impl AiProposalBinding {
     /// Verify this decoded envelope against the exact plan and referenced bytes.
     ///
     /// Structured inputs must be supplied in the same canonical encoding used
-    /// when the binding was created. This checks byte-to-digest correspondence;
-    /// it does not verify the truth, safety, or cryptographic validity of content.
+    /// when the binding was created. Besides checking byte-to-digest correspondence,
+    /// this checks the structured proposal intent against the exact plan. It does
+    /// not verify truth, safety, cryptographic validity, or upstream parsing fidelity.
     #[allow(clippy::too_many_arguments)]
     pub fn validate_against_artifacts(
         &self,
