@@ -3643,7 +3643,7 @@ mod tests {
                     candidate,
                 );
             let activation_started = matches!(
-                disposition,
+                &disposition,
                 super::super::config_transaction::ProfileTransitionDisposition::Committed { .. }
             );
             (observed, disposition, activation_started)
