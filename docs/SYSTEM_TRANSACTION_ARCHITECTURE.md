@@ -375,19 +375,30 @@ verify the observed post-recovery running closure
 Recovery evidence records the exact closure targeted for recovery and the exact
 post-recovery closure observed by Nixward.
 
-The exact system-profile transition is now part of the privileged activation
-primitive. The Nixward transaction interlock remains held across the exact
-profile transition, the immutable `switch-to-configuration` action, and
-post-state verification/recovery. The underlying Nix profile mutation and the
-closure activation retain their own Nix-managed locks; Nixward does not hold
-the profile lock across the child activation. This prevents concurrent Nixward
-transactions from interleaving while preserving Nix's native activation
-serialization. The worker launcher also performs a fresh exact profile
-observation immediately before releasing a gated worker, but that check is not
-atomic with the subsequent profile mutation or payload execution. It cannot
-exclude an unrelated privileged writer that races after the observation or
-bypasses Nix's locking protocol. The unsupported external-writer
-compare-and-set gap documented in Issue #9 therefore remains open.
+The exact system-profile transition is part of the privileged activation
+primitive, and the Nixward transaction interlock remains held across profile
+transition, immutable `switch-to-configuration` execution, and
+post-state verification/recovery. This serializes Nixward-owned transactions;
+it does not, by itself, serialize every external writer.
+
+**Do not assume that `nix-env --set` supplies a native profile lock.** In the
+upstream Nix `2.28.5` source, `opSet` calls `createGeneration` followed by
+`switchLink` without calling `lockProfile` or `optimisticLockProfile`
+([pinned source](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)).
+Other profile operations such as `switchGeneration` explicitly call
+`lockProfile`, and the current profiles header documents both exclusive and
+optimistic profile-lock helpers. Locking must therefore be audited per operation
+and per deployed Nix version. Nixward must record each target's exact Nix
+version/build and matching source before relying on any native writer-lock
+claim; the `2.28.5` finding is not proof that every currently deployed version
+has identical internals.
+
+The worker launcher still performs a fresh exact profile observation
+immediately before releasing the gated worker. That check is not atomic with
+the later profile mutation or payload execution. It cannot exclude an
+unmodified `nix-env --set` implementation with no shared lock, nor an unrelated
+privileged writer that races after the observation or bypasses Nixward's lock.
+The external-writer compare-and-set gap documented in Issue #9 remains open.
 
 Bootloader-specific next-boot selection remains a separate evidence boundary
 tracked in Issue #8 and must not be silently folded into the runtime or profile
@@ -666,6 +677,30 @@ The Rust tests above are authored, but have not been compiled or executed in
 this environment. Static review cannot be represented as a passing test.
 Keep Issue #9 open until the harness is run and the pre-check-to-write gap is
 either closed for the stated threat model or explicitly accepted as a residual.
+
+## Version-pinned Nix profile-mutation source audit (2026-10-11)
+
+The broker decision record now includes a source-specific audit. In upstream
+Nix tag `2.28.5`, `opSet` in `src/nix-env/nix-env.cc` directly calls
+`createGeneration` and `switchLink` after realization; it does not acquire
+the profile lock in that function body. The adjacent `opSetFlag` does use
+`optimisticLockProfile`. Separately, `switchGeneration` in
+`src/libstore/profiles.cc` uses `lockProfile`. This difference matters:
+one cannot infer that every command targeting the same profile participates in
+the same lock merely because Nix has a native profile-lock API.
+
+Sources:
+- [Nix 2.28.5 opSet implementation](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)
+- [Nix 2.28.5 profile implementation](https://github.com/NixOS/nix/blob/2.28.5/src/libstore/profiles.cc)
+- [Current profile-lock API contract](https://github.com/NixOS/nix/blob/master/src/libstore/include/nix/store/profiles.hh#L193-L210)
+- [Nix issue #6349: no equivalent of nix-env --set for nix profile](https://github.com/NixOS/nix/issues/6349)
+
+This audit is deliberately version-bounded. It does not establish behavior
+for all releases or for the exact Nix derivation installed on a target. The
+native-CAS integration must pin and inspect the actual supported source
+revision, then prove that all in-scope writers either honor one shared lock
+and conditional comparison, or remain an explicitly excluded threat. A
+Nixward-only wrapper lock cannot force an unmodified writer to participate.
 
 ## Parent-gated worker launch (2026-10-09)
 
