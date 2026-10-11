@@ -104,6 +104,29 @@ Validation is read-only and should establish, as applicable:
 
 Validation failure never becomes authorization.
 
+#### AI proposal provenance
+
+When an AI proposal participates in validation, the validation receipt may commit
+to an `AiProposalValidationEvidence` envelope. The envelope joins the exact
+ChangePlan digest, the ordinary validation-evidence digest, and the digest of
+an `AiProposalBinding` that names the model artifact, input, policy, proposal
+output, verifier artifact, and evaluation evidence.
+
+Nixward's `record_validation_with_ai_proposal` path rechecks the proposal
+binding against the exact plan and supplied artifact bytes before changing the
+transaction to `Validated`. It then records the envelope digest in the existing
+validation receipt and returns the typed envelope so the caller can persist it
+alongside the referenced evidence.
+
+This preserves the existing transaction wire shape and does not add a new
+authorization primitive. Provenance is not approval: the normal detached
+authority protocol, freshness and replay handling, exact-command enforcement,
+and observed post-state verification remain required. The digest check proves
+only byte correspondence and plan binding, not that inputs are true, a policy
+is appropriate, or a referenced AI/cryptographic proof is sound. Callers must
+canonically encode structured inputs and retain the envelope/evidence needed to
+resolve the recorded digest.
+
 ### 4. Authorize
 
 The owner/operator authorizes the exact plan.
