@@ -402,7 +402,8 @@ mod tests {
     #[test]
     fn decoded_binding_checks_every_artifact_against_supplied_bytes() {
         let plan = plan("machine-a");
-        let evidence = binding(&plan);
+        let encoded = serde_json::to_vec(&binding(&plan)).unwrap();
+        let evidence: AiProposalBinding = serde_json::from_slice(&encoded).unwrap();
         assert!(evidence
             .validate_against_artifacts(
                 &plan,
