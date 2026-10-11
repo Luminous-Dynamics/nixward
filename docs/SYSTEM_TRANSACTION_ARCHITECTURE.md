@@ -680,27 +680,46 @@ either closed for the stated threat model or explicitly accepted as a residual.
 
 ## Version-pinned Nix profile-mutation source audit (2026-10-11)
 
-The broker decision record now includes a source-specific audit. In upstream
-Nix tag `2.28.5`, `opSet` in `src/nix-env/nix-env.cc` directly calls
-`createGeneration` and `switchLink` after realization; it does not acquire
-the profile lock in that function body. The adjacent `opSetFlag` does use
-`optimisticLockProfile`. Separately, `switchGeneration` in
-`src/libstore/profiles.cc` uses `lockProfile`. This difference matters:
-one cannot infer that every command targeting the same profile participates in
-the same lock merely because Nix has a native profile-lock API.
+The Nixward flake lock pins nixpkgs to
+[`0bb7ec54c8483066ec9d7720e780a5caa71f8612`](https://github.com/NixOS/nixpkgs/tree/0bb7ec54c8483066ec9d7720e780a5caa71f8612).
+At that exact nixpkgs revision, `nixVersions.latest` and `nixVersions.stable`
+both resolve to Nix 2.34.8
+([package version and aliases](https://github.com/NixOS/nixpkgs/blob/0bb7ec54c8483066ec9d7720e780a5caa71f8612/pkgs/tools/package-management/nix/default.nix#L174-L212)).
+That is the locked flake packaging baseline—not a promise that every deployed
+NixOS target uses the same host-side `nix.package`.
 
-Sources:
-- [Nix 2.28.5 opSet implementation](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)
-- [Nix 2.28.5 profile implementation](https://github.com/NixOS/nix/blob/2.28.5/src/libstore/profiles.cc)
-- [Current profile-lock API contract](https://github.com/NixOS/nix/blob/master/src/libstore/include/nix/store/profiles.hh#L193-L210)
-- [Nix issue #6349: no equivalent of nix-env --set for nix profile](https://github.com/NixOS/nix/issues/6349)
+At upstream Nix tag `2.34.8`, the legacy command source is now
+`src/nix/nix-env/nix-env.cc`. `opSet` at lines 758–801 realizes the requested
+derivation and then calls `createGeneration` followed by `switchLink`; the
+function body contains no `lockProfile` or `optimisticLockProfile` call:
+[version-pinned source](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801).
+The implementation of `createGeneration` does not acquire a profile lock
+([profile creation](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L64-L119)).
+By contrast, `switchGeneration` acquires `PathLocks` and calls `lockProfile`,
+while `switchLink` itself replaces the symlink
+([profile operations](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L247-L296)).
+Therefore a lock in one profile operation cannot be assumed to protect
+`nix-env --set`. The earlier Nix 2.28.5 source audit found the same
+generation-then-link sequence in `opSet`
+([Nix 2.28.5 source](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)).
 
-This audit is deliberately version-bounded. It does not establish behavior
-for all releases or for the exact Nix derivation installed on a target. The
-native-CAS integration must pin and inspect the actual supported source
-revision, then prove that all in-scope writers either honor one shared lock
-and conditional comparison, or remain an explicitly excluded threat. A
-Nixward-only wrapper lock cannot force an unmodified writer to participate.
+The native fix must be implemented in the operation that commits the profile:
+build first; acquire the lock in the mutating Nix process; compare the resolved
+current target with an exact expected-old value while locked; on mismatch,
+refuse before generation mutation; on match, preserve Nix's generation and
+permanent-root logic and perform the link switch before releasing the same
+lock. Each supported writer must be audited for participation in that shared
+boundary. A wrapper lock around an unmodified `nix-env --set` is not enough,
+and writing the link directly from Rust would risk bypassing Nix's profile
+semantics.
+
+This finding is source-bounded. Capture the actual Nix executable version and
+package/source identity on each supported deployment before claiming all target
+systems share the result. The design and deterministic in-memory counterexample
+tests remain unqualified; no native CAS, upstream patch, or live profile
+concurrency test is claimed. Keep Issue #9 open until the native conditional
+transition is implemented and the acceptance matrix runs against an isolated
+temporary profile with the exact packaged Nix.
 
 ## Parent-gated worker launch (2026-10-09)
 
