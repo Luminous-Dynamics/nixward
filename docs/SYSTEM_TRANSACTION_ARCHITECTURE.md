@@ -709,6 +709,16 @@ Therefore a lock in one profile operation cannot be assumed to protect
 generation-then-link sequence in `opSet`
 ([Nix 2.28.5 source](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)).
 
+The finding is not confined to Nix 2.34.8. A check of the Nix 2.35.2 tag
+([source](https://github.com/NixOS/nix/blob/2.35.2/src/nix/nix-env/nix-env.cc#L758-L800))
+and upstream development commit
+[`979a87c97bef7b96cd4ec4b142188089851e47ad`](https://github.com/NixOS/nix/blob/979a87c97bef7b96cd4ec4b142188089851e47ad/src/nix/nix-env/nix-env.cc#L759-L801)
+found the same generation-then-link path in `opSet`, without a profile lock.
+That development revision is pinned by a current upstream nixpkgs snapshot
+[`a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3`](https://github.com/NixOS/nixpkgs/blob/a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3/pkgs/tools/package-management/nix/default.nix#L196-L234).
+These are additional version-pinned source checks—not proof about every
+downstream build or the host's actual package.
+
 The native fix must be implemented in the operation that commits the profile:
 build first; acquire the lock in the mutating Nix process; compare the resolved
 current target with an exact expected-old value while locked; on mismatch,
