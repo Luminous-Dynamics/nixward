@@ -872,9 +872,15 @@ impl AiProposalResolvedValidationEvidence {
         validation_evidence_digest: [u8; 32],
         proposal: &AiProposalBinding,
         resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
     ) -> Result<Self, AiProposalBindingError> {
         proposal.validate_for_plan(plan)?;
-        resolution.validate_for_plan(plan)?;
+        resolution.validate_against_artifacts(
+            plan,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )?;
         if validation_evidence_digest == [0; 32] {
             return Err(AiProposalBindingError::MissingDigest("validation evidence"));
         }
@@ -898,13 +904,19 @@ impl AiProposalResolvedValidationEvidence {
         plan: &ChangePlan,
         proposal: &AiProposalBinding,
         resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
     ) -> Result<(), AiProposalBindingError> {
         self.validate_shape()?;
         if self.plan_digest != plan.digest() {
             return Err(AiProposalBindingError::PlanBindingMismatch);
         }
         proposal.validate_for_plan(plan)?;
-        resolution.validate_for_plan(plan)?;
+        resolution.validate_against_artifacts(
+            plan,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )?;
         if self.proposal_binding_digest != proposal.digest()? {
             return Err(AiProposalBindingError::ProposalBindingMismatch);
         }
@@ -1392,9 +1404,16 @@ mod tests {
         )
         .unwrap();
         let evidence =
-            AiProposalResolvedValidationEvidence::new(&plan, [21; 32], &proposal, &resolution)
-                .unwrap();
-        assert!(evidence.validate_for(&plan, &proposal, &resolution).is_ok());
+            AiProposalResolvedValidationEvidence::new(
+                &plan,
+                [21; 32],
+                &proposal,
+                &resolution,
+                &raw,
+                &canonical,
+            )
+            .unwrap();
+        assert!(evidence.validate_for(&plan, &proposal, &resolution, &raw, &canonical).is_ok());
 
         let encoded = serde_json::to_vec(&evidence).unwrap();
         let decoded: AiProposalResolvedValidationEvidence =
@@ -1406,7 +1425,7 @@ mod tests {
         let (other_resolution, _) =
             AiProposalResolutionReceipt::resolve_provider_json(&plan, &other_raw).unwrap();
         assert_eq!(
-            evidence.validate_for(&plan, &proposal, &other_resolution),
+            evidence.validate_for(&plan, &proposal, &other_resolution, &other_raw, &canonical),
             Err(AiProposalBindingError::ResolutionReceiptMismatch)
         );
     }
