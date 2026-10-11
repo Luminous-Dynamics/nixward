@@ -738,6 +738,28 @@ concurrency test is claimed. Keep Issue #9 open until the native conditional
 transition is implemented and the acceptance matrix runs against an isolated
 temporary profile with the exact packaged Nix.
 
+A conditional profile-set primitive alone is not enough to claim that a
+system deployment is one transaction. In the inspected nixpkgs snapshot,
+`nixos-rebuild-ng` performs profile selection via
+[`nix-env -p … --set …`](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/ni/nixos-rebuild-ng/src/nixos_rebuild/nix.py#L687-L755)
+and launches activation separately. The activation binary has a distinct
+`/run/nixos/switch-to-configuration.lock`
+([source](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/sw/switch-to-configuration-ng/src/main.rs#L1809-L1821));
+that lock does not serialize profile mutation. If the native set releases the
+profile lock before activation, another writer can change the selected profile
+between A's successful set and A's activation. A final pre-release observation
+only narrows that interval.
+
+For the end-to-end guarantee in Issue #9, require a profile-lock lease or a
+single shared system-deployment coordinator to remain in force through
+profile publication, exact activation and profile/runtime read-back. Audit and
+migrate every supported writer/front-end, including `nixos-rebuild-ng`,
+legacy rebuild commands and self-deploy services. Any lock handoff must prove
+inode and lock ownership, inherited descriptor lifetime, stale-lock
+semantics, and cleanup. Profile CAS tests and activation-isolation tests are
+separate mandatory gates. The implementation proposal now records this as an
+explicit design requirement; it is not yet implemented.
+
 The follow-on
 [`NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md`](NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md)
 audits the adjacent legacy writer paths, specifies a proposed conditional
