@@ -207,8 +207,10 @@ impl SystemTransaction {
     /// stored in the existing validation receipt, so the transaction wire shape
     /// and authorization protocol remain unchanged.
     ///
-    /// This method validates byte/digest correspondence, not artifact semantics
-    /// or proof soundness. It does not authorize or execute the proposed change.
+    /// This method validates byte/digest correspondence and checks that the
+    /// canonical structured proposal intent equals the exact plan. It does not
+    /// prove upstream natural-language conversion fidelity, input truth, policy
+    /// quality, or proof soundness. It never authorizes or executes the change.
     #[allow(clippy::too_many_arguments)]
     pub fn record_validation_with_ai_proposal(
         &mut self,
