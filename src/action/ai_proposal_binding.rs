@@ -333,7 +333,10 @@ mod serde_hex_32 {
     where
         S: Serializer,
     {
-        let encoded: String = value.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut encoded = String::with_capacity(64);
+        for byte in value {
+            encoded.push_str(&format!("{byte:02x}"));
+        }
         serializer.serialize_str(&encoded)
     }
 
