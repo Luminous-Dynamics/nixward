@@ -533,6 +533,7 @@ impl SystemTransaction {
 mod tests {
     use super::*;
     use crate::action::executor::NixOSCommand;
+    use crate::action::ai_proposal_binding::{digest_artifact, ProposalArtifactKind};
 
     fn plan() -> ChangePlan {
         ChangePlan::command_only(
@@ -675,6 +676,52 @@ mod tests {
         );
 
         assert!(result.is_err());
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+    }
+
+    #[test]
+    fn forged_binding_with_matching_digest_but_wrong_intent_does_not_advance_transaction() {
+        let plan = plan();
+        let wrong_command = NixOSCommand::Search {
+            query: "nixpkgs#different".into(),
+            json: true,
+        };
+        let wrong_output = AiProposalOutputIntent::new(
+            plan.machine(),
+            None,
+            Some(&wrong_command),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap();
+
+        // Simulate a decoded, attacker-constructed envelope whose output digest
+        // honestly matches the wrong bytes. The digest alone must not suffice.
+        let mut value = serde_json::to_value(ai_proposal(&plan)).unwrap();
+        let output_digest =
+            digest_artifact(ProposalArtifactKind::ProposalOutput, &wrong_output);
+        value["proposal_output_digest"] = serde_json::json!(digest_hex(&output_digest));
+        let forged: AiProposalBinding = serde_json::from_value(value).unwrap();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_ai_proposal(
+            &plan,
+            [31; 32],
+            "validated proposal and policy",
+            &forged,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &wrong_output,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result
+            .unwrap_err()
+            .contains("AI proposal output intent does not exactly match the ChangePlan"));
         assert_eq!(tx.phase, TransactionPhase::Planned);
         assert!(tx.validation.is_none());
         assert!(tx.authorization.is_none());
