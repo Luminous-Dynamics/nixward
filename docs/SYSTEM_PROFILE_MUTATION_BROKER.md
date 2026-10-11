@@ -89,6 +89,19 @@ generation management with an ad hoc Rust symlink rewrite. The separate
 root-owned broker remains a possible coordinator for cooperating clients, not
 a protection against a root process that deliberately bypasses it.
 
+### Source-audited implementation plan
+
+The operation matrix and concrete upstream patch contract are now specified separately in
+[`docs/NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md`](NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md).
+The audit finds the named legacy install/upgrade/uninstall/flag-update paths use
+`createUserEnv`, which locks and checks an optimistic token; generation
+switch/rollback and generation deletion take the profile lock directly.
+`opSet` is the audited gap. The design defines the conditional check as closure
+equality under the profile lock, names the exact native seam after realization,
+and lists upstream functional/concurrency tests. Newer `nix profile` commands,
+custom profile paths, downstream patches, and direct root writes remain
+separate audit boundaries. This is a design, not an upstream patch or a test pass.
+
 ## Evidence and current facts
 
 - Nix's [Profiles manual](https://nix.dev/manual/nix/2.35/package-management/profiles.html) says the final profile symlink switch is atomic on Unix. Atomic replacement prevents partial-link visibility; it does not compare the previous target with a caller-supplied expected target.
