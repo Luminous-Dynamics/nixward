@@ -122,10 +122,12 @@ This preserves the existing transaction wire shape and does not add a new
 authorization primitive. Provenance is not approval: the normal detached
 authority protocol, freshness and replay handling, exact-command enforcement,
 and observed post-state verification remain required. The digest check proves
-only byte correspondence and plan binding, not that inputs are true, a policy
-is appropriate, or a referenced AI/cryptographic proof is sound. Callers must
-canonically encode structured inputs and retain the envelope/evidence needed to
-resolve the recorded digest.
+only byte correspondence and plan binding; it does not prove that inputs are
+true, a policy is appropriate, that proposal output semantically entails the
+resolved ChangePlan, or that a referenced AI/cryptographic proof is sound.
+Callers must independently verify the proposal-to-plan derivation, canonically
+encode structured inputs, and retain the returned envelope plus referenced
+evidence needed to resolve the recorded digest.
 
 ### 4. Authorize
 
