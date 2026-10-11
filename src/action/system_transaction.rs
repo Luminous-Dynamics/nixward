@@ -8,6 +8,7 @@
 //! receipts so the installer, management UI, and remote transports can
 //! exchange one stable, digest-addressed transaction vocabulary.
 
+use super::ai_proposal_binding::{AiProposalBinding, AiProposalValidationEvidence};
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +196,56 @@ impl SystemTransaction {
         });
         self.phase = TransactionPhase::Validated;
         Ok(())
+    }
+
+    /// Record normal validation while binding it to exact AI-proposal provenance.
+    ///
+    /// The returned evidence envelope must be persisted by the caller alongside
+    /// the referenced validation evidence and proposal binding. Its digest is
+    /// stored in the existing validation receipt, so the transaction wire shape
+    /// and authorization protocol remain unchanged.
+    ///
+    /// This method validates byte/digest correspondence, not artifact semantics
+    /// or proof soundness. It does not authorize or execute the proposed change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        proposal_output_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+    ) -> Result<AiProposalValidationEvidence, String> {
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                proposal_output_canonical_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let evidence = AiProposalValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+        )
+        .map_err(|error| format!("AI proposal validation envelope is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("AI proposal validation envelope is invalid: {error}"))?;
+
+        // All proposal and artifact checks happen before this state transition.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
     }
 
     pub fn record_snapshot(
@@ -497,6 +548,19 @@ mod tests {
         ChangeAuthorization::from_verified_approval(plan, "test-owner", [7; 32]).unwrap()
     }
 
+    fn ai_proposal(plan: &ChangePlan) -> AiProposalBinding {
+        AiProposalBinding::new(
+            plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"canonical-proposal-output-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap()
+    }
+
     #[test]
     fn external_wire_receipts_are_bounded_and_structurally_validated() {
         let mut tx = SystemTransaction::planned(&plan());
@@ -534,6 +598,66 @@ mod tests {
         assert_eq!(tx.plan_digest, digest_hex(&plan.digest()));
         assert_eq!(tx.target_machine_digest, digest_hex(&plan.machine().digest()));
         assert_eq!(tx.transaction_id, transaction_id(&plan));
+    }
+
+    #[test]
+    fn ai_proposal_validation_is_committed_to_transaction_validation_receipt() {
+        let plan = plan();
+        let proposal = ai_proposal(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+
+        let evidence = tx
+            .record_validation_with_ai_proposal(
+                &plan,
+                [31; 32],
+                "validated proposal and policy",
+                &proposal,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"canonical-proposal-output-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&evidence.digest().unwrap())
+        );
+        assert!(evidence.validate_for(&plan, &proposal).is_ok());
+        assert!(tx.validate_wire().is_ok());
+
+        // Provenance records evidence only; normal authorization remains required.
+        assert!(tx.authorization.is_none());
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+    }
+
+    #[test]
+    fn invalid_ai_proposal_artifact_leaves_transaction_unmodified() {
+        let plan = plan();
+        let proposal = ai_proposal(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+
+        let result = tx.record_validation_with_ai_proposal(
+            &plan,
+            [31; 32],
+            "validated proposal and policy",
+            &proposal,
+            b"SUBSTITUTED-model-artifact",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"canonical-proposal-output-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
     }
 
     #[test]
