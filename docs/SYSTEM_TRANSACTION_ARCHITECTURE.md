@@ -123,13 +123,24 @@ lowercase hexadecimal JSON strings; see
 This preserves the existing transaction wire shape and does not add a new
 authorization primitive. Provenance is not approval: the normal detached
 authority protocol, freshness and replay handling, exact-command enforcement,
-and observed post-state verification remain required. The digest check proves
-only byte correspondence and plan binding; it does not prove that inputs are
-true, a policy is appropriate, that proposal output semantically entails the
-resolved ChangePlan, or that a referenced AI/cryptographic proof is sound.
-Callers must independently verify the proposal-to-plan derivation, canonically
-encode structured inputs, and retain the returned envelope plus referenced
-evidence needed to resolve the recorded digest.
+and observed post-state verification remain required.
+
+Schema-v1 proposal output is a typed AiProposalOutputIntent: canonical,
+compact serde_json bytes containing the machine identity, optional full
+configuration patch (target, original and modified contents, description), and
+optional structured NixOSCommand. The verifier rejects non-canonical bytes
+and checks these fields against ChangePlan::matches_intent before transaction
+validation can advance. A cross-language producer should follow the schema and
+the exact byte fixture at
+[docs/fixtures/ai-proposal-output-intent-v1.json](fixtures/ai-proposal-output-intent-v1.json).
+
+This establishes equality between the supplied structured intent and the exact
+ChangePlan; it does not prove that free-form model text was faithfully converted
+into that structure, that inputs are true, a policy is appropriate, an AI or
+cryptographic proof is sound, or a real-world action is safe. The component
+translating model output into the structured representation remains an
+independent trust boundary. Callers must preserve the returned validation
+envelope and the referenced artifacts/evidence needed to resolve its digest.
 
 ### 4. Authorize
 
