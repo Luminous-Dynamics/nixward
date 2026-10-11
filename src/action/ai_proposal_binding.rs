@@ -312,7 +312,7 @@ mod tests {
     fn unknown_fields_are_rejected_on_deserialization() {
         let plan = plan("machine-a");
         let encoded = serde_json::to_string(&binding(&plan)).unwrap();
-        let with_unknown = encoded.trim_end_matches('}').to_owned() + ",\\"unexpected\\":true}";
+        let with_unknown = encoded.trim_end_matches('}').to_owned() + ",\"unexpected\":true}";
         assert!(serde_json::from_str::<AiProposalBinding>(&with_unknown).is_err());
     }
 
