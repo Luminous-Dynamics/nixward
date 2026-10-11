@@ -201,6 +201,35 @@ impl AiProposalOutputIntent {
         Ok(intent)
     }
 
+    /// Parse a model/provider JSON response while rejecting data the schema
+    /// would otherwise silently discard. Formatting and key order may vary here;
+    /// the returned value must be serialized with canonical_bytes before hashing.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, AiProposalBindingError> {
+        if bytes.is_empty() {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "JSON output bytes must not be empty".into(),
+            ));
+        }
+        let intent: Self = serde_json::from_slice(bytes).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!("invalid JSON: {error}"))
+        })?;
+        intent.validate_shape()?;
+        let supplied_value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!("invalid JSON: {error}"))
+        })?;
+        let represented_value = serde_json::to_value(&intent).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!(
+                "schema-v1 JSON encoding failed: {error}"
+            ))
+        })?;
+        if supplied_value != represented_value {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "JSON contains fields or data not represented by schema v1".into(),
+            ));
+        }
+        Ok(intent)
+    }
+
     /// Serialize the canonical schema-v1 output bytes that are digest-bound.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, AiProposalBindingError> {
         self.validate_shape()?;
@@ -693,6 +722,15 @@ mod tests {
             AiProposalOutputIntent::from_canonical_bytes(&pretty),
             Err(AiProposalBindingError::InvalidProposalOutput(_))
         ));
+        let parsed_pretty = AiProposalOutputIntent::from_json_bytes(&pretty).unwrap();
+        assert_eq!(parsed_pretty.canonical_bytes().unwrap(), encoded);
+
+        let non_schema_field =
+            String::from_utf8(encoded.clone()).unwrap().replace(
+                "\\"json\\":true",
+                "\\"json\\":true,\\"untrusted_extra\\":1",
+            );
+        assert!(AiProposalOutputIntent::from_json_bytes(non_schema_field.as_bytes()).is_err());
     }
 
     #[test]
