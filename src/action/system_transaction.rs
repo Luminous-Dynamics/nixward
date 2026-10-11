@@ -622,11 +622,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(evidence.validation_evidence_digest(), [31; 32]);
+        assert_eq!(
+            evidence.proposal_binding_digest(),
+            proposal.digest().unwrap()
+        );
+
+        // The returned envelope is the persisted evidence whose digest is in the receipt.
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        let decoded: AiProposalValidationEvidence = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.validate_for(&plan, &proposal).is_ok());
         assert_eq!(
             tx.validation.as_ref().unwrap().evidence_digest,
-            digest_hex(&evidence.digest().unwrap())
+            digest_hex(&decoded.digest().unwrap())
         );
-        assert!(evidence.validate_for(&plan, &proposal).is_ok());
         assert!(tx.validate_wire().is_ok());
 
         // Provenance records evidence only; normal authorization remains required.
