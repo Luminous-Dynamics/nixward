@@ -125,13 +125,17 @@ authorization primitive. Provenance is not approval: the normal detached
 authority protocol, freshness and replay handling, exact-command enforcement,
 and observed post-state verification remain required.
 
-Schema-v1 proposal output is a typed AiProposalOutputIntent: canonical,
-compact serde_json bytes containing the machine identity, optional full
-configuration patch (target, original and modified contents, description), and
-optional structured NixOSCommand. The verifier rejects non-canonical bytes
-and checks these fields against ChangePlan::matches_intent before transaction
-validation can advance. A cross-language producer should follow the schema and
-the exact byte fixture at
+Schema-v1 proposal output is a typed AiProposalOutputIntent: its bound
+representation is canonical, compact serde_json bytes containing the machine
+identity, optional full configuration patch (target, original and modified
+contents, description), and optional structured NixOSCommand. Callers ingesting
+provider JSON may use from_json_bytes to accept harmless whitespace/key-order
+variation; it compares the parsed JSON value with the typed schema so unknown
+or unrepresented fields cannot be silently discarded, then callers bind
+canonical_bytes. The transaction validator requires canonical bytes and checks
+the structured fields against ChangePlan::matches_intent before validation can
+advance. A cross-language producer should follow the schema and exact byte
+fixture at
 [docs/fixtures/ai-proposal-output-intent-v1.json](fixtures/ai-proposal-output-intent-v1.json).
 
 This establishes equality between the supplied structured intent and the exact
