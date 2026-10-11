@@ -734,6 +734,37 @@ mod tests {
     }
 
     #[test]
+    fn binding_constructor_rejects_structured_output_for_another_command() {
+        let plan = plan("machine-a");
+        let wrong_command = NixOSCommand::Search {
+            query: "nixpkgs#different".into(),
+            json: true,
+        };
+        let output = AiProposalOutputIntent::new(
+            plan.machine(),
+            None,
+            Some(&wrong_command),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap();
+
+        let result = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &output,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+        assert_eq!(
+            result,
+            Err(AiProposalBindingError::ProposalOutputPlanMismatch)
+        );
+    }
+
+    #[test]
     fn structured_proposal_output_binds_exact_config_patch() {
         let machine = MachineBinding::new("machine-a").unwrap();
         let patch = crate::action::config_writer::ConfigPatch {
