@@ -13,12 +13,40 @@
 //! never be reused for this plan.
 
 use super::change_covenant::{ChangePlan, MachineBinding};
+use super::config_writer::ConfigPatch;
+use super::executor::NixOSCommand;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use thiserror::Error;
 
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
+pub const AI_PROPOSAL_OUTPUT_SCHEMA_VERSION: u16 = 1;
 const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
 const AI_PROPOSAL_ARTIFACT_DOMAIN: &[u8] = b"nixward-ai-proposal-artifact-v1\0";
+
+
+/// Structured, versioned proposal output used for exact plan resolution.
+///
+/// This is deliberately not a free-form natural-language semantic verifier.
+/// It verifies that the structured machine/configuration/command intent in the
+/// proposal is exactly the intent in a ChangePlan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiProposalOutputIntent {
+    schema_version: u16,
+    machine_id: String,
+    config_patch: Option<AiProposalOutputConfigPatch>,
+    command: Option<NixOSCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AiProposalOutputConfigPatch {
+    target: String,
+    original: String,
+    modified: String,
+    description: String,
+}
 
 /// Artifact classes used to domain-separate proposal provenance digests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +131,136 @@ pub enum AiProposalBindingError {
     ProposalBindingMismatch,
     #[error("unsupported AI proposal validation evidence schema version: {0}")]
     UnsupportedValidationEvidenceSchemaVersion(u16),
+    #[error("unsupported AI proposal output schema version: {0}")]
+    UnsupportedProposalOutputSchemaVersion(u16),
+    #[error("invalid AI proposal output intent: {0}")]
+    InvalidProposalOutput(String),
+    #[error("AI proposal output intent does not exactly match the ChangePlan")]
+    ProposalOutputPlanMismatch,
+}
+
+
+impl AiProposalOutputIntent {
+    /// Build a structured proposal output from typed intent components.
+    pub fn new(
+        machine: &MachineBinding,
+        config_patch: Option<&ConfigPatch>,
+        command: Option<&NixOSCommand>,
+    ) -> Result<Self, AiProposalBindingError> {
+        let config_patch = config_patch
+            .map(|patch| {
+                let target = patch.target.to_str().ok_or_else(|| {
+                    AiProposalBindingError::InvalidProposalOutput(
+                        "configuration target path is not valid UTF-8".into(),
+                    )
+                })?;
+                Ok(AiProposalOutputConfigPatch {
+                    target: target.to_string(),
+                    original: patch.original.clone(),
+                    modified: patch.modified.clone(),
+                    description: patch.description.clone(),
+                })
+            })
+            .transpose()?;
+
+        let intent = Self {
+            schema_version: AI_PROPOSAL_OUTPUT_SCHEMA_VERSION,
+            machine_id: machine.machine_id().to_string(),
+            config_patch,
+            command: command.cloned(),
+        };
+        intent.validate_shape()?;
+        Ok(intent)
+    }
+
+    /// Decode only the canonical JSON byte representation for schema v1.
+    ///
+    /// Re-encoding must reproduce the exact input bytes. This rejects whitespace,
+    /// reordered fields, omitted null fields, unknown fields, and non-canonical
+    /// nested command encodings before their digest is accepted as proposal output.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, AiProposalBindingError> {
+        if bytes.is_empty() {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "canonical output bytes must not be empty".into(),
+            ));
+        }
+        let intent: Self = serde_json::from_slice(bytes).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!("invalid JSON: {error}"))
+        })?;
+        intent.validate_shape()?;
+        let canonical = serde_json::to_vec(&intent).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!(
+                "canonical JSON encoding failed: {error}"
+            ))
+        })?;
+        if canonical.as_slice() != bytes {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "output must use the canonical schema-v1 JSON encoding".into(),
+            ));
+        }
+        Ok(intent)
+    }
+
+    /// Serialize the canonical schema-v1 output bytes that are digest-bound.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, AiProposalBindingError> {
+        self.validate_shape()?;
+        serde_json::to_vec(self).map_err(|error| {
+            AiProposalBindingError::InvalidProposalOutput(format!(
+                "canonical JSON encoding failed: {error}"
+            ))
+        })
+    }
+
+    /// Require the proposal's structured intent to match this exact plan.
+    pub fn validate_for_plan(
+        &self,
+        plan: &ChangePlan,
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_shape()?;
+        let machine = MachineBinding::new(self.machine_id.clone())
+            .map_err(AiProposalBindingError::InvalidProposalOutput)?;
+        let patch = self.config_patch.as_ref().map(|patch| ConfigPatch {
+            target: PathBuf::from(&patch.target),
+            original: patch.original.clone(),
+            modified: patch.modified.clone(),
+            description: patch.description.clone(),
+        });
+        if plan.matches_intent(&machine, patch.as_ref(), self.command.as_ref()) {
+            Ok(())
+        } else {
+            Err(AiProposalBindingError::ProposalOutputPlanMismatch)
+        }
+    }
+
+    fn validate_shape(&self) -> Result<(), AiProposalBindingError> {
+        if self.schema_version != AI_PROPOSAL_OUTPUT_SCHEMA_VERSION {
+            return Err(AiProposalBindingError::UnsupportedProposalOutputSchemaVersion(
+                self.schema_version,
+            ));
+        }
+        let machine = MachineBinding::new(self.machine_id.clone())
+            .map_err(AiProposalBindingError::InvalidProposalOutput)?;
+        if machine.machine_id() != self.machine_id {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "machine_id must use its normalized representation".into(),
+            ));
+        }
+        if self.config_patch.is_none() && self.command.is_none() {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "output must include a configuration patch or command".into(),
+            ));
+        }
+        if self
+            .config_patch
+            .as_ref()
+            .is_some_and(|patch| patch.target.trim().is_empty())
+        {
+            return Err(AiProposalBindingError::InvalidProposalOutput(
+                "configuration target path must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl AiProposalBinding {
@@ -133,6 +291,9 @@ impl AiProposalBinding {
                 return Err(AiProposalBindingError::EmptyArtifactBytes(label));
             }
         }
+
+        AiProposalOutputIntent::from_canonical_bytes(proposal_output_canonical_bytes)?
+            .validate_for_plan(plan)?;
 
         let binding = Self {
             schema_version: AI_PROPOSAL_BINDING_SCHEMA_VERSION,
@@ -235,6 +396,8 @@ impl AiProposalBinding {
                 return Err(AiProposalBindingError::ArtifactDigestMismatch(label));
             }
         }
+        AiProposalOutputIntent::from_canonical_bytes(proposal_output_canonical_bytes)?
+            .validate_for_plan(plan)?;
         Ok(())
     }
 
@@ -483,17 +646,51 @@ mod tests {
         .unwrap()
     }
 
+    fn proposal_output(plan: &ChangePlan) -> Vec<u8> {
+        AiProposalOutputIntent::new(plan.machine(), None, plan.command())
+            .unwrap()
+            .canonical_bytes()
+            .unwrap()
+    }
+
     fn binding(plan: &ChangePlan) -> AiProposalBinding {
+        let output = proposal_output(plan);
         AiProposalBinding::new(
             plan,
             b"model-artifact-v1",
             b"canonical-input-v1",
             b"canonical-policy-v1",
-            b"canonical-proposal-output-v1",
+            &output,
             b"verifier-artifact-v1",
             b"canonical-evaluation-evidence-v1",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn structured_proposal_output_is_canonical_and_matches_exact_plan_intent() {
+        let plan = plan("machine-a");
+        let output = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let encoded = output.canonical_bytes().unwrap();
+        let decoded = AiProposalOutputIntent::from_canonical_bytes(&encoded).unwrap();
+        assert!(decoded.validate_for_plan(&plan).is_ok());
+
+        let wrong_command = NixOSCommand::Search {
+            query: "nixpkgs#different".into(),
+            json: true,
+        };
+        let mismatched =
+            AiProposalOutputIntent::new(plan.machine(), None, Some(&wrong_command)).unwrap();
+        assert_eq!(
+            mismatched.validate_for_plan(&plan),
+            Err(AiProposalBindingError::ProposalOutputPlanMismatch)
+        );
+
+        let pretty = serde_json::to_vec_pretty(&output).unwrap();
+        assert!(matches!(
+            AiProposalOutputIntent::from_canonical_bytes(&pretty),
+            Err(AiProposalBindingError::InvalidProposalOutput(_))
+        ));
     }
 
     #[test]
@@ -578,7 +775,7 @@ mod tests {
                 b"model-artifact-v1",
                 b"canonical-input-v1",
                 b"canonical-policy-v1",
-                b"canonical-proposal-output-v1",
+                &proposal_output(&plan),
                 b"verifier-artifact-v1",
                 b"canonical-evaluation-evidence-v1",
             )
@@ -590,7 +787,7 @@ mod tests {
                 b"model-artifact-substituted",
                 b"canonical-input-v1",
                 b"canonical-policy-v1",
-                b"canonical-proposal-output-v1",
+                &proposal_output(&plan),
                 b"verifier-artifact-v1",
                 b"canonical-evaluation-evidence-v1",
             ),
@@ -605,7 +802,7 @@ mod tests {
                 b"model-artifact-v1",
                 b"canonical-input-v1",
                 b"canonical-policy-v1",
-                b"canonical-proposal-output-v1",
+                &proposal_output(&plan),
                 b"verifier-artifact-v1",
                 b"canonical-evaluation-evidence-v1",
             ),
@@ -621,7 +818,7 @@ mod tests {
             b"",
             b"canonical-input-v1",
             b"canonical-policy-v1",
-            b"canonical-proposal-output-v1",
+            &proposal_output(&plan),
             b"verifier-artifact-v1",
             b"canonical-evaluation-evidence-v1",
         );
