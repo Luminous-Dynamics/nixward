@@ -274,6 +274,18 @@ mod tests {
         let mut changed_input = original.clone();
         changed_input.input_digest = [13; 32];
         assert_ne!(original.digest().unwrap(), changed_input.digest().unwrap());
+
+        let mut changed_output = original.clone();
+        changed_output.proposal_output_digest = [14; 32];
+        assert_ne!(original.digest().unwrap(), changed_output.digest().unwrap());
+
+        let mut changed_verifier = original.clone();
+        changed_verifier.verifier_artifact_digest = [15; 32];
+        assert_ne!(original.digest().unwrap(), changed_verifier.digest().unwrap());
+
+        let mut changed_evaluation = original.clone();
+        changed_evaluation.evaluation_evidence_digest = [16; 32];
+        assert_ne!(original.digest().unwrap(), changed_evaluation.digest().unwrap());
     }
 
     #[test]
