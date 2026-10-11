@@ -1438,6 +1438,20 @@ mod tests {
             evidence.validate_for(&plan, &proposal, &other_resolution, &other_raw, &canonical),
             Err(AiProposalBindingError::ResolutionReceiptMismatch)
         );
+
+        let mut mismatched_output_binding = proposal.clone();
+        mismatched_output_binding.proposal_output_digest = [77; 32];
+        assert_eq!(
+            AiProposalResolvedValidationEvidence::new(
+                &plan,
+                [21; 32],
+                &mismatched_output_binding,
+                &resolution,
+                &raw,
+                &canonical,
+            ),
+            Err(AiProposalBindingError::ArtifactDigestMismatch("proposal output"))
+        );
     }
 
     #[test]
