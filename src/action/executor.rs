@@ -1639,16 +1639,35 @@ impl NixOSExecutor {
         hasher.finalize().to_hex().to_string()
     }
 
+    fn validate_system_profile_before_worker_release(
+        expected_profile: &str,
+        observed_profile: Result<String, String>,
+    ) -> Result<(), String> {
+        let observed_profile = observed_profile.map_err(|error| {
+            format!(
+                "could not re-observe system profile before releasing transaction worker: {error}"
+            )
+        })?;
+        if observed_profile != expected_profile {
+            return Err(format!(
+                "system-profile drift before worker release: expected exact profile {}, observed {};                  transaction worker payload remains unreleased",
+                expected_profile, observed_profile
+            ));
+        }
+        Ok(())
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
         transaction: &mut super::config_transaction::ConfigTransaction,
         journal_path: &Path,
         purpose: super::config_transaction::ActivationWorkerPurpose,
+        expected_system_profile: &str,
     ) -> Result<std::process::Output, String> {
         #[cfg(not(all(feature = "native", target_os = "linux")))]
         {
-            let _ = (executable, args, transaction, journal_path, purpose);
+            let _ = (executable, args, transaction, journal_path, purpose, expected_system_profile);
             return Err("transaction worker execution requires Linux pidfd support".into());
         }
 
@@ -1715,7 +1734,21 @@ impl NixOSExecutor {
             }
 
             // The payload remains blocked until its pidfd, exact gate argv,
-            // payload digest, and transaction binding are durable.
+            // payload digest, and transaction binding are durable. Re-observe
+            // the selected profile after that durable receipt and immediately
+            // before release, so an intervening writer fails closed.
+            if let Err(error) = Self::validate_system_profile_before_worker_release(
+                expected_system_profile,
+                GenerationManager::current_system_profile_closure(),
+            ) {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!(
+                    "transaction worker profile guard failed; payload was not released: {error}"
+                ));
+            }
+
             let Some(mut gate_stdin) = child.stdin.take() else {
                 let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
                 let _ = child.start_kill();
@@ -1860,12 +1893,16 @@ impl NixOSExecutor {
 
     async fn set_exact_system_profile_with_worker(
         profile_store_path: &str,
+        expected_current_profile: &str,
         transaction: &mut super::config_transaction::ConfigTransaction,
         journal_path: &Path,
         purpose: super::config_transaction::ActivationWorkerPurpose,
     ) -> Result<super::config_transaction::ProfileTransitionDisposition, String> {
         if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
             return Err("system profile target is not a canonical Nix store path".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(expected_current_profile) {
+            return Err("expected current system profile is not a canonical Nix store path".into());
         }
         let nix_env = Self::trusted_system_executable("nix-env")?;
         let args = vec![
@@ -1880,6 +1917,7 @@ impl NixOSExecutor {
             transaction,
             journal_path,
             purpose,
+            expected_current_profile,
         )
         .await?;
         let process_exit_status = output.status.code();
@@ -2745,6 +2783,7 @@ impl NixOSExecutor {
         // immutable activation artifact.
         match Self::set_exact_system_profile_with_worker(
             prior_profile,
+            &observed_profile,
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::RecoveryProfileTransition,
@@ -2793,6 +2832,7 @@ impl NixOSExecutor {
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::RecoveryActivation,
+            prior_profile,
         ).await;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
@@ -2998,6 +3038,18 @@ impl NixOSExecutor {
             };
         }
 
+        let expected_pre_transition_profile = match authorization.recovery_command.as_ref() {
+            Some(NixOSCommand::ActivateSystemClosure {
+                profile_store_path: Some(value),
+                ..
+            }) => value.clone(),
+            _ => {
+                return ExecutionResult::Blocked {
+                    reason: "exact activation has no bound prior system-profile precondition".into(),
+                    safety_level: safety,
+                };
+            }
+        };
         let profile_store_path = match &command {
             NixOSCommand::ActivateSystemClosure {
                 profile_store_path: Some(value),
@@ -3007,6 +3059,7 @@ impl NixOSExecutor {
         };
         match Self::set_exact_system_profile_with_worker(
             &profile_store_path,
+            &expected_pre_transition_profile,
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::ProfileTransition,
@@ -3073,6 +3126,7 @@ impl NixOSExecutor {
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::Activation,
+            &profile_store_path,
         ).await;
         let elapsed = start.elapsed().as_millis() as u64;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
@@ -3491,6 +3545,33 @@ impl NixOSExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_release_profile_guard_requires_exact_prestate_and_fails_closed() {
+        let expected = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        assert!(NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Ok(expected.to_string()),
+        )
+        .is_ok());
+
+        let drift = NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Ok("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external".into()),
+        )
+        .expect_err("an external profile change must prevent worker release");
+        assert!(drift.contains("system-profile drift before worker release"));
+        assert!(drift.contains(expected));
+        assert!(drift.contains("nixos-system-external"));
+        assert!(drift.contains("payload remains unreleased"));
+
+        let unavailable = NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Err("injected observation failure".into()),
+        )
+        .expect_err("failed profile observation must prevent worker release");
+        assert!(unavailable.contains("could not re-observe system profile"));
+    }
 
     #[cfg(unix)]
     #[test]
