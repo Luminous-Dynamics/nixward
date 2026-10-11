@@ -146,6 +146,32 @@ translating model output into the structured representation remains an
 independent trust boundary. Callers must preserve the returned validation
 envelope and the referenced artifacts/evidence needed to resolve its digest.
 
+For consumers that need to evidence the *raw-response-to-structure* step, the
+higher-assurance path is `AiProposalResolutionReceipt` plus
+`SystemTransaction::record_validation_with_resolved_ai_proposal`:
+the built-in JSON resolver hashes the exact provider-response bytes, identifies
+the resolver contract and embedded resolver-source bytes, canonicalizes the
+typed intent, checks that intent against the exact plan, and emits a receipt
+joining the raw response digest, source digest, canonical-intent digest, and
+plan digest. The resolved validation envelope then commits the resolution
+receipt digest alongside ordinary validation evidence and the proposal binding
+in the existing transaction receipt.
+
+Only structured provider JSON matching schema v1 is supported; this component
+does not infer commands from free-form prose. Persist the raw response, canonical
+intent, resolution receipt, resolved validation envelope, proposal binding, and
+referenced evidence. Interchange fixtures are in
+[docs/fixtures/ai-proposal-resolution-receipt-v1.json](fixtures/ai-proposal-resolution-receipt-v1.json)
+and
+[docs/fixtures/ai-proposal-resolved-validation-evidence-v1.json](fixtures/ai-proposal-resolved-validation-evidence-v1.json).
+
+The resolver-source digest identifies source bytes embedded in the build. It
+does not attest that the running executable is untampered or prove deployment
+provenance. Establishing which binary actually ran still requires a separate
+trusted build/release and runtime-attestation mechanism. The receipt proves a
+reproducible resolution under the identified source implementation—not the
+truth of model claims, the suitability of a policy, or real-world safety.
+
 ### 4. Authorize
 
 The owner/operator authorizes the exact plan.
