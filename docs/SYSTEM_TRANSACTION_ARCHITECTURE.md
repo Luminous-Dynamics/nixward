@@ -382,9 +382,12 @@ post-state verification/recovery. The underlying Nix profile mutation and the
 closure activation retain their own Nix-managed locks; Nixward does not hold
 the profile lock across the child activation. This prevents concurrent Nixward
 transactions from interleaving while preserving Nix's native activation
-serialization. It does not authorize or claim to prevent arbitrary direct
-filesystem mutation that bypasses Nix's locking protocol, nor does it remove
-the unsupported external-writer compare-and-set gap documented in Issue #9.
+serialization. The worker launcher also performs a fresh exact profile
+observation immediately before releasing a gated worker, but that check is not
+atomic with the subsequent profile mutation or payload execution. It cannot
+exclude an unrelated privileged writer that races after the observation or
+bypasses Nix's locking protocol. The unsupported external-writer
+compare-and-set gap documented in Issue #9 therefore remains open.
 
 Bootloader-specific next-boot selection remains a separate evidence boundary
 tracked in Issue #8 and must not be silently folded into the runtime or profile
@@ -635,12 +638,29 @@ identity across `exec`; if the parent exits before release, the pipe closes and
 the gate exits without running the privileged payload.
 
 This closes the pre-receipt execution window for workers routed through the
-gate, subject to the gate binary and package co-installation being exact. It
+gate, subject to the gate binary and package co-installation being exact.
+After the worker identity has been persisted, the parent now observes the
+selected system profile again immediately before token release and compares it
+with the caller-supplied exact precondition. Primary profile transition requires
+the authorization-bound prior profile; primary activation requires the
+candidate profile to remain selected; recovery profile transition requires the
+exact profile observed at recovery admission; recovery activation requires the
+exact bound predecessor profile. Observation failure or drift kills the inert
+gate and returns without delivering the token. The durable gate receipt stays
+in the journal so a later recovery can account for the terminated worker.
+
+This is a last-moment drift guard, not a compare-and-set and not an OS-level
+exclusion guarantee. An external writer can still race between the final
+observation and token delivery or the profile-mutation operation. Issue #9
+remains open until the system has a supported conditional profile update or a
+single privileged mutation broker that excludes unrelated writers. The guard
 does not itself prove successful activation: the worker receipt still has to
 be durable, the pidfd identity must remain consistent, and runtime/profile
 post-state observation and terminal journal persistence remain required.
 
 The launch-gate protocol has unit tests for exact release token, digest
-canonicality, truncation, and trailing bytes. As with all changes here, those
-tests and the full compiler/test matrix must complete on the exact subject
-before it may be qualified.
+canonicality, truncation, and trailing bytes. A profile-precondition unit test
+now checks the exact-match, drift, and observation-error outcomes used by the
+pre-release guard. These tests and the full compiler/test matrix must complete
+on the exact subject before it may be qualified; no passing execution result is
+claimed for this source-only pass.
