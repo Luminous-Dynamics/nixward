@@ -9,7 +9,8 @@
 //! exchange one stable, digest-addressed transaction vocabulary.
 
 use super::ai_proposal_binding::{
-    AiProposalBinding, AiProposalOutputIntent, AiProposalValidationEvidence,
+    AiProposalBinding, AiProposalOutputIntent, AiProposalResolutionReceipt,
+    AiProposalResolvedValidationEvidence, AiProposalValidationEvidence,
 };
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use serde::{Deserialize, Serialize};
@@ -248,6 +249,65 @@ impl SystemTransaction {
             .map_err(|error| format!("AI proposal validation envelope is invalid: {error}"))?;
 
         // All proposal and artifact checks happen before this state transition.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
+    }
+
+    /// Record validation while binding raw provider JSON to a deterministic
+    /// resolution receipt, the exact ChangePlan, and AI-proposal provenance.
+    ///
+    /// The returned resolved envelope's digest is stored in the existing
+    /// ValidationReceipt. Persist that envelope plus the resolution receipt,
+    /// proposal binding, raw response, canonical intent, referenced artifacts,
+    /// and ordinary validation evidence. All resolution and artifact checks
+    /// happen before the transaction changes phase.
+    ///
+    /// The receipt identifies this build's embedded resolver source; it is not
+    /// a software attestation proving that the executing binary is untampered.
+    /// This method neither authorizes nor executes the change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_resolved_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+    ) -> Result<AiProposalResolvedValidationEvidence, String> {
+        resolution
+            .validate_against_artifacts(plan, raw_model_output_bytes, canonical_intent_bytes)
+            .map_err(|error| format!("AI proposal resolution receipt validation failed: {error}"))?;
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                canonical_intent_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let evidence = AiProposalResolvedValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+            resolution,
+        )
+        .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
+
+        // No transaction state mutation occurs until all referenced evidence is checked.
         self.record_validation(plan, evidence_digest, summary)?;
         Ok(evidence)
     }
