@@ -669,6 +669,13 @@ mod tests {
         assert_eq!(decoded, original);
         assert!(decoded.validate_for(&plan, &proposal).is_ok());
         assert_eq!(decoded.digest().unwrap(), original.digest().unwrap());
+
+        let mut changed_validation = decoded.clone();
+        changed_validation.validation_evidence_digest = [99; 32];
+        assert_ne!(
+            decoded.digest().unwrap(),
+            changed_validation.digest().unwrap()
+        );
     }
 
     #[test]
