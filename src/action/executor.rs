@@ -3674,7 +3674,7 @@ mod tests {
         let candidate = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate";
         let foreign_runtime = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-external";
         let foreign_profile = "/nix/store/dddddddddddddddddddddddddddddddd-nixos-system-external-profile";
-        let mut recovery_mutation_started = false;
+        let mut recovery_mutation_callback_count = 0usize;
 
         let decision = NixOSExecutor::validate_exact_recovery_observation(
             foreign_runtime,
@@ -3686,11 +3686,16 @@ mod tests {
             SystemActivation::Switch,
         );
         if decision.is_ok() {
-            recovery_mutation_started = true;
+            // Models the only branch allowed to invoke the subsequent
+            // privileged recovery callback after the production admission check.
+            recovery_mutation_callback_count += 1;
         }
 
         assert!(decision.is_err(), "a foreign runtime/profile pair is outside the recovery allow-set");
-        assert!(!recovery_mutation_started, "recovery must not overwrite foreign state");
+        assert_eq!(
+            recovery_mutation_callback_count, 0,
+            "recovery must not overwrite foreign state"
+        );
     }
 
     #[test]
