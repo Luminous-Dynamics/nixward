@@ -886,7 +886,7 @@ mod tests {
             b"canonical-evaluation-evidence-v1",
         );
 
-        assert!(result.unwrap_err().contains("resolution receipt validation failed"));
+        assert!(result.unwrap_err().contains("AI proposal resolution receipt does not match"));
         assert_eq!(tx.phase, TransactionPhase::Planned);
         assert!(tx.validation.is_none());
         assert!(tx.authorization.is_none());
