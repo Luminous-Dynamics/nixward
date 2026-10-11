@@ -24,8 +24,9 @@ pub mod service_manager;
 pub mod system_transaction;
 
 pub use ai_proposal_binding::{
-    digest_artifact, AiProposalBinding, AiProposalBindingError,
-    AiProposalValidationEvidence, ProposalArtifactKind,
+    digest_artifact, AiProposalBinding, AiProposalBindingError, AiProposalValidationEvidence,
+    ProposalArtifactKind, AI_PROPOSAL_BINDING_SCHEMA_VERSION,
+    AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION,
 };
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
