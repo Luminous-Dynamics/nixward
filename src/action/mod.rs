@@ -23,7 +23,10 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 
-pub use ai_proposal_binding::{digest_artifact, AiProposalBinding, AiProposalBindingError, ProposalArtifactKind};
+pub use ai_proposal_binding::{
+    digest_artifact, AiProposalBinding, AiProposalBindingError,
+    AiProposalValidationEvidence, ProposalArtifactKind,
+};
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,
