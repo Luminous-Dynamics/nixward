@@ -281,9 +281,6 @@ impl SystemTransaction {
         verifier_artifact_bytes: &[u8],
         evaluation_evidence_canonical_bytes: &[u8],
     ) -> Result<AiProposalResolvedValidationEvidence, String> {
-        resolution
-            .validate_against_artifacts(plan, raw_model_output_bytes, canonical_intent_bytes)
-            .map_err(|error| format!("AI proposal resolution receipt validation failed: {error}"))?;
         proposal
             .validate_against_artifacts(
                 plan,
@@ -301,6 +298,8 @@ impl SystemTransaction {
             validation_evidence_digest,
             proposal,
             resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
         )
         .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
         let evidence_digest = evidence
@@ -839,7 +838,7 @@ mod tests {
         let encoded = serde_json::to_vec(&evidence).unwrap();
         let decoded: AiProposalResolvedValidationEvidence =
             serde_json::from_slice(&encoded).unwrap();
-        assert!(decoded.validate_for(&plan, &proposal, &resolution).is_ok());
+        assert!(decoded.validate_for(&plan, &proposal, &resolution, &raw, &canonical).is_ok());
         assert_eq!(
             tx.validation.as_ref().unwrap().evidence_digest,
             digest_hex(&decoded.digest().unwrap())
