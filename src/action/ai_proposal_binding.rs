@@ -1336,6 +1336,107 @@ mod tests {
     }
 
     #[test]
+    fn resolution_receipt_links_raw_provider_json_to_canonical_intent_and_plan() {
+        let plan = plan("machine-a");
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let raw = serde_json::to_vec_pretty(&intent).unwrap();
+        let (receipt, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+
+        assert_ne!(raw, canonical);
+        assert_eq!(
+            receipt.raw_model_output_digest(),
+            digest_artifact(ProposalArtifactKind::RawModelOutput, &raw)
+        );
+        assert_eq!(
+            receipt.canonical_intent_digest(),
+            digest_artifact(ProposalArtifactKind::ProposalOutput, &canonical)
+        );
+        assert_eq!(receipt.plan_digest(), plan.digest());
+        assert_eq!(receipt.resolver_id(), AI_PROPOSAL_JSON_RESOLVER_ID);
+        assert_eq!(receipt.resolver_version(), AI_PROPOSAL_JSON_RESOLVER_VERSION);
+        assert!(receipt.resolver_source_digest() != [0; 32]);
+        assert!(receipt
+            .validate_against_artifacts(&plan, &raw, &canonical)
+            .is_ok());
+
+        // Different raw bytes with identical meaning must not reuse the receipt.
+        let mut altered_raw = raw.clone();
+        altered_raw.push(b' ');
+        assert_eq!(
+            receipt.validate_against_artifacts(&plan, &altered_raw, &canonical),
+            Err(AiProposalBindingError::ResolutionReceiptMismatch)
+        );
+
+        let encoded = serde_json::to_vec(&receipt).unwrap();
+        let decoded: AiProposalResolutionReceipt = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, receipt);
+        assert_eq!(decoded.digest().unwrap(), receipt.digest().unwrap());
+    }
+
+    #[test]
+    fn resolved_validation_evidence_joins_resolution_and_proposal_binding() {
+        let plan = plan("machine-a");
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let raw = serde_json::to_vec_pretty(&intent).unwrap();
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+        let evidence =
+            AiProposalResolvedValidationEvidence::new(&plan, [21; 32], &proposal, &resolution)
+                .unwrap();
+        assert!(evidence.validate_for(&plan, &proposal, &resolution).is_ok());
+
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        let decoded: AiProposalResolvedValidationEvidence =
+            serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, evidence);
+        assert_eq!(decoded.digest().unwrap(), evidence.digest().unwrap());
+
+        let other_raw = serde_json::to_vec(&intent).unwrap();
+        let (other_resolution, _) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &other_raw).unwrap();
+        assert_eq!(
+            evidence.validate_for(&plan, &proposal, &other_resolution),
+            Err(AiProposalBindingError::ResolutionReceiptMismatch)
+        );
+    }
+
+    #[test]
+    fn resolution_receipt_fixture_has_strict_hex_and_versioned_identity() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/ai-proposal-resolution-receipt-v1.json"
+        ));
+        let parsed: AiProposalResolutionReceipt = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.schema_version(),
+            AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION
+        );
+        assert_eq!(parsed.resolver_id(), AI_PROPOSAL_JSON_RESOLVER_ID);
+        assert_eq!(parsed.resolver_version(), AI_PROPOSAL_JSON_RESOLVER_VERSION);
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        for field in [
+            "plan_digest",
+            "raw_model_output_digest",
+            "resolver_source_digest",
+            "canonical_intent_digest",
+        ] {
+            assert_eq!(encoded[field].as_str().unwrap().len(), 64);
+        }
+        assert!(parsed.digest().is_ok());
+    }
+
+    #[test]
     fn validation_evidence_fixture_uses_lowercase_hex_digests() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
