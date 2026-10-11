@@ -306,6 +306,175 @@ impl AiProposalOutputIntent {
     }
 }
 
+/// Content-addressed receipt linking raw provider JSON to the canonical intent
+/// and exact plan produced by this resolver implementation.
+///
+/// The resolver source digest is computed from the source file embedded into
+/// this build. This is a source identity, not an attestation that the executing
+/// binary is untampered or that a deployment actually ran this resolver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiProposalResolutionReceipt {
+    schema_version: u16,
+    resolver_id: String,
+    resolver_version: u16,
+    #[serde(with = "serde_hex_32")]
+    plan_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    raw_model_output_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    resolver_source_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    canonical_intent_digest: [u8; 32],
+}
+
+const AI_PROPOSAL_RESOLUTION_DOMAIN: &[u8] =
+    b"nixward-ai-proposal-resolution-receipt-v1\0";
+
+fn embedded_resolver_source_digest() -> [u8; 32] {
+    digest_artifact(
+        ProposalArtifactKind::ResolverSource,
+        include_bytes!("ai_proposal_binding.rs"),
+    )
+}
+
+impl AiProposalResolutionReceipt {
+    /// Run the built-in strict JSON resolver over the raw provider response.
+    ///
+    /// The raw response is hashed before parsing; successful parsing is then
+    /// normalized to the exact canonical schema-v1 intent representation and
+    /// checked against the provided ChangePlan. Returns the receipt and those
+    /// canonical bytes. Free-form natural-language responses are intentionally
+    /// not interpreted by this resolver.
+    pub fn resolve_provider_json(
+        plan: &ChangePlan,
+        raw_model_output_bytes: &[u8],
+    ) -> Result<(Self, Vec<u8>), AiProposalBindingError> {
+        if raw_model_output_bytes.is_empty() {
+            return Err(AiProposalBindingError::EmptyArtifactBytes(
+                "raw model output",
+            ));
+        }
+
+        let intent = AiProposalOutputIntent::from_json_bytes(raw_model_output_bytes)?;
+        intent.validate_for_plan(plan)?;
+        let canonical_intent_bytes = intent.canonical_bytes()?;
+        let receipt = Self {
+            schema_version: AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION,
+            resolver_id: AI_PROPOSAL_JSON_RESOLVER_ID.to_string(),
+            resolver_version: AI_PROPOSAL_JSON_RESOLVER_VERSION,
+            plan_digest: plan.digest(),
+            raw_model_output_digest: digest_artifact(
+                ProposalArtifactKind::RawModelOutput,
+                raw_model_output_bytes,
+            ),
+            resolver_source_digest: embedded_resolver_source_digest(),
+            canonical_intent_digest: digest_artifact(
+                ProposalArtifactKind::ProposalOutput,
+                &canonical_intent_bytes,
+            ),
+        };
+        receipt.validate_for_plan(plan)?;
+        Ok((receipt, canonical_intent_bytes))
+    }
+
+    /// Re-run resolution and reject substitutions in any linked byte sequence.
+    pub fn validate_against_artifacts(
+        &self,
+        plan: &ChangePlan,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_for_plan(plan)?;
+        let (recomputed, recomputed_intent) =
+            Self::resolve_provider_json(plan, raw_model_output_bytes)?;
+        if &recomputed != self || recomputed_intent.as_slice() != canonical_intent_bytes {
+            return Err(AiProposalBindingError::ResolutionReceiptMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_plan(&self, plan: &ChangePlan) -> Result<(), AiProposalBindingError> {
+        self.validate_shape()?;
+        if self.plan_digest != plan.digest()
+            || self.resolver_source_digest != embedded_resolver_source_digest()
+        {
+            return Err(AiProposalBindingError::ResolutionReceiptMismatch);
+        }
+        Ok(())
+    }
+
+    /// Stable digest to join this receipt into a resolved validation envelope.
+    pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
+        self.validate_shape()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AI_PROPOSAL_RESOLUTION_DOMAIN);
+        hasher.update(&self.schema_version.to_le_bytes());
+        hasher.update(&(self.resolver_id.len() as u64).to_le_bytes());
+        hasher.update(self.resolver_id.as_bytes());
+        hasher.update(&self.resolver_version.to_le_bytes());
+        hasher.update(&self.plan_digest);
+        hasher.update(&self.raw_model_output_digest);
+        hasher.update(&self.resolver_source_digest);
+        hasher.update(&self.canonical_intent_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    pub fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    pub fn resolver_id(&self) -> &str {
+        &self.resolver_id
+    }
+
+    pub fn resolver_version(&self) -> u16 {
+        self.resolver_version
+    }
+
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub fn raw_model_output_digest(&self) -> [u8; 32] {
+        self.raw_model_output_digest
+    }
+
+    pub fn resolver_source_digest(&self) -> [u8; 32] {
+        self.resolver_source_digest
+    }
+
+    pub fn canonical_intent_digest(&self) -> [u8; 32] {
+        self.canonical_intent_digest
+    }
+
+    fn validate_shape(&self) -> Result<(), AiProposalBindingError> {
+        if self.schema_version != AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION {
+            return Err(
+                AiProposalBindingError::UnsupportedResolutionReceiptSchemaVersion(
+                    self.schema_version,
+                ),
+            );
+        }
+        if self.resolver_id != AI_PROPOSAL_JSON_RESOLVER_ID
+            || self.resolver_version != AI_PROPOSAL_JSON_RESOLVER_VERSION
+        {
+            return Err(AiProposalBindingError::ResolutionReceiptMismatch);
+        }
+        for (name, digest) in [
+            ("resolution plan", &self.plan_digest),
+            ("raw model output", &self.raw_model_output_digest),
+            ("resolver source", &self.resolver_source_digest),
+            ("canonical intent", &self.canonical_intent_digest),
+        ] {
+            if *digest == [0; 32] {
+                return Err(AiProposalBindingError::MissingDigest(name));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl AiProposalBinding {
     /// Bind AI provenance to the exact, already-constructed ChangePlan.
     ///
