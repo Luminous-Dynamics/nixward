@@ -5,10 +5,12 @@
 //! Provenance binding between an AI proposal and one exact Nixward ChangePlan.
 //!
 //! This module binds content digests; it does not verify an AI proof, assert that
-//! inputs are true, decide whether a policy is appropriate, or grant execution
-//! authority. Callers must independently verify referenced artifacts/evidence
-//! and use the existing ChangeAuthorization and enforcement path for privileged
-//! actions. A binding from another plan must never be reused for this plan.
+//! inputs are true, decide whether a policy is appropriate, prove that a proposal
+//! semantically entails the resulting ChangePlan, or grant execution authority.
+//! Callers must independently verify referenced artifacts/evidence and the
+//! proposal-to-plan derivation, then use the existing ChangeAuthorization and
+//! enforcement path for privileged actions. A binding from another plan must
+//! never be reused for this plan.
 
 use super::change_covenant::{ChangePlan, MachineBinding};
 use serde::{Deserialize, Serialize};
