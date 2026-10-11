@@ -699,6 +699,18 @@ mod tests {
     }
 
     #[test]
+    fn digest_fields_reject_uppercase_and_wrong_length_hex() {
+        let plan = plan("machine-a");
+        let mut uppercase = serde_json::to_value(binding(&plan)).unwrap();
+        uppercase["plan_digest"] = serde_json::json!("AA".repeat(32));
+        assert!(serde_json::from_value::<AiProposalBinding>(uppercase).is_err());
+
+        let mut short = serde_json::to_value(binding(&plan)).unwrap();
+        short["plan_digest"] = serde_json::json!("abcd");
+        assert!(serde_json::from_value::<AiProposalBinding>(short).is_err());
+    }
+
+    #[test]
     fn validation_evidence_fixture_uses_lowercase_hex_digests() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
