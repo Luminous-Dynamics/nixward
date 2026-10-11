@@ -64,6 +64,33 @@ Contract:
 
 This proposal defines CAS over the **resolved profile closure**, matching the current Nixward transaction state. Switching between two generation-link names that resolve to the same closure therefore does not count as a closure-value mismatch. If a future requirement needs generation-history identity, the API must additionally bind the selected generation-link token; it must not silently claim that closure equality also proves generation-link equality.
 
+### Important distinction: the existing optimistic token is not a closure
+
+In Nix 2.34.8, `optimisticLockProfile(profile)` returns the raw
+`readLink(profile).string()` value (or an empty string when the profile path
+does not exist): [implementation](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L283-L292).
+The `createUserEnv` path compares that same link-target token under lock after
+building: [comparison and publish](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/user-env.cc#L164-L179).
+That token is a profile-link/generation identity, not a resolved store closure.
+
+Nixward's current transaction observation is the resolved system closure. The
+proposed `--expected-profile-closure` therefore must compare like-for-like:
+resolve `globals.profile` to a validated store path under the lock (Nix has
+`Store::followLinksToStorePath` for resolving a link chain to a store path:
+[API](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/include/nix/store/store-api.hh)),
+then compare its canonical store-path identity with the caller expectation. Do
+not compare a closure string directly to `optimisticLockProfile`'s raw symlink
+text. If Nixward later requires generation-link identity as well as closure
+identity, make the request bind both explicitly; do not silently redefine the
+closure-only contract.
+
+A missing, dangling or unresolvable profile must not be treated as the empty
+string merely because the optimistic-token helper does so. The conditional
+operation should distinguish an explicitly authorized empty/nonexistent
+pre-state (if the API ever supports that mode) from failed or ambiguous
+observation. For the NixOS system-profile transition in this proposal, the
+expected-old profile must resolve to the caller-authorized store closure.
+
 ## 4. Native mutation sequence
 
 The implementation seam is inside `opSet`, immediately after the existing realization call and before `createGeneration`:
@@ -94,6 +121,15 @@ Implement the tests in the Nix 2.34.8 functional test environment with an isolat
 9. **Failure after publication:** inject failure/reporting uncertainty after the profile link switch. The command result must not falsely claim rollback; read-back should allow Nixward to classify current visibility separately from durability or activation state.
 10. **Compatibility:** normal `nix-env --set` and user profile commands retain documented compatibility. Test a custom `--profile` target explicitly.
 11. **Package identity:** build and test the exact Nix derivation intended for the Nixward deployment, including any downstream patches. Re-run this matrix for every additionally supported Nix version; do not extrapolate 2.34.8 results.
+
+The existing Nix functional suite already exercises `nix-env --set` in
+[`tests/functional/user-envs-test-case.sh`](https://github.com/NixOS/nix/blob/2.34.8/tests/functional/user-envs-test-case.sh),
+which is sourced by `tests/functional/user-envs.sh` and registered from
+[`tests/functional/meson.build`](https://github.com/NixOS/nix/blob/2.34.8/tests/functional/meson.build).
+Extend that fixture to assert expected-closure success and mismatch/no-new-
+generation behavior; put deterministic lock interleavings in the same
+functional harness or a dedicated registered test rather than creating a
+separate test that is never invoked by Meson.
 
 The core concurrency tests require explicit channels/FIFOs or a dedicated test seam, not timing sleeps as the only oracle. Every test must assert both the command result and filesystem/profile/generation state.
 
