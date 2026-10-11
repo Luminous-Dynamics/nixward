@@ -3551,6 +3551,149 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_writer_between_profile_guard_and_nix_env_set_is_a_reproducible_non_cas_counterexample() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::mpsc;
+
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let outsider = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external";
+        let candidate = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-candidate";
+        let selected_profile = Arc::new(Mutex::new(prior.to_string()));
+        let actor_profile = Arc::clone(&selected_profile);
+        let (guard_passed_tx, guard_passed_rx) = mpsc::channel();
+        let (continue_mutation_tx, continue_mutation_rx) = mpsc::channel();
+
+        // Actor A executes the same exact-state policy used by the production
+        // pre-release guard. The channel is the deterministic barrier between
+        // that observation and the simulated non-CAS profile-set operation.
+        let actor_a = std::thread::spawn(move || {
+            let observed = actor_profile.lock().expect("profile mutex").clone();
+            NixOSExecutor::validate_system_profile_before_worker_release(
+                prior,
+                Ok(observed.clone()),
+            )
+            .expect("the initial exact prior profile satisfies the guard");
+            guard_passed_tx.send(observed).expect("publish guard checkpoint");
+            continue_mutation_rx.recv().expect("wait at mutation barrier");
+
+            // Models nix-env --set candidate: it does not accept the caller's
+            // expected-old profile as a compare-and-set argument.
+            *actor_profile.lock().expect("profile mutex") = candidate.to_string();
+            let post_state = actor_profile.lock().expect("profile mutex").clone();
+            let disposition =
+                super::super::config_transaction::classify_profile_transition_post_state(
+                    Some(0),
+                    Some(&post_state),
+                    candidate,
+                );
+            (post_state, disposition)
+        });
+
+        assert_eq!(
+            guard_passed_rx.recv().expect("actor A reaches pre-release guard"),
+            prior
+        );
+        // Actor C is not cooperating with the Nixward transaction interlock.
+        *selected_profile.lock().expect("profile mutex") = outsider.to_string();
+        assert_eq!(
+            selected_profile.lock().expect("profile mutex").as_str(),
+            outsider,
+            "prove that external state changed after the guard but before mutation"
+        );
+        continue_mutation_tx.send(()).expect("release mutation barrier");
+
+        let (post_state, disposition) = actor_a.join().expect("actor A completed");
+        assert_eq!(post_state, candidate);
+        assert!(
+            matches!(
+                disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Committed { .. }
+            ),
+            "this passing assertion documents the counterexample: a final candidate match cannot prove there was no external writer"
+        );
+        // This is deliberately not a safety/pass oracle. It proves that the
+        // pre-release guard plus a matching post-read does not constitute CAS.
+        assert_ne!(outsider, candidate);
+    }
+
+    #[test]
+    fn external_writer_after_child_exit_produces_indeterminate_readback_and_blocks_activation() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::mpsc;
+
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let outsider = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external";
+        let candidate = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-candidate";
+        let selected_profile = Arc::new(Mutex::new(prior.to_string()));
+        let child_profile = Arc::clone(&selected_profile);
+        let (child_exited_tx, child_exited_rx) = mpsc::channel();
+        let (continue_readback_tx, continue_readback_rx) = mpsc::channel();
+
+        let parent = std::thread::spawn(move || {
+            // Child's profile mutation returns before the parent performs its
+            // read-back. Test channels make the intervening actor deterministic.
+            *child_profile.lock().expect("profile mutex") = candidate.to_string();
+            child_exited_tx.send(()).expect("publish child-exit checkpoint");
+            continue_readback_rx.recv().expect("wait at read-back barrier");
+            let observed = child_profile.lock().expect("profile mutex").clone();
+            let disposition =
+                super::super::config_transaction::classify_profile_transition_post_state(
+                    Some(0),
+                    Some(&observed),
+                    candidate,
+                );
+            let activation_started = matches!(
+                disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Committed { .. }
+            );
+            (observed, disposition, activation_started)
+        });
+
+        child_exited_rx.recv().expect("child must exit before external write");
+        *selected_profile.lock().expect("profile mutex") = outsider.to_string();
+        continue_readback_tx.send(()).expect("release read-back barrier");
+
+        let (observed, disposition, activation_started) =
+            parent.join().expect("parent completed read-back");
+        assert_eq!(observed, outsider);
+        assert!(
+            matches!(
+                disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Indeterminate { .. }
+            ),
+            "a divergent post-child read-back must be indeterminate"
+        );
+        assert!(!activation_started, "activation must not start from divergent read-back");
+        assert_ne!(prior, outsider);
+        assert_ne!(candidate, outsider);
+    }
+
+    #[test]
+    fn recovery_rejects_foreign_runtime_profile_pair_before_mutation_callback() {
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let candidate = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate";
+        let foreign_runtime = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-external";
+        let foreign_profile = "/nix/store/dddddddddddddddddddddddddddddddd-nixos-system-external-profile";
+        let mut recovery_mutation_started = false;
+
+        let decision = NixOSExecutor::validate_exact_recovery_observation(
+            foreign_runtime,
+            foreign_profile,
+            candidate,
+            candidate,
+            prior,
+            prior,
+            SystemActivation::Switch,
+        );
+        if decision.is_ok() {
+            recovery_mutation_started = true;
+        }
+
+        assert!(decision.is_err(), "a foreign runtime/profile pair is outside the recovery allow-set");
+        assert!(!recovery_mutation_started, "recovery must not overwrite foreign state");
+    }
+
+    #[test]
     fn worker_release_profile_guard_requires_exact_prestate_and_fails_closed() {
         let expected = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
         assert!(NixOSExecutor::validate_system_profile_before_worker_release(
@@ -4791,19 +4934,30 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn nixward_transaction_interlock_is_exclusive_and_releases() {
+    fn nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nixward.lock");
+        let holder_path = path.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
 
-        let first = NixwardTransactionInterlock::acquire_at(&path).expect("first lock");
-        let second = NixwardTransactionInterlock::acquire_at(&path);
-        assert!(second
-            .expect_err("second exclusive lock must fail closed")
-            .contains("already held"));
+        let holder = std::thread::spawn(move || {
+            let lock = NixwardTransactionInterlock::acquire_at(&holder_path)
+                .expect("actor A acquires the transaction interlock");
+            held_tx.send(()).expect("notify lock acquisition");
+            release_rx.recv().expect("wait for deterministic release barrier");
+            drop(lock);
+        });
 
-        drop(first);
+        held_rx.recv().expect("actor A must hold the interlock before actor B runs");
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("actor B must fail before its protected mutation boundary");
+        assert!(error.contains("already held"));
+
+        release_tx.send(()).expect("release actor A");
+        holder.join().expect("actor A exits after dropping the lock");
         NixwardTransactionInterlock::acquire_at(&path)
-            .expect("lock must be reusable after release");
+            .expect("actor B can acquire after actor A releases");
     }
 
 }
