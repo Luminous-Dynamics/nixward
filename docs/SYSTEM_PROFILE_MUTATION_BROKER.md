@@ -12,20 +12,82 @@ The preferred long-term primitive is a versioned Nix-native conditional profile 
 
 A root-owned coordinator can still serialize **cooperating managed writers**, audit requests, and funnel Nixward transactions through one mutation plane. This is useful defense in depth, but it is not a CAS guarantee against arbitrary root processes. Its guarantee must be named accordingly unless the expected-old check is performed inside the same native conditional-update operation.
 
-## Version-pinned source audit: nix-env --set (2026-10-11)
+## Version-pinned Nix profile-mutation audit (2026-10-11)
 
-A source inspection of the upstream Nix tag `2.28.5` found a stronger reason not to rely on the existing command as a CAS or assume that every mutation uses Nix's profile lock:
+### Nixward's locked packaging baseline
 
-- In [src/nix-env/nix-env.cc at tag 2.28.5, opSet](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765), after realizing the requested derivation, the function calls `createGeneration(*store2, globals.profile, drv.queryOutPath())` and then `switchLink(globals.profile, generation)`. This function body does not call `lockProfile` or `optimisticLockProfile`.
-- The adjacent `opSetFlag` path does use `optimisticLockProfile`, and the same Nix tag's [profile API](https://github.com/NixOS/nix/blob/2.28.5/src/libstore/profiles.cc) defines explicit `lockProfile` and `optimisticLockProfile` helpers. This difference is evidence that lock semantics must be checked per operation; we must not generalize from another Nix command.
-- The current upstream [profiles header](https://github.com/NixOS/nix/blob/master/src/libstore/include/nix/store/profiles.hh#L193-L210) documents `lockProfile` as the exclusive lock for profile-modifying commands, and describes optimistic locking as comparing the symlink target and restarting if it changes. The current [profile implementation](https://github.com/NixOS/nix/blob/master/src/libstore/profiles.cc#L235-L279) also shows `switchGeneration` taking `lockProfile`. These APIs are internal Nix C++ interfaces, not a stable Rust or command-line CAS contract.
-- Nix issue [#6349](https://github.com/NixOS/nix/issues/6349) asks for a `nix profile set` equivalent to `nix-env --set`; it records the gap in the newer profile CLI, not a CAS feature.
+The current Nixward `flake.lock` pins nixpkgs to commit
+[`0bb7ec54c8483066ec9d7720e780a5caa71f8612`](https://github.com/NixOS/nixpkgs/tree/0bb7ec54c8483066ec9d7720e780a5caa71f8612).
+At that exact nixpkgs revision, `pkgs/tools/package-management/nix/default.nix`
+sets `nixVersions.latest` and `nixVersions.stable` to Nix **2.34.8**
+([version and aliases](https://github.com/NixOS/nixpkgs/blob/0bb7ec54c8483066ec9d7720e780a5caa71f8612/pkgs/tools/package-management/nix/default.nix#L174-L212)).
+This identifies the flake's locked Nix packaging baseline. It does **not** force
+every deployed NixOS target to run that Nix binary: a system can select another
+`nix.package`, and the Nixward module does not own or pin the host's Nix
+installation.
 
-**Scope limitation:** this source audit is pinned to Nix tag `2.28.5` and current upstream `master` source as retrieved on 2026-10-11. It does not prove the behavior of every Nix release deployed by NixOS unstable, or the system's exact packaged build. Before adopting a native-lock design, record the Nix version/store path used by each supported target and inspect the matching source revision. No claim is made that the current target's `nix-env --set` has identical code until that check is done.
+### Nix 2.34.8 source result
+
+The current source tree moved the legacy `nix-env` implementation to
+`src/nix/nix-env/nix-env.cc`. At the exact upstream tag
+[`2.34.8`](https://github.com/NixOS/nix/tree/2.34.8):
+
+- `opSet` starts at line 758. After realizing the derivation, it calls
+  `createGeneration(*store2, globals.profile, drv.queryOutPath())` and then
+  `switchLink(globals.profile, generation)`; see the
+  [exact implementation](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801).
+  That operation path contains no `lockProfile` or
+  `optimisticLockProfile` call.
+- `createGeneration` in
+  [`src/libstore/profiles.cc`](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L64-L119)
+  creates/records a generation and its permanent-root behavior, but does not
+  acquire the profile lock.
+- `switchLink` replaces the link, while `switchGeneration` separately
+  acquires `PathLocks` and calls `lockProfile`; see the
+  [profile functions](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L247-L296).
+  The existence of that lock in a neighboring operation does not make it
+  implicit in `opSet`.
+- The earlier
+  [Nix 2.28.5 `opSet` path](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)
+  exhibited the same relevant sequence: generation creation followed by
+  `switchLink`, without an explicit profile lock in `opSet`.
+
+This is no longer just an inference from a historical release: the hole is
+present in the **2.34.8 source selected by the current flake's locked
+nixpkgs package aliases**. It remains version-bounded. The host's actual Nix
+executable and source revision must still be captured on each supported target
+before making target-wide claims.
 
 ### Consequence for the implementation plan
 
-The next native patch needs to do more than pass an expected-old value through a parent broker. The profile-update implementation itself must acquire a serialization mechanism used by all managed writers, compare the expected current target while holding that mechanism, and construct/select the exact generation before releasing it. For the observed Nix 2.28.5 `opSet` implementation, a wrapper-held lock would not serialize against that unmodified path because that function body does not acquire the profile lock. Therefore either the supported native mutation path must be patched/replaced so competing supported writers honor the same boundary, or arbitrary external/root bypass must remain explicitly outside the guarantee. A change that adds a lock only to the Nixward wrapper would not solve the observed counterexample.
+The next implementation should be an upstream Nix patch or supported native
+API, not a wrapper pretending the gap is closed. The required critical section
+is:
+
+1. Realize the candidate closure **before** acquiring the profile lock, avoiding
+   a long-held mutation lock during build/download.
+2. In the same Nix process that performs the mutation, acquire the profile lock
+   that cooperating profile writers use.
+3. While holding it, resolve and compare the actual current profile target with
+   the request's exact expected-old value. Treat a missing profile distinctly
+   from a failed observation; on mismatch, return a typed/machine-distinguishable
+   refusal before creating or switching a generation.
+4. On match, run Nix's existing generation-creation/permanent-root logic and
+   link switch under that same lock, then release it.
+5. Audit all supported profile writers at the pinned source revision and make
+   each in-scope writer honor the same boundary. A caller-owned lock or
+   pre-check followed by launching an unmodified `nix-env --set` does not
+   satisfy this contract. Any writer outside the shared boundary must be named
+   as a residual, not silently considered serialized.
+
+An implementation option is a Nix-native conditional-set interface that takes
+an expected current profile target and checks it inside `opSet`'s mutation
+critical section; the final option name and representation must be designed
+against the actual Nix source/API. The current Nixward guard remains a useful
+mitigation, but it does not implement this operation. Do not replace Nix's
+generation management with an ad hoc Rust symlink rewrite. The separate
+root-owned broker remains a possible coordinator for cooperating clients, not
+a protection against a root process that deliberately bypasses it.
 
 ## Evidence and current facts
 
