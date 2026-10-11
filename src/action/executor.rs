@@ -1650,8 +1650,12 @@ impl NixOSExecutor {
         })?;
         if observed_profile != expected_profile {
             return Err(format!(
-                "system-profile drift before worker release: expected exact profile {}, observed {};                  transaction worker payload remains unreleased",
-                expected_profile, observed_profile
+                concat!(
+                    "system-profile drift before worker release: expected exact profile {}, observed {}; ",
+                    "transaction worker payload remains unreleased"
+                ),
+                expected_profile,
+                observed_profile,
             ));
         }
         Ok(())
