@@ -694,6 +694,18 @@ mod tests {
     }
 
     #[test]
+    fn proposal_output_fixture_is_canonical_and_resolves_exact_plan() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/ai-proposal-output-intent-v1.json"
+        ));
+        let output = AiProposalOutputIntent::from_canonical_bytes(raw.as_bytes()).unwrap();
+        let plan = plan("machine-a");
+        assert_eq!(output.schema_version, AI_PROPOSAL_OUTPUT_SCHEMA_VERSION);
+        assert!(output.validate_for_plan(&plan).is_ok());
+    }
+
+    #[test]
     fn binding_round_trips_and_remains_plan_bound() {
         let plan = plan("machine-a");
         let original = binding(&plan);
