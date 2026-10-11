@@ -17,8 +17,47 @@ use thiserror::Error;
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
 const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
 
-/// Content-addressed provenance for one AI-generated proposal.
+/// Artifact classes used to domain-separate proposal provenance digests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalArtifactKind {
+    ModelArtifact,
+    Input,
+    Policy,
+    ProposalOutput,
+    VerifierArtifact,
+    EvaluationEvidence,
+}
+
+impl ProposalArtifactKind {
+    fn tag(self) -> &'static [u8] {
+        match self {
+            Self::ModelArtifact => b"model-artifact",
+            Self::Input => b"input",
+            Self::Policy => b"policy",
+            Self::ProposalOutput => b"proposal-output",
+            Self::VerifierArtifact => b"verifier-artifact",
+            Self::EvaluationEvidence => b"evaluation-evidence",
+        }
+    }
+}
+
+/// Hash exact artifact bytes with a stable domain and role tag.
 ///
+/// For structured inputs, callers must first encode the value canonically. This
+/// helper does not validate what the artifact means or whether it is trustworthy.
+pub fn digest_artifact(kind: ProposalArtifactKind, bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AI_PROPOSAL_ARTIFACT_DOMAIN);
+    let tag = kind.tag();
+    hasher.update(&(tag.len() as u64).to_le_bytes());
+    hasher.update(tag);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    *hasher.finalize().as_bytes()
+}
+
+/// Content-addressed provenance for one AI-generated proposal.
+
 /// Digest fields are fixed-width 32-byte values supplied by the caller. The
 /// caller is responsible for computing each digest over the intended artifact
 /// or canonical input bytes; this type cannot verify bytes it does not receive.
@@ -26,6 +65,7 @@ const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
 /// repeated after deserializing untrusted data. This type intentionally has no
 /// method that authorizes or executes a change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiProposalBinding {
     schema_version: u16,
     plan_digest: [u8; 32],
@@ -249,6 +289,31 @@ mod tests {
             evidence.digest(),
             Err(AiProposalBindingError::MissingDigest("evaluation evidence"))
         );
+    }
+
+    #[test]
+    fn artifact_digest_is_bound_to_role_and_exact_bytes() {
+        let model = digest_artifact(ProposalArtifactKind::ModelArtifact, b"model-v1");
+        assert_eq!(
+            model,
+            digest_artifact(ProposalArtifactKind::ModelArtifact, b"model-v1")
+        );
+        assert_ne!(
+            model,
+            digest_artifact(ProposalArtifactKind::ModelArtifact, b"model-v2")
+        );
+        assert_ne!(
+            model,
+            digest_artifact(ProposalArtifactKind::Input, b"model-v1")
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected_on_deserialization() {
+        let plan = plan("machine-a");
+        let encoded = serde_json::to_string(&binding(&plan)).unwrap();
+        let with_unknown = encoded.trim_end_matches('}').to_owned() + ",\\"unexpected\\":true}";
+        assert!(serde_json::from_str::<AiProposalBinding>(&with_unknown).is_err());
     }
 
     #[test]
