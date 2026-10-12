@@ -126,10 +126,11 @@ impl NetworkResourceCapability {
     }
 }
 
-/// A normalized resource-state fingerprint. Adapters must domain-separate it
-/// and bind it to target, scope, resource id, resource kind, schema version,
-/// and the normalized non-secret semantics. Do not fingerprint secrets, raw
-/// packet payloads, volatile counters, or wall-clock timestamps as state.
+/// A directly observed state or an explicit statement that the state is unknown.
+/// `Known` fingerprints must be domain-separated and bind target, scope,
+/// resource id, resource kind, schema version, and normalized non-secret
+/// semantics. Do not fingerprint secrets, packet payloads, volatile counters,
+/// or wall-clock timestamps as resource state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "observation", rename_all = "kebab-case")]
 pub enum NetworkResourceObservation {
