@@ -214,8 +214,11 @@ pre-check and the write. This also rejects existing hard-link aliases to the
 seed or a release artifact. Focused binary tests cover these path-boundary and
 secret-handling cases. These controls reduce accidental secret inclusion and
 path confusion; they do not replace an appropriately protected signing-key
-store or an immutable release root. The signer walk and verifier scan both
-assume the release tree is not concurrently modified by an untrusted actor.
+store or an immutable release root. New manifests are written with exclusive
+creation and the file is synced before success is reported; on a handled write or
+sync failure the signer attempts to remove the incomplete output. The signer walk
+and verifier scan both assume the release tree is not concurrently modified by an
+untrusted actor.
 
 **Important build-provenance limit:** this verifies that the trusted release signer
 signed both the current executable bytes and the matching resolver-source artifact
