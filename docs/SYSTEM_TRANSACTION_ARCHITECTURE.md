@@ -208,8 +208,10 @@ inside the signed release root or supplied through a symlink, denies group/other
 permission bits on the seed file, rejects every seed with more than one hard
 link (inside or outside the release tree), and caps accepted seed input at 128
 bytes. Seed reads use a no-follow open and validate permissions, link count, and
-inode identity from the opened descriptor. Temporary seed input buffers and the
-decoded seed use `zeroize::Zeroizing`; `ed25519-dalek`'s `zeroize` feature is
+inode identity from the opened descriptor. The reader preallocates its bounded
+129-byte read window to avoid reallocating a secret-bearing buffer. Temporary
+seed input buffers and the decoded seed use `zeroize::Zeroizing`;
+`ed25519-dalek`'s `zeroize` feature is
 enabled so the signing key is zeroized on drop. These reduce process-memory
 residue and path substitution risk but cannot guarantee erasure of copies made
 by the OS, allocator, compiler, or hardware. Signing directories still require
