@@ -146,6 +146,13 @@ fn require_outside_release_root(
     Ok(())
 }
 
+fn require_distinct_seed_and_output(seed_path: &Path, output_path: &Path) -> Result<(), String> {
+    if seed_path == output_path {
+        return Err("output manifest must not overwrite the signing seed".into());
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -215,6 +222,19 @@ mod tests {
     }
 
     #[test]
+    fn output_must_not_overwrite_the_signing_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [9u8; 32]).unwrap();
+        let canonical_seed = seed.canonicalize().unwrap();
+        let output = resolve_output_path(&seed).unwrap();
+
+        assert!(require_distinct_seed_and_output(&canonical_seed, &output)
+            .unwrap_err()
+            .contains("must not overwrite the signing seed"));
+    }
+
+    #[test]
     fn existing_output_symlink_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("target.json");
@@ -264,6 +284,10 @@ fn main() {
         std::process::exit(2)
     });
     require_outside_release_root(&root, &output, "output manifest").unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    require_distinct_seed_and_output(&seed_file, &output).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2)
     });
