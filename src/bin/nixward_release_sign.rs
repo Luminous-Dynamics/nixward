@@ -7,7 +7,7 @@ use nixward::release_integrity::{
     RELEASE_MANIFEST_KIND, RELEASE_SCHEMA_VERSION, RELEASE_SIGNATURE_KIND, ReleaseArtifact,
     ReleaseManifest, SignedReleaseManifest,
 };
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -113,10 +113,9 @@ fn resolve_output_path(path: &Path) -> Result<PathBuf, String> {
                 return Err("output manifest path must not be a symbolic link".into());
             }
             if !metadata.is_file() {
-                return Err("output manifest path must be a regular file".into());
+                return Err("output manifest path must name a regular file".into());
             }
-            path.canonicalize()
-                .map_err(|error| format!("cannot canonicalize output manifest path: {error}"))
+            Err("output manifest destination already exists; choose a new path".into())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let file_name = path
@@ -144,27 +143,6 @@ fn require_outside_release_root(
         return Err(format!("{label} must be outside the signed release root"));
     }
     Ok(())
-}
-
-fn require_distinct_seed_and_output(seed_path: &Path, output_path: &Path) -> Result<(), String> {
-    if seed_path == output_path {
-        return Err("output manifest must not overwrite the signing seed".into());
-    }
-
-    use std::os::unix::fs::MetadataExt;
-    let seed_metadata = std::fs::metadata(seed_path)
-        .map_err(|error| format!("cannot inspect signing seed identity: {error}"))?;
-    match std::fs::metadata(output_path) {
-        Ok(output_metadata)
-            if seed_metadata.dev() == output_metadata.dev()
-                && seed_metadata.ino() == output_metadata.ino() =>
-        {
-            Err("output manifest must not overwrite the signing seed".into())
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("cannot inspect output file identity: {error}")),
-    }
 }
 
 fn now_ms() -> u64 {
@@ -240,12 +218,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let seed = temp.path().join("signing.seed");
         std::fs::write(&seed, [9u8; 32]).unwrap();
-        let canonical_seed = seed.canonicalize().unwrap();
-        let output = resolve_output_path(&seed).unwrap();
 
-        assert!(require_distinct_seed_and_output(&canonical_seed, &output)
+        assert!(resolve_output_path(&seed)
             .unwrap_err()
-            .contains("must not overwrite the signing seed"));
+            .contains("already exists"));
     }
 
     #[test]
@@ -256,11 +232,24 @@ mod tests {
         std::fs::write(&seed, [10u8; 32]).unwrap();
         std::fs::hard_link(&seed, &output_alias).unwrap();
 
-        let canonical_seed = seed.canonicalize().unwrap();
-        let output = resolve_output_path(&output_alias).unwrap();
-        assert!(require_distinct_seed_and_output(&canonical_seed, &output)
+        assert!(resolve_output_path(&output_alias)
             .unwrap_err()
-            .contains("must not overwrite the signing seed"));
+            .contains("already exists"));
+    }
+
+    #[test]
+    fn output_hard_link_to_release_artifact_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let artifact = release_root.join("artifact.bin");
+        let output_alias = temp.path().join("manifest.json");
+        std::fs::write(&artifact, b"artifact payload").unwrap();
+        std::fs::hard_link(&artifact, &output_alias).unwrap();
+
+        assert!(resolve_output_path(&output_alias)
+            .unwrap_err()
+            .contains("already exists"));
     }
 
     #[test]
@@ -316,11 +305,6 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2)
     });
-    require_distinct_seed_and_output(&seed_file, &output).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2)
-    });
-
     let seed = read_seed(&seed_file).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)
@@ -351,8 +335,16 @@ fn main() {
         manifest,
     };
     let bytes = serde_json::to_vec_pretty(&signed).expect("release manifest serializes");
-    std::fs::write(&output, bytes).unwrap_or_else(|e| {
-        eprintln!("cannot write signed manifest: {e}");
+    let mut output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output)
+        .unwrap_or_else(|error| {
+            eprintln!("cannot create new output manifest without overwriting an existing path: {error}");
+            std::process::exit(2)
+        });
+    output_file.write_all(&bytes).unwrap_or_else(|error| {
+        eprintln!("cannot write signed manifest: {error}");
         std::process::exit(2)
     });
     eprintln!("release root public key: {}", signed.signer_public_key_hex);
