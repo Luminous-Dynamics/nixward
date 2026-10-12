@@ -62,6 +62,7 @@ struct Scenario {
     expected_receipt_state: String,
     assertions: Vec<String>,
     production_mutation: bool,
+    expected_transition_trace: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +105,7 @@ pub struct ScenarioResult {
     pub simulated_mutation_applied: bool,
     pub postconditions_modelled_verified: bool,
     pub production_mutation_applied: bool,
+    pub expected_transition_trace: Vec<String>,
     pub modeled_transition_trace: Vec<String>,
     pub declared_assertions: Vec<String>,
     pub checks: Vec<CheckResult>,
@@ -551,6 +553,7 @@ fn execute_scenario(
         true
     };
     let modeled_fence_matches_outcome = model.is_fenced(resource) == outcome.resource_fenced;
+    let modeled_transition_trace_matches = model.transition_trace == scenario.expected_transition_trace;
 
     let modeled_postconditions_verified = match outcome.receipt_state {
         "Recovered" => {
@@ -601,6 +604,10 @@ fn execute_scenario(
             passed: modeled_fence_matches_outcome,
         },
         CheckResult {
+            check_id: "expected_transition_trace_matches".into(),
+            passed: modeled_transition_trace_matches,
+        },
+        CheckResult {
             check_id: "required_resource_fence_is_active".into(),
             passed: !fence_required || model.is_fenced(resource),
         },
@@ -640,6 +647,7 @@ fn execute_scenario(
         simulated_mutation_applied: modeled_apply_happened,
         postconditions_modelled_verified: modeled_postconditions_verified,
         production_mutation_applied: false,
+        expected_transition_trace: scenario.expected_transition_trace.clone(),
         modeled_transition_trace: model.transition_trace,
         declared_assertions: scenario.assertions.clone(),
         checks,
@@ -1022,6 +1030,35 @@ mod tests {
             .expect("result");
         assert!(!row.passed);
         assert!(!row.simulated_mutation_applied);
+    }
+
+    #[test]
+    fn altered_expected_transition_trace_fails_the_oracle() {
+        let mut input = inputs();
+        let mut value = parse_fixture_value(&input);
+        let scenarios = value["scenarios"].as_array_mut().expect("array");
+        let case = scenarios
+            .iter_mut()
+            .find(|case| case["scenario_id"] == "FX-011")
+            .expect("FX-011");
+        case["expected_transition_trace"]
+            .as_array_mut()
+            .expect("trace")
+            .push(Value::String("forged_success".into()));
+        replace_fixture_value(&mut input, &value);
+
+        let receipt = build_receipt(&input).expect("trace mismatch should yield failing receipt");
+        assert_eq!(receipt.receipt.status, "fail");
+        let row = receipt
+            .receipt
+            .results
+            .iter()
+            .find(|result| result.scenario_id == "FX-011")
+            .expect("result");
+        assert!(!row.passed);
+        assert!(row.checks.iter().any(|check| {
+            check.check_id == "expected_transition_trace_matches" && !check.passed
+        }));
     }
 
     #[test]
