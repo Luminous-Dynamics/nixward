@@ -194,7 +194,7 @@ A credible early win could be safer audited changes, reproducible fleet provisio
 
 ## Network administration automation and Xenia
 
-The companion [Network Administration Automation and Xenia Integration](NETWORK_ADMIN_AUTOMATION_AND_XENIA_INTEGRATION.md) describes task-level autonomy tiers and a future, exact-plan approval integration with Xenia. It explicitly keeps Xenia's current remote-control consent semantics separate from network-change authority and acknowledges that Xenia remains pre-alpha. The follow-on implementation is tracked in [Issue #69](https://github.com/Luminous-Dynamics/nixward/issues/69); the independent evidence verifier remains [Issue #68](https://github.com/Luminous-Dynamics/nixward/issues/68).
+The companion [Network Administration Automation and Xenia Integration](NETWORK_ADMIN_AUTOMATION_AND_XENIA_INTEGRATION.md) describes task-level autonomy tiers and a future, exact-plan approval integration with Xenia. The paired [task corpus](NETWORK_AUTOMATION_TASK_CORPUS_V1.json) and [fault fixtures](NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json) now seed a typed acceptance harness; both remain qualification-design artifacts until CI passes and the described observer/simulator/broker actually executes the cases. It explicitly keeps Xenia's current remote-control consent semantics separate from network-change authority and acknowledges that Xenia remains pre-alpha. The follow-on implementation is tracked in [Issue #69](https://github.com/Luminous-Dynamics/nixward/issues/69); the independent evidence verifier remains [Issue #68](https://github.com/Luminous-Dynamics/nixward/issues/68).
 
 ## Decision and immediate next work
 
