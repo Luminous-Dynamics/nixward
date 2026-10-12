@@ -512,9 +512,10 @@ fn execute_scenario(
     ) || outcome.receipt_state == "Indeterminate";
     let success_oracle_is_virtual_lab =
         scenario.expected_decision != "ApplyAndVerify" || scenario.layer == "virtual-lab";
+    let permitted_simulated_layer =
+        matches!(scenario.layer.as_str(), "virtual-lab" | "transaction-simulator");
     let simulated_apply_layer_is_safe =
-        !outcome.simulated_mutation_applied
-            || matches!(scenario.layer.as_str(), "virtual-lab" | "transaction-simulator");
+        !outcome.simulated_mutation_applied || permitted_simulated_layer;
 
     let mut model = SimulatedNetworkState::default();
     let resource = scenario.scenario_id.as_str();
@@ -524,8 +525,13 @@ fn execute_scenario(
         "AppliedAndVerified" => "desired-state",
         _ => "observed-state",
     };
-    let modeled_apply_happened = if outcome.simulated_mutation_applied {
+    let modeled_apply_happened = if outcome.simulated_mutation_applied && permitted_simulated_layer {
         model.apply(resource, modeled_apply_state).is_ok()
+    } else if outcome.simulated_mutation_applied {
+        model
+            .transition_trace
+            .push("modeled_apply_blocked:unsupported_test_layer".into());
+        false
     } else {
         model
             .transition_trace
@@ -596,7 +602,7 @@ fn execute_scenario(
             passed: !fence_required || model.is_fenced(resource),
         },
         CheckResult {
-            check_id: "conflicting_retry_is_rejected_after_fence".into(),
+            check_id: "required_fenced_retry_is_rejected".into(),
             passed: conflicting_write_blocked,
         },
         CheckResult {
@@ -1013,6 +1019,33 @@ mod tests {
             .expect("result");
         assert!(!row.passed);
         assert!(!row.simulated_mutation_applied);
+    }
+
+    #[test]
+    fn simulated_apply_is_blocked_outside_declared_model_layers() {
+        let mut input = inputs();
+        let mut value = parse_fixture_value(&input);
+        let scenarios = value["scenarios"].as_array_mut().expect("array");
+        let case = scenarios
+            .iter_mut()
+            .find(|case| case["scenario_id"] == "FX-011")
+            .expect("FX-011");
+        case["layer"] = Value::String("observer-fixture".into());
+        replace_fixture_value(&mut input, &value);
+
+        let receipt = build_receipt(&input).expect("unsupported modeled layer is reported");
+        assert_eq!(receipt.receipt.status, "fail");
+        let row = receipt
+            .receipt
+            .results
+            .iter()
+            .find(|result| result.scenario_id == "FX-011")
+            .expect("result");
+        assert!(!row.simulated_mutation_applied);
+        assert!(!row.passed);
+        assert!(row.modeled_transition_trace.iter().any(|step| {
+            step == "modeled_apply_blocked:unsupported_test_layer"
+        }));
     }
 
     #[test]
