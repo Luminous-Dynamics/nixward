@@ -222,8 +222,13 @@ pub struct NetworkDeviceSnapshot {
     /// A kind is complete only when its evidence digest is present below.
     pub complete_kinds: BTreeSet<NetworkResourceKind>,
     /// Digests of artifacts supporting the completeness claim, keyed by kind.
-    /// This planner binds these digests; a separate verifier must validate the
-    /// evidence artifact before an inventory is trusted for actuation.
+    /// Evidence should bind target/namespace, resource family, collector build,
+    /// request/reply boundaries, and all loss/interruption indicators. For
+    /// Netlink dumps, an interrupted dump (NLM_F_DUMP_INTR), receive loss, or a
+    /// truncated result must not be attested complete; retry within a bounded
+    /// policy or keep that kind incomplete. This planner only binds these
+    /// digests; a separate verifier must validate the referenced artifacts
+    /// before any future adapter could use the inventory for actuation.
     pub completeness_evidence_blake3: BTreeMap<NetworkResourceKind, String>,
 }
 
