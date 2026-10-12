@@ -57,6 +57,23 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("review required", result.stderr)
 
+    def test_known_compromised_append_only_vec_release_is_rejected(self) -> None:
+        result = self.run_policy(make_lock(("append-only-vec", "0.1.9")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("append-only-vec@0.1.9", result.stderr)
+
+    def test_known_compromised_internment_release_is_rejected(self) -> None:
+        result = self.run_policy(make_lock(("internment", "0.8.7")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("internment@0.8.7", result.stderr)
+
+    def test_known_compromised_greentic_release_is_rejected(self) -> None:
+        result = self.run_policy(
+            make_lock(("greentic-setup", "1.3.1-dev.34027618345"))
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("greentic-setup@1.3.1-dev.34027618345", result.stderr)
+
     def test_malformed_lockfile_is_rejected(self) -> None:
         result = self.run_policy("this is not valid TOML = [")
         self.assertEqual(result.returncode, 2)
