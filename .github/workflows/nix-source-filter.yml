@@ -1,0 +1,39 @@
+name: Nix source-filter regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "nix/source-filter.nix"
+      - "tests/nix-source-filter/**"
+      - ".github/workflows/nix-source-filter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-source-filter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  filter-regression:
+    name: Evaluate Nix credential-path filter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact triggering revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Record Nix version
+        run: nix --version
+
+      - name: Build isolated source-filter regression check
+        run: nix build --no-link --print-build-logs ./tests/nix-source-filter#checks.x86_64-linux.source-filter
