@@ -370,9 +370,11 @@ rejection, exhaustive phase classification, and a live worker subprocess
 surviving SIGKILL of the lock-owning supervisor while journal admission blocks
 a second mutation. Two additional test-binary entry points support that
 subprocess scenario.
-No Rust test has been compiled or run at this head. A real subprocess/systemd
-crash test, native CAS, the privileged coordinator service, supported-writer
-migration, and exact-head hosted qualification remain mandatory. The current
-regression uses a barrier-controlled test thread to model a still-running
-worker after lock release; it is not evidence of actual child-process survival
-or systemd kill behavior.
+No Rust test has been compiled or run at this head. The new Linux-only subprocess regression kills an isolated lock-owning test
+supervisor while a separate worker process remains live, then proves journal
+admission blocks another mutation and cleans up the worker via pidfd. This is
+actual subprocess-survival evidence when the test executes, but it is not a test
+of production systemd stop/restart behavior or the exact shipped activation
+payload. The test has not been compiled or executed yet. Native CAS, the
+privileged coordinator service, supported-writer migration, and exact-head
+hosted qualification remain mandatory.
