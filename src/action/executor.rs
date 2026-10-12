@@ -2409,6 +2409,138 @@ impl NixOSExecutor {
             .with_extension("json"))
     }
 
+    /// Reject new managed mutations while any other journal records a profile
+    /// transition, activation, or recovery whose terminal disposition is not
+    /// durable. The interlock alone is insufficient after its owner crashes:
+    /// the kernel releases flock when that owner exits, even if a worker
+    /// survives. The worker receipt is persisted before release, so the next
+    /// owner must reconcile the journal before it may start another mutation.
+    fn ensure_no_unresolved_peer_transactions(current_transaction_id: &str) -> Result<(), String> {
+        Self::ensure_no_unresolved_peer_transactions_at(
+            Path::new(Self::TRANSACTION_JOURNAL_ROOT),
+            current_transaction_id,
+            Some(0),
+        )
+    }
+
+    fn phase_requires_reconciliation(
+        phase: super::config_transaction::ConfigTransactionPhase,
+    ) -> bool {
+        use super::config_transaction::ConfigTransactionPhase as Phase;
+        matches!(
+            phase,
+            Phase::ProfileTransitionStarted
+                | Phase::ProfileCommitted
+                | Phase::IndeterminateProfileTransition
+                | Phase::ActivationStarted
+                | Phase::IndeterminateActivation
+                | Phase::RecoveryObservation
+                | Phase::RecoveryRequired
+                | Phase::RecoveryMutationStarted
+        )
+    }
+
+    /// Test seam for an isolated transaction-journal directory. Production
+    /// always uses the root-owned directory above. Unknown/malformed journals
+    /// fail closed because their worker liveness and mutation phase cannot be
+    /// established safely.
+    fn ensure_no_unresolved_peer_transactions_at(
+        root: &Path,
+        current_transaction_id: &str,
+        expected_root_uid: Option<u32>,
+    ) -> Result<(), String> {
+        let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+            format!("failed to inspect transaction journal directory {}: {error}", root.display())
+        })?;
+        if !root_metadata.file_type().is_dir() {
+            return Err(format!(
+                "transaction journal root {} is not a real directory",
+                root.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            if let Some(expected_uid) = expected_root_uid {
+                if root_metadata.uid() != expected_uid {
+                    return Err(format!(
+                        "transaction journal root {} has owner uid {}, expected {}",
+                        root.display(), root_metadata.uid(), expected_uid
+                    ));
+                }
+            }
+            if root_metadata.mode() & 0o022 != 0 {
+                return Err(format!(
+                    "transaction journal root {} is group/world-writable",
+                    root.display()
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        if expected_root_uid.is_some() {
+            return Err("root-owned transaction journal validation requires Unix".into());
+        }
+
+        let entries = std::fs::read_dir(root).map_err(|error| {
+            format!("failed to enumerate transaction journals in {}: {error}", root.display())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!("failed to enumerate a transaction journal entry: {error}")
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                format!("failed to inspect transaction journal {}: {error}", path.display())
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "transaction journal {} is not a regular non-symlink file",
+                    path.display()
+                ));
+            }
+            let journal_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| format!("transaction journal has a non-UTF-8 identity: {}", path.display()))?;
+            if journal_id.len() != 64
+                || !journal_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "transaction journal filename has a noncanonical identity: {}",
+                    path.display()
+                ));
+            }
+
+            let transaction = super::config_transaction::ConfigTransaction::load(&path)
+                .map_err(|error| format!(
+                    "cannot establish safe disposition for transaction journal {}: {error}",
+                    path.display()
+                ))?;
+            if transaction.transaction_id() != journal_id {
+                return Err(format!(
+                    "transaction journal identity does not match its filename: {}",
+                    path.display()
+                ));
+            }
+            if journal_id == current_transaction_id {
+                continue;
+            }
+
+            let phase = transaction.phase();
+            if Self::phase_requires_reconciliation(phase) {
+                return Err(format!(
+                    "unresolved peer transaction {journal_id} remains in phase {phase:?}; reconcile it before starting another system mutation"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn persist_transaction(
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
@@ -2582,6 +2714,9 @@ impl NixOSExecutor {
             Ok(lock) => lock,
             Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
+        if let Err(reason) = Self::ensure_no_unresolved_peer_transactions(&transaction_id) {
+            return ExecutionResult::Blocked { reason, safety_level: safety };
+        }
         let capability = match super::config_transaction::JournalOwnedRecoveryCapability::issue(
             &journal_path, transaction_id, command, authorization
         ) {
@@ -3022,6 +3157,9 @@ impl NixOSExecutor {
             Ok(lock) => lock,
             Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
+        if let Err(reason) = Self::ensure_no_unresolved_peer_transactions(&transaction_id) {
+            return ExecutionResult::Blocked { reason, safety_level: safety };
+        }
         let capability = match super::config_transaction::JournalOwnedActivationCapability::issue(
             &journal_path, transaction_id, command, authorization
         ) {
@@ -5159,6 +5297,102 @@ mod tests {
         assert_eq!(second_metadata.dev(), first_metadata.dev());
         assert_eq!(second_metadata.ino(), first_metadata.ino());
         drop(second);
+    }
+
+    #[cfg(unix)]
+    fn write_test_transaction_journal(root: &Path, phase: &str) -> String {
+        let source_dir = tempfile::tempdir().expect("source tempdir");
+        std::fs::write(
+            source_dir.path().join("configuration.nix"),
+            "{ config = {}; }\\n",
+        )
+        .expect("write immutable source fixture");
+        let source = super::super::config_transaction::FrozenConfigSource::capture(
+            source_dir.path(),
+            "configuration.nix",
+        )
+        .expect("capture frozen source");
+        let mut source_digest = [0u8; 32];
+        for (index, chunk) in source.root_digest.as_bytes().chunks_exact(2).enumerate() {
+            source_digest[index] = u8::from_str_radix(
+                std::str::from_utf8(chunk).expect("hex digest is ASCII"),
+                16,
+            )
+            .expect("source digest is canonical hex");
+        }
+        let mut transaction = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            source_digest,
+        );
+        transaction
+            .advance(super::super::config_transaction::ConfigTransactionPhase::InputFrozen)
+            .expect("advance test journal to input-frozen");
+        transaction
+            .bind_frozen_source(&source)
+            .expect("bind exact frozen source");
+        let transaction_id = transaction.transaction_id().to_string();
+        let mut value = serde_json::to_value(&transaction).expect("serialize test journal");
+        value["phase"] = serde_json::Value::String(phase.to_string());
+        std::fs::write(
+            root.join(format!("{transaction_id}.json")),
+            serde_json::to_vec(&value).expect("encode test journal"),
+        )
+        .expect("persist test journal");
+        transaction_id
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_peer_journal_blocks_a_new_transaction_after_lock_owner_exit() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let current_id = "f".repeat(64);
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            &current_id,
+            None,
+        )
+        .expect_err("a peer left in activation_started must block new mutations");
+
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("activation_started"));
+        assert!(error.contains("reconcile it"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_journal_scan_skips_current_transaction_and_allows_pre_mutation_peers() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let current_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let _pre_mutation_peer = write_test_transaction_journal(dir.path(), "input_frozen");
+
+        NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            &current_id,
+            None,
+        )
+        .expect("the current transaction is exempt and pre-mutation peers are safe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_peer_journal_blocks_new_transaction_fail_closed() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "a".repeat(64);
+        std::fs::write(dir.path().join(format!("{peer_id}.json")), b"not-json")
+            .expect("write malformed journal");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            &"f".repeat(64),
+            None,
+        )
+        .expect_err("unparseable peer journal prevents proving no outstanding mutation");
+
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("cannot establish safe disposition"));
     }
 
     #[cfg(unix)]
