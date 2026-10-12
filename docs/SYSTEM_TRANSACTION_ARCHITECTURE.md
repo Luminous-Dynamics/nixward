@@ -873,9 +873,12 @@ IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
 RecoveryMutationStarted.
 
 Malformed, unreadable, noncanonical, symlinked, or identity-mismatched JSON
-journal entries fail closed instead of being ignored. In the production root-owned
-journal directory, entries must also be root-owned, not group/world-writable,
-and single-linked; the scanner verifies these metadata invariants before parsing. The current transaction
+journal entries fail closed instead of being ignored. Production validates every
+component of the absolute journal-root path with no-follow metadata checks; each
+must be a real root-owned directory that is not group/world-writable. Journal
+files must be root-owned, single-linked, free of special permission bits, and
+private from group/other read or execute access; these metadata checks run before
+parsing. The current transaction
 is exempt so a legitimate recovery can reconcile itself; pre-mutation journals
 do not block system activation.
 
@@ -888,9 +891,10 @@ terminate or supervise a surviving process, protect non-participating profile
 writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
 crash test and the long-lived shared coordinator remain required.
 
-Eight source-level regressions cover blocking an ActivationStarted peer
+Eleven source-level regressions cover blocking an ActivationStarted peer
 after interlock reacquisition, exempting the current transaction while allowing
-a pre-mutation peer, rejecting writable and multiply-linked journal files,
-rejecting symlinked and filename-mismatched records, failing closed on malformed
-JSON, and exhaustively classifying lifecycle phases. They have not been compiled
+a pre-mutation peer, rejecting writable, group-readable, special-bit, and
+multiply-linked journal files, rejecting symlinked journal roots/entries and
+filename-mismatched records, failing closed on malformed JSON, and exhaustively
+classifying lifecycle phases. They have not been compiled
 or executed. No qualification result is claimed.
