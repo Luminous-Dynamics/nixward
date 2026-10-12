@@ -5568,7 +5568,12 @@ mod tests {
                 .read_line(&mut line)
                 .expect("read supervisor readiness");
             assert!(count > 0, "supervisor exited before exposing worker identity");
-            if let Some(value) = line.trim().strip_prefix("NIXWARD_SUPERVISOR_WORKER_PID=") {
+            if let Some(offset) = line.find("NIXWARD_SUPERVISOR_WORKER_PID=") {
+                let suffix = &line[offset + "NIXWARD_SUPERVISOR_WORKER_PID=".len()..];
+                let value = suffix
+                    .split_whitespace()
+                    .next()
+                    .expect("supervisor output contains worker PID");
                 break value
                     .parse::<u32>()
                     .expect("supervisor worker PID is decimal");
