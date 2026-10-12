@@ -11,7 +11,7 @@
 use super::ai_proposal_binding::{
     AiProposalBinding, AiProposalOutputIntent, AiProposalResolutionReceipt,
     AiProposalResolvedValidationEvidence, AiProposalRuntimeVerifiedValidationEvidence,
-    AiProposalValidationEvidence, VerifiedResolverRuntimeBinding,
+    AiProposalValidationEvidence,
 };
 use crate::release_integrity::SignedReleaseManifest;
 use std::path::Path;
@@ -684,6 +684,11 @@ mod tests {
     use super::*;
     use crate::action::executor::NixOSCommand;
     use crate::action::ai_proposal_binding::{digest_artifact, ProposalArtifactKind};
+    use crate::release_integrity::{
+        RELEASE_MANIFEST_KIND, RELEASE_SCHEMA_VERSION, RELEASE_SIGNATURE_KIND, ReleaseArtifact,
+        ReleaseManifest,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn plan() -> ChangePlan {
         ChangePlan::command_only(
@@ -711,6 +716,72 @@ mod tests {
     fn raw_ai_proposal_output(plan: &ChangePlan) -> Vec<u8> {
         let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
         serde_json::to_vec_pretty(&intent).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sign_current_process_release(
+        release_root: &Path,
+        resolver_source_relative_path: &str,
+        source_bytes: &[u8],
+        signing: &SigningKey,
+    ) -> SignedReleaseManifest {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_path = std::fs::read_link("/proc/self/exe").unwrap();
+        let runtime_path = runtime_path.canonicalize().unwrap();
+        let runtime_relative = runtime_path
+            .strip_prefix(release_root)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let source_path = release_root.join(resolver_source_relative_path);
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, source_bytes).unwrap();
+
+        let runtime_bytes = std::fs::read("/proc/self/exe").unwrap();
+        let runtime_metadata = std::fs::metadata(&runtime_path).unwrap();
+        let source_metadata = std::fs::metadata(&source_path).unwrap();
+        let mut artifacts = vec![
+            ReleaseArtifact {
+                path: resolver_source_relative_path.into(),
+                blake3: blake3::hash(source_bytes).to_hex().to_string(),
+                size_bytes: source_bytes.len() as u64,
+                executable: source_metadata.permissions().mode() & 0o111 != 0,
+            },
+            ReleaseArtifact {
+                path: runtime_relative,
+                blake3: blake3::hash(&runtime_bytes).to_hex().to_string(),
+                size_bytes: runtime_bytes.len() as u64,
+                executable: runtime_metadata.permissions().mode() & 0o111 != 0,
+            },
+        ];
+        artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "nixward-runtime-transaction-test".into(),
+            created_at_ms: 1_800_000_000_000,
+            source_revision: format!("test-revision-{}", std::process::id()),
+            artifacts,
+        };
+        let signature = signing.sign(&manifest.signing_bytes().unwrap());
+        SignedReleaseManifest {
+            kind: RELEASE_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            signer_public_key_hex: signing
+                .verifying_key()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            signature_hex: signature
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            manifest,
+        }
     }
 
     fn ai_proposal(plan: &ChangePlan) -> AiProposalBinding {
@@ -979,6 +1050,151 @@ mod tests {
         assert_eq!(tx.phase, TransactionPhase::Planned);
         assert!(tx.validation.is_none());
         assert!(tx.authorization.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_verified_proposal_validation_binds_signed_current_executable() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let release_root = executable.parent().unwrap().to_path_buf();
+        let source_path = format!(
+            "share/nixward/runtime-evidence-positive-{}.rs",
+            std::process::id()
+        );
+        let signing = SigningKey::from_bytes(&[121u8; 32]);
+        let signed = sign_current_process_release(
+            &release_root,
+            &source_path,
+            include_bytes!("ai_proposal_binding.rs"),
+            &signing,
+        );
+        let trusted_key: String = signing
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let evidence = tx
+            .record_validation_with_runtime_verified_ai_proposal(
+                &plan,
+                [33; 32],
+                "release-verified proposal",
+                &proposal,
+                &resolution,
+                &raw,
+                &canonical,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+                &release_root,
+                &signed,
+                &trusted_key,
+                &source_path,
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(
+            evidence.resolution_receipt_digest(),
+            resolution.digest().unwrap()
+        );
+        assert_ne!(evidence.runtime_binding_digest(), [0; 32]);
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&evidence.digest().unwrap())
+        );
+        assert!(tx.authorization.is_none());
+
+        // Signed provenance binds code/runtime identity, but does not confer authority.
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+        std::fs::remove_file(release_root.join(&source_path)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_verified_proposal_rejects_untrusted_release_root_without_state_change() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let release_root = executable.parent().unwrap().to_path_buf();
+        let source_path = format!(
+            "share/nixward/runtime-evidence-untrusted-{}.rs",
+            std::process::id()
+        );
+        let signing = SigningKey::from_bytes(&[122u8; 32]);
+        let signed = sign_current_process_release(
+            &release_root,
+            &source_path,
+            include_bytes!("ai_proposal_binding.rs"),
+            &signing,
+        );
+        let wrong_trust_root = SigningKey::from_bytes(&[123u8; 32]);
+        let wrong_key: String = wrong_trust_root
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_runtime_verified_ai_proposal(
+            &plan,
+            [33; 32],
+            "release-verified proposal",
+            &proposal,
+            &resolution,
+            &raw,
+            &canonical,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+            &release_root,
+            &signed,
+            &wrong_key,
+            &source_path,
+        );
+
+        assert!(result.unwrap_err().contains("release signature verification failed"));
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+        std::fs::remove_file(release_root.join(&source_path)).unwrap();
     }
 
     #[test]
