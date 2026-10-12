@@ -493,6 +493,37 @@ mod tests {
 
     #[cfg(all(feature = "native", unix))]
     #[test]
+    fn release_tree_rejects_unlisted_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"declared release payload";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[49u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        // This path is not in the manifest, so its link must still be rejected
+        // by the closed-world tree scan.
+        symlink(
+            temp.path().join("artifact.bin"),
+            temp.path().join("unlisted-link"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "unlisted-link"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
     fn release_tree_rejects_symlinked_artifacts_even_when_target_bytes_match() {
         use std::os::unix::fs::symlink;
 
