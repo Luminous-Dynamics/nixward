@@ -85,6 +85,30 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("missing or invalid registry checksum", result.stderr)
 
+    def test_unresolved_dependency_edge_is_rejected(self) -> None:
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            "dependencies = []", 'dependencies = ["missing-crate"]', 1
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unresolved or ambiguous dependency edge", result.stderr)
+
+    def test_dependency_source_must_match_locked_package_source(self) -> None:
+        dependency = 'safe-crate 1.0.0 (registry+https://packages.example.invalid/index)'
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            "dependencies = []", f'dependencies = ["{dependency}"]', 1
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unresolved or ambiguous dependency edge", result.stderr)
+
+    def test_duplicate_package_identity_is_rejected(self) -> None:
+        result = self.run_policy(
+            make_lock(("safe-crate", "1.0.0"), ("safe-crate", "1.0.0"))
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("duplicate Cargo.lock package identity", result.stderr)
+
     def test_compromised_arrayref_release_is_rejected(self) -> None:
         result = self.run_policy(make_lock(("arrayref", "0.3.10")))
         self.assertEqual(result.returncode, 1)
