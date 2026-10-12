@@ -75,11 +75,31 @@ def check_schema_supported(schema: Any, path: str = "$schema") -> None:
     if unknown:
         raise SchemaDefinitionError(f"{path}: unsupported schema keyword(s): {', '.join(unknown)}")
     schema_type = schema.get("type")
-    if schema_type is not None and schema_type not in SUPPORTED_TYPES:
+    if schema_type is not None and (
+        not isinstance(schema_type, str) or schema_type not in SUPPORTED_TYPES
+    ):
         raise SchemaDefinitionError(f"{path}: unsupported type {schema_type!r}")
     required = schema.get("required", [])
     if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
         raise SchemaDefinitionError(f"{path}: required must be an array of strings")
+    if len(required) != len(set(required)):
+        raise SchemaDefinitionError(f"{path}: required entries must be unique")
+    for keyword in ("minLength", "minItems"):
+        if keyword in schema and (
+            not isinstance(schema[keyword], int)
+            or isinstance(schema[keyword], bool)
+            or schema[keyword] < 0
+        ):
+            raise SchemaDefinitionError(f"{path}: {keyword} must be a non-negative integer")
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        raise SchemaDefinitionError(f"{path}: uniqueItems must be boolean")
+    if "pattern" in schema:
+        if not isinstance(schema["pattern"], str):
+            raise SchemaDefinitionError(f"{path}: pattern must be a string")
+        try:
+            re.compile(schema["pattern"])
+        except re.error as exc:
+            raise SchemaDefinitionError(f"{path}: invalid pattern: {exc}") from exc
     properties = schema.get("properties", {})
     if not isinstance(properties, dict):
         raise SchemaDefinitionError(f"{path}: properties must be an object")
@@ -94,8 +114,9 @@ def check_schema_supported(schema: Any, path: str = "$schema") -> None:
         raise SchemaDefinitionError(f"{path}: additionalProperties must be boolean or schema")
     if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
         raise SchemaDefinitionError(f"{path}: enum must be a non-empty array")
-    if "format" in schema and schema["format"] != "date":
-        raise SchemaDefinitionError(f"{path}: unsupported format {schema['format']!r}")
+    if "format" in schema:
+        if not isinstance(schema["format"], str) or schema["format"] != "date":
+            raise SchemaDefinitionError(f"{path}: unsupported format {schema['format']!r}")
 
 
 def validate_instance(value: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
@@ -165,17 +186,20 @@ def validate_corpus(corpus: Any, schema: Any) -> list[str]:
             if isinstance(task_id, str):
                 ids.append(task_id)
             mode, tier = task.get("mode"), task.get("max_tier_after_qualification")
-            if mode in MODE_TIERS and tier not in MODE_TIERS[mode]:
-                errors.append(
-                    f"$.tasks[{index}]: tier {tier!r} incompatible with mode {mode!r}; "
-                    f"expected one of {sorted(MODE_TIERS[mode])}"
-                )
+            if isinstance(mode, str) and mode in MODE_TIERS:
+                allowed_tiers = MODE_TIERS[mode]
+                if not isinstance(tier, str) or tier not in allowed_tiers:
+                    errors.append(
+                        f"$.tasks[{index}]: tier {tier!r} incompatible with mode {mode!r}; "
+                        f"expected one of {sorted(allowed_tiers)}"
+                    )
         if len(ids) != len(set(ids)):
             errors.append("$.tasks: task_id values must be unique")
 
     shared = corpus.get("common_hard_stops")
-    if isinstance(shared, list) and len(shared) != len(set(shared)):
-        errors.append("$.common_hard_stops: entries must be unique")
+    if isinstance(shared, list) and all(isinstance(item, str) for item in shared):
+        if len(shared) != len(set(shared)):
+            errors.append("$.common_hard_stops: entries must be unique")
     if isinstance(tasks, list) and isinstance(shared, list):
         uses_shared = any(
             isinstance(task, dict)
