@@ -11,10 +11,12 @@ import sys
 import tomllib
 from pathlib import Path
 
-# Reviewed against the RustSec malicious-advisory index on 2026-10-12.
-# These package names were reported malicious/compromised in the RustSec catalog.
-# RUSTSEC-2026-0265/-0264/-0259/-0261/-0263 (Aug. 20 campaign),
-# RUSTSEC-2026-0171/-0155/-0102/-0100/-0101/-0108/-0107/-0081.
+# Reviewed against https://rustsec.org/categories/malicious.html on 2026-10-12.
+# This includes the RustSec name-level catalog, plus aovine/arone/aronenao/tinymember
+# called out by https://blog.rust-lang.org/2026/08/20/supply-chain-attack-on-arrayref/.
+# Representative advisory IDs: RUSTSEC-2026-0265/-0264/-0259/-0261/-0263 (August
+# campaign), RUSTSEC-2026-0171/-0155/-0102/-0100/-0101/-0108/-0107/-0081,
+# RUSTSEC-2025-0158..0160, and the 2023 malicious-package advisories in the index.
 # Deny these names until an explicit dependency/security review is approved.
 KNOWN_MALICIOUS_CRATE_NAMES = {
     "acceptxmr-rs",
