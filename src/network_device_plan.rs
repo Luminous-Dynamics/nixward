@@ -525,6 +525,24 @@ impl NetworkDevicePlanner {
         plan.validate()?;
         Ok(plan)
     }
+
+    /// Verify that a candidate plan is exactly the deterministic output for
+    /// these snapshot and desired-state inputs. Validating a plan in isolation
+    /// checks structure only; it does not prove derivation from the referenced
+    /// inputs. Future write-capable code must recompute and compare rather than
+    /// trusting a supplied plan digest or serialized decision.
+    pub fn verify_plan(
+        snapshot: &NetworkDeviceSnapshot,
+        desired: &DesiredNetworkState,
+        candidate: &NetworkDevicePlan,
+    ) -> Result<(), NetworkDevicePlanError> {
+        candidate.validate()?;
+        let recomputed = Self::plan(snapshot, desired)?;
+        if candidate != &recomputed {
+            return Err(NetworkDevicePlanError::PlanDoesNotMatchInputs);
+        }
+        Ok(())
+    }
 }
 
 fn plan_entry(
@@ -646,6 +664,8 @@ pub enum NetworkDevicePlanError {
     ScopeMismatch,
     #[error("desired management mode and expected runtime owner are incompatible")]
     InvalidDesiredOwnership,
+    #[error("candidate plan does not match a fresh plan from the supplied inputs")]
+    PlanDoesNotMatchInputs,
     #[error("plan status is not the read-only M0 status")]
     InvalidPlanStatus,
     #[error("plan claims reasoning or execution authority")]
@@ -1034,6 +1054,35 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.digest_hex().expect("first digest"), second.digest_hex().expect("second digest"));
+    }
+
+    #[test]
+    fn plan_verifier_rejects_tampered_decision() {
+        let snapshot = snapshot();
+        let desired = desired(NetworkManagementMode::NixwardRuntime);
+        let mut candidate = NetworkDevicePlanner::plan(&snapshot, &desired)
+            .expect("valid plan");
+        candidate.entries[0].decision = NetworkPlanDecision::NoOp;
+
+        assert_eq!(
+            NetworkDevicePlanner::verify_plan(&snapshot, &desired, &candidate),
+            Err(NetworkDevicePlanError::PlanDoesNotMatchInputs)
+        );
+    }
+
+    #[test]
+    fn desired_state_rejects_incompatible_runtime_owner() {
+        let mut desired = desired(NetworkManagementMode::NixOsDeclarative);
+        desired
+            .resources
+            .get_mut(&id("link:lan0"))
+            .expect("resource")
+            .expected_runtime_owner = NetworkRuntimeOwner::NixwardRuntime;
+
+        assert_eq!(
+            desired.validate(),
+            Err(NetworkDevicePlanError::InvalidDesiredOwnership)
+        );
     }
 
     #[test]
