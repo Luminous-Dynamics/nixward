@@ -187,6 +187,24 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("greentic-setup@1.3.1-dev.34027618345", result.stderr)
 
+    def test_newer_greentic_setup_requires_review(self) -> None:
+        result = self.run_policy(make_lock(("greentic-setup", "1.3.2")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked pending explicit security review", result.stderr)
+
+    def test_older_greentic_setup_release_is_allowed(self) -> None:
+        result = self.run_policy(make_lock(("greentic-setup", "1.3.0")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_newer_greentic_setup_dev_requires_review(self) -> None:
+        result = self.run_policy(make_lock(("greentic-setup-dev", "1.3.34027618346")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked pending explicit security review", result.stderr)
+
+    def test_older_greentic_setup_dev_release_is_allowed(self) -> None:
+        result = self.run_policy(make_lock(("greentic-setup-dev", "1.3.34027618344")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_malformed_lockfile_is_rejected(self) -> None:
         result = self.run_policy("this is not valid TOML = [")
         self.assertEqual(result.returncode, 2)
