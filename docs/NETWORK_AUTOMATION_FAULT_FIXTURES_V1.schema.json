@@ -132,7 +132,8 @@
               "RequireApproval",
               "MarkIndeterminate",
               "EscalateHuman",
-              "AbortRollout"
+              "AbortRollout",
+              "RecoverAndVerify"
             ]
           },
           "expected_receipt_state": {
@@ -145,7 +146,9 @@
               "Conflict",
               "Indeterminate",
               "Blocked",
-              "Unsupported"
+              "Unsupported",
+              "Recovered",
+              "AppliedAndVerified"
             ]
           },
           "assertions": {
