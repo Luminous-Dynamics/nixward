@@ -320,7 +320,7 @@ The lock acquisition path is now hardened in source to:
 - retain the lock file and inode across unlock/reacquisition rather than
   unlinking it on drop.
 
-Five Unix regression tests were added for symlink rejection, writable-parent
+Six Unix regression tests were added for symlink rejection, writable-parent
 rejection, group/other lock-file permission rejection, and stable path/inode
 across release/reacquisition. These are source changes, **not passing test
 evidence**; Rust compilation and execution have not been performed here.
