@@ -16,7 +16,7 @@ let
   sensitiveFileSuffixes = [ ".key" ".p12" ".pfx" ];
   safeEnvTemplateNames = [ ".env.defaults" ".env.example" ".env.sample" ".env.template" ];
 in
-path: _type:
+path: type:
 let
   relPath = lib.removePrefix (toString root) (toString path);
   baseName = lib.toLower (baseNameOf path);
@@ -26,13 +26,17 @@ let
   # Match sensitive names independent of filesystem type, including symlinks.
   excludedCredentialDirectory = builtins.elem baseName sensitiveDirNames;
   isEnvFile = baseName == ".env" || lib.hasPrefix ".env." baseName;
+  safeTemplateFile =
+    type == "regular" && builtins.elem baseName safeEnvTemplateNames;
+  safePublicKeyFile =
+    type == "regular" && lib.hasSuffix ".pub" baseName;
   excludedCredentialPath =
     builtins.elem baseName sensitiveFileNames
     || (
       builtins.any (prefix: lib.hasPrefix prefix baseName) privateKeyPrefixes
-      && !(lib.hasSuffix ".pub" baseName)
+      && !safePublicKeyFile
     )
     || builtins.any (suffix: lib.hasSuffix suffix baseName) sensitiveFileSuffixes
-    || (isEnvFile && !(builtins.elem baseName safeEnvTemplateNames));
+    || (isEnvFile && !safeTemplateFile);
 in
 !(excludedBuildOrVcsNoise || excludedCredentialDirectory || excludedCredentialPath)
