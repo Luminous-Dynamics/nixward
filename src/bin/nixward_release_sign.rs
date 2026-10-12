@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_or_aliased_output_inside_release_root_is_rejected() {
+    fn output_inside_release_root_is_rejected() {
         let temp = tempfile::tempdir().unwrap();
         let release_root = temp.path().join("release");
         std::fs::create_dir_all(&release_root).unwrap();
