@@ -96,6 +96,37 @@ Plan HA in layers: process restart and state reconstruction; link/path redundanc
 
 Do not claim hitless upgrades merely because Nix can build the next generation. A Nix generation rollback, process restart, control-plane restart, routing convergence and a hitless line-card/forwarding upgrade are different properties and require different measurements.
 
+## Validation and lab toolchain — integrate, do not reinvent
+
+The safest path is to compose mature, narrow tools behind Nixward's evidence and policy boundaries. Do not give a third-party validator, collector, simulator or AI direct mutation authority.
+
+### Candidate integrations
+
+- **Batfish — offline configuration and reachability analysis.** Evaluate it in M2 for candidate-vs-baseline analysis of routes, reachability, ACL/firewall effects, policy and configuration compliance. Batfish analyzes supplied configurations and models supported semantics; a successful analysis does not prove that the live device matches those inputs, that every feature is modeled, or that the physical forwarding path behaves identically. Pin its image/version and parser behavior, bind the exact input snapshot and query definitions into the test receipt, retain warnings/unsupported constructs, and block required checks when the model cannot establish them.
+- **SuzieQ — supplementary multi-vendor observability.** Evaluate it as an existing collection and operational-query source for supported platforms, not as the sole authority for completeness. Its agentless SSH/REST observations are useful for broader fleet state; they do not by themselves create a globally atomic snapshot or close races among device managers. Add it as a separately identified evidence source with target/version coverage, observation-time semantics, gaps and adapter-specific limitations.
+- **containerlab — repeatable virtual network labs.** Evaluate it for M2 topology lifecycle and virtual NOS interconnection; use Linux network namespaces/veth fixtures where kernel-Netlink failure injection and isolation need tighter control. Pin node images and topology files, preserve test inputs, and record which protocol/device behaviors are software-emulated. Container labs cannot qualify ASIC forwarding, PHY/optic behavior, thermal/power failure, or real hardware failover.
+- **FRR and the Linux kernel — actual candidate software backend.** Keep the first functional route/forwarding profile here. Isolate FRR management/configuration state from operational RIB/FIB observations and test only the selected release's declared features.
+- **Nixward — policy, evidence gate and execution boundary.** Nixward remains responsible for exact target/scope identity, manager ownership, freshness/coherence policy, independent receipt verification, plan digest, authorization tier, journal/fencing, narrow actuation and independent post-state read-back. External tools can contribute results; they cannot certify themselves complete or promote a task to a higher autonomy tier.
+
+### External-result acceptance contract
+
+For every integrated tool, record at least its exact build/image digest, configuration, parser/model version where exposed, exact input artifact digests, target and scope, declared capability coverage, warnings/skipped or unsupported semantics, run start/end and timeout/resource limits, raw output digest, normalized result digest, exit/error state and verifier version. Treat a process exit code as one observation, not a correctness result. The independent verifier must reject missing, mismatched, stale, truncated or scope-substituted receipts. Run external parsers/simulators in an unprivileged, resource-bounded process; never load arbitrary network input inside the privileged broker.
+
+Use a layered comparison rather than forcing unlike tools into one "pass":
+
+1. Batfish or a similarly qualified model checks the candidate against explicit reachability/security invariants.
+2. containerlab/namespace tests exercise protocol behavior and injected faults in the declared virtual topology.
+3. Nixward observes the test target independently and compares the resulting live-in-lab state with the expected postconditions.
+4. Hardware or production qualification remains a separate gate with separate evidence classes.
+
+A model can be internally correct over the wrong or incomplete input. That is why model verification, source completeness, live read-back and hardware qualification must remain distinct.
+
+### Competitive honesty
+
+Transactional configuration is not a unique feature by itself. Cisco NSO documents staged service orchestration, read-set checks to avoid overwriting changes made by other systems, and version-dependent transaction semantics. This is useful competitive evidence: do not claim incumbent platforms lack stale-state protection or rollback simply because Nixward has typed plans. The product hypothesis to test is a composable, reproducible and inspectable system that exposes evidence limitations and ownership conflicts clearly, provides a narrow locally enforceable safety broker, and can be operated without coupling the data plane to a hosted control service. Price, reliability, supported devices, feature coverage and administrator effort require measured comparison against a named baseline.
+
+These integrations are proposals only. No Batfish, SuzieQ or containerlab adapter is implemented or qualified by this document.
+
 ## Security model
 
 - **Control versus data plane:** unprivileged observers and APIs cannot directly mutate networking. A narrow privileged broker validates exact typed capabilities.
@@ -178,6 +209,10 @@ No code, live adapter, hardware qualification, throughput result or Cisco featur
 ## Research references
 
 - Cisco IOS XE model-driven telemetry: https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/prog/configuration/26x/26x-programmability-cg/model-driven-telemetry.html
+- Batfish configuration analysis, differential reachability and supported-platform caveats: https://github.com/batfish/batfish#what-is-batfish
+- SuzieQ multi-vendor observability and collection model: https://suzieq.readthedocs.io/en/latest/
+- containerlab network topology/lifecycle concepts: https://containerlab.dev/manual/network/
+- Cisco NSO transaction read-set / no-overwrite behavior (version-specific): https://nso-docs.cisco.com/guides/nso-6.4/operation-and-usage/operations/managing-network-services
 - Cisco NX-OS high availability / stateful restart / ISSU overview: https://www.cisco.com/c/en/us/td/docs/dcn/nx-os/nexus9000/106x/configuration/high-availability/cisco-nexus-9000-series-nx-os-high-availability-and-redundancy-guide-106x/m-overview.html
 - Cisco IOS XR architecture and Linux workflows: https://www.cisco.com/c/en/us/products/collateral/ios-nx-os-software/ios-xr-software/datasheet-c78-743014.html
 - NixOS manual: https://nixos.org/manual/nixos/stable/
