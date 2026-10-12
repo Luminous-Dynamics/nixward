@@ -49,6 +49,11 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("blocked pending explicit security review", result.stderr)
 
+    def test_arrayref_versions_after_compromised_release_remain_blocked(self) -> None:
+        result = self.run_policy(make_lock(("arrayref", "0.3.11")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("arrayref 0.3.11", result.stderr)
+
     def test_known_malicious_crate_name_is_rejected(self) -> None:
         result = self.run_policy(make_lock(("proc-macro1", "1.0.107")))
         self.assertEqual(result.returncode, 1)
