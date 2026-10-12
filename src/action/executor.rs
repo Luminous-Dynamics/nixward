@@ -252,9 +252,9 @@ impl NixwardTransactionInterlock {
                 parent.display()
             ));
         }
-        if metadata.mode() & 0o077 != 0 {
+        if metadata.mode() & 0o600 != 0o600 || metadata.mode() & 0o077 != 0 {
             return Err(format!(
-                "Nixward transaction lock {} grants group/other permissions",
+                "Nixward transaction lock {} must be owner-readable/writable and deny group/other permissions",
                 path.display()
             ));
         }
@@ -5005,6 +5005,81 @@ mod tests {
             .is_allowed()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_symlink_lock_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let link = dir.path().join("nixward.lock");
+        std::fs::write(&target, b"").expect("create target");
+        symlink(&target, &link).expect("create symlink");
+
+        let error = NixwardTransactionInterlock::acquire_at(&link)
+            .expect_err("the lock must not follow a symlink");
+        assert!(error.contains("failed to open Nixward transaction lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_writable_parent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("make directory deliberately unsafe");
+        let path = dir.path().join("nixward.lock");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("a group/world-writable parent can permit lock replacement");
+        assert!(error.contains("group/world-writable"));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore secure temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_group_or_other_access_on_lock_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        std::fs::write(&path, b"").expect("create lock file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("make lock file deliberately unsafe");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("group-readable lock files must be rejected");
+        assert!(error.contains("owner-readable/writable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_keeps_lock_path_and_inode_stable_after_release() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let first = NixwardTransactionInterlock::acquire_at(&path)
+            .expect("first acquisition");
+        let first_metadata = std::fs::symlink_metadata(&path).expect("lock path exists");
+        assert_eq!(first_metadata.nlink(), 1);
+        drop(first);
+
+        let after_release = std::fs::symlink_metadata(&path)
+            .expect("release must not unlink the stable coordinator path");
+        assert_eq!(after_release.dev(), first_metadata.dev());
+        assert_eq!(after_release.ino(), first_metadata.ino());
+
+        let second = NixwardTransactionInterlock::acquire_at(&path)
+            .expect("same stable inode can be acquired again");
+        let second_metadata = std::fs::symlink_metadata(&path).expect("lock path persists");
+        assert_eq!(second_metadata.dev(), first_metadata.dev());
+        assert_eq!(second_metadata.ino(), first_metadata.ino());
+        drop(second);
+    }
+
     #[cfg(unix)]
     #[test]
     fn nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions() {
