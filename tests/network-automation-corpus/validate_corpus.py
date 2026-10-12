@@ -342,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     scenarios = fixtures["scenarios"]
     unique_scenarios = len({scenario["scenario_id"] for scenario in scenarios})
     print(
-        "PASS: task corpus (schema_version={corpus['schema_version']}, tasks={len(tasks)}, "
-        "unique_task_ids={unique_count})"
+        f"PASS: task corpus (schema_version={corpus['schema_version']}, tasks={len(tasks)}, "
+        f"unique_task_ids={unique_count})"
     )
     print(
         f"PASS: fault fixtures (scenarios={len(scenarios)}, "
