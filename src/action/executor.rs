@@ -23,7 +23,7 @@ use std::os::fd::AsRawFd;
 #[cfg(all(feature = "native", target_os = "linux"))]
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -197,13 +197,42 @@ impl NixwardTransactionInterlock {
 
     #[cfg(unix)]
     fn acquire_at(path: &Path) -> Result<Self, String> {
+        // The lock pathname is deliberately persistent: unlinking/replacing it
+        // while a holder is active could split participants across different
+        // inodes and create two independently-held "exclusive" locks.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+            format!(
+                "failed to inspect Nixward transaction lock directory {}: {error}",
+                parent.display()
+            )
+        })?;
+        if !parent_metadata.file_type().is_dir() {
+            return Err(format!(
+                "Nixward transaction lock parent {} is not a real directory",
+                parent.display()
+            ));
+        }
+        // The production parent is /run (root-owned, not writable by group or
+        // other). For the private test seam, a caller-owned, non-writable
+        // temporary directory is accepted under the same rule.
+        if parent_metadata.mode() & 0o022 != 0 {
+            return Err(format!(
+                "Nixward transaction lock directory {} is group/world-writable",
+                parent.display()
+            ));
+        }
+
         let mut options = OpenOptions::new();
         options
             .read(true)
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW);
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
         let file = options.open(path).map_err(|error| {
             format!("failed to open Nixward transaction lock {}: {error}", path.display())
         })?;
@@ -216,6 +245,45 @@ impl NixwardTransactionInterlock {
                 path.display()
             ));
         }
+        if metadata.uid() != parent_metadata.uid() {
+            return Err(format!(
+                "Nixward transaction lock {} owner does not match trusted directory {}",
+                path.display(),
+                parent.display()
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(format!(
+                "Nixward transaction lock {} grants group/other permissions",
+                path.display()
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(format!(
+                "Nixward transaction lock {} must have exactly one hard link",
+                path.display()
+            ));
+        }
+
+        // Compare the descriptor we will lock with the pathname's current
+        // target. O_NOFOLLOW protects the final component, and this identity
+        // check fails closed if the path changed during open/validation.
+        let path_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            format!(
+                "failed to re-check Nixward transaction lock path {}: {error}",
+                path.display()
+            )
+        })?;
+        if !path_metadata.file_type().is_file()
+            || path_metadata.dev() != metadata.dev()
+            || path_metadata.ino() != metadata.ino()
+        {
+            return Err(format!(
+                "Nixward transaction lock {} changed identity while opening",
+                path.display()
+            ));
+        }
+
         if let Err(error) = nix::fcntl::flock(
             file.as_raw_fd(),
             nix::fcntl::FlockArg::LockExclusiveNonblock,
