@@ -25,6 +25,13 @@ def make_lock(*packages: tuple[str, str]) -> str:
             f'source = "{REGISTRY}"\n'
             f'checksum = "{CHECKSUM}"\n'
         )
+    # The harness itself is the only allowed source-less lockfile package.
+    chunks.append(
+        "[[package]]\n"
+        'name = "nixward-network-device-plan-m0-harness"\n'
+        'version = "0.1.0"\n'
+        "dependencies = []\n"
+    )
     return "\n".join(chunks)
 
 
@@ -43,6 +50,40 @@ class LockPolicyTests(unittest.TestCase):
     def test_clean_arrayref_release_is_allowed(self) -> None:
         result = self.run_policy(make_lock(("arrayref", "0.3.9")))
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_git_dependency_source_is_rejected(self) -> None:
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            f'source = "{REGISTRY}"',
+            'source = "git+https://example.invalid/safe-crate#' + "a" * 40 + '"',
+            1,
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unapproved dependency source", result.stderr)
+
+    def test_alternate_registry_is_rejected(self) -> None:
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            REGISTRY, "registry+https://packages.example.invalid/index", 1
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unapproved dependency source", result.stderr)
+
+    def test_missing_registry_checksum_is_rejected(self) -> None:
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            f'checksum = "{CHECKSUM}"\n', "", 1
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing or invalid registry checksum", result.stderr)
+
+    def test_invalid_registry_checksum_is_rejected(self) -> None:
+        lock_text = make_lock(("safe-crate", "1.0.0")).replace(
+            CHECKSUM, "not-a-checksum", 1
+        )
+        result = self.run_policy(lock_text)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing or invalid registry checksum", result.stderr)
 
     def test_compromised_arrayref_release_is_rejected(self) -> None:
         result = self.run_policy(make_lock(("arrayref", "0.3.10")))
