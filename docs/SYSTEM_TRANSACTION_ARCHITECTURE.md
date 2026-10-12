@@ -203,6 +203,13 @@ source artifact, for example at a documented path under
 share/nixward/src/action/ai_proposal_binding.rs. The release signing process must
 bind source_revision to the reviewed source revision under its own release policy;
 the field is a signed release-root assertion, not independent proof of a build.
+The offline `nixward-release-sign` utility also rejects a signing-seed path
+inside the signed release root or supplied through a symlink, canonicalizes
+output destinations (including symlinked parent directories), rejects output
+paths inside the signed tree, and refuses to overwrite the seed file itself.
+Focused binary tests cover these path-boundary cases. These controls reduce
+accidental secret inclusion and path confusion; they do not replace an
+appropriately protected signing-key store or an immutable release root.
 
 **Important build-provenance limit:** this verifies that the trusted release signer
 signed both the current executable bytes and the matching resolver-source artifact
