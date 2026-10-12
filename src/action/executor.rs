@@ -2423,14 +2423,6 @@ impl NixOSExecutor {
         )
     }
 
-    fn ensure_no_unresolved_transactions() -> Result<(), String> {
-        Self::ensure_no_unresolved_peer_transactions_at(
-            Path::new(Self::TRANSACTION_JOURNAL_ROOT),
-            None,
-            Some(0),
-        )
-    }
-
     fn phase_requires_reconciliation(
         phase: super::config_transaction::ConfigTransactionPhase,
     ) -> bool {
@@ -3575,17 +3567,7 @@ impl NixOSExecutor {
             && matches!(command, NixOSCommand::ActivateSystemClosure { .. })
         {
             match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => {
-                    if let Err(reason) = Self::ensure_no_unresolved_transactions() {
-                        let blocked = ExecutionResult::Blocked {
-                            reason,
-                            safety_level: safety,
-                        };
-                        self.record_execution(&command, decision_quality, &authorization, &blocked);
-                        return blocked;
-                    }
-                    Some(lock)
-                }
+                Ok(lock) => Some(lock)
                 Err(reason) => {
                     let blocked = ExecutionResult::Blocked {
                         reason,
