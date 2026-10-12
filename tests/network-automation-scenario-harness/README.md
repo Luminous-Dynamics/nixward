@@ -36,7 +36,9 @@ The test-only resource-fence model rejects a subsequent write to the same
 resource after an Indeterminate result, permits unrelated scopes, and permits
 fence removal only when a recovery-receipt digest is supplied. This is a
 unit-tested in-memory model, not a distributed lock, cryptographic receipt
-verifier, or real transaction journal.
+verifier, or real transaction journal. The modeled recovery verifier checks
+declared target/post-state/read-back predicates and digest formatting only; it
+does not authenticate a signature or independently read a real device.
 
 The natural-language assertions in the fixture document are carried through
 into the receipt for traceability; they are **not** claimed as individually
