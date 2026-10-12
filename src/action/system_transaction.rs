@@ -10,8 +10,11 @@
 
 use super::ai_proposal_binding::{
     AiProposalBinding, AiProposalOutputIntent, AiProposalResolutionReceipt,
-    AiProposalResolvedValidationEvidence, AiProposalValidationEvidence,
+    AiProposalResolvedValidationEvidence, AiProposalRuntimeVerifiedValidationEvidence,
+    AiProposalValidationEvidence, VerifiedResolverRuntimeBinding,
 };
+use crate::release_integrity::SignedReleaseManifest;
+use std::path::Path;
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +310,92 @@ impl SystemTransaction {
             .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
 
         // No transaction state mutation occurs until all referenced evidence is checked.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
+    }
+
+    /// Record validation only after the current process executable is found in a
+    /// release tree signed by the independently trusted offline release root.
+    ///
+    /// The signed release manifest must include both the current executable and
+    /// the resolver source file at resolver_source_relative_path. The resolver
+    /// source file must exactly match the source digest in the resolution receipt.
+    /// The returned runtime-verified evidence digest occupies the existing
+    /// ValidationReceipt field; no new authorization mechanism is introduced.
+    ///
+    /// On Linux this checks /proc/self/exe bytes plus the signed release tree.
+    /// It is software-level evidence under the OS/kernel trust assumption, not
+    /// hardware-backed measured boot or remote runtime attestation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_runtime_verified_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+        release_root: &Path,
+        signed_release: &SignedReleaseManifest,
+        trusted_release_public_key_hex: &str,
+        resolver_source_relative_path: &str,
+    ) -> Result<AiProposalRuntimeVerifiedValidationEvidence, String> {
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                canonical_intent_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let runtime = resolution
+            .verify_current_runtime(
+                release_root,
+                signed_release,
+                trusted_release_public_key_hex,
+                plan,
+                raw_model_output_bytes,
+                canonical_intent_bytes,
+                resolver_source_relative_path,
+            )
+            .map_err(|error| format!("resolver runtime verification failed: {error}"))?;
+
+        let resolved = AiProposalResolvedValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+            resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )
+        .map_err(|error| format!("resolved AI proposal evidence is invalid: {error}"))?;
+
+        let evidence = AiProposalRuntimeVerifiedValidationEvidence::new(
+            plan,
+            &resolved,
+            proposal,
+            resolution,
+            &runtime,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )
+        .map_err(|error| format!("runtime-verified AI proposal evidence is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("runtime-verified AI proposal evidence is invalid: {error}"))?;
+
+        // Release signature, artifact tree, current executable, source, raw response,
+        // structured intent, and model artifact checks all precede this state change.
         self.record_validation(plan, evidence_digest, summary)?;
         Ok(evidence)
     }
