@@ -312,7 +312,7 @@ writers.
 
 The lock acquisition path is now hardened in source to:
 
-- reject a symlink or non-directory parent and a group/world-writable parent;
+- reject a symlink or non-directory parent and a group/world-writable parent; production acquisition explicitly requires parent UID 0 for `/run`;
 - open with `O_NOFOLLOW | O_CLOEXEC`;
 - require a regular lock file whose owner matches the trusted parent, whose
   mode grants owner read/write only, and whose link count is exactly one;
@@ -320,9 +320,10 @@ The lock acquisition path is now hardened in source to:
 - retain the lock file and inode across unlock/reacquisition rather than
   unlinking it on drop.
 
-Six Unix regression tests were added for symlink rejection, writable-parent
-rejection, group/other lock-file permission rejection, and stable path/inode
-across release/reacquisition. These are source changes, **not passing test
+Six new Unix regression tests cover unexpected parent-owner rejection, symlink
+lock-path rejection, writable-parent rejection, unsafe lock-file permissions,
+multiple hard links, and stable path/inode across release/reacquisition. The
+pre-existing deterministic two-thread exclusion test remains separate. These are source changes, **not passing test
 evidence**; Rust compilation and execution have not been performed here.
 
 This remains deliberately narrower than the preferred two-lock implementation
