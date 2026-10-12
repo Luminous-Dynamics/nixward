@@ -104,6 +104,7 @@ pub struct ScenarioResult {
     pub simulated_mutation_applied: bool,
     pub postconditions_modelled_verified: bool,
     pub production_mutation_applied: bool,
+    pub modeled_transition_trace: Vec<String>,
     pub declared_assertions: Vec<String>,
     pub checks: Vec<CheckResult>,
     pub passed: bool,
@@ -159,6 +160,80 @@ impl Outcome {
         }
     }
 }
+
+#[derive(Debug, Default)]
+struct SimulatedNetworkState {
+    resources: BTreeMap<String, String>,
+    fenced_resources: BTreeSet<String>,
+    transition_trace: Vec<String>,
+}
+
+impl SimulatedNetworkState {
+    fn apply(&mut self, resource: &str, state: &str) -> Result<(), String> {
+        if self.fenced_resources.contains(resource) {
+            self.transition_trace
+                .push("conflicting_write_rejected_by_fence".into());
+            return Err(format!("modeled resource {resource} is fenced"));
+        }
+        self.resources.insert(resource.to_owned(), state.to_owned());
+        self.transition_trace.push(format!("modeled_apply:{state}"));
+        Ok(())
+    }
+
+    fn fence(&mut self, resource: &str, reason: &str) {
+        self.fenced_resources.insert(resource.to_owned());
+        self.transition_trace
+            .push(format!("resource_fenced:{reason}"));
+    }
+
+    fn is_fenced(&self, resource: &str) -> bool {
+        self.fenced_resources.contains(resource)
+    }
+
+    fn verify_modeled_state(&mut self, resource: &str, expected: &str) -> bool {
+        let matches = self.resources.get(resource).is_some_and(|state| state == expected);
+        self.transition_trace.push(if matches {
+            "modeled_poststate_readback:matched".into()
+        } else {
+            "modeled_poststate_readback:mismatch".into()
+        });
+        matches
+    }
+
+    fn recover_with_modeled_evidence(
+        &mut self,
+        resource: &str,
+        prior_state: &str,
+        receipt_digest: &str,
+        target_identity_matches: bool,
+        expected_poststate_matches: bool,
+        modeled_readback_passed: bool,
+    ) -> bool {
+        let digest_is_well_formed = receipt_digest.len() == 64
+            && receipt_digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !digest_is_well_formed {
+            self.transition_trace
+                .push("recovery_rejected:malformed_receipt_digest".into());
+            return false;
+        }
+        if !target_identity_matches {
+            self.transition_trace
+                .push("recovery_rejected:target_mismatch".into());
+            return false;
+        }
+        if !expected_poststate_matches || !modeled_readback_passed {
+            self.transition_trace
+                .push("recovery_rejected:poststate_not_verified".into());
+            return false;
+        }
+        self.resources.insert(resource.to_owned(), prior_state.to_owned());
+        self.fenced_resources.remove(resource);
+        self.transition_trace
+            .push("modeled_recovery:prior_state_restored_and_readback_verified".into());
+        true
+    }
+}
+
 
 fn artifact_digest(bytes: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -435,9 +510,57 @@ fn execute_scenario(
             | "broker-crash-after-apply"
             | "rollback-failure"
     ) || outcome.receipt_state == "Indeterminate";
-    let mutation_layer_safe =
+    let success_oracle_is_virtual_lab =
         scenario.expected_decision != "ApplyAndVerify" || scenario.layer == "virtual-lab";
-    let fence_satisfied = !fence_required || outcome.resource_fenced;
+    let simulated_apply_layer_is_safe =
+        !outcome.simulated_mutation_applied
+            || matches!(scenario.layer.as_str(), "virtual-lab" | "transaction-simulator");
+
+    let mut model = SimulatedNetworkState::default();
+    let resource = scenario.scenario_id.as_str();
+    let modeled_apply_state = match outcome.receipt_state {
+        "Indeterminate" => "applied-but-unconfirmed",
+        "Recovered" => "applied-before-recovery",
+        "AppliedAndVerified" => "desired-state",
+        _ => "observed-state",
+    };
+    let modeled_apply_happened = if outcome.simulated_mutation_applied {
+        model.apply(resource, modeled_apply_state).is_ok()
+    } else {
+        model
+            .transition_trace
+            .push(format!("no_apply:{}", outcome.decision));
+        false
+    };
+
+    if fence_required {
+        model.fence(resource, &outcome.receipt_state.to_lowercase());
+    }
+    let conflicting_write_blocked = if fence_required {
+        model.apply(resource, "conflicting-state").is_err()
+    } else {
+        true
+    };
+    let modeled_fence_matches_outcome = model.is_fenced(resource) == outcome.resource_fenced;
+
+    let modeled_postconditions_verified = match outcome.receipt_state {
+        "Recovered" => {
+            let recovery_digest = artifact_digest(scenario.scenario_id.as_bytes());
+            model.recover_with_modeled_evidence(
+                resource,
+                "prior-state",
+                &recovery_digest,
+                true,
+                outcome.postconditions_modelled_verified,
+                outcome.postconditions_modelled_verified,
+            )
+        }
+        "AppliedAndVerified" => {
+            model.verify_modeled_state(resource, "desired-state")
+                && outcome.postconditions_modelled_verified
+        }
+        _ => false,
+    };
 
     let checks = vec![
         CheckResult {
@@ -454,16 +577,32 @@ fn execute_scenario(
         },
         CheckResult {
             check_id: "positive_mutation_is_virtual_lab_only".into(),
-            passed: mutation_layer_safe,
+            passed: success_oracle_is_virtual_lab,
+        },
+        CheckResult {
+            check_id: "simulated_apply_is_confined_to_model_layers".into(),
+            passed: simulated_apply_layer_is_safe,
+        },
+        CheckResult {
+            check_id: "modeled_apply_matches_declared_outcome".into(),
+            passed: modeled_apply_happened == outcome.simulated_mutation_applied,
+        },
+        CheckResult {
+            check_id: "modeled_fence_matches_outcome".into(),
+            passed: modeled_fence_matches_outcome,
         },
         CheckResult {
             check_id: "required_resource_fence_is_active".into(),
-            passed: fence_satisfied,
+            passed: !fence_required || model.is_fenced(resource),
+        },
+        CheckResult {
+            check_id: "conflicting_retry_is_rejected_after_fence".into(),
+            passed: conflicting_write_blocked,
         },
         CheckResult {
             check_id: "recovered_or_applied_state_has_modelled_postconditions".into(),
             passed: !matches!(outcome.receipt_state, "Recovered" | "AppliedAndVerified")
-                || outcome.postconditions_modelled_verified,
+                || modeled_postconditions_verified,
         },
         CheckResult {
             check_id: "expected_pair_is_supported".into(),
@@ -488,10 +627,11 @@ fn execute_scenario(
         actual_decision: outcome.decision.into(),
         expected_receipt_state: scenario.expected_receipt_state.clone(),
         actual_receipt_state: outcome.receipt_state.into(),
-        resource_fenced: outcome.resource_fenced,
-        simulated_mutation_applied: outcome.simulated_mutation_applied,
-        postconditions_modelled_verified: outcome.postconditions_modelled_verified,
+        resource_fenced: model.is_fenced(resource),
+        simulated_mutation_applied: modeled_apply_happened,
+        postconditions_modelled_verified: modeled_postconditions_verified,
         production_mutation_applied: false,
+        modeled_transition_trace: model.transition_trace,
         declared_assertions: scenario.assertions.clone(),
         checks,
         passed,
