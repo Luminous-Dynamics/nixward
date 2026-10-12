@@ -266,7 +266,6 @@ mod tests {
         assert_eq!(verified.artifact_count, 1);
     }
 
-    #[cfg(feature = "native")]
     fn test_artifact(path: &str, bytes: &[u8], executable: bool) -> ReleaseArtifact {
         ReleaseArtifact {
             path: path.into(),
@@ -276,7 +275,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "native")]
     fn sign_test_tree(
         signing: &SigningKey,
         artifacts: Vec<ReleaseArtifact>,
