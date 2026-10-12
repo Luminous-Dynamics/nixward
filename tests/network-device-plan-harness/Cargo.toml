@@ -5,9 +5,6 @@ edition = "2024"
 publish = false
 description = "Isolated compile/test harness for Nixward's read-only network device planner"
 
-[lib]
-path = "../../src/network_device_plan.rs"
-
 [dependencies]
 blake3 = "=1.8.5"
 serde = { version = "=1.0.228", features = ["derive"] }
