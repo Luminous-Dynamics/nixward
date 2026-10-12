@@ -204,15 +204,18 @@ share/nixward/src/action/ai_proposal_binding.rs. The release signing process mus
 bind source_revision to the reviewed source revision under its own release policy;
 the field is a signed release-root assertion, not independent proof of a build.
 The offline `nixward-release-sign` utility also rejects a signing-seed path
-inside the signed release root or supplied through a symlink, canonicalizes
-output parent directories (including aliased parents), and rejects output paths
-inside the signed tree. It only creates a new manifest file: existing output
-paths are rejected, and `create_new` prevents overwriting an existing path
-between the pre-check and the write. This also rejects existing hard-link aliases
-to the seed or a release artifact. Focused binary tests cover these path-boundary
-cases. These controls reduce accidental secret inclusion and path confusion;
-they do not replace an appropriately protected signing-key store or an immutable
-release root.
+inside the signed release root or supplied through a symlink, denies group/other
+permission bits on the seed file, and rejects a seed sharing a device/inode with
+any release-tree file (including an external hard link). It canonicalizes output
+parent directories (including aliased parents) and rejects output paths inside
+the signed tree. It only creates a new manifest file: existing output paths are
+rejected, and `create_new` prevents overwriting an existing path between the
+pre-check and the write. This also rejects existing hard-link aliases to the
+seed or a release artifact. Focused binary tests cover these path-boundary and
+secret-handling cases. These controls reduce accidental secret inclusion and
+path confusion; they do not replace an appropriately protected signing-key
+store or an immutable release root. The signer walk and verifier scan both
+assume the release tree is not concurrently modified by an untrusted actor.
 
 **Important build-provenance limit:** this verifies that the trusted release signer
 signed both the current executable bytes and the matching resolver-source artifact
