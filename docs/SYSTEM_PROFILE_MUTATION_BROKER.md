@@ -337,18 +337,22 @@ directory and its ownership/mode are part of the security assumption.
 
 ## Admission check after prior coordinator loss (2026-10-12)
 
-The current PR now adds a conservative journal-admission check to every
-exact-system activation path and to journaled recovery. After taking the local
-Nixward interlock, it scans the root-owned transaction journal directory and
-blocks on any nonterminal profile-transition, activation, or recovery phase.
-Journaled activation/recovery exempts its own transaction ID so that the
-current operation can proceed; non-journaled exact activation has no such
-exemption. Unreadable, malformed, symlinked, noncanonical, or
-filename/transaction-ID-mismatched journal records also block admission. Production validates every component of the absolute
-journal-root path as a real root-owned directory that is not group/world-writable.
-Journal files must be root-owned, single-linked, free of special permission bits,
-and private from group/other read or execute access; the scanner checks those
-properties before parsing.
+The current PR adds a conservative journal-admission check to journaled
+activation and recovery. After taking the local Nixward interlock, those paths
+scan the root-owned transaction journal directory and block on any other
+nonterminal profile-transition, activation, or recovery phase. A journaled
+operation exempts its own transaction ID so that recovery can proceed. The
+separate non-journaled execute_authorized entry point already rejects real
+exact-system activation before mutation in favor of the durable transaction
+boundary; it does not depend on this scanner. The scanner itself accepts an
+optional current transaction ID and blocks on every unresolved journal when no
+exemption is provided. Unreadable, malformed, symlinked, noncanonical, or
+filename/transaction-ID-mismatched records also block admission. Production
+validates every component of the absolute journal-root path as a real
+root-owned directory that is not group/world-writable. Journal files must be
+root-owned, single-linked, free of special permission bits, and private from
+group/other read or execute access; the scanner checks these properties before
+parsing.
 
 This reduces the risk that a replacement Nixward request proceeds merely
 because the previous process's flock was released on supervisor exit while its
