@@ -5471,6 +5471,7 @@ mod tests {
             return;
         };
         use std::io::{BufRead, BufReader, Write};
+        use std::os::fd::AsRawFd;
         use std::process::{Command, Stdio};
 
         let _interlock = NixwardTransactionInterlock::acquire_at(Path::new(&lock_path))
@@ -5493,13 +5494,15 @@ mod tests {
         let mut line = String::new();
         loop {
             line.clear();
-            let mut pollfd = nix::libc::pollfd {
-                fd: reader.get_ref().as_raw_fd(),
-                events: nix::libc::POLLIN | nix::libc::POLLHUP,
-                revents: 0,
-            };
-            let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
-            assert!(ready > 0, "activation worker did not signal readiness");
+            if reader.buffer().is_empty() {
+                let mut pollfd = nix::libc::pollfd {
+                    fd: reader.get_ref().as_raw_fd(),
+                    events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+                assert!(ready > 0, "activation worker did not signal readiness");
+            }
             let count = reader
                 .read_line(&mut line)
                 .expect("read activation worker readiness");
@@ -5521,6 +5524,7 @@ mod tests {
     #[test]
     fn unresolved_journal_blocks_new_mutation_after_supervisor_process_dies() {
         use std::io::{BufRead, BufReader};
+        use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
@@ -5551,13 +5555,15 @@ mod tests {
         let mut line = String::new();
         let worker_pid = loop {
             line.clear();
-            let mut pollfd = nix::libc::pollfd {
-                fd: reader.get_ref().as_raw_fd(),
-                events: nix::libc::POLLIN | nix::libc::POLLHUP,
-                revents: 0,
-            };
-            let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
-            assert!(ready > 0, "supervisor did not expose worker identity");
+            if reader.buffer().is_empty() {
+                let mut pollfd = nix::libc::pollfd {
+                    fd: reader.get_ref().as_raw_fd(),
+                    events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+                assert!(ready > 0, "supervisor did not expose worker identity");
+            }
             let count = reader
                 .read_line(&mut line)
                 .expect("read supervisor readiness");
