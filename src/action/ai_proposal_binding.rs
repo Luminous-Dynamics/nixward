@@ -1276,6 +1276,158 @@ impl AiProposalResolvedValidationEvidence {
     }
 }
 
+/// Validation evidence that joins resolved model output to the signed release
+/// and the executable bytes backing the current process.
+///
+/// Unlike the resolution receipt, this envelope requires an opaque
+/// VerifiedResolverRuntimeBinding produced by live release-tree verification.
+/// It is not deserializable into a trusted runtime token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiProposalRuntimeVerifiedValidationEvidence {
+    schema_version: u16,
+    #[serde(with = "serde_hex_32")]
+    plan_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    resolved_validation_evidence_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    runtime_binding_digest: [u8; 32],
+    #[serde(with = "serde_hex_32")]
+    resolution_receipt_digest: [u8; 32],
+}
+
+const AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_DOMAIN: &[u8] =
+    b"nixward-ai-proposal-runtime-verified-validation-evidence-v1\0";
+
+impl AiProposalRuntimeVerifiedValidationEvidence {
+    pub fn new(
+        plan: &ChangePlan,
+        resolved: &AiProposalResolvedValidationEvidence,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        runtime: &VerifiedResolverRuntimeBinding,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+    ) -> Result<Self, AiProposalBindingError> {
+        resolved.validate_for(
+            plan,
+            proposal,
+            resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )?;
+        if runtime.plan_digest() != plan.digest()
+            || runtime.resolution_receipt_digest() != resolution.digest()?
+            || runtime.resolver_source_digest() != resolution.resolver_source_digest()
+            || resolved.resolution_receipt_digest() != resolution.digest()?
+        {
+            return Err(AiProposalBindingError::ResolverRuntimeBindingMismatch);
+        }
+        let evidence = Self {
+            schema_version: AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+            plan_digest: plan.digest(),
+            resolved_validation_evidence_digest: resolved.digest()?,
+            runtime_binding_digest: runtime.digest(),
+            resolution_receipt_digest: resolution.digest()?,
+        };
+        evidence.validate_shape()?;
+        Ok(evidence)
+    }
+
+    pub fn validate_for(
+        &self,
+        plan: &ChangePlan,
+        resolved: &AiProposalResolvedValidationEvidence,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        runtime: &VerifiedResolverRuntimeBinding,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+    ) -> Result<(), AiProposalBindingError> {
+        self.validate_shape()?;
+        resolved.validate_for(
+            plan,
+            proposal,
+            resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )?;
+        if self.plan_digest != plan.digest() {
+            return Err(AiProposalBindingError::PlanBindingMismatch);
+        }
+        if runtime.plan_digest() != plan.digest()
+            || runtime.resolution_receipt_digest() != resolution.digest()?
+            || runtime.resolver_source_digest() != resolution.resolver_source_digest()
+            || resolved.resolution_receipt_digest() != resolution.digest()?
+        {
+            return Err(AiProposalBindingError::ResolverRuntimeBindingMismatch);
+        }
+        if self.resolved_validation_evidence_digest != resolved.digest()?
+            || self.runtime_binding_digest != runtime.digest()
+            || self.resolution_receipt_digest != resolution.digest()?
+        {
+            return Err(AiProposalBindingError::ResolverRuntimeBindingMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
+        self.validate_shape()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_DOMAIN);
+        hasher.update(&self.schema_version.to_le_bytes());
+        hasher.update(&self.plan_digest);
+        hasher.update(&self.resolved_validation_evidence_digest);
+        hasher.update(&self.runtime_binding_digest);
+        hasher.update(&self.resolution_receipt_digest);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    pub fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub fn resolved_validation_evidence_digest(&self) -> [u8; 32] {
+        self.resolved_validation_evidence_digest
+    }
+
+    pub fn runtime_binding_digest(&self) -> [u8; 32] {
+        self.runtime_binding_digest
+    }
+
+    pub fn resolution_receipt_digest(&self) -> [u8; 32] {
+        self.resolution_receipt_digest
+    }
+
+    fn validate_shape(&self) -> Result<(), AiProposalBindingError> {
+        if self.schema_version != AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION {
+            return Err(
+                AiProposalBindingError::UnsupportedRuntimeValidationEvidenceSchemaVersion(
+                    self.schema_version,
+                ),
+            );
+        }
+        for (name, digest) in [
+            ("runtime-verified plan", &self.plan_digest),
+            (
+                "resolved validation evidence",
+                &self.resolved_validation_evidence_digest,
+            ),
+            ("runtime binding", &self.runtime_binding_digest),
+            ("runtime resolution receipt", &self.resolution_receipt_digest),
+        ] {
+            if *digest == [0; 32] {
+                return Err(AiProposalBindingError::MissingDigest(name));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
