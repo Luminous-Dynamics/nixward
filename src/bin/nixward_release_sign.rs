@@ -12,6 +12,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
+const MAX_SEED_INPUT_BYTES: u64 = 128;
+
 fn usage() -> ! {
     eprintln!(
         "Usage: nixward-release-sign --root <dir> --release-id <id> --source-revision <rev> --seed-file <32-byte-or-64hex> --output <json>"
@@ -53,6 +55,11 @@ fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), St
     if !metadata.is_file() {
         return Err("signing seed must be a regular file".into());
     }
+    if metadata.len() > MAX_SEED_INPUT_BYTES {
+        return Err(format!(
+            "signing seed input exceeds the {MAX_SEED_INPUT_BYTES}-byte limit"
+        ));
+    }
     if metadata.permissions().mode() & 0o077 != 0 {
         return Err(
             "signing seed permissions must deny group and other access (for example, mode 0600)"
@@ -65,10 +72,19 @@ fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), St
         );
     }
 
-    // Both the temporary input buffer and decoded key are zeroized on drop.
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.read_to_end(&mut bytes)
+    // Cap the read as well as checking fstat size, so concurrent growth cannot
+    // turn a small seed file into an unbounded allocation. The temporary input
+    // buffer and decoded key are zeroized on drop.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    let mut limited_file = file.take(MAX_SEED_INPUT_BYTES + 1);
+    limited_file
+        .read_to_end(&mut bytes)
         .map_err(|error| format!("cannot read opened signing seed: {error}"))?;
+    if bytes.len() as u64 > MAX_SEED_INPUT_BYTES {
+        return Err(format!(
+            "signing seed input exceeds the {MAX_SEED_INPUT_BYTES}-byte limit"
+        ));
+    }
     let seed = if bytes.len() == 32 {
         let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&bytes);
@@ -274,6 +290,20 @@ mod tests {
         let error = write_new_manifest(&output, b"replacement").unwrap_err();
         assert!(error.contains("without overwriting an existing path"));
         assert_eq!(std::fs::read(&output).unwrap(), bytes);
+    }
+
+    #[test]
+    fn oversized_signing_seed_is_rejected_before_reading_contents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, vec![0x41; (MAX_SEED_INPUT_BYTES + 1) as usize]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("exceeds the 128-byte limit"));
     }
 
     #[test]
