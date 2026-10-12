@@ -10,6 +10,7 @@ use nixward::release_integrity::{
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 fn usage() -> ! {
     eprintln!(
@@ -22,19 +23,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
+fn decode_hex_32(s: &str) -> Result<Zeroizing<[u8; 32]>, String> {
     let s = s.trim();
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("seed file must contain exactly 32 raw bytes or 64 hex characters".into());
     }
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     for i in 0..32 {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| "invalid hex seed")?;
     }
     Ok(out)
 }
 
-fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
+fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), String> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
@@ -64,11 +65,12 @@ fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
         );
     }
 
-    let mut bytes = Vec::new();
+    // Both the temporary input buffer and decoded key are zeroized on drop.
+    let mut bytes = Zeroizing::new(Vec::new());
     file.read_to_end(&mut bytes)
         .map_err(|error| format!("cannot read opened signing seed: {error}"))?;
     let seed = if bytes.len() == 32 {
-        let mut out = [0u8; 32];
+        let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&bytes);
         out
     } else {
