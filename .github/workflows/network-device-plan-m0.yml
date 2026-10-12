@@ -1,14 +1,8 @@
 name: Network device planner M0
 
 on:
-  push:
-    branches:
-      - feature/network-device-planner-m0
-    paths:
-      - "src/network_device_plan.rs"
-      - "tests/network-device-plan-harness/**"
-      - ".github/workflows/network-device-plan-m0.yml"
   pull_request:
+    branches: [main]
     paths:
       - "src/network_device_plan.rs"
       - "tests/network-device-plan-harness/**"
