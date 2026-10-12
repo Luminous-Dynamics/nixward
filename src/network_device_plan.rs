@@ -905,6 +905,61 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_inventory_blocks_all_resource_kinds_and_management_modes() {
+        let kinds = [
+            NetworkResourceKind::Link,
+            NetworkResourceKind::Address,
+            NetworkResourceKind::Route,
+            NetworkResourceKind::Bridge,
+            NetworkResourceKind::Vlan,
+            NetworkResourceKind::FirewallTable,
+            NetworkResourceKind::WireGuardDevice,
+        ];
+        let modes = [
+            NetworkManagementMode::NixOsDeclarative,
+            NetworkManagementMode::NixwardRuntime,
+        ];
+
+        for kind in kinds {
+            for mode in modes {
+                let mut snapshot = snapshot();
+                snapshot.complete_kinds.clear();
+                snapshot.completeness_evidence_blake3.clear();
+                snapshot.capabilities.insert(kind, NetworkResourceCapability::Supported);
+
+                let expected_runtime_owner = match mode {
+                    NetworkManagementMode::NixOsDeclarative => NetworkRuntimeOwner::SystemdNetworkd,
+                    NetworkManagementMode::NixwardRuntime => NetworkRuntimeOwner::NixwardRuntime,
+                };
+                let mut observed = known_observation(
+                    fingerprint('b'),
+                    mode.expected_configuration_owner(),
+                    expected_runtime_owner.clone(),
+                );
+                observed.kind = kind;
+                snapshot.resources.insert(id("link:lan0"), observed);
+
+                let mut desired = desired(mode);
+                desired
+                    .resources
+                    .get_mut(&id("link:lan0"))
+                    .expect("test resource")
+                    .kind = kind;
+
+                let plan = NetworkDevicePlanner::plan(&snapshot, &desired)
+                    .expect("incomplete inventory yields a blocked plan");
+                assert_eq!(
+                    entry(&plan).decision,
+                    NetworkPlanDecision::Blocked {
+                        reason: NetworkPlanBlockReason::InventoryIncomplete,
+                    },
+                    "kind={kind:?}, mode={mode:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn declarative_resources_produce_no_runtime_update_proposal() {
         let mut snapshot = snapshot();
         snapshot.resources.insert(
