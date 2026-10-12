@@ -463,7 +463,13 @@ fn evaluate_fault(fault_class: &str, layer: &str) -> Result<Outcome, String> {
         unknown => return Err(format!("unsupported fault_class: {unknown}")),
     };
 
-    if outcome.simulated_mutation_applied && layer != "virtual-lab" {
+    // Both virtual-lab and transaction-simulator are non-production model
+    // layers. Permit modeled apply-before-crash/recovery transitions in either;
+    // keep every other layer fail-closed. The positive create-success oracle
+    // remains explicitly restricted to virtual-lab above.
+    let permits_modeled_mutation =
+        matches!(layer, "virtual-lab" | "transaction-simulator");
+    if outcome.simulated_mutation_applied && !permits_modeled_mutation {
         return Ok(Outcome::blocked());
     }
     Ok(outcome)
@@ -1094,6 +1100,22 @@ mod tests {
         assert!(create
             .iter()
             .any(|step| step == "modeled_poststate_readback:matched"));
+    }
+
+    #[test]
+    fn transaction_simulator_preserves_indeterminate_apply_evidence() {
+        let outcome = evaluate_fault("broker-crash-after-apply", "transaction-simulator")
+            .expect("known crash fault class");
+        assert_eq!(outcome.decision, "MarkIndeterminate");
+        assert_eq!(outcome.receipt_state, "Indeterminate");
+        assert!(outcome.simulated_mutation_applied);
+        assert!(outcome.resource_fenced);
+
+        let rollback = evaluate_fault("rollback-failure", "transaction-simulator")
+            .expect("known rollback fault class");
+        assert_eq!(rollback.receipt_state, "Indeterminate");
+        assert!(rollback.simulated_mutation_applied);
+        assert!(rollback.resource_fenced);
     }
 
     #[test]
