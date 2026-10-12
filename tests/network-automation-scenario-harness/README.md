@@ -45,12 +45,20 @@ verifier, or real transaction journal. The modeled recovery verifier checks
 declared target/post-state/read-back predicates and digest formatting only; it
 does not authenticate a signature or independently read a real device.
 
+Each scenario result also contains a modeled transition trace. For example, an
+apply-before-crash case records modeled apply, fence installation, and a
+conflicting retry rejected by that fence; a recovered case records modeled
+apply followed by modeled restoration/read-back; a bounded-create positive
+control records modeled desired-state apply and post-state read-back. The
+machine checks compare these traces and states with the fixture oracle. The
+model has no sockets or backend adapter and does not mutate a host network.
+
 The natural-language assertions in the fixture document are carried through
 into the receipt for traceability; they are **not** claimed as individually
-executed assertions. This harness checks the named machine invariants and
-expected decision/receipt-state oracles. An additional simulator must later
-exercise concrete state transitions, external-writer races, management-path
-failure and recovery.
+executed assertions. This harness checks only the explicitly named machine
+invariants and modeled decision/receipt-state transitions. An additional
+simulator must later exercise protocol-level behavior, genuine independent
+observation, external-writer races, management-path failure and recovery.
 
 The Python validator remains the corpus/schema structural gate. This Rust
 crate does not implement general JSON Schema 2020-12 validation. The workflow
