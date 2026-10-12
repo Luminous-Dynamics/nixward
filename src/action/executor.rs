@@ -2537,7 +2537,12 @@ impl NixOSExecutor {
             let journal_id = path
                 .file_stem()
                 .and_then(|value| value.to_str())
-                .ok_or_else(|| format!("transaction journal has a non-UTF-8 identity: {}", path.display()))?;
+                .ok_or_else(|| {
+                    format!(
+                        "transaction journal has a non-UTF-8 identity: {}",
+                        path.display()
+                    )
+                })?;
             if journal_id.len() != 64
                 || !journal_id
                     .bytes()
@@ -5422,6 +5427,14 @@ mod tests {
         assert!(error.contains(&peer_id));
         assert!(error.contains("ActivationStarted"));
         assert!(error.contains("reconcile it"));
+
+        let no_current_id_error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("non-journaled activation must also block on the unresolved peer");
+        assert!(no_current_id_error.contains(&peer_id));
     }
 
     #[cfg(unix)]
