@@ -890,8 +890,9 @@ worker could still be alive, a subsequent Nixward exact activation must
 reconcile the nonterminal journal before starting another mutation. It is a
 conservative journal gate, not a crash-proof lease keeper. It does not itself
 terminate or supervise a surviving process, protect non-participating profile
-writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
-crash test and the long-lived shared coordinator remain required.
+writers, or provide Nix-native expected-old CAS. A systemd stop/restart and
+production-service crash test remain required, along with the long-lived shared
+coordinator. The new subprocess regression is authored but has not been run.
 
 Twelve source-level regression oracles cover blocking an ActivationStarted peer
 after interlock reacquisition, exempting the current transaction while allowing
