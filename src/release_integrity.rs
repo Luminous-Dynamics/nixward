@@ -457,6 +457,33 @@ mod tests {
         assert_eq!(verified.artifact_count, 1);
     }
 
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_executable_mode_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"mode-bound artifact";
+        let path = temp.path().join("artifact.bin");
+        std::fs::write(&path, payload).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let signing = SigningKey::from_bytes(&[50u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::ArtifactModeMismatch(path))
+                if path == "artifact.bin"
+        ));
+    }
+
     #[cfg(feature = "native")]
     #[test]
     fn release_tree_rejects_same_size_modified_artifact_bytes() {
