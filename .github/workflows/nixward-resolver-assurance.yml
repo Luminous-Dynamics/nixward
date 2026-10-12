@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nixward-resolver-assurance-\${{ github.ref }}-\${{ github.event_name }}
+  group: nixward-resolver-assurance-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
@@ -75,7 +75,7 @@ jobs:
             echo "- Symthaea workspace: $(git -C symthaea rev-parse HEAD)"
             echo "- Rust: $(rustc --version)"
             echo "- Test target: nixward library module tests"
-          } >> "\${GITHUB_STEP_SUMMARY}"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Test structured resolver, signed runtime, and evidence fixtures
         working-directory: symthaea
