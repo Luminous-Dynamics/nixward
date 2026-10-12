@@ -22,6 +22,7 @@ use thiserror::Error;
 
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_OUTPUT_SCHEMA_VERSION: u16 = 1;
+const MAX_AI_PROPOSAL_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 pub const AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
@@ -145,6 +146,8 @@ pub enum AiProposalBindingError {
     UnsupportedProposalOutputSchemaVersion(u16),
     #[error("invalid AI proposal output intent: {0}")]
     InvalidProposalOutput(String),
+    #[error("AI proposal output exceeds size limit ({actual} bytes, max {max} bytes)")]
+    ProposalOutputTooLarge { actual: usize, max: usize },
     #[error("AI proposal output intent does not exactly match the ChangePlan")]
     ProposalOutputPlanMismatch,
     #[error("unsupported AI proposal resolution receipt schema version: {0}")]
@@ -203,6 +206,12 @@ impl AiProposalOutputIntent {
     /// reordered fields, omitted null fields, unknown fields, and non-canonical
     /// nested command encodings before their digest is accepted as proposal output.
     pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, AiProposalBindingError> {
+        if bytes.len() > MAX_AI_PROPOSAL_OUTPUT_BYTES {
+            return Err(AiProposalBindingError::ProposalOutputTooLarge {
+                actual: bytes.len(),
+                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
+            });
+        }
         if bytes.is_empty() {
             return Err(AiProposalBindingError::InvalidProposalOutput(
                 "canonical output bytes must not be empty".into(),
@@ -229,6 +238,12 @@ impl AiProposalOutputIntent {
     /// would otherwise silently discard. Formatting and key order may vary here;
     /// the returned value must be serialized with canonical_bytes before hashing.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, AiProposalBindingError> {
+        if bytes.len() > MAX_AI_PROPOSAL_OUTPUT_BYTES {
+            return Err(AiProposalBindingError::ProposalOutputTooLarge {
+                actual: bytes.len(),
+                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
+            });
+        }
         if bytes.is_empty() {
             return Err(AiProposalBindingError::InvalidProposalOutput(
                 "JSON output bytes must not be empty".into(),
@@ -257,11 +272,18 @@ impl AiProposalOutputIntent {
     /// Serialize the canonical schema-v1 output bytes that are digest-bound.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, AiProposalBindingError> {
         self.validate_shape()?;
-        serde_json::to_vec(self).map_err(|error| {
+        let bytes = serde_json::to_vec(self).map_err(|error| {
             AiProposalBindingError::InvalidProposalOutput(format!(
                 "canonical JSON encoding failed: {error}"
             ))
-        })
+        })?;
+        if bytes.len() > MAX_AI_PROPOSAL_OUTPUT_BYTES {
+            return Err(AiProposalBindingError::ProposalOutputTooLarge {
+                actual: bytes.len(),
+                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
+            });
+        }
+        Ok(bytes)
     }
 
     /// Require the proposal's structured intent to match this exact plan.
@@ -1527,6 +1549,25 @@ mod tests {
             b"canonical-evaluation-evidence-v1",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn oversized_provider_json_is_rejected_before_parsing() {
+        let oversized = vec![b' '; MAX_AI_PROPOSAL_OUTPUT_BYTES + 1];
+        assert_eq!(
+            AiProposalOutputIntent::from_json_bytes(&oversized),
+            Err(AiProposalBindingError::ProposalOutputTooLarge {
+                actual: MAX_AI_PROPOSAL_OUTPUT_BYTES + 1,
+                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
+            })
+        );
+        assert_eq!(
+            AiProposalOutputIntent::from_canonical_bytes(&oversized),
+            Err(AiProposalBindingError::ProposalOutputTooLarge {
+                actual: MAX_AI_PROPOSAL_OUTPUT_BYTES + 1,
+                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
+            })
+        );
     }
 
     #[test]
