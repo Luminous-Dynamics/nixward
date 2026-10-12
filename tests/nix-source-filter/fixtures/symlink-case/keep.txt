@@ -1,0 +1,1 @@
+fixture target for symlinks; not a secret
