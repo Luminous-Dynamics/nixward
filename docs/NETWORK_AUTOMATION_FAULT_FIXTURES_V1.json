@@ -345,6 +345,36 @@
         "Original event evidence remains linkable."
       ],
       "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-023",
+      "task_id": "OBS-001",
+      "layer": "observer-fixture",
+      "fault_class": "complete-empty-family",
+      "setup": "Provide a valid zero-object family dump with matching target/sequence, valid terminal marker, no loss/interruption indicators, and verified raw artifact digest.",
+      "expected_decision": "AcceptReadOnly",
+      "expected_receipt_state": "CompleteForDeclaredScope",
+      "assertions": [
+        "An authoritative empty family is accepted only for the explicitly declared scope.",
+        "The receipt still reports target, freshness and temporal-coherence limitations.",
+        "No write capability is created by accepting read-only evidence."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-024",
+      "task_id": "PROV-001",
+      "layer": "virtual-lab",
+      "fault_class": "bounded-create-success",
+      "setup": "In an isolated virtual topology only, create one reserved lab VLAN using a frozen plan, unique owner, fresh complete inventory and an independently verified post-state.",
+      "expected_decision": "ApplyAndVerify",
+      "expected_receipt_state": "AppliedAndVerified",
+      "assertions": [
+        "Only the declared simulated VLAN changes.",
+        "Independent read-back proves the exact VLAN ID and parent relationship.",
+        "No host or production network is touched."
+      ],
+      "production_mutation": false
     }
   ]
 }
