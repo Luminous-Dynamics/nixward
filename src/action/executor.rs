@@ -5056,6 +5056,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn nixward_transaction_interlock_rejects_multiple_hard_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let alias = dir.path().join("alias.lock");
+        std::fs::write(&path, b"").expect("create lock file");
+        std::fs::hard_link(&path, &alias).expect("create hard-link alias");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("a multiply-linked lock inode must be rejected");
+        assert!(error.contains("exactly one hard link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn nixward_transaction_interlock_keeps_lock_path_and_inode_stable_after_release() {
         use std::os::unix::fs::MetadataExt;
 
