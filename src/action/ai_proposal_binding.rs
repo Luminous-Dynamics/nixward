@@ -15,14 +15,16 @@
 use super::change_covenant::{ChangePlan, MachineBinding};
 use super::config_writer::ConfigPatch;
 use super::executor::NixOSCommand;
+use crate::release_integrity::{verify_release_tree, SignedReleaseManifest};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub const AI_PROPOSAL_BINDING_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_OUTPUT_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+pub const AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION: u16 = 1;
 pub const AI_PROPOSAL_JSON_RESOLVER_ID: &str = "nixward.ai-proposal-json-resolver";
 pub const AI_PROPOSAL_JSON_RESOLVER_VERSION: u16 = 1;
 const AI_PROPOSAL_BINDING_DOMAIN: &[u8] = b"nixward-ai-proposal-binding-v1\0";
@@ -151,6 +153,14 @@ pub enum AiProposalBindingError {
     ResolutionReceiptMismatch,
     #[error("unsupported AI proposal resolved validation evidence schema version: {0}")]
     UnsupportedResolvedValidationEvidenceSchemaVersion(u16),
+    #[error("resolver runtime verification failed: {0}")]
+    ResolverRuntimeVerification(String),
+    #[error("resolver runtime verification requires Linux /proc/self/exe")]
+    ResolverRuntimeUnsupportedPlatform,
+    #[error("resolved validation evidence does not match the verified runtime binding")]
+    ResolverRuntimeBindingMismatch,
+    #[error("unsupported runtime-verified validation evidence schema version: {0}")]
+    UnsupportedRuntimeValidationEvidenceSchemaVersion(u16),
 }
 
 
@@ -405,6 +415,75 @@ impl AiProposalResolutionReceipt {
     }
 
     /// Stable digest to join this receipt into a resolved validation envelope.
+
+    /// Verify this receipt against a signed release tree and the current process.
+    ///
+    /// The trusted key must come from an independently provisioned release-root
+    /// policy; the key embedded in the manifest is never accepted as its own root.
+    /// Linux /proc/self/exe is hashed to bind the check to the executable file
+    /// backing this process, subject to the integrity of the running OS/kernel.
+    pub fn verify_current_runtime(
+        &self,
+        root: &Path,
+        signed_release: &SignedReleaseManifest,
+        trusted_release_public_key_hex: &str,
+        plan: &ChangePlan,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+        resolver_source_relative_path: &str,
+    ) -> Result<VerifiedResolverRuntimeBinding, AiProposalBindingError> {
+        self.validate_against_artifacts(plan, raw_model_output_bytes, canonical_intent_bytes)
+            .map_err(|error| AiProposalBindingError::ResolverRuntimeVerification(error.to_string()))?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let exe_link = Path::new("/proc/self/exe");
+            let runtime_path = std::fs::read_link(exe_link).map_err(|error| {
+                AiProposalBindingError::ResolverRuntimeVerification(format!(
+                    "cannot resolve /proc/self/exe: {error}"
+                ))
+            })?;
+            if runtime_path.to_string_lossy().ends_with(" (deleted)") {
+                return Err(AiProposalBindingError::ResolverRuntimeVerification(
+                    "current executable has been unlinked or replaced".into(),
+                ));
+            }
+            let runtime_path = runtime_path.canonicalize().map_err(|error| {
+                AiProposalBindingError::ResolverRuntimeVerification(format!(
+                    "cannot canonicalize current executable: {error}"
+                ))
+            })?;
+            let runtime_bytes = std::fs::read(exe_link).map_err(|error| {
+                AiProposalBindingError::ResolverRuntimeVerification(format!(
+                    "cannot read current executable bytes: {error}"
+                ))
+            })?;
+            verify_runtime_binding_from_bundle(
+                root,
+                signed_release,
+                trusted_release_public_key_hex,
+                &runtime_path,
+                &runtime_bytes,
+                resolver_source_relative_path,
+                plan,
+                self,
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (
+                root,
+                signed_release,
+                trusted_release_public_key_hex,
+                plan,
+                raw_model_output_bytes,
+                canonical_intent_bytes,
+                resolver_source_relative_path,
+            );
+            Err(AiProposalBindingError::ResolverRuntimeUnsupportedPlatform)
+        }
+    }
+
     pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
         self.validate_shape()?;
         let mut hasher = blake3::Hasher::new();
