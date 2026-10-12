@@ -83,6 +83,7 @@
           "service-account.json"
         ];
         privateKeyPrefixes = [ "id_dsa" "id_ecdsa" "id_ed25519" "id_rsa" ];
+        sensitiveFileSuffixes = [ ".key" ".p12" ".pfx" ];
         safeEnvTemplateNames = [ ".env.defaults" ".env.example" ".env.sample" ".env.template" ];
         monorepoSrc = pkgs.lib.cleanSourceWith {
           name = "luminous-dynamics-nixward-src";
@@ -102,7 +103,11 @@
                 type == "regular"
                 && (
                   builtins.elem baseName sensitiveFileNames
-                  || builtins.any (prefix: pkgs.lib.hasPrefix prefix baseName) privateKeyPrefixes
+                  || (
+                    builtins.any (prefix: pkgs.lib.hasPrefix prefix baseName) privateKeyPrefixes
+                    && !(pkgs.lib.hasSuffix ".pub" baseName)
+                  )
+                  || builtins.any (suffix: pkgs.lib.hasSuffix suffix baseName) sensitiveFileSuffixes
                   || (isEnvFile && !(builtins.elem baseName safeEnvTemplateNames))
                 );
             in
