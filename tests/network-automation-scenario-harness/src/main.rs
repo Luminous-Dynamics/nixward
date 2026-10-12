@@ -10,7 +10,11 @@ fn main() -> ExitCode {
         Ok((receipt, bytes)) => {
             let stdout = std::io::stdout();
             let mut output = stdout.lock();
-            if let Err(error) = output.write_all(&bytes).and_then(|_| output.write_all(b"\n")) {
+            let write_result = output
+                .write_all(&bytes)
+                .and_then(|_| output.write_all(b"\n"))
+                .and_then(|_| output.flush());
+            if let Err(error) = write_result {
                 eprintln!("cannot write scenario receipt: {error}");
                 return ExitCode::from(2);
             }
