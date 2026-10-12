@@ -35,5 +35,40 @@ jobs:
       - name: Record Nix version
         run: nix --version
 
+      - name: Test actual symlinks against the shared filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture"' EXIT
+          printf 'fixture-only private data\n' > "$fixture/private.key"
+          printf 'ordinary fixture source\n' > "$fixture/keep.txt"
+          ln -s private.key "$fixture/.env.example"
+          ln -s private.key "$fixture/id_rsa.pub"
+          ln -s private.key "$fixture/.ssh"
+
+          filtered="$(
+            TEST_SOURCE="$fixture" nix eval --impure --raw --expr '
+              let
+                root = builtins.toPath (builtins.getEnv "TEST_SOURCE");
+                pkgs = import (builtins.getFlake "github:NixOS/nixpkgs/0bb7ec54c8483066ec9d7720e780a5caa71f8612").outPath {
+                  system = "x86_64-linux";
+                };
+                filter = import ./nix/source-filter.nix { lib = pkgs.lib; inherit root; };
+              in toString (pkgs.lib.cleanSourceWith {
+                name = "nixward-actual-symlink-filter-fixture";
+                src = root;
+                inherit filter;
+              })
+            '
+          )"
+          test -f "$filtered/keep.txt"
+          for path in ".env.example" "id_rsa.pub" ".ssh" "private.key"; do
+            if [ -e "$filtered/$path" ] || [ -L "$filtered/$path" ]; then
+              echo "unexpected path in filtered Nix source: $path" >&2
+              exit 1
+            fi
+          done
+
       - name: Build isolated source-filter regression check
         run: nix build --no-link --print-build-logs ./tests/nix-source-filter#checks.x86_64-linux.source-filter
