@@ -2119,6 +2119,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_verified_validation_evidence_fixture_has_strict_hex_and_version() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/ai-proposal-runtime-verified-validation-evidence-v1.json"
+        ));
+        let parsed: AiProposalRuntimeVerifiedValidationEvidence =
+            serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed.schema_version(),
+            AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION
+        );
+        let encoded = serde_json::to_value(&parsed).unwrap();
+        for field in [
+            "plan_digest",
+            "resolved_validation_evidence_digest",
+            "runtime_binding_digest",
+            "resolution_receipt_digest",
+        ] {
+            assert_eq!(encoded[field].as_str().unwrap().len(), 64);
+        }
+        assert!(parsed.digest().is_ok());
+    }
+
+    #[test]
     fn resolved_validation_evidence_fixture_has_strict_hex_and_versioned_identity() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
