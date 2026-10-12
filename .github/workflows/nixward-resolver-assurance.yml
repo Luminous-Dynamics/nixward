@@ -1,0 +1,86 @@
+name: Nixward Resolver Assurance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "src/**"
+      - "docs/fixtures/**"
+      - "docs/SYSTEM_TRANSACTION_ARCHITECTURE.md"
+      - ".github/workflows/nixward-resolver-assurance.yml"
+  push:
+    branches:
+      - main
+      - "feat/**"
+    paths:
+      - "Cargo.toml"
+      - "src/**"
+      - "docs/fixtures/**"
+      - "docs/SYSTEM_TRANSACTION_ARCHITECTURE.md"
+      - ".github/workflows/nixward-resolver-assurance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nixward-resolver-assurance-\${{ github.ref }}-\${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  resolver-tests:
+    name: Structured proposal, signed runtime, and transaction tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout Nixward source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: nixward-source
+          persist-credentials: false
+
+      # Nixward is a workspace member of Symthaea. Pin the workspace revision so
+      # dependency/API context is explicit and the same inputs can be reconstructed.
+      - name: Checkout pinned Symthaea workspace
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Luminous-Dynamics/symthaea
+          ref: b9af191f380d635f0459b24284c1d1fd6a5516aa
+          path: symthaea
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.96.0
+
+      - name: Overlay reviewed Nixward tree into workspace member path
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f nixward-source/Cargo.toml
+          test -f symthaea/Cargo.toml
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            nixward-source/ symthaea/crates/core/nixward/
+
+          {
+            echo "### Resolver assurance inputs"
+            echo "- Nixward source: $(git -C nixward-source rev-parse HEAD)"
+            echo "- Symthaea workspace: $(git -C symthaea rev-parse HEAD)"
+            echo "- Rust: $(rustc --version)"
+            echo "- Test target: nixward library module tests"
+          } >> "\${GITHUB_STEP_SUMMARY}"
+
+      - name: Test structured resolver, signed runtime, and evidence fixtures
+        working-directory: symthaea
+        run: cargo test -p nixward --lib action::ai_proposal_binding::tests
+
+      - name: Test transaction integration and fail-closed state transitions
+        working-directory: symthaea
+        run: cargo test -p nixward --lib action::system_transaction::tests
