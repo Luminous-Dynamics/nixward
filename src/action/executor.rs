@@ -5494,6 +5494,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn peer_journal_symlink_is_rejected_before_loading() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "d".repeat(64);
+        let target = dir.path().join("target.json");
+        let link = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&target, b"not-json").expect("write symlink target");
+        symlink(&target, &link).expect("create journal symlink");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal scanner must reject symlink entries before parsing");
+        assert!(error.contains("not a regular non-symlink file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_filename_must_match_embedded_transaction_id() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let transaction_id = write_test_transaction_journal(dir.path(), "input_frozen");
+        let original = dir.path().join(format!("{transaction_id}.json"));
+        let renamed_id = if transaction_id.starts_with('a') {
+            format!("b{}", &transaction_id[1..])
+        } else {
+            format!("a{}", &transaction_id[1..])
+        };
+        std::fs::rename(&original, dir.path().join(format!("{renamed_id}.json")))
+            .expect("rename journal under a mismatching identity");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal filename must bind to its embedded transaction identity");
+        assert!(error.contains("does not match its filename"));
+    }
+
+    #[test]
+    fn reconciliation_phase_classification_is_exhaustive_for_transaction_lifecycle() {
+        use super::super::config_transaction::ConfigTransactionPhase as Phase;
+
+        for phase in [
+            Phase::ProfileTransitionStarted,
+            Phase::ProfileCommitted,
+            Phase::IndeterminateProfileTransition,
+            Phase::ActivationStarted,
+            Phase::IndeterminateActivation,
+            Phase::RecoveryObservation,
+            Phase::RecoveryRequired,
+            Phase::RecoveryMutationStarted,
+        ] {
+            assert!(
+                NixOSExecutor::phase_requires_reconciliation(phase),
+                "{phase:?} must require reconciliation"
+            );
+        }
+        for phase in [
+            Phase::Prepared,
+            Phase::InputFrozen,
+            Phase::CandidateBuilt,
+            Phase::SourceCommitted,
+            Phase::FailedBeforeActivation,
+            Phase::Activated,
+            Phase::BootSelected,
+            Phase::Recovered,
+        ] {
+            assert!(
+                !NixOSExecutor::phase_requires_reconciliation(phase),
+                "{phase:?} is not a nonterminal mutation phase"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn malformed_peer_journal_blocks_new_transaction_fail_closed() {
         let dir = tempfile::tempdir().expect("journal root");
         let peer_id = "a".repeat(64);
