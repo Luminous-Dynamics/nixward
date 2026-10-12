@@ -87,6 +87,12 @@ jobs:
           assert all(not row["production_mutation_applied"] for row in receipt["results"])
           assert all(row["passed"] for row in receipt["results"])
           assert receipt["rustc_version"].startswith("rustc ")
+          assert receipt["cargo_version"].startswith("cargo ")
+          assert all(
+              row["resource_fenced"]
+              for row in receipt["results"]
+              if row["actual_receipt_state"] == "Indeterminate"
+          )
           print("PASS: stable receipt bytes, all scenario oracles matched, no production mutation")
           print("LIMIT: deterministic decision model only; no network adapter or live-state qualification")
           PY
