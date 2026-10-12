@@ -362,11 +362,14 @@ not terminate or prove the death of a surviving activation process, and does
 not serialize stock rebuild/self-deploy/auto-upgrade or other non-participating
 writers. It also does not close the Nix-native expected-old compare-and-set gap.
 
-Eleven source regressions cover an unresolved peer after lock reacquisition,
-current-transaction exemption plus a pre-mutation peer, writable/group-readable/
-special-bit/multiply-linked journal rejection, symlinked root/entry and
-filename/identity substitution, malformed-journal rejection, and exhaustive
-phase classification.
+Twelve source regression oracles cover an unresolved peer after lock
+reacquisition, current-transaction exemption plus a pre-mutation peer,
+writable/group-readable/special-bit/multiply-linked journal rejection,
+symlinked root/entry and filename/identity substitution, malformed-journal
+rejection, exhaustive phase classification, and a live worker subprocess
+surviving SIGKILL of the lock-owning supervisor while journal admission blocks
+a second mutation. Two additional test-binary entry points support that
+subprocess scenario.
 No Rust test has been compiled or run at this head. A real subprocess/systemd
 crash test, native CAS, the privileged coordinator service, supported-writer
 migration, and exact-head hosted qualification remain mandatory. The current
