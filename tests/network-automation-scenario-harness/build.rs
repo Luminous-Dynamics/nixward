@@ -13,4 +13,5 @@ fn main() {
 
     println!("cargo:rustc-env=NIXWARD_SCENARIO_RUSTC_VERSION={version}");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=RUSTC");
 }
