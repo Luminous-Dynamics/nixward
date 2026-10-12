@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 # Reviewed against the RustSec malicious-advisory index on 2026-10-12.
-# These package names had malicious releases/code reported and removed:
+# These package names were reported malicious/compromised in the RustSec catalog.
 # RUSTSEC-2026-0265/-0264/-0259/-0261/-0263 (Aug. 20 campaign),
 # RUSTSEC-2026-0171/-0155/-0102/-0100/-0101/-0108/-0107/-0081.
 # Deny these names until an explicit dependency/security review is approved.
@@ -32,11 +32,8 @@ KNOWN_MALICIOUS_CRATE_NAMES = {
     "finch-rst",
     "finch-rust",
     "finch_cli_rust",
-    "greentic-setup",
-    "greentic-setup-dev",
     "hann-rs-service",
     "if-cfg",
-    "internment",
     "jfrog_quotes",
     "lasso-rs",
     "lazystatic",
@@ -50,7 +47,6 @@ KNOWN_MALICIOUS_CRATE_NAMES = {
     "monero-rpc-rs",
     "mysten-metrics",
     "oncecell",
-    "onering",
     "openvpn-plugin-rs",
     "polymarket-client-sdks",
     "polymarket-clients-sdk",
@@ -94,6 +90,7 @@ KNOWN_MALICIOUS_CRATE_NAMES = {
     "winx-rs",
     "xrvrv",
 }
+# Do not blanket-deny packages whose advisory applies only to one release.
 # Exact bad releases with published boundaries:
 # RUSTSEC-2026-0262 append-only-vec, 0266 internment, 0281/-0280 greentic,
 # and 0175 onering. RUSTSEC-2026-0260 identifies arrayref 0.3.10; below,
