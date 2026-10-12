@@ -207,6 +207,28 @@ fn ensure_seed_not_linked_into_release_tree(
     scan(release_root, seed_metadata.dev(), seed_metadata.ino())
 }
 
+fn write_new_manifest(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!("cannot create new output manifest without overwriting an existing path: {error}")
+        })?;
+
+    if let Err(error) = output_file.write_all(bytes).and_then(|_| output_file.sync_all()) {
+        drop(output_file);
+        return match std::fs::remove_file(path) {
+            Ok(()) => Err(format!("cannot persist signed manifest; incomplete output removed: {error}")),
+            Err(cleanup_error) => Err(format!(
+                "cannot persist signed manifest: {error}; could not remove incomplete output: {cleanup_error}"
+            )),
+        };
+    }
+
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -218,6 +240,20 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn write_new_manifest_persists_bytes_and_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("manifest.json");
+        let bytes = br#"{"kind":"test-manifest"}"#;
+
+        write_new_manifest(&output, bytes).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+
+        let error = write_new_manifest(&output, b"replacement").unwrap_err();
+        assert!(error.contains("without overwriting an existing path"));
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+    }
 
     #[test]
     fn signing_seed_with_group_or_other_permissions_is_rejected() {
@@ -441,16 +477,8 @@ fn main() {
         manifest,
     };
     let bytes = serde_json::to_vec_pretty(&signed).expect("release manifest serializes");
-    let mut output_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&output)
-        .unwrap_or_else(|error| {
-            eprintln!("cannot create new output manifest without overwriting an existing path: {error}");
-            std::process::exit(2)
-        });
-    output_file.write_all(&bytes).unwrap_or_else(|error| {
-        eprintln!("cannot write signed manifest: {error}");
+    write_new_manifest(&output, &bytes).unwrap_or_else(|error| {
+        eprintln!("{error}");
         std::process::exit(2)
     });
     eprintln!("release root public key: {}", signed.signer_public_key_hex);
