@@ -394,7 +394,7 @@ impl NetworkDevicePlan {
     pub fn has_blocked_entries(&self) -> bool {
         self.entries
             .iter()
-            .any(|entry| matches!(entry.decision, NetworkPlanDecision::Blocked { .. }))
+            .any(|entry| matches!(&entry.decision, NetworkPlanDecision::Blocked { .. }))
     }
 }
 
@@ -782,6 +782,59 @@ mod tests {
             entry(&plan).decision,
             NetworkPlanDecision::Blocked {
                 reason: NetworkPlanBlockReason::CapabilityUnknown
+            }
+        );
+    }
+
+    #[test]
+    fn explicitly_unsupported_capability_blocks_creation() {
+        let mut snapshot = snapshot();
+        snapshot.capabilities.insert(
+            NetworkResourceKind::Link,
+            NetworkResourceCapability::Unsupported {
+                reason: "adapter does not manage links".into(),
+            },
+        );
+
+        let plan = NetworkDevicePlanner::plan(
+            &snapshot,
+            &desired(NetworkManagementMode::NixwardRuntime),
+        )
+        .expect("valid blocked plan");
+
+        assert_eq!(
+            entry(&plan).decision,
+            NetworkPlanDecision::Blocked {
+                reason: NetworkPlanBlockReason::UnsupportedCapability
+            }
+        );
+    }
+
+    #[test]
+    fn resource_kind_change_is_not_silently_reinterpreted() {
+        let mut snapshot = snapshot();
+        snapshot.resources.insert(
+            id("link:lan0"),
+            ObservedNetworkResource {
+                id: id("link:lan0"),
+                kind: NetworkResourceKind::Bridge,
+                observation: NetworkResourceObservation::Known {
+                    fingerprint_blake3: fingerprint('b'),
+                    owner: NetworkResourceOwner::NixwardRuntime,
+                },
+            },
+        );
+
+        let plan = NetworkDevicePlanner::plan(
+            &snapshot,
+            &desired(NetworkManagementMode::NixwardRuntime),
+        )
+        .expect("valid blocked plan");
+
+        assert_eq!(
+            entry(&plan).decision,
+            NetworkPlanDecision::Blocked {
+                reason: NetworkPlanBlockReason::ResourceKindMismatch
             }
         );
     }
