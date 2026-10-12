@@ -1554,20 +1554,22 @@ mod tests {
     #[test]
     fn oversized_provider_json_is_rejected_before_parsing() {
         let oversized = vec![b' '; MAX_AI_PROPOSAL_OUTPUT_BYTES + 1];
-        assert_eq!(
+        assert!(matches!(
             AiProposalOutputIntent::from_json_bytes(&oversized),
             Err(AiProposalBindingError::ProposalOutputTooLarge {
-                actual: MAX_AI_PROPOSAL_OUTPUT_BYTES + 1,
-                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
-            })
-        );
-        assert_eq!(
+                actual,
+                max,
+            }) if actual == MAX_AI_PROPOSAL_OUTPUT_BYTES + 1
+                && max == MAX_AI_PROPOSAL_OUTPUT_BYTES
+        ));
+        assert!(matches!(
             AiProposalOutputIntent::from_canonical_bytes(&oversized),
             Err(AiProposalBindingError::ProposalOutputTooLarge {
-                actual: MAX_AI_PROPOSAL_OUTPUT_BYTES + 1,
-                max: MAX_AI_PROPOSAL_OUTPUT_BYTES,
-            })
-        );
+                actual,
+                max,
+            }) if actual == MAX_AI_PROPOSAL_OUTPUT_BYTES + 1
+                && max == MAX_AI_PROPOSAL_OUTPUT_BYTES
+        ));
     }
 
     #[test]
