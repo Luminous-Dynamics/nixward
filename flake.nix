@@ -95,23 +95,21 @@
               excludedBuildOrVcsNoise =
                 builtins.elem (baseNameOf path) excludedDirNames
                 || builtins.any (d: pkgs.lib.hasInfix "/${d}/" relPath) excludedDirNames;
-              excludedCredentialDirectory =
-                type == "directory" && builtins.elem baseName sensitiveDirNames;
+              # Match sensitive names independent of file type. A credential
+              # symlink must not bypass a filter intended for regular files.
+              excludedCredentialDirectory = builtins.elem baseName sensitiveDirNames;
               isEnvFile =
                 baseName == ".env" || pkgs.lib.hasPrefix ".env." baseName;
-              excludedCredentialFile =
-                type == "regular"
-                && (
-                  builtins.elem baseName sensitiveFileNames
-                  || (
-                    builtins.any (prefix: pkgs.lib.hasPrefix prefix baseName) privateKeyPrefixes
-                    && !(pkgs.lib.hasSuffix ".pub" baseName)
-                  )
-                  || builtins.any (suffix: pkgs.lib.hasSuffix suffix baseName) sensitiveFileSuffixes
-                  || (isEnvFile && !(builtins.elem baseName safeEnvTemplateNames))
-                );
+              excludedCredentialPath =
+                builtins.elem baseName sensitiveFileNames
+                || (
+                  builtins.any (prefix: pkgs.lib.hasPrefix prefix baseName) privateKeyPrefixes
+                  && !(pkgs.lib.hasSuffix ".pub" baseName)
+                )
+                || builtins.any (suffix: pkgs.lib.hasSuffix suffix baseName) sensitiveFileSuffixes
+                || (isEnvFile && !(builtins.elem baseName safeEnvTemplateNames));
             in
-            !(excludedBuildOrVcsNoise || excludedCredentialDirectory || excludedCredentialFile);
+            !(excludedBuildOrVcsNoise || excludedCredentialDirectory || excludedCredentialPath);
         };
 
         # Base package derivation
