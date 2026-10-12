@@ -173,6 +173,32 @@ trusted build/release and runtime-attestation mechanism. The receipt proves a
 reproducible resolution under the identified source implementation—not the
 truth of model claims, the suitability of a policy, or real-world safety.
 
+For deployments that need to check which executable is participating in resolution,
+use AiProposalResolutionReceipt::verify_current_runtime and
+SystemTransaction::record_validation_with_runtime_verified_ai_proposal.
+This reuses Nixward's existing offline Ed25519 SignedReleaseManifest verifier:
+the caller supplies the release manifest and a trusted release public key obtained
+from an independently provisioned trust root. Verification checks the signature,
+the declared release tree's artifact bytes/sizes/executable modes, that the current
+process's Linux /proc/self/exe bytes match the manifest-listed executable, and
+that a manifest-listed resolver source file matches the source digest in the
+resolution receipt. The resulting opaque in-memory runtime binding is committed
+through AiProposalRuntimeVerifiedValidationEvidence into the existing transaction
+validation digest before the transaction may advance.
+
+The signed release tree must include both the executable and the exact resolver
+source artifact, for example at a documented path under
+share/nixward/src/action/ai_proposal_binding.rs. The release signing process must
+bind source_revision to the reviewed source revision under its own release policy;
+the field is a signed release-root assertion, not independent proof of a build.
+
+This path uses the existing offline signing root; it adds no CI OIDC permission and
+does not trust a public key merely because the manifest embeds it. It provides
+software-level evidence under the assumption that the running OS/kernel and
+process memory are trustworthy. It is **not** TPM/secure-boot measured runtime
+attestation, proof against a compromised kernel, or proof that the model's claims
+are true. Those remain separate assurance claims.
+
 ### 4. Authorize
 
 The owner/operator authorizes the exact plan.
