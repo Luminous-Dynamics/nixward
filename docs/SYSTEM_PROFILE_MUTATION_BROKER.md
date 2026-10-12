@@ -344,7 +344,9 @@ blocks on any nonterminal profile-transition, activation, or recovery phase.
 Journaled activation/recovery exempts its own transaction ID so that the
 current operation can proceed; non-journaled exact activation has no such
 exemption. Unreadable, malformed, symlinked, noncanonical, or
-filename/transaction-ID-mismatched journal records also block admission.
+filename/transaction-ID-mismatched journal records also block admission. Production journal files must be root-owned, not
+group/world-writable, and single-linked; the scanner checks these properties
+before parsing.
 
 This reduces the risk that a replacement Nixward request proceeds merely
 because the previous process's flock was released on supervisor exit while its
