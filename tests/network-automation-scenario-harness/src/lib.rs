@@ -98,6 +98,7 @@ pub struct ScenarioResult {
     pub actual_receipt_state: String,
     pub resource_fenced: bool,
     pub simulated_mutation_applied: bool,
+    pub postconditions_modelled_verified: bool,
     pub production_mutation_applied: bool,
     pub declared_assertions: Vec<String>,
     pub checks: Vec<CheckResult>,
@@ -149,10 +150,6 @@ impl Outcome {
             postconditions_modelled_verified: false,
         }
     }
-}
-
-fn blake3_hex(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex().to_string()
 }
 
 fn artifact_digest(bytes: &[u8]) -> String {
@@ -408,9 +405,10 @@ fn execute_scenario(
     let checks = vec![
         CheckResult { check_id: "expected_decision_matches".into(), passed: outcome.decision == scenario.expected_decision },
         CheckResult { check_id: "expected_receipt_state_matches".into(), passed: outcome.receipt_state == scenario.expected_receipt_state },
-        CheckResult { check_id: "production_mutation_forbidden".into(), passed: !scenario.production_mutation && !false },
+        CheckResult { check_id: "production_mutation_forbidden".into(), passed: !scenario.production_mutation },
         CheckResult { check_id: "positive_mutation_is_virtual_lab_only".into(), passed: mutation_layer_safe },
         CheckResult { check_id: "required_resource_fence_is_active".into(), passed: fence_satisfied },
+        CheckResult { check_id: "recovered_or_applied_state_has_modelled_postconditions".into(), passed: !matches!(outcome.receipt_state, "Recovered" | "AppliedAndVerified") || outcome.postconditions_modelled_verified },
         CheckResult { check_id: "expected_pair_is_supported".into(), passed: expected_pair_is_supported(&scenario.expected_decision, &scenario.expected_receipt_state) },
         CheckResult { check_id: "declared_assertions_non_empty".into(), passed: !scenario.assertions.is_empty() },
     ];
@@ -427,6 +425,7 @@ fn execute_scenario(
         actual_receipt_state: outcome.receipt_state.into(),
         resource_fenced: outcome.resource_fenced,
         simulated_mutation_applied: outcome.simulated_mutation_applied,
+        postconditions_modelled_verified: outcome.postconditions_modelled_verified,
         production_mutation_applied: false,
         declared_assertions: scenario.assertions.clone(),
         checks,
