@@ -159,9 +159,11 @@ validation evidence and the proposal binding in the existing transaction receipt
 
 Only structured model-output JSON matching schema v1 is supported; this
 component does not extract content from provider-specific response envelopes or
-infer commands from free-form prose. Persist the exact model-output bytes,
-canonical intent, resolution receipt, resolved validation envelope, proposal
-binding, and referenced evidence. Interchange fixtures are in
+infer commands from free-form prose. Both raw ingestion and canonical output
+serialization enforce a 4 MiB maximum so oversized payloads fail before parsing
+or envelope construction. Persist the exact model-output bytes, canonical intent,
+resolution receipt, resolved validation envelope, proposal binding, and
+referenced evidence. Interchange fixtures are in
 [docs/fixtures/ai-proposal-resolution-receipt-v1.json](fixtures/ai-proposal-resolution-receipt-v1.json)
 and
 [docs/fixtures/ai-proposal-resolved-validation-evidence-v1.json](fixtures/ai-proposal-resolved-validation-evidence-v1.json).
