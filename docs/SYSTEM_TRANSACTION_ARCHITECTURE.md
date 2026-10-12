@@ -203,6 +203,36 @@ a separately trusted build-provenance verifier whose claim binds the exact sourc
 revision and executable digest. The release signer must not be treated as proof of
 that relationship unless its build process actually establishes it.
 
+A standards-based source-to-binary profile should be a separate trust input, not
+another field asserted by the release manifest. Prefer an in-toto Statement with
+the [SLSA Build Provenance v1 predicate](https://slsa.dev/spec/v1.0/provenance).
+The verifier should require the statement's subject digest to equal the exact
+running executable digest, resolve the source repository to the expected immutable
+commit, check the declared build recipe and resolved dependencies/toolchain against
+policy, and authenticate an allowlisted builder identity. The provenance must be
+verified independently of the claim being verified: a manifest signer repeating
+`source_revision` and `executable_digest` in another unsigned or same-root field
+does not add evidence.
+
+An optional reproducible-build profile can further require byte-for-byte identical
+outputs from independently administered builders using the same reviewed source,
+workspace lockfile, toolchain, target, build flags, and declared dependencies; the
+live executable must match that reproduced digest. Re-running twice on one runner
+is a useful diagnostic, but is not independent corroboration. The
+[NixOS Reproducible Builds project](https://reproducible.nixos.org/) describes the
+stronger criterion as bit-identical output from the same source on independent
+infrastructure and cautions that building twice alone does not prove
+reproducibility. If the build is nondeterministic, keep the claim at the current
+software-level release-binding boundary rather than relaxing digest equality.
+
+The future verifier should return an opaque, non-deserializable build-provenance
+token that joins the verified attestation digest, builder identity, source commit,
+build-recipe digest, executable digest, and verifier-policy version. Runtime
+validation must fail closed for a missing attestation, unknown builder, source or
+binary mismatch, incompatible schema, or failed independent rebuild. This would
+strengthen provenance only; owner authorization and post-state verification would
+remain separate requirements.
+
 This path uses the existing offline signing root; it adds no CI OIDC permission and
 does not trust a public key merely because the manifest embeds it. It provides
 software-level evidence under the assumption that the running OS/kernel and
