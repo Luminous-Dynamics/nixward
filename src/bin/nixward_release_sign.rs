@@ -530,6 +530,9 @@ fn main() {
         std::process::exit(2)
     });
     let signing = SigningKey::from_bytes(&seed);
+    // The key object now owns the signing material; drop the separately decoded
+    // seed immediately rather than retaining a second copy through the full run.
+    drop(seed);
     let mut artifacts = Vec::new();
     walk(&root, &root, &mut artifacts).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -547,6 +550,7 @@ fn main() {
         eprintln!("manifest validation failed: {e}");
         std::process::exit(2)
     }));
+    drop(signing);
     let signed = SignedReleaseManifest {
         kind: RELEASE_SIGNATURE_KIND.into(),
         algorithm: "ed25519".into(),
