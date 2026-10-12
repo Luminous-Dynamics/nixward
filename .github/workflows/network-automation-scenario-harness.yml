@@ -102,10 +102,21 @@ jobs:
               if row["actual_receipt_state"] == "Indeterminate"
           )
           by_id = {row["scenario_id"]: row for row in receipt["results"]}
+          assert all(
+              row["expected_transition_trace"] == row["modeled_transition_trace"]
+              for row in receipt["results"]
+          )
+          assert all(
+              any(
+                  check["check_id"] == "expected_transition_trace_matches" and check["passed"]
+                  for check in row["checks"]
+              )
+              for row in receipt["results"]
+          )
           assert "conflicting_write_rejected_by_fence" in by_id["FX-011"]["modeled_transition_trace"]
           assert "modeled_recovery:prior_state_restored_and_readback_verified" in by_id["FX-010"]["modeled_transition_trace"]
           assert "modeled_poststate_readback:matched" in by_id["FX-024"]["modeled_transition_trace"]
-          print("PASS: stable receipt bytes, oracle outcomes, modeled transition traces, no production mutation")
+          print("PASS: stable receipt bytes, outcome and trace oracles matched, no production mutation")
           print("LIMIT: deterministic decision model only; no network adapter or live-state qualification")
           PY
 
