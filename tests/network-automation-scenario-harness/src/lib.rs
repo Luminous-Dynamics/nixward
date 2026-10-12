@@ -114,8 +114,11 @@ pub struct RunReceipt {
     pub receipt_schema_version: u32,
     pub status: String,
     pub evaluator_id: String,
+    pub source_revision: String,
     pub rustc_version: String,
     pub cargo_version: String,
+    pub target_os: String,
+    pub target_arch: String,
     pub input_digests: ArtifactDigests,
     pub task_corpus_schema_version: u32,
     pub fault_fixture_schema_version: u32,
@@ -674,12 +677,17 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
             "nixward-network-automation-scenario-harness/{}",
             env!("CARGO_PKG_VERSION")
         ),
+        source_revision: option_env!("NIXWARD_SCENARIO_GIT_COMMIT")
+            .unwrap_or("source-revision-not-injected")
+            .into(),
         rustc_version: option_env!("NIXWARD_SCENARIO_RUSTC_VERSION")
             .unwrap_or("rustc-version-not-injected")
             .into(),
         cargo_version: option_env!("NIXWARD_SCENARIO_CARGO_VERSION")
             .unwrap_or("cargo-version-not-injected")
             .into(),
+        target_os: std::env::consts::OS.into(),
+        target_arch: std::env::consts::ARCH.into(),
         input_digests: ArtifactDigests {
             task_corpus_blake3: artifact_digest(&input.task_corpus_bytes),
             task_schema_blake3: artifact_digest(&input.task_schema_bytes),
