@@ -18,30 +18,31 @@ concurrency:
 
 jobs:
   pure-planner:
-    name: Format and unit-test pure planner
+    name: Format and unit-test pure planner (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.96.0 matches the monorepo's pinned compiler; 1.99.0 checks current stable.
+        toolchain: ["1.96.0", "1.99.0"]
     steps:
       - name: Checkout exact triggering revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Install pinned-action stable Rust toolchain
+      - name: Install exact Rust toolchain
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt
+
+      - name: Record compiler identity
+        run: |
+          rustc --version --verbose
+          cargo --version
 
       - name: Check formatting
         run: cargo fmt --manifest-path tests/network-device-plan-harness/Cargo.toml -- --check
 
-      - name: Run exact-source unit tests
-        run: cargo test --manifest-path tests/network-device-plan-harness/Cargo.toml --all-targets --verbose
-
-      - name: Record resolved dependency lockfile
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v4.6.2
-        with:
-          name: network-device-plan-m0-lock-${{ github.sha }}
-          path: tests/network-device-plan-harness/Cargo.lock
-          if-no-files-found: warn
-          retention-days: 14
+      - name: Run exact-source unit tests with locked dependencies
+        run: cargo test --locked --manifest-path tests/network-device-plan-harness/Cargo.toml --all-targets --verbose
