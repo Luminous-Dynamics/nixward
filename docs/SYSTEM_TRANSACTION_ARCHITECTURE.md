@@ -860,15 +860,17 @@ remain unimplemented; direct privileged/root bypass remains out of scope.
 
 ## Admission guard for unresolved peer journals (2026-10-12)
 
-All exact activation entry points, together with journaled recovery, now perform
-an additional admission check after acquiring the existing Nixward interlock.
-The journaled flow exempts its own transaction ID so recovery can proceed; the
-non-journaled exact-activation path has no current transaction to exempt and
-therefore blocks on any unresolved journal. The check enumerates the trusted
-transaction journal directory, securely loads each *.json journal, binds the
-filename to the journal's transaction ID, and refuses a new mutation if a
-different transaction remains in ProfileTransitionStarted, ProfileCommitted,
-IndeterminateProfileTransition, ActivationStarted,
+The journaled activation and recovery entry points perform an additional
+admission check after acquiring the existing Nixward interlock. The journaled
+flow exempts its own transaction ID so recovery can proceed. The separate
+non-journaled execute_authorized entry point already rejects real exact-system
+activation before mutation in favor of the durable ConfigTransaction boundary;
+it does not rely on this scanner. The scanner itself supports an optional current
+transaction ID and blocks unresolved journals when no exemption is supplied.
+It enumerates the trusted journal directory, securely loads each *.json journal,
+binds filename to embedded transaction ID, and refuses a new journaled mutation
+if a different transaction remains in ProfileTransitionStarted,
+ProfileCommitted, IndeterminateProfileTransition, ActivationStarted,
 IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
 RecoveryMutationStarted.
 
