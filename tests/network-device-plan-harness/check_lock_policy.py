@@ -11,8 +11,11 @@ import sys
 import tomllib
 from pathlib import Path
 
-# Names for which the malicious package itself was removed/identified;
-# deny the name until a maintainer explicitly reviews any proposed dependency.
+# Reviewed against the RustSec malicious-advisory index on 2026-10-12.
+# These package names had malicious releases/code reported and removed:
+# RUSTSEC-2026-0265/-0264/-0259/-0261/-0263 (Aug. 20 campaign),
+# RUSTSEC-2026-0171/-0155/-0102/-0100/-0101/-0108/-0107/-0081.
+# Deny these names until an explicit dependency/security review is approved.
 KNOWN_MALICIOUS_CRATE_NAMES = {
     "proc-macro1",
     "proc-macro-en",
@@ -29,7 +32,10 @@ KNOWN_MALICIOUS_CRATE_NAMES = {
     "mysten-metrics",
     "logtrace",
 }
-# Known malicious releases where RustSec published a bounded bad version.
+# Exact bad releases with published boundaries:
+# RUSTSEC-2026-0262 append-only-vec, 0266 internment, 0281/-0280 greentic,
+# and 0175 onering. RUSTSEC-2026-0260 identifies arrayref 0.3.10; below,
+# ARRAYREF_REVIEW_FLOOR conservatively requires review of that version or newer.
 KNOWN_MALICIOUS_RELEASES = {
     ("append-only-vec", "0.1.9"),
     ("internment", "0.8.7"),
