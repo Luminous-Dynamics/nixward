@@ -102,6 +102,13 @@ KNOWN_MALICIOUS_RELEASES = {
     ("greentic-setup-dev", "1.3.34027618345"),
     ("onering", "1.4.1"),
 }
+# Conservative review floors: once a release of these packages was compromised,
+# any same-or-newer version remains blocked until its provenance is explicitly reviewed.
+KNOWN_MALICIOUS_VERSION_FLOORS = {
+    "append-only-vec": (0, 1, 9),
+    "internment": (0, 8, 7),
+    "onering": (1, 4, 1),
+}
 ARRAYREF_REVIEW_FLOOR = (0, 3, 10)
 ALLOWED_REGISTRY_SOURCES = {
     "registry+https://github.com/rust-lang/crates.io-index",
@@ -238,9 +245,24 @@ def main() -> int:
         return 1
 
     for package in packages:
-        if not isinstance(package, dict) or package.get("name") != "arrayref":
+        if not isinstance(package, dict):
             continue
-        version = package.get("version")
+        name, version = package.get("name"), package.get("version")
+        floor = KNOWN_MALICIOUS_VERSION_FLOORS.get(name)
+        if floor is not None:
+            release = parse_release(version) if isinstance(version, str) else None
+            if release is None:
+                print(f"ERROR: unrecognized {name} version {version!r}; review required", file=sys.stderr)
+                return 1
+            if release >= floor:
+                print(
+                    f"ERROR: {name} {version} is blocked pending explicit security review "
+                    f"(review floor {floor[0]}.{floor[1]}.{floor[2]})",
+                    file=sys.stderr,
+                )
+                return 1
+        if name != "arrayref":
+            continue
         release = parse_release(version) if isinstance(version, str) else None
         if release is None:
             print(f"ERROR: unrecognized arrayref version {version!r}; review required", file=sys.stderr)
