@@ -13,7 +13,16 @@ let
     "service-account.json"
   ];
   privateKeyPrefixes = [ "id_dsa" "id_ecdsa" "id_ed25519" "id_rsa" ];
-  sensitiveFileSuffixes = [ ".key" ".p12" ".pfx" ];
+  sensitiveFileSuffixes = [ ".key" ".p8" ".p12" ".pfx" ".jks" ".keystore" ];
+  sensitivePathFragments = [
+    "/.cargo/credentials"
+    "/.config/gh/hosts.yml"
+    "/.config/gcloud/"
+    "/.config/azure/"
+    "/.config/1password/"
+    "/.config/op/"
+    "/.local/share/keyrings/"
+  ];
   safeEnvTemplateNames = [ ".env.defaults" ".env.example" ".env.sample" ".env.template" ];
 in
 path: type:
@@ -30,8 +39,10 @@ let
     type == "regular" && builtins.elem baseName safeEnvTemplateNames;
   safePublicKeyFile =
     type == "regular" && lib.hasSuffix ".pub" baseName;
+  sensitivePath = builtins.any (fragment: lib.hasInfix fragment relPath) sensitivePathFragments;
   excludedCredentialPath =
-    builtins.elem baseName sensitiveFileNames
+    sensitivePath
+    || builtins.elem baseName sensitiveFileNames
     || (
       builtins.any (prefix: lib.hasPrefix prefix baseName) privateKeyPrefixes
       && !safePublicKeyFile
