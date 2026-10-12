@@ -1123,6 +1123,38 @@ mod tests {
             tx.validation.as_ref().unwrap().evidence_digest,
             digest_hex(&evidence.digest().unwrap())
         );
+
+        let runtime = resolution
+            .verify_current_runtime(
+                &release_root,
+                &signed,
+                &trusted_key,
+                &plan,
+                &raw,
+                &canonical,
+                &source_path,
+            )
+            .unwrap();
+        let resolved = AiProposalResolvedValidationEvidence::new(
+            &plan,
+            [33; 32],
+            &proposal,
+            &resolution,
+            &raw,
+            &canonical,
+        )
+        .unwrap();
+        assert!(evidence
+            .validate_for(
+                &plan,
+                &resolved,
+                &proposal,
+                &resolution,
+                &runtime,
+                &raw,
+                &canonical,
+            )
+            .is_ok());
         assert!(tx.authorization.is_none());
 
         // Signed provenance binds code/runtime identity, but does not confer authority.
