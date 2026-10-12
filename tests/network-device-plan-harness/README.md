@@ -16,10 +16,12 @@ Direct dependencies are exact-pinned and the harness has a committed
 `Cargo.lock`. CI uses `--locked`, so dependency resolution must not silently
 change the dependency graph. The workflow runs the exact same source on the
 monorepo's pinned Rust 1.96.0 baseline and Rust 1.99.0, and records compiler
-identities. A separate job runs pinned `cargo-audit 0.22.2` against the lock
+identities. The workflow also runs a dependency-free denylist/version-boundary
+check for known malicious crate names and the compromised `arrayref 0.3.10`
+release line. A separate job runs pinned `cargo-audit 0.22.2` against the lock
 file from outside the checkout, without asking Cargo to resolve or rewrite the
-project's dependencies. This detects known RustSec advisories, not unknown
-malware or every supply-chain compromise.
+project's dependencies. These checks detect known risks; they do not prove the
+absence of unknown malware or every supply-chain compromise.
 
 This harness validates only pure model/planner code. It does not validate live
 Netlink observation, device ownership claims, kernel mutation, authorization,
