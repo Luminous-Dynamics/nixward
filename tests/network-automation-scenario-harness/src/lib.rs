@@ -683,7 +683,8 @@ mod tests {
     use serde_json::Value;
 
     fn inputs() -> InputArtifacts {
-        load_input_artifacts(&repository_root().expect("repository root")).expect("input artifacts")
+        load_input_artifacts(&repository_root().expect("repository root"))
+            .expect("input artifacts")
     }
 
     fn parse_fixture_value(input: &InputArtifacts) -> Value {
@@ -696,7 +697,9 @@ mod tests {
 
     #[test]
     fn all_checked_in_scenarios_match_the_evaluator() {
-        let (receipt, _) = evaluate_repository(&repository_root().expect("root")).expect("receipt");
+        let (receipt, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
+
         assert_eq!(receipt.receipt.status, "pass");
         assert_eq!(receipt.receipt.task_count, 16);
         assert_eq!(receipt.receipt.scenario_count, 25);
@@ -711,14 +714,27 @@ mod tests {
         let mut input = inputs();
         let mut value = parse_fixture_value(&input);
         let scenarios = value["scenarios"].as_array_mut().expect("scenario array");
-        let case = scenarios.iter_mut().find(|case| case["scenario_id"] == "FX-001").expect("FX-001");
-        case["expected_decision"] = Value::String("AcceptReadOnly".into());
+        let case = scenarios
+            .iter_mut()
+            .find(|case| case["scenario_id"] == "FX-001")
+            .expect("FX-001");
+        case["expected_decision"] = Value::String("Reject".into());
+        case["expected_receipt_state"] = Value::String("Invalid".into());
         replace_fixture_value(&mut input, &value);
-        let receipt = build_receipt(&input).expect("mismatched oracle should produce a failing receipt");
+
+        let receipt =
+            build_receipt(&input).expect("mismatched oracle should produce a failing receipt");
         assert_eq!(receipt.receipt.status, "fail");
-        let row = receipt.receipt.results.iter().find(|result| result.scenario_id == "FX-001").expect("result");
+        let row = receipt
+            .receipt
+            .results
+            .iter()
+            .find(|result| result.scenario_id == "FX-001")
+            .expect("result");
         assert!(!row.passed);
-        assert!(row.checks.iter().any(|check| check.check_id == "expected_decision_matches" && !check.passed));
+        assert!(row.checks.iter().any(|check| {
+            check.check_id == "expected_decision_matches" && !check.passed
+        }));
     }
 
     #[test]
@@ -727,7 +743,10 @@ mod tests {
         let mut value = parse_fixture_value(&input);
         value["scenarios"][0]["fault_class"] = Value::String("unmodelled-fault".into());
         replace_fixture_value(&mut input, &value);
-        assert!(build_receipt(&input).unwrap_err().contains("unsupported fault_class"));
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("unsupported fault_class"));
     }
 
     #[test]
@@ -736,7 +755,10 @@ mod tests {
         let mut value = parse_fixture_value(&input);
         value["scenarios"][0]["production_mutation"] = Value::Bool(true);
         replace_fixture_value(&mut input, &value);
-        assert!(build_receipt(&input).unwrap_err().contains("permits production mutation"));
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("permits production mutation"));
     }
 
     #[test]
@@ -744,21 +766,37 @@ mod tests {
         let mut input = inputs();
         let mut value = parse_fixture_value(&input);
         let scenarios = value["scenarios"].as_array_mut().expect("array");
-        let case = scenarios.iter_mut().find(|case| case["scenario_id"] == "FX-024").expect("FX-024");
+        let case = scenarios
+            .iter_mut()
+            .find(|case| case["scenario_id"] == "FX-024")
+            .expect("FX-024");
         case["layer"] = Value::String("offline-model".into());
         replace_fixture_value(&mut input, &value);
-        let receipt = build_receipt(&input).expect("the changed oracle should be recorded as a mismatch");
+
+        let receipt = build_receipt(&input)
+            .expect("changed layer should be recorded as an oracle mismatch");
         assert_eq!(receipt.receipt.status, "fail");
-        let row = receipt.receipt.results.iter().find(|result| result.scenario_id == "FX-024").expect("result");
+        let row = receipt
+            .receipt
+            .results
+            .iter()
+            .find(|result| result.scenario_id == "FX-024")
+            .expect("result");
         assert!(!row.passed);
         assert!(!row.simulated_mutation_applied);
     }
 
     #[test]
     fn indeterminate_crash_and_rollback_are_fenced() {
-        let (receipt, _) = evaluate_repository(&repository_root().expect("root")).expect("receipt");
+        let (receipt, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
         for scenario_id in ["FX-011", "FX-012"] {
-            let row = receipt.receipt.results.iter().find(|result| result.scenario_id == scenario_id).expect("row");
+            let row = receipt
+                .receipt
+                .results
+                .iter()
+                .find(|result| result.scenario_id == scenario_id)
+                .expect("row");
             assert_eq!(row.actual_receipt_state, "Indeterminate");
             assert!(row.resource_fenced);
             assert!(!row.simulated_mutation_applied);
@@ -768,71 +806,33 @@ mod tests {
 
     #[test]
     fn external_writer_conflict_is_fenced() {
-        let (receipt, _) = evaluate_repository(&repository_root().expect("root")).expect("receipt");
-        let row = receipt.receipt.results.iter().find(|result| result.scenario_id == "FX-009").expect("row");
+        let (receipt, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
+        let row = receipt
+            .receipt
+            .results
+            .iter()
+            .find(|result| result.scenario_id == "FX-009")
+            .expect("row");
         assert_eq!(row.actual_receipt_state, "Conflict");
         assert!(row.resource_fenced);
-    }
-
-    #[test]
-    fn receipt_is_byte_deterministic_for_identical_inputs() {
-        let input = inputs();
-        let first = serialize_envelope(&build_receipt(&input).expect("first receipt")).expect("bytes");
-        let second = serialize_envelope(&build_receipt(&input).expect("second receipt")).expect("bytes");
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn receipt_binds_exact_raw_artifact_bytes() {
-        let original = inputs();
-        let base = build_receipt(&original).expect("original receipt");
-        let mut changed = original.clone();
-        changed.fault_fixture_bytes.push(b'\n');
-        let changed_receipt = build_receipt(&changed).expect("receipt for semantically identical but byte-different fixture");
-        assert_ne!(base.receipt.input_digests.fault_fixtures_blake3, changed_receipt.receipt.input_digests.fault_fixtures_blake3);
-        assert_ne!(base.receipt_blake3, changed_receipt.receipt_blake3);
-    }
-
-    #[test]
-    fn task_corpus_identity_substitution_is_rejected() {
-        let mut input = inputs();
-        let mut value = parse_fixture_value(&input);
-        value["task_corpus_artifact_id"] = Value::String("another-corpus".into());
-        replace_fixture_value(&mut input, &value);
-        assert!(build_receipt(&input).unwrap_err().contains("different task corpus identity"));
-    }
-
-    #[test]
-    fn duplicate_scenario_id_is_rejected() {
-        let mut input = inputs();
-        let mut value = parse_fixture_value(&input);
-        let scenarios = value["scenarios"].as_array_mut().expect("array");
-        scenarios[1]["scenario_id"] = scenarios[0]["scenario_id"].clone();
-        replace_fixture_value(&mut input, &value);
-        assert!(build_receipt(&input).unwrap_err().contains("duplicate scenario ID"));
-    }
-
-    #[test]
-    fn missing_task_coverage_is_rejected() {
-        let mut input = inputs();
-        let mut value = parse_fixture_value(&input);
-        let scenarios = value["scenarios"].as_array_mut().expect("array");
-        scenarios.retain(|case| case["task_id"] != "FIX-001");
-        replace_fixture_value(&mut input, &value);
-        assert!(build_receipt(&input).unwrap_err().contains("tasks without fixtures: FIX-001"));
     }
 
     #[test]
     fn indeterminate_transaction_fences_follow_up_writes() {
         let mut ledger = SimulatedResourceFence::default();
         let resource = "lab:firewall-management";
+
         assert_eq!(ledger.record_write(resource).expect("first simulated write"), 1);
         ledger.mark_indeterminate(resource);
 
         assert!(ledger.is_fenced(resource));
         assert!(ledger.record_write(resource).is_err());
         assert_eq!(ledger.write_count(resource), 1);
-        assert_eq!(ledger.record_write("lab:unrelated-interface").expect("unrelated scope"), 1);
+        assert_eq!(
+            ledger.record_write("lab:unrelated-interface").expect("unrelated scope"),
+            1
+        );
     }
 
     #[test]
@@ -847,15 +847,119 @@ mod tests {
             .clear_after_verified_recovery(resource, Some(&"a".repeat(64)))
             .is_ok());
         assert!(!ledger.is_fenced(resource));
-        assert_eq!(ledger.record_write(resource).expect("write after verified recovery"), 1);
+        assert_eq!(
+            ledger.record_write(resource).expect("write after verified recovery"),
+            1
+        );
+    }
+
+    #[test]
+    fn receipt_is_byte_deterministic_for_identical_inputs() {
+        let input = inputs();
+        let first = serialize_envelope(&build_receipt(&input).expect("first receipt"))
+            .expect("first bytes");
+        let second = serialize_envelope(&build_receipt(&input).expect("second receipt"))
+            .expect("second bytes");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn receipt_binds_exact_raw_artifact_bytes() {
+        let original = inputs();
+        let base = build_receipt(&original).expect("original receipt");
+        let mut changed = original.clone();
+        changed.fault_fixture_bytes.push(b'\n');
+        let changed_receipt = build_receipt(&changed)
+            .expect("receipt for semantically identical but byte-different fixture");
+
+        assert_ne!(
+            base.receipt.input_digests.fault_fixtures_blake3,
+            changed_receipt.receipt.input_digests.fault_fixtures_blake3
+        );
+        assert_ne!(base.receipt_blake3, changed_receipt.receipt_blake3);
+    }
+
+    #[test]
+    fn task_corpus_identity_substitution_is_rejected() {
+        let mut input = inputs();
+        let mut value = parse_fixture_value(&input);
+        value["task_corpus_artifact_id"] = Value::String("another-corpus".into());
+        replace_fixture_value(&mut input, &value);
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("different task corpus identity"));
+    }
+
+    #[test]
+    fn task_corpus_artifact_id_substitution_is_rejected() {
+        let mut input = inputs();
+        let mut value: Value =
+            serde_json::from_slice(&input.task_corpus_bytes).expect("task corpus JSON");
+        value["artifact_id"] = Value::String("nixward.other-corpus.v1".into());
+        input.task_corpus_bytes = serde_json::to_vec(&value).expect("serialize mutation");
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("task corpus identity/version/status"));
+    }
+
+    #[test]
+    fn schema_identity_substitution_is_rejected() {
+        let mut input = inputs();
+        let mut value: Value =
+            serde_json::from_slice(&input.task_schema_bytes).expect("task schema JSON");
+        value["$id"] = Value::String("urn:wrong-schema".into());
+        input.task_schema_bytes = serde_json::to_vec(&value).expect("serialize mutation");
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("task corpus schema identity mismatch"));
+    }
+
+    #[test]
+    fn duplicate_scenario_id_is_rejected() {
+        let mut input = inputs();
+        let mut value = parse_fixture_value(&input);
+        let scenarios = value["scenarios"].as_array_mut().expect("array");
+        scenarios[1]["scenario_id"] = scenarios[0]["scenario_id"].clone();
+        replace_fixture_value(&mut input, &value);
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("duplicate scenario ID"));
+    }
+
+    #[test]
+    fn missing_task_coverage_is_rejected() {
+        let mut input = inputs();
+        let mut value = parse_fixture_value(&input);
+        let scenarios = value["scenarios"].as_array_mut().expect("array");
+        scenarios.retain(|case| case["task_id"].as_str() != Some("FIX-001"));
+        replace_fixture_value(&mut input, &value);
+
+        assert!(build_receipt(&input)
+            .unwrap_err()
+            .contains("tasks without fixtures: FIX-001"));
     }
 
     #[test]
     fn receipt_cannot_claim_live_or_production_qualification() {
-        let (receipt, _) = evaluate_repository(&repository_root().expect("root")).expect("receipt");
-        assert!(receipt.receipt.limitations.iter().any(|text| text.contains("not execution of real kernel")));
-        assert!(receipt.receipt.limitations.iter().any(|text| text.contains("does not qualify a live observer")));
+        let (receipt, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
+
+        assert!(receipt.receipt.limitations.iter().any(|text| {
+            text.contains("not execution of real kernel")
+        }));
+        assert!(receipt.receipt.limitations.iter().any(|text| {
+            text.contains("does not qualify a live observer")
+        }));
         assert!(!receipt.receipt.production_mutation_enabled);
-        assert!(receipt.receipt.results.iter().all(|result| !result.production_mutation_applied));
+        assert!(receipt
+            .receipt
+            .results
+            .iter()
+            .all(|result| !result.production_mutation_applied));
     }
 }
