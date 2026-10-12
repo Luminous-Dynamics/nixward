@@ -108,6 +108,8 @@ KNOWN_MALICIOUS_RELEASES = {
 # any same-or-newer version remains blocked until its provenance is explicitly reviewed.
 KNOWN_MALICIOUS_VERSION_FLOORS = {
     "append-only-vec": (0, 1, 9),
+    "greentic-setup": (1, 3, 1),
+    "greentic-setup-dev": (1, 3, 34027618345),
     "internment": (0, 8, 7),
     "onering": (1, 4, 1),
 }
