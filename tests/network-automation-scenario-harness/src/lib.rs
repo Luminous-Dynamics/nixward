@@ -522,11 +522,20 @@ impl SimulatedResourceFence {
         if evidence.resource_id != resource {
             return Err("recovery evidence targets a different resource".into());
         }
+        if evidence.receipt_blake3.len() != 64
+            || !evidence
+                .receipt_blake3
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("recovery evidence receipt digest is malformed".into());
+        }
         self.fenced_resources.remove(resource);
         Ok(())
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct RecoveryEvidence {
     resource_id: String,
@@ -537,12 +546,14 @@ struct RecoveryEvidence {
     independent_readback_passed: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct VerifiedRecoveryEvidence {
     resource_id: String,
     receipt_blake3: String,
 }
 
+#[cfg(test)]
 impl RecoveryEvidence {
     fn verify(self) -> Result<VerifiedRecoveryEvidence, String> {
         if self.receipt_state != "Recovered" {
