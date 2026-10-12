@@ -145,6 +145,10 @@ jobs:
         working-directory: symthaea
         run: cargo test --locked -p nixward --lib action::ai_proposal_binding::tests
 
+      - name: Test offline release signer path safety
+        working-directory: symthaea
+        run: cargo test --locked -p nixward --bin nixward-release-sign
+
       - name: Test transaction integration and fail-closed state transitions
         working-directory: symthaea
         run: cargo test --locked -p nixward --lib action::system_transaction::tests
