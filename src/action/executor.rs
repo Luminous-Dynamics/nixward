@@ -5425,6 +5425,208 @@ mod tests {
         transaction_id
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    struct NixwardTestProcessGroupGuard {
+        pgid: nix::libc::pid_t,
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    impl Drop for NixwardTestProcessGroupGuard {
+        fn drop(&mut self) {
+            // The supervisor may have been killed while its worker survives.
+            // Kill the isolated test process group on every exit path so a failed
+            // assertion cannot leave the subprocess behind.
+            unsafe {
+                let _ = nix::libc::kill(-self.pgid, nix::libc::SIGKILL);
+            }
+        }
+    }
+
+    /// Isolated test-binary entrypoint for a process that models an activation
+    /// child. It parks indefinitely after announcing readiness to its supervisor.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn nixward_interlock_activation_worker_process_child() {
+        if std::env::var_os("NIXWARD_TEST_ACTIVATION_WORKER_CHILD").is_none() {
+            return;
+        }
+        use std::io::Write;
+
+        println!("NIXWARD_ACTIVATION_WORKER_READY");
+        std::io::stdout()
+            .flush()
+            .expect("flush activation worker readiness");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// Isolated test-binary entrypoint for the lease owner. It acquires the real
+    /// interlock, starts an independent worker process, and remains alive until
+    /// the parent test kills it without running Rust destructors.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn nixward_interlock_supervisor_process_child() {
+        let Ok(lock_path) = std::env::var("NIXWARD_TEST_SUPERVISOR_LOCK_PATH") else {
+            return;
+        };
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        let _interlock = NixwardTransactionInterlock::acquire_at(Path::new(&lock_path))
+            .expect("child supervisor acquires real Nixward interlock");
+        let executable = std::env::current_exe().expect("resolve current test binary");
+        let mut worker = Command::new(executable)
+            .arg("nixward_interlock_activation_worker_process_child")
+            .arg("--nocapture")
+            .env("NIXWARD_TEST_ACTIVATION_WORKER_CHILD", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn independent activation worker process");
+        let worker_pid = worker.id();
+        let child_stdout = worker
+            .stdout
+            .take()
+            .expect("activation worker stdout is piped");
+        let mut reader = BufReader::new(child_stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let mut pollfd = nix::libc::pollfd {
+                fd: reader.get_ref().as_raw_fd(),
+                events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                revents: 0,
+            };
+            let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+            assert!(ready > 0, "activation worker did not signal readiness");
+            let count = reader
+                .read_line(&mut line)
+                .expect("read activation worker readiness");
+            assert!(count > 0, "activation worker exited before readiness");
+            if line.contains("NIXWARD_ACTIVATION_WORKER_READY") {
+                break;
+            }
+        }
+        println!("NIXWARD_SUPERVISOR_WORKER_PID={worker_pid}");
+        std::io::stdout()
+            .flush()
+            .expect("flush supervisor readiness");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn unresolved_journal_blocks_new_mutation_after_supervisor_process_dies() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let lock_path = dir.path().join("nixward.lock");
+        let executable = std::env::current_exe().expect("resolve current test binary");
+
+        let mut owner_command = Command::new(executable);
+        owner_command
+            .arg("nixward_interlock_supervisor_process_child")
+            .arg("--nocapture")
+            .env("NIXWARD_TEST_SUPERVISOR_LOCK_PATH", &lock_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        owner_command.process_group(0);
+        let mut supervisor = owner_command
+            .spawn()
+            .expect("spawn isolated interlock-owning supervisor");
+        let _process_group_guard = NixwardTestProcessGroupGuard {
+            pgid: supervisor.id() as nix::libc::pid_t,
+        };
+        let stdout = supervisor
+            .stdout
+            .take()
+            .expect("supervisor stdout is piped");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let worker_pid = loop {
+            line.clear();
+            let mut pollfd = nix::libc::pollfd {
+                fd: reader.get_ref().as_raw_fd(),
+                events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                revents: 0,
+            };
+            let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+            assert!(ready > 0, "supervisor did not expose worker identity");
+            let count = reader
+                .read_line(&mut line)
+                .expect("read supervisor readiness");
+            assert!(count > 0, "supervisor exited before exposing worker identity");
+            if let Some(value) = line.trim().strip_prefix("NIXWARD_SUPERVISOR_WORKER_PID=") {
+                break value
+                    .parse::<u32>()
+                    .expect("supervisor worker PID is decimal");
+            }
+        };
+
+        let start_before = NixOSExecutor::proc_start_time_ticks(worker_pid)
+            .expect("read worker start identity")
+            .expect("worker must still exist");
+        let worker_pidfd = NixOSExecutor::open_pidfd(worker_pid)
+            .expect("open pidfd for the activation worker");
+        assert_eq!(
+            NixOSExecutor::proc_start_time_ticks(worker_pid)
+                .expect("re-read worker start identity"),
+            Some(start_before),
+            "worker PID identity must remain stable across pidfd acquisition"
+        );
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll worker pidfd"),
+            "activation worker must be live before supervisor termination"
+        );
+
+        // SIGKILL the lock owner: no Drop runs, so the kernel releases its flock
+        // while the separately-running activation worker remains alive.
+        supervisor.kill().expect("kill interlock-owning supervisor");
+        let _ = supervisor.wait().expect("reap supervisor child");
+
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll surviving worker"),
+            "activation worker must outlive the supervisor process"
+        );
+        let _next_owner = NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("kernel released the dead supervisor's interlock");
+
+        let admission = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        );
+        let error = admission.expect_err(
+            "unresolved ActivationStarted journal must block mutation despite free flock",
+        );
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("ActivationStarted"));
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll worker after admission"),
+            "admission check must block while the activation worker is still alive"
+        );
+
+        NixOSExecutor::signal_pidfd(&worker_pidfd, nix::libc::SIGKILL)
+            .expect("terminate the isolated activation worker");
+        let mut worker_pollfd = nix::libc::pollfd {
+            fd: worker_pidfd.as_raw_fd(),
+            events: nix::libc::POLLIN | nix::libc::POLLHUP,
+            revents: 0,
+        };
+        let exited = unsafe { nix::libc::poll(&mut worker_pollfd, 1, 5_000) };
+        assert!(exited > 0, "activation worker termination must be observable");
+        assert!(
+            NixOSExecutor::pidfd_exited(&worker_pidfd).expect("confirm worker exit"),
+            "worker pidfd must report terminal process state after cleanup"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unresolved_peer_journal_blocks_new_transaction_after_interlock_reacquisition() {
