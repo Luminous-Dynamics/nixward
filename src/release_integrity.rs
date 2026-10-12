@@ -265,4 +265,141 @@ mod tests {
         let verified = verify_release_signature(&signed, &signed.signer_public_key_hex).unwrap();
         assert_eq!(verified.artifact_count, 1);
     }
+
+    #[cfg(feature = "native")]
+    fn test_artifact(path: &str, bytes: &[u8], executable: bool) -> ReleaseArtifact {
+        ReleaseArtifact {
+            path: path.into(),
+            blake3: blake3::hash(bytes).to_hex().to_string(),
+            size_bytes: bytes.len() as u64,
+            executable,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    fn sign_test_tree(
+        signing: &SigningKey,
+        artifacts: Vec<ReleaseArtifact>,
+    ) -> SignedReleaseManifest {
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "nixward-release-integrity-tree-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts,
+        };
+        let signature = signing.sign(&manifest.signing_bytes().unwrap());
+        SignedReleaseManifest {
+            kind: RELEASE_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            signer_public_key_hex: hex(signing.verifying_key().as_bytes()),
+            signature_hex: hex(&signature.to_bytes()),
+            manifest,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_accepts_matching_signed_file_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"verified release artifact";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        let verified = verify_release_tree(temp.path(), &signed, &trusted).unwrap();
+        assert_eq!(verified.release_id, "nixward-release-integrity-tree-test");
+        assert_eq!(verified.artifact_count, 1);
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_rejects_same_size_modified_artifact_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let expected = b"good";
+        let actual = b"evil";
+        assert_eq!(expected.len(), actual.len());
+        std::fs::write(temp.path().join("artifact.bin"), actual).unwrap();
+
+        let signing = SigningKey::from_bytes(&[44u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", expected, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::ArtifactDigestMismatch(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_symlinked_artifacts_even_when_target_bytes_match() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"symlink must not be a release artifact";
+        std::fs::write(temp.path().join("actual.bin"), payload).unwrap();
+        symlink(
+            temp.path().join("actual.bin"),
+            temp.path().join("artifact.bin"),
+        )
+        .unwrap();
+
+        let signing = SigningKey::from_bytes(&[45u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[test]
+    fn release_manifest_rejects_parent_segments_and_duplicate_paths() {
+        let signing = SigningKey::from_bytes(&[46u8; 32]);
+        let traversal = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "traversal-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts: vec![test_artifact("../outside.bin", b"x", false)],
+        };
+        assert!(matches!(
+            traversal.validate(),
+            Err(ReleaseIntegrityError::UnsafePath(path)) if path == "../outside.bin"
+        ));
+
+        let duplicate_artifact = test_artifact("same.bin", b"x", false);
+        let duplicate = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "duplicate-path-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts: vec![duplicate_artifact.clone(), duplicate_artifact],
+        };
+        assert_eq!(duplicate.validate(), Err(ReleaseIntegrityError::InvalidManifest));
+
+        // Keep the test's signing key initialization live and ensure helper output
+        // is validated through the exact same canonical signing path as production.
+        let signed = sign_test_tree(&signing, vec![test_artifact("inside.bin", b"x", false)]);
+        assert!(signed.manifest.signing_bytes().is_ok());
+    }
+
 }
