@@ -873,7 +873,9 @@ IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
 RecoveryMutationStarted.
 
 Malformed, unreadable, noncanonical, symlinked, or identity-mismatched JSON
-journal entries fail closed instead of being ignored. The current transaction
+journal entries fail closed instead of being ignored. In the production root-owned
+journal directory, entries must also be root-owned, not group/world-writable,
+and single-linked; the scanner verifies these metadata invariants before parsing. The current transaction
 is exempt so a legitimate recovery can reconcile itself; pre-mutation journals
 do not block system activation.
 
@@ -886,7 +888,8 @@ terminate or supervise a surviving process, protect non-participating profile
 writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
 crash test and the long-lived shared coordinator remain required.
 
-Three source-level regressions cover blocking an activation_started peer
+Five source-level regressions cover blocking an activation_started peer
 after interlock reacquisition, exempting the current transaction while allowing
-a pre-mutation peer, and failing closed on a malformed peer journal. They have
+a pre-mutation peer, rejecting writable and multiply-linked journal files, and
+failing closed on a malformed peer journal. They have
 not been compiled or executed. No qualification result is claimed.
