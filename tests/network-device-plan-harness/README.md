@@ -31,6 +31,8 @@ outside the checkout, without asking Cargo to resolve or rewrite the project's
 dependencies. These are supplemental guards, not a substitute for fresh
 advisory data or proof that a dependency is malware-free.
 
+The planner suite includes a matrix regression over all seven resource kinds and both management modes to ensure incomplete inventories never authorize create/update proposals.
+
 This harness validates only pure model/planner code. It does not validate live
 Netlink observation, device ownership claims, kernel mutation, authorization,
 recovery, throughput, or production readiness. A passing result is not device
