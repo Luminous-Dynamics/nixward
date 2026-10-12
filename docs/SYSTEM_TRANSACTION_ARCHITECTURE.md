@@ -190,6 +190,13 @@ source digest in the resolution receipt. The resulting opaque in-memory runtime 
 through AiProposalRuntimeVerifiedValidationEvidence into the existing transaction
 validation digest before the transaction may advance.
 
+The release verifier treats the file set as closed-world: unlisted files,
+symlinks anywhere in the tree, and symlinked path components are rejected.
+This scan is not an atomic filesystem snapshot. The release root must be
+read-only or otherwise protected from untrusted concurrent writes during
+verification; this implementation does not claim race-free path resolution
+against a concurrent filesystem attacker or a compromised kernel.
+
 The signed release tree must include both the executable and the exact resolver
 source artifact, for example at a documented path under
 share/nixward/src/action/ai_proposal_binding.rs. The release signing process must
