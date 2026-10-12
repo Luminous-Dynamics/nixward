@@ -272,9 +272,9 @@ impl NixwardTransactionInterlock {
                 parent.display()
             ));
         }
-        if metadata.mode() & 0o600 != 0o600 || metadata.mode() & 0o077 != 0 {
+        if !Self::lock_mode_is_valid(metadata.mode()) {
             return Err(format!(
-                "Nixward transaction lock {} must be owner-readable/writable and deny group/other permissions",
+                "Nixward transaction lock {} must have exact mode 0600 with no special permission bits",
                 path.display()
             ));
         }
@@ -320,6 +320,13 @@ impl NixwardTransactionInterlock {
             ));
         }
         Ok(Self { file })
+    }
+
+    #[cfg(unix)]
+    fn lock_mode_is_valid(mode: u32) -> bool {
+        // Require exactly owner read/write. Masking only group/other bits would
+        // accidentally permit setuid, setgid, or sticky mode bits.
+        mode & 0o7777 == 0o600
     }
 
     #[cfg(not(unix))]
@@ -5025,6 +5032,16 @@ mod tests {
             .is_allowed()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_special_lock_mode_bits() {
+        assert!(NixwardTransactionInterlock::lock_mode_is_valid(0o600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o640));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o4600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o2600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o1600));
+    }
+
     #[cfg(unix)]
     #[test]
     fn nixward_transaction_interlock_rejects_unexpected_parent_owner() {
