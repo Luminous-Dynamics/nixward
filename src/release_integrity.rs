@@ -65,6 +65,7 @@ pub enum ReleaseIntegrityError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseArtifact {
     pub path: String,
     pub blake3: String,
@@ -73,6 +74,7 @@ pub struct ReleaseArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseManifest {
     pub schema_version: u32,
     pub kind: String,
@@ -142,6 +144,7 @@ impl ReleaseManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SignedReleaseManifest {
     pub kind: String,
     pub algorithm: String,
@@ -333,6 +336,46 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn release_manifest_wire_types_reject_unknown_fields() {
+        let artifact = r#"{
+            "path":"artifact.bin",
+            "blake3":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size_bytes":1,
+            "executable":false,
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<ReleaseArtifact>(artifact).is_err());
+
+        let manifest = r#"{
+            "schema_version":1,
+            "kind":"symthaea-release-manifest-v1",
+            "release_id":"strict-schema-test",
+            "created_at_ms":1,
+            "source_revision":"test-revision",
+            "artifacts":[],
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<ReleaseManifest>(manifest).is_err());
+
+        let signed = r#"{
+            "kind":"symthaea-release-signature-v1",
+            "algorithm":"ed25519",
+            "signer_public_key_hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "signature_hex":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "manifest":{
+                "schema_version":1,
+                "kind":"symthaea-release-manifest-v1",
+                "release_id":"strict-schema-test",
+                "created_at_ms":1,
+                "source_revision":"test-revision",
+                "artifacts":[]
+            },
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<SignedReleaseManifest>(signed).is_err());
     }
 
     #[test]
