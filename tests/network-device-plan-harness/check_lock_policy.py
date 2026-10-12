@@ -11,6 +11,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+# Names for which the malicious package itself was removed/identified;
+# deny the name until a maintainer explicitly reviews any proposed dependency.
 KNOWN_MALICIOUS_CRATE_NAMES = {
     "proc-macro1",
     "proc-macro-en",
@@ -18,6 +20,22 @@ KNOWN_MALICIOUS_CRATE_NAMES = {
     "arone",
     "aronenao",
     "tinymember",
+    "logflux",
+    "exploration",
+    "microsoftsystem64",
+    "pretty-changelog-logger",
+    "safe-agent-rs",
+    "sui-execution-cut",
+    "mysten-metrics",
+    "logtrace",
+}
+# Known malicious releases where RustSec published a bounded bad version.
+KNOWN_MALICIOUS_RELEASES = {
+    ("append-only-vec", "0.1.9"),
+    ("internment", "0.8.7"),
+    ("greentic-setup", "1.3.1-dev.34027618345"),
+    ("greentic-setup-dev", "1.3.34027618345"),
+    ("onering", "1.4.1"),
 }
 ARRAYREF_REVIEW_FLOOR = (0, 3, 10)
 
@@ -62,6 +80,17 @@ def main() -> int:
         )
         return 1
 
+    found_releases = sorted(
+        (package.get("name"), package.get("version"))
+        for package in packages
+        if isinstance(package, dict)
+        and (package.get("name"), package.get("version")) in KNOWN_MALICIOUS_RELEASES
+    )
+    if found_releases:
+        formatted = ", ".join(f"{name}@{version}" for name, version in found_releases)
+        print(f"ERROR: known malicious Rust release(s) in lockfile: {formatted}", file=sys.stderr)
+        return 1
+
     for package in packages:
         if not isinstance(package, dict) or package.get("name") != "arrayref":
             continue
@@ -78,7 +107,7 @@ def main() -> int:
             )
             return 1
 
-    print(f"OK: {len(packages)} locked packages; known malicious names absent; arrayref boundary satisfied")
+    print(f"OK: {len(packages)} locked packages; known malicious names/releases absent; arrayref boundary satisfied")
     return 0
 
 
