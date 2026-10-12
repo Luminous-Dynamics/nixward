@@ -153,6 +153,33 @@ class LockPolicyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("internment@0.8.7", result.stderr)
 
+    def test_older_append_only_vec_release_is_allowed(self) -> None:
+        result = self.run_policy(make_lock(("append-only-vec", "0.1.8")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_newer_append_only_vec_release_requires_review(self) -> None:
+        result = self.run_policy(make_lock(("append-only-vec", "0.1.10")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked pending explicit security review", result.stderr)
+
+    def test_older_internment_release_is_allowed(self) -> None:
+        result = self.run_policy(make_lock(("internment", "0.8.6")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_newer_internment_release_requires_review(self) -> None:
+        result = self.run_policy(make_lock(("internment", "0.8.8")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked pending explicit security review", result.stderr)
+
+    def test_onering_after_compromised_release_requires_review(self) -> None:
+        result = self.run_policy(make_lock(("onering", "1.4.2")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("blocked pending explicit security review", result.stderr)
+
+    def test_older_onering_release_is_allowed(self) -> None:
+        result = self.run_policy(make_lock(("onering", "1.4.0")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_known_compromised_greentic_release_is_rejected(self) -> None:
         result = self.run_policy(
             make_lock(("greentic-setup", "1.3.1-dev.34027618345"))
