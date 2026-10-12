@@ -27,8 +27,16 @@ of each fixture's expected decision. It fails closed for unknown fault kinds,
 task/fixture identity mismatches, duplicate IDs, missing task coverage,
 unsupported expected decision/state pairs and any fixture that permits
 production mutation. It marks crashed or ambiguous operations Indeterminate
-and fences conflicting modeled writes. It accepts the positive create control
-only in a virtual-lab layer.
+and fences conflicting modeled writes. The simulated-mutation field records
+whether a modeled apply event occurred, including apply-before-crash or
+apply-before-verified-recovery; it never means a real network write occurred.
+The positive create *success oracle* is accepted only in a virtual-lab layer.
+
+The test-only resource-fence model rejects a subsequent write to the same
+resource after an Indeterminate result, permits unrelated scopes, and permits
+fence removal only when a recovery-receipt digest is supplied. This is a
+unit-tested in-memory model, not a distributed lock, cryptographic receipt
+verifier, or real transaction journal.
 
 The natural-language assertions in the fixture document are carried through
 into the receipt for traceability; they are **not** claimed as individually
