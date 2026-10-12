@@ -2509,6 +2509,31 @@ impl NixOSExecutor {
                     path.display()
                 ));
             }
+            #[cfg(unix)]
+            {
+                if let Some(expected_uid) = expected_root_uid {
+                    if metadata.uid() != expected_uid {
+                        return Err(format!(
+                            "transaction journal {} has owner uid {}, expected {}",
+                            path.display(),
+                            metadata.uid(),
+                            expected_uid
+                        ));
+                    }
+                }
+                if metadata.mode() & 0o022 != 0 {
+                    return Err(format!(
+                        "transaction journal {} is group/world-writable",
+                        path.display()
+                    ));
+                }
+                if metadata.nlink() != 1 {
+                    return Err(format!(
+                        "transaction journal {} must have exactly one hard link",
+                        path.display()
+                    ));
+                }
+            }
             let journal_id = path
                 .file_stem()
                 .and_then(|value| value.to_str())
@@ -5412,6 +5437,46 @@ mod tests {
             None,
         )
         .expect("the current transaction is exempt and pre-mutation peers are safe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_group_or_world_writable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "b".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("make journal deliberately unsafe");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("a writable journal must block transaction admission");
+        assert!(error.contains("group/world-writable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_multiple_hard_links() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "c".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        let alias = dir.path().join("alias.json");
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::hard_link(&path, &alias).expect("create hard link");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("a journal with a second hard link must not be trusted");
+        assert!(error.contains("exactly one hard link"));
     }
 
     #[cfg(unix)]
