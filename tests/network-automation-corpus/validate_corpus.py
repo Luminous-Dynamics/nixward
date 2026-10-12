@@ -220,6 +220,95 @@ def validate_corpus(corpus: Any, schema: Any) -> list[str]:
     return errors
 
 
+
+DECISION_STATES = {
+    "AcceptReadOnly": {"CompleteForDeclaredScope"},
+    "Incomplete": {"Incomplete"},
+    "Reject": {"Invalid", "Expired", "Unsupported"},
+    "BlockMutation": {"Blocked", "Incomplete", "Conflict", "Unsupported"},
+    "RequireApproval": {"Blocked", "Expired"},
+    "MarkIndeterminate": {"Indeterminate"},
+    "EscalateHuman": {"Conflict", "Unsupported", "Incomplete"},
+    "AbortRollout": {"Blocked", "Indeterminate", "Recovered"},
+    "RecoverAndVerify": {"Recovered", "Indeterminate"},
+    "ApplyAndVerify": {"AppliedAndVerified"},
+}
+
+
+def validate_fault_fixtures(fixtures: Any, schema: Any, task_corpus: Any) -> list[str]:
+    """Validate fixture schema and invariants, including task cross-references."""
+    check_schema_supported(schema)
+    errors = validate_instance(fixtures, schema)
+    if not isinstance(fixtures, dict):
+        return errors
+    if not isinstance(task_corpus, dict):
+        errors.append("$: task corpus must be an object for cross-reference validation")
+        return errors
+
+    expected_corpus_id = task_corpus.get("artifact_id")
+    if fixtures.get("task_corpus_artifact_id") != expected_corpus_id:
+        errors.append("$.task_corpus_artifact_id: does not match the loaded task corpus")
+
+    tasks = task_corpus.get("tasks")
+    task_ids = {
+        task.get("task_id")
+        for task in tasks
+        if isinstance(task, dict) and isinstance(task.get("task_id"), str)
+    } if isinstance(tasks, list) else set()
+
+    scenarios = fixtures.get("scenarios")
+    if not isinstance(scenarios, list):
+        return errors
+    scenario_ids: list[str] = []
+    covered_task_ids: set[str] = set()
+    for index, scenario in enumerate(scenarios):
+        if not isinstance(scenario, dict):
+            continue
+        scenario_id = scenario.get("scenario_id")
+        if isinstance(scenario_id, str):
+            scenario_ids.append(scenario_id)
+        task_id = scenario.get("task_id")
+        if isinstance(task_id, str):
+            if task_id not in task_ids:
+                errors.append(f"$.scenarios[{index}].task_id: unknown task ID {task_id!r}")
+            else:
+                covered_task_ids.add(task_id)
+
+        if scenario.get("production_mutation") is not False:
+            errors.append(f"$.scenarios[{index}].production_mutation: must be false")
+
+        decision = scenario.get("expected_decision")
+        state = scenario.get("expected_receipt_state")
+        if isinstance(decision, str) and decision in DECISION_STATES:
+            permitted_states = DECISION_STATES[decision]
+            if not isinstance(state, str) or state not in permitted_states:
+                errors.append(
+                    f"$.scenarios[{index}]: receipt state {state!r} is inconsistent with "
+                    f"decision {decision!r}; expected one of {sorted(permitted_states)}"
+                )
+        if decision == "ApplyAndVerify" and scenario.get("layer") != "virtual-lab":
+            errors.append(
+                f"$.scenarios[{index}]: ApplyAndVerify is allowed only in a virtual-lab fixture"
+            )
+        if state == "AppliedAndVerified" and scenario.get("layer") != "virtual-lab":
+            errors.append(
+                f"$.scenarios[{index}]: AppliedAndVerified is allowed only in a virtual-lab fixture"
+            )
+
+    if len(scenario_ids) != len(set(scenario_ids)):
+        errors.append("$.scenarios: scenario_id values must be unique")
+
+    uncovered = sorted(task_id for task_id in task_ids if task_id not in covered_task_ids)
+    if uncovered:
+        errors.append(f"$.scenarios: task IDs without any fixture: {', '.join(uncovered)}")
+
+    invariants = fixtures.get("common_invariants")
+    if isinstance(invariants, list):
+        normalized = " ".join(item.lower() for item in invariants if isinstance(item, str))
+        if "production network mutation is forbidden" not in normalized:
+            errors.append("$.common_invariants: must prohibit production network mutation")
+    return errors
+
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -229,25 +318,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=Path("docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.json"))
     parser.add_argument("--schema", type=Path, default=Path("docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"))
+    parser.add_argument("--fixtures", type=Path, default=Path("docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json"))
+    parser.add_argument("--fixture-schema", type=Path, default=Path("docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json"))
     args = parser.parse_args(argv)
     try:
-        corpus, schema = load_json(args.corpus), load_json(args.schema)
+        corpus = load_json(args.corpus)
+        schema = load_json(args.schema)
+        fixtures = load_json(args.fixtures)
+        fixture_schema = load_json(args.fixture_schema)
         errors = validate_corpus(corpus, schema)
+        fixture_errors = validate_fault_fixtures(fixtures, fixture_schema, corpus)
+        errors.extend(f"fault-fixtures: {error}" for error in fixture_errors)
     except (OSError, json.JSONDecodeError, SchemaDefinitionError) as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 1
     if errors:
-        print("FAIL: network automation task corpus validation")
+        print("FAIL: network automation corpus/fixture validation")
         for error in errors:
             print(f" - {error}")
         return 1
     tasks = corpus["tasks"]
     unique_count = len({task["task_id"] for task in tasks})
+    scenarios = fixtures["scenarios"]
+    unique_scenarios = len({scenario["scenario_id"] for scenario in scenarios})
     print(
-        "PASS: structural and corpus-invariant validation "
-        f"(schema_version={corpus['schema_version']}, tasks={len(tasks)}, unique_task_ids={unique_count})"
+        "PASS: task corpus (schema_version={corpus['schema_version']}, tasks={len(tasks)}, "
+        "unique_task_ids={unique_count})"
     )
-    print("LIMIT: shape/consistency only; not operational safety or authorization evidence")
+    print(
+        f"PASS: fault fixtures (scenarios={len(scenarios)}, "
+        f"unique_scenario_ids={unique_scenarios}, task_references=validated)"
+    )
+    print("LIMIT: shape/consistency only; not operational safety, execution success, or authorization evidence")
     return 0
 
 
