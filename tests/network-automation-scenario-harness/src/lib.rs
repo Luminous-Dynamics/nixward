@@ -24,6 +24,7 @@ pub struct InputArtifacts {
     pub task_schema_bytes: Vec<u8>,
     pub fault_fixture_bytes: Vec<u8>,
     pub fault_schema_bytes: Vec<u8>,
+    pub cargo_manifest_bytes: Vec<u8>,
     pub cargo_lock_bytes: Vec<u8>,
 }
 
@@ -78,6 +79,7 @@ pub struct ArtifactDigests {
     pub task_schema_blake3: String,
     pub fault_fixtures_blake3: String,
     pub fault_schema_blake3: String,
+    pub cargo_manifest_blake3: String,
     pub cargo_lock_blake3: String,
     pub evaluator_source_blake3: String,
 }
@@ -113,6 +115,7 @@ pub struct RunReceipt {
     pub status: String,
     pub evaluator_id: String,
     pub rustc_version: String,
+    pub cargo_version: String,
     pub input_digests: ArtifactDigests,
     pub task_corpus_schema_version: u32,
     pub fault_fixture_schema_version: u32,
@@ -194,6 +197,7 @@ pub fn load_input_artifacts(root: &Path) -> Result<InputArtifacts, String> {
         task_schema_bytes: read("docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json")?,
         fault_fixture_bytes: read("docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json")?,
         fault_schema_bytes: read("docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json")?,
+        cargo_manifest_bytes: read("tests/network-automation-scenario-harness/Cargo.toml")?,
         cargo_lock_bytes: read("tests/network-automation-scenario-harness/Cargo.lock")?,
     })
 }
@@ -480,12 +484,14 @@ fn execute_scenario(
     })
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct SimulatedResourceFence {
     fenced_resources: BTreeSet<String>,
     write_counts: BTreeMap<String, u64>,
 }
 
+#[cfg(test)]
 impl SimulatedResourceFence {
     fn record_write(&mut self, resource: &str) -> Result<u64, String> {
         if self.fenced_resources.contains(resource) {
@@ -619,11 +625,15 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
         rustc_version: option_env!("NIXWARD_SCENARIO_RUSTC_VERSION")
             .unwrap_or("rustc-version-not-injected")
             .into(),
+        cargo_version: option_env!("NIXWARD_SCENARIO_CARGO_VERSION")
+            .unwrap_or("cargo-version-not-injected")
+            .into(),
         input_digests: ArtifactDigests {
             task_corpus_blake3: artifact_digest(&input.task_corpus_bytes),
             task_schema_blake3: artifact_digest(&input.task_schema_bytes),
             fault_fixtures_blake3: artifact_digest(&input.fault_fixture_bytes),
             fault_schema_blake3: artifact_digest(&input.fault_schema_bytes),
+            cargo_manifest_blake3: artifact_digest(&input.cargo_manifest_bytes),
             cargo_lock_blake3: artifact_digest(&input.cargo_lock_bytes),
             evaluator_source_blake3: evaluator_source_digest(),
         },
