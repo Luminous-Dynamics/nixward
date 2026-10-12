@@ -34,16 +34,48 @@ fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32], String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read signing seed: {e}"))?;
-    if bytes.len() == 32 {
+fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    // Open without following a leaf symlink, then derive the key bytes,
+    // permission check, and inode identity from this same file descriptor.
+    // This avoids validating one path target and later reading another.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("cannot securely open signing seed without following symlinks: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened signing seed: {error}"))?;
+    if !metadata.is_file() {
+        return Err("signing seed must be a regular file".into());
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(
+            "signing seed permissions must deny group and other access (for example, mode 0600)"
+                .into(),
+        );
+    }
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read opened signing seed: {error}"))?;
+    let seed = if bytes.len() == 32 {
         let mut out = [0u8; 32];
         out.copy_from_slice(&bytes);
-        return Ok(out);
-    }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| "seed is neither 32 raw bytes nor UTF-8 hex")?;
-    decode_hex_32(text)
+        out
+    } else {
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| "seed is neither 32 raw bytes nor UTF-8 hex")?;
+        decode_hex_32(text)?
+    };
+
+    // Keep the metadata from the opened descriptor so link checks use the
+    // exact inode from which these key bytes were read.
+    let _ = metadata.dev();
+    Ok((seed, metadata))
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), String> {
@@ -145,28 +177,11 @@ fn require_outside_release_root(
     Ok(())
 }
 
-fn validate_seed_permissions(seed_path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = std::fs::metadata(seed_path)
-        .map_err(|error| format!("cannot inspect signing seed permissions: {error}"))?;
-    if metadata.permissions().mode() & 0o077 != 0 {
-        return Err(
-            "signing seed permissions must deny group and other access (for example, mode 0600)"
-                .into(),
-        );
-    }
-    Ok(())
-}
-
 fn ensure_seed_not_linked_into_release_tree(
-    seed_path: &Path,
+    seed_metadata: &std::fs::Metadata,
     release_root: &Path,
 ) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-
-    let seed_metadata = std::fs::metadata(seed_path)
-        .map_err(|error| format!("cannot inspect signing seed identity: {error}"))?;
 
     fn scan(directory: &Path, seed_dev: u64, seed_ino: u64) -> Result<(), String> {
         let mut entries = std::fs::read_dir(directory)
@@ -264,12 +279,12 @@ mod tests {
         std::fs::write(&seed, [11u8; 32]).unwrap();
         std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o640)).unwrap();
 
-        assert!(validate_seed_permissions(&seed)
+        assert!(read_seed(&seed)
             .unwrap_err()
             .contains("deny group and other access"));
 
         std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(validate_seed_permissions(&seed).is_ok());
+        assert!(read_seed(&seed).is_ok());
     }
 
     #[test]
@@ -285,8 +300,8 @@ mod tests {
         let leaked = release_root.join("artifact.bin");
         std::fs::hard_link(&seed, &leaked).unwrap();
 
-        let canonical_seed = seed.canonicalize().unwrap();
-        assert!(ensure_seed_not_linked_into_release_tree(&canonical_seed, &release_root)
+        let (_seed_bytes, seed_metadata) = read_seed(&seed).unwrap();
+        assert!(ensure_seed_not_linked_into_release_tree(&seed_metadata, &release_root)
             .unwrap_err()
             .contains("shares a hard link with release artifact"));
     }
@@ -431,11 +446,11 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(2)
     });
-    validate_seed_permissions(&seed_file).unwrap_or_else(|error| {
+    let (seed, seed_metadata) = read_seed(&seed_file).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2)
     });
-    ensure_seed_not_linked_into_release_tree(&seed_file, &root).unwrap_or_else(|error| {
+    ensure_seed_not_linked_into_release_tree(&seed_metadata, &root).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2)
     });
@@ -445,10 +460,6 @@ fn main() {
     });
     require_outside_release_root(&root, &output, "output manifest").unwrap_or_else(|error| {
         eprintln!("{error}");
-        std::process::exit(2)
-    });
-    let seed = read_seed(&seed_file).unwrap_or_else(|e| {
-        eprintln!("{e}");
         std::process::exit(2)
     });
     let signing = SigningKey::from_bytes(&seed);
