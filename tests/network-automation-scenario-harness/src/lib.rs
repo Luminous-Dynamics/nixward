@@ -995,6 +995,17 @@ mod tests {
     }
 
     #[test]
+    fn receipt_payload_tampering_is_detected_before_serialization() {
+        let (mut envelope, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
+        envelope.receipt.status = "pass-but-tampered".into();
+
+        assert!(serialize_envelope(&envelope)
+            .unwrap_err()
+            .contains("receipt digest does not match receipt payload"));
+    }
+
+    #[test]
     fn receipt_binds_exact_raw_artifact_bytes() {
         let original = inputs();
         let base = build_receipt(&original).expect("original receipt");
