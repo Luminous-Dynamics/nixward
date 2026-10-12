@@ -5304,7 +5304,7 @@ mod tests {
         let source_dir = tempfile::tempdir().expect("source tempdir");
         std::fs::write(
             source_dir.path().join("configuration.nix"),
-            "{ config = {}; }\\n",
+            "{ config = {}; }\n",
         )
         .expect("write immutable source fixture");
         let source = super::super::config_transaction::FrozenConfigSource::capture(
@@ -5320,9 +5320,10 @@ mod tests {
             )
             .expect("source digest is canonical hex");
         }
+        let nonce = if phase == "input_frozen" { [3; 32] } else { [2; 32] };
         let mut transaction = super::super::config_transaction::ConfigTransaction::new(
             [1; 32],
-            [2; 32],
+            nonce,
             source_digest,
         );
         transaction
@@ -5344,18 +5345,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unresolved_peer_journal_blocks_a_new_transaction_after_lock_owner_exit() {
+    fn unresolved_peer_journal_blocks_new_transaction_after_interlock_reacquisition() {
+        use std::sync::mpsc;
+
         let dir = tempfile::tempdir().expect("journal root");
         let peer_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let lock_path = dir.path().join("nixward.lock");
         let current_id = "f".repeat(64);
+        let (worker_started_tx, worker_started_rx) = mpsc::channel();
+        let (allow_worker_exit_tx, allow_worker_exit_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_started_tx.send(()).expect("signal simulated activation is live");
+            allow_worker_exit_rx.recv().expect("hold worker until admission check completes");
+        });
+        worker_started_rx.recv().expect("worker must be live before owner loss");
 
-        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+        // Model the supervisor losing its lease while the journaled activation
+        // worker is still live. A later actor can acquire flock, but the journal
+        // admission check must stop it before any second mutation is started.
+        drop(NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("first coordinator owner acquires interlock"));
+        let _next_owner = NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("kernel lock is available after prior owner exits");
+        let result = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
             dir.path(),
             &current_id,
             None,
-        )
-        .expect_err("a peer left in activation_started must block new mutations");
+        );
 
+        allow_worker_exit_tx.send(()).expect("allow simulated activation to exit");
+        worker.join().expect("simulated activation worker exits cleanly");
+        let error = result.expect_err("unresolved activation journal must block next mutation");
         assert!(error.contains(&peer_id));
         assert!(error.contains("activation_started"));
         assert!(error.contains("reconcile it"));
