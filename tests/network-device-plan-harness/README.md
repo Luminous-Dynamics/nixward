@@ -20,11 +20,12 @@ change the dependency graph. Rust tools and Python policy checks run from the
 runner's temporary directory with explicit absolute paths, outside the checkout's
 `.cargo` configuration tree. The workflow runs the exact same source on the
 monorepo's pinned Rust 1.96.0 baseline and Rust 1.99.0, and records compiler
-identities. The workflow also runs 15 standard-library-only regression tests for its dependency-free
-policy guard. It checks malicious crate names/releases and the `arrayref >=0.3.10`
-review boundary, and rejects Git/alternate-registry sources, source-less packages
-other than the harness itself, duplicate package identities, and registry entries
-without valid 64-character checksums. The local denylist is supplemental to `cargo-audit`, not a replacement for current advisory-database checks.
+identities. The workflow also runs 18 standard-library-only regression tests for its dependency-free
+policy guard. Its name-level denylist tracks the published RustSec malicious catalog
+as reviewed on 2026-10-12; separate exact-version rules cover affected releases.
+The checker also rejects Git/alternate-registry sources, source-less packages
+other than the harness itself, duplicate package identities, malformed dependency
+edges, and registry entries without valid 64-character checksums. The local denylist is supplemental to `cargo-audit`, not a replacement for current advisory-database checks.
 A separate job runs pinned `cargo-audit 0.22.2` against the lock file from
 outside the checkout, without asking Cargo to resolve or rewrite the project's
 dependencies. These are supplemental guards, not a substitute for fresh
