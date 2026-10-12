@@ -44,6 +44,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --manifest-path tests/network-device-plan-harness/Cargo.toml -- --check
 
+      - name: Enforce known supply-chain deny rules
+        run: python3 tests/network-device-plan-harness/check_lock_policy.py tests/network-device-plan-harness/Cargo.lock
+
       - name: Run exact-source unit tests with locked dependencies
         run: cargo test --locked --manifest-path tests/network-device-plan-harness/Cargo.toml --all-targets --verbose
 
