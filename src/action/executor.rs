@@ -192,11 +192,21 @@ impl NixwardTransactionInterlock {
 
     #[cfg(unix)]
     fn acquire() -> Result<Self, String> {
-        Self::acquire_at(Path::new(Self::PATH))
+        Self::acquire_at_with_expected_parent_uid(Path::new(Self::PATH), Some(0))
     }
 
     #[cfg(unix)]
     fn acquire_at(path: &Path) -> Result<Self, String> {
+        Self::acquire_at_with_expected_parent_uid(path, None)
+    }
+
+    #[cfg(unix)]
+    fn acquire_at_with_expected_parent_uid(
+        path: &Path,
+        expected_parent_uid: Option<u32>,
+    ) -> Result<Self, String> {
+        // Production uses Some(0): /run and its transaction lock must be
+        // root-owned. None is reserved for isolated temporary-directory tests.
         // The lock pathname is deliberately persistent: unlinking/replacing it
         // while a holder is active could split participants across different
         // inodes and create two independently-held "exclusive" locks.
@@ -219,6 +229,16 @@ impl NixwardTransactionInterlock {
         // The production parent is /run (root-owned, not writable by group or
         // other). For the private test seam, a caller-owned, non-writable
         // temporary directory is accepted under the same rule.
+        if let Some(expected_uid) = expected_parent_uid {
+            if parent_metadata.uid() != expected_uid {
+                return Err(format!(
+                    "Nixward transaction lock directory {} has owner uid {}, expected {}",
+                    parent.display(),
+                    parent_metadata.uid(),
+                    expected_uid
+                ));
+            }
+        }
         if parent_metadata.mode() & 0o022 != 0 {
             return Err(format!(
                 "Nixward transaction lock directory {} is group/world-writable",
@@ -5005,6 +5025,27 @@ mod tests {
             .is_allowed()
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_unexpected_parent_owner() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let actual_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary directory")
+            .uid();
+        let unexpected_uid = actual_uid ^ 1;
+
+        let error = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(unexpected_uid),
+        )
+        .expect_err("parent ownership must match the explicitly trusted uid");
+        assert!(error.contains("expected"));
+        assert!(error.contains(&unexpected_uid.to_string()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn nixward_transaction_interlock_rejects_symlink_lock_path() {
