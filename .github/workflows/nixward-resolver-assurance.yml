@@ -105,8 +105,8 @@ jobs:
           manifest = Path("Cargo.toml")
           member = Path("crates/core/symthaea-observation-attestation")
           text = manifest.read_text()
-          marker = "exclude = [\\n"
-          entry = '    "crates/core/symthaea-observation-attestation", # no Cargo.toml at pinned revision\\n'
+          marker = "exclude = [\n"
+          entry = '    "crates/core/symthaea-observation-attestation", # no Cargo.toml at pinned revision\n'
 
           # Fail closed if the pinned workspace changes unexpectedly. This
           # excludes only the malformed glob match; it doesn't fabricate a crate
