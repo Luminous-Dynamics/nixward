@@ -893,10 +893,13 @@ terminate or supervise a surviving process, protect non-participating profile
 writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
 crash test and the long-lived shared coordinator remain required.
 
-Eleven source-level regressions cover blocking an ActivationStarted peer
+Twelve source-level regression oracles cover blocking an ActivationStarted peer
 after interlock reacquisition, exempting the current transaction while allowing
 a pre-mutation peer, rejecting writable, group-readable, special-bit, and
 multiply-linked journal files, rejecting symlinked journal roots/entries and
-filename-mismatched records, failing closed on malformed JSON, and exhaustively
-classifying lifecycle phases. They have not been compiled
+filename-mismatched records, failing closed on malformed JSON, exhaustively
+classifying lifecycle phases, and blocking a new mutation after the lock-owning
+supervisor process is killed while an actual worker subprocess remains alive.
+Two test-binary entry points support the subprocess case; they are harness
+helpers rather than separate regression oracles. They have not been compiled
 or executed. No qualification result is claimed.
