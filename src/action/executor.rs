@@ -5116,8 +5116,14 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nixward.lock");
-        let first = NixwardTransactionInterlock::acquire_at(&path)
-            .expect("first acquisition");
+        let parent_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary parent")
+            .uid();
+        let first = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("first acquisition with an explicit trusted parent uid");
         let first_metadata = std::fs::symlink_metadata(&path).expect("lock path exists");
         assert_eq!(first_metadata.nlink(), 1);
         drop(first);
@@ -5127,8 +5133,11 @@ mod tests {
         assert_eq!(after_release.dev(), first_metadata.dev());
         assert_eq!(after_release.ino(), first_metadata.ino());
 
-        let second = NixwardTransactionInterlock::acquire_at(&path)
-            .expect("same stable inode can be acquired again");
+        let second = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("same stable inode can be reacquired with the same trusted parent uid");
         let second_metadata = std::fs::symlink_metadata(&path).expect("lock path persists");
         assert_eq!(second_metadata.dev(), first_metadata.dev());
         assert_eq!(second_metadata.ino(), first_metadata.ino());
