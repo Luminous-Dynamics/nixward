@@ -214,14 +214,19 @@ that relationship unless its build process actually establishes it.
 
 A standards-based source-to-binary profile should be a separate trust input, not
 another field asserted by the release manifest. Prefer an in-toto Statement with
-the [SLSA Build Provenance v1 predicate](https://slsa.dev/spec/v1.0/provenance).
+the [SLSA Build Provenance v1 predicate](https://slsa.dev/spec/v1.2/provenance);
+SLSA 1.2 is the current approved specification version at this review date.
 The verifier should require the statement's subject digest to equal the exact
 running executable digest, resolve the source repository to the expected immutable
 commit, check the declared build recipe and resolved dependencies/toolchain against
-policy, and authenticate an allowlisted builder identity. The provenance must be
-verified independently of the claim being verified: a manifest signer repeating
-`source_revision` and `executable_digest` in another unsigned or same-root field
-does not add evidence.
+policy, and authenticate an allowlisted builder identity. Set a policy minimum:
+SLSA Build L1 provenance alone is insufficient for the privileged acceptance
+path; require at least Build L2's authenticated provenance from a hosted build
+platform, and prefer Build L3's hardened build platform when the threat model
+includes build-time tampering. See the [current SLSA Build levels](https://slsa.dev/spec/v1.2/build-track-basics).
+The provenance must be verified independently of the claim being verified: a
+manifest signer repeating `source_revision` and `executable_digest` in another
+unsigned or same-root field does not add evidence.
 
 An optional reproducible-build profile can further require byte-for-byte identical
 outputs from independently administered builders using the same reviewed source,
