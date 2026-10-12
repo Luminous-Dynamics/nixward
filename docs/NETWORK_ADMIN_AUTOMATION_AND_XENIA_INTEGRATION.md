@@ -164,7 +164,7 @@ Track:
 
 Report denominators, sample size, platform coverage and qualification window. Simulation, lab and production results are separate evidence classes. A strong result on one simulated topology does not establish fleet-wide reliability.
 
-The initial machine-readable seed is [`NETWORK_AUTOMATION_TASK_CORPUS_V1.json`](NETWORK_AUTOMATION_TASK_CORPUS_V1.json). It defines 16 candidate tasks with evidence prerequisites, preconditions, stop conditions, independent postconditions, recovery expectations, required fault fixtures and a measurement unit. It is deliberately marked `qualification-design-only`: the tier ceiling is not authority, the seed is not representative, and implementation must add schema validation plus deterministic fixture runners before using it as an acceptance corpus.
+The initial machine-readable seed is [`NETWORK_AUTOMATION_TASK_CORPUS_V1.json`](NETWORK_AUTOMATION_TASK_CORPUS_V1.json), paired with [`NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json`](NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json). The corpus defines 16 candidate tasks with evidence prerequisites, preconditions, stop conditions, independent postconditions, recovery expectations, required fault fixtures and measurement units. It is deliberately marked `qualification-design-only`: the tier ceiling is not authority, the seed is not representative, and structural validation does not establish operational safety. The corpus/schema shape has been read-back checked; an automated JSON Schema test and deterministic fixture runner remain future work.
 
 ## 8. Rollout stages
 
