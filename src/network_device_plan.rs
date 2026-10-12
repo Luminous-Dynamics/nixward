@@ -65,19 +65,40 @@ pub enum NetworkResourceKind {
     WireGuardDevice,
 }
 
-/// Where the effective resource is believed to be managed from.
+/// Source of configuration intent. It is distinct from the process that
+/// currently applies or maintains the effective kernel configuration.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "owner", rename_all = "kebab-case")]
-pub enum NetworkResourceOwner {
-    NixwardRuntime,
+pub enum NetworkConfigurationOwner {
     NixOsDeclarative,
+    NixwardDesiredState,
+    External { authority_id: String },
+    Unknown,
+}
+
+impl NetworkConfigurationOwner {
+    fn validate(&self) -> Result<(), NetworkDevicePlanError> {
+        if let Self::External { authority_id } = self {
+            validate_token("external authority id", authority_id, 256)?;
+        }
+        Ok(())
+    }
+}
+
+/// Process/control system currently responsible for the effective resource.
+/// NixOS intent may be realized by systemd-networkd or NetworkManager; these
+/// are runtime owners, not configuration authorities.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "owner", rename_all = "kebab-case")]
+pub enum NetworkRuntimeOwner {
+    NixwardRuntime,
     SystemdNetworkd,
     NetworkManager,
     External { manager_id: String },
     Unknown,
 }
 
-impl NetworkResourceOwner {
+impl NetworkRuntimeOwner {
     fn validate(&self) -> Result<(), NetworkDevicePlanError> {
         if let Self::External { manager_id } = self {
             validate_token("external manager id", manager_id, 256)?;
@@ -98,11 +119,20 @@ pub enum NetworkManagementMode {
 }
 
 impl NetworkManagementMode {
-    fn expected_owner(self) -> NetworkResourceOwner {
+    fn expected_configuration_owner(self) -> NetworkConfigurationOwner {
         match self {
-            Self::NixOsDeclarative => NetworkResourceOwner::NixOsDeclarative,
-            Self::NixwardRuntime => NetworkResourceOwner::NixwardRuntime,
+            Self::NixOsDeclarative => NetworkConfigurationOwner::NixOsDeclarative,
+            Self::NixwardRuntime => NetworkConfigurationOwner::NixwardDesiredState,
         }
+    }
+
+    fn allows_runtime_owner(self, owner: &NetworkRuntimeOwner) -> bool {
+        matches!(
+            (self, owner),
+            (Self::NixwardRuntime, NetworkRuntimeOwner::NixwardRuntime)
+                | (Self::NixOsDeclarative, NetworkRuntimeOwner::SystemdNetworkd)
+                | (Self::NixOsDeclarative, NetworkRuntimeOwner::NetworkManager)
+        )
     }
 }
 
@@ -136,7 +166,8 @@ impl NetworkResourceCapability {
 pub enum NetworkResourceObservation {
     Known {
         fingerprint_blake3: String,
-        owner: NetworkResourceOwner,
+        configuration_owner: NetworkConfigurationOwner,
+        runtime_owner: NetworkRuntimeOwner,
     },
     Unknown {
         reason: String,
@@ -148,10 +179,12 @@ impl NetworkResourceObservation {
         match self {
             Self::Known {
                 fingerprint_blake3,
-                owner,
+                configuration_owner,
+                runtime_owner,
             } => {
                 validate_digest(fingerprint_blake3)?;
-                owner.validate()
+                configuration_owner.validate()?;
+                runtime_owner.validate()
             }
             Self::Unknown { reason } => validate_token("observation reason", reason, 512),
         }
@@ -166,9 +199,16 @@ impl NetworkResourceObservation {
         }
     }
 
-    fn owner(&self) -> Option<&NetworkResourceOwner> {
+    fn configuration_owner(&self) -> Option<&NetworkConfigurationOwner> {
         match self {
-            Self::Known { owner, .. } => Some(owner),
+            Self::Known { configuration_owner, .. } => Some(configuration_owner),
+            Self::Unknown { .. } => None,
+        }
+    }
+
+    fn runtime_owner(&self) -> Option<&NetworkRuntimeOwner> {
+        match self {
+            Self::Known { runtime_owner, .. } => Some(runtime_owner),
             Self::Unknown { .. } => None,
         }
     }
@@ -288,12 +328,19 @@ pub struct DesiredNetworkResource {
     pub kind: NetworkResourceKind,
     pub desired_fingerprint_blake3: String,
     pub management_mode: NetworkManagementMode,
+    /// Expected runtime manager, distinct from configuration ownership.
+    pub expected_runtime_owner: NetworkRuntimeOwner,
 }
 
 impl DesiredNetworkResource {
     fn validate(&self) -> Result<(), NetworkDevicePlanError> {
         self.id.validate()?;
-        validate_digest(&self.desired_fingerprint_blake3)
+        validate_digest(&self.desired_fingerprint_blake3)?;
+        self.expected_runtime_owner.validate()?;
+        if !self.management_mode.allows_runtime_owner(&self.expected_runtime_owner) {
+            return Err(NetworkDevicePlanError::InvalidDesiredOwnership);
+        }
+        Ok(())
     }
 }
 
@@ -355,8 +402,10 @@ pub struct NetworkPlanEntry {
     pub kind: NetworkResourceKind,
     pub desired_fingerprint_blake3: String,
     pub observed_fingerprint_blake3: Option<String>,
-    pub observed_owner: Option<NetworkResourceOwner>,
+    pub observed_configuration_owner: Option<NetworkConfigurationOwner>,
+    pub observed_runtime_owner: Option<NetworkRuntimeOwner>,
     pub management_mode: NetworkManagementMode,
+    pub expected_runtime_owner: NetworkRuntimeOwner,
     pub decision: NetworkPlanDecision,
 }
 
@@ -367,8 +416,15 @@ impl NetworkPlanEntry {
         if let Some(fingerprint) = &self.observed_fingerprint_blake3 {
             validate_digest(fingerprint)?;
         }
-        if let Some(owner) = &self.observed_owner {
+        if let Some(owner) = &self.observed_configuration_owner {
             owner.validate()?;
+        }
+        if let Some(owner) = &self.observed_runtime_owner {
+            owner.validate()?;
+        }
+        self.expected_runtime_owner.validate()?;
+        if !self.management_mode.allows_runtime_owner(&self.expected_runtime_owner) {
+            return Err(NetworkDevicePlanError::InvalidDesiredOwnership);
         }
         Ok(())
     }
@@ -476,37 +532,41 @@ fn plan_entry(
     desired: &DesiredNetworkResource,
 ) -> NetworkPlanEntry {
     let observed = snapshot.resources.get(&desired.id);
-    let (observed_fingerprint_blake3, observed_owner) = observed
-        .map(|resource| {
-            (
-                resource.observation.fingerprint().map(str::to_owned),
-                resource.observation.owner().cloned(),
-            )
-        })
-        .unwrap_or((None, None));
+    let (observed_fingerprint_blake3, observed_configuration_owner, observed_runtime_owner) =
+        observed
+            .map(|resource| {
+                (
+                    resource.observation.fingerprint().map(str::to_owned),
+                    resource.observation.configuration_owner().cloned(),
+                    resource.observation.runtime_owner().cloned(),
+                )
+            })
+            .unwrap_or((None, None, None));
 
     let decision = match observed {
-        Some(resource) if resource.kind != desired.kind => {
-            NetworkPlanDecision::Blocked {
-                reason: NetworkPlanBlockReason::ResourceKindMismatch,
-            }
-        }
+        Some(resource) if resource.kind != desired.kind => NetworkPlanDecision::Blocked {
+            reason: NetworkPlanBlockReason::ResourceKindMismatch,
+        },
         Some(resource) => match &resource.observation {
             NetworkResourceObservation::Unknown { .. } => NetworkPlanDecision::Blocked {
                 reason: NetworkPlanBlockReason::ObservationUnknown,
             },
             NetworkResourceObservation::Known {
-                fingerprint_blake3, ..
-            } if fingerprint_blake3 == &desired.desired_fingerprint_blake3 => {
-                NetworkPlanDecision::NoOp
-            }
-            NetworkResourceObservation::Known { owner, .. } => {
-                if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
-                    NetworkPlanDecision::Blocked { reason }
-                } else if owner != &desired.management_mode.expected_owner() {
+                fingerprint_blake3,
+                configuration_owner,
+                runtime_owner,
+            } => {
+                // Matching state must not hide that another controller owns it.
+                if configuration_owner != &desired.management_mode.expected_configuration_owner()
+                    || runtime_owner != &desired.expected_runtime_owner
+                {
                     NetworkPlanDecision::Blocked {
                         reason: NetworkPlanBlockReason::ResourceOwnerConflict,
                     }
+                } else if fingerprint_blake3 == &desired.desired_fingerprint_blake3 {
+                    NetworkPlanDecision::NoOp
+                } else if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
+                    NetworkPlanDecision::Blocked { reason }
                 } else {
                     match desired.management_mode {
                         NetworkManagementMode::NixOsDeclarative => {
@@ -545,8 +605,10 @@ fn plan_entry(
         kind: desired.kind,
         desired_fingerprint_blake3: desired.desired_fingerprint_blake3.clone(),
         observed_fingerprint_blake3,
-        observed_owner,
+        observed_configuration_owner,
+        observed_runtime_owner,
         management_mode: desired.management_mode,
+        expected_runtime_owner: desired.expected_runtime_owner.clone(),
         decision,
     }
 }
@@ -582,6 +644,8 @@ pub enum NetworkDevicePlanError {
     TargetMismatch,
     #[error("snapshot and desired state scopes differ")]
     ScopeMismatch,
+    #[error("desired management mode and expected runtime owner are incompatible")]
+    InvalidDesiredOwnership,
     #[error("plan status is not the read-only M0 status")]
     InvalidPlanStatus,
     #[error("plan claims reasoning or execution authority")]
