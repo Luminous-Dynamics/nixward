@@ -162,6 +162,7 @@
             "minLength": 1
           },
           "mode": {
+            "type": "string",
             "enum": [
               "read-only",
               "plan-only",
@@ -175,6 +176,7 @@
             ]
           },
           "max_tier_after_qualification": {
+            "type": "string",
             "enum": [
               "A1",
               "A2",
