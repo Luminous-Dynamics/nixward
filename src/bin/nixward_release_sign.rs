@@ -75,7 +75,9 @@ fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), St
     // Cap the read as well as checking fstat size, so concurrent growth cannot
     // turn a small seed file into an unbounded allocation. The temporary input
     // buffer and decoded key are zeroized on drop.
-    let mut bytes = Zeroizing::new(Vec::with_capacity(metadata.len() as usize));
+    // Allocate the entire capped read window up front, avoiding secret-bearing
+    // buffer reallocation if the underlying file grows while it is being read.
+    let mut bytes = Zeroizing::new(Vec::with_capacity((MAX_SEED_INPUT_BYTES + 1) as usize));
     let mut limited_file = file.take(MAX_SEED_INPUT_BYTES + 1);
     limited_file
         .read_to_end(&mut bytes)
