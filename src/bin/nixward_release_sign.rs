@@ -36,7 +36,7 @@ fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
 
 fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
     use std::io::Read;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
     // Open without following a leaf symlink, then derive the key bytes,
     // permission check, and inode identity from this same file descriptor.
@@ -56,6 +56,11 @@ fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
         return Err(
             "signing seed permissions must deny group and other access (for example, mode 0600)"
                 .into(),
+        );
+    }
+    if metadata.nlink() != 1 {
+        return Err(
+            "signing seed must have exactly one hard link; external aliases are unsupported".into(),
         );
     }
 
@@ -299,10 +304,28 @@ mod tests {
         let leaked = release_root.join("artifact.bin");
         std::fs::hard_link(&seed, &leaked).unwrap();
 
-        let (_seed_bytes, seed_metadata) = read_seed(&seed).unwrap();
-        assert!(ensure_seed_not_linked_into_release_tree(&seed_metadata, &release_root)
+        assert!(read_seed(&seed)
             .unwrap_err()
-            .contains("shares a hard link with release artifact"));
+            .contains("exactly one hard link"));
+    }
+
+    #[test]
+    fn signing_seed_hard_linked_outside_release_tree_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        let alias = temp.path().join("seed-alias");
+        std::fs::write(&seed, [14u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&seed, &alias).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("exactly one hard link"));
+        assert!(read_seed(&alias)
+            .unwrap_err()
+            .contains("exactly one hard link"));
     }
 
     #[test]
