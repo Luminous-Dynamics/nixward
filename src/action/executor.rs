@@ -5163,6 +5163,116 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn nixward_transaction_interlock_holds_profile_transition_through_activation_and_readback() {
+        use std::sync::{Arc, Mutex, mpsc};
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct State {
+            selected_profile: &'static str,
+            running_closure: &'static str,
+            activation_order: Vec<&'static str>,
+            generation_links: Vec<&'static str>,
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let parent_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary parent")
+            .uid();
+        let state = Arc::new(Mutex::new(State {
+            selected_profile: "prior",
+            running_closure: "prior",
+            activation_order: Vec::new(),
+            generation_links: vec!["prior"],
+        }));
+
+        // Actor A owns the coordinator before profile publication and retains
+        // it through activation and read-back.
+        let a_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("A acquires coordinator before pre-state/publication");
+        {
+            let mut current = state.lock().expect("state mutex");
+            assert_eq!(current.selected_profile, "prior");
+            assert_eq!(current.running_closure, "prior");
+            current.selected_profile = "A";
+            current.generation_links.push("A");
+        }
+
+        let (b_attempted_tx, b_attempted_rx) = mpsc::channel();
+        let (b_rejected_tx, b_rejected_rx) = mpsc::channel();
+        let (allow_b_retry_tx, allow_b_retry_rx) = mpsc::channel();
+        let (b_finished_tx, b_finished_rx) = mpsc::channel();
+        let b_path = path.clone();
+        let b_state = Arc::clone(&state);
+
+        let actor_b = std::thread::spawn(move || {
+            // B signals its request, then fails closed rather than publishing
+            // while A holds the real cross-process-style file lock.
+            b_attempted_tx.send(()).expect("signal B request");
+            let error = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+                &b_path,
+                Some(parent_uid),
+            )
+            .expect_err("B must not enter A's publication-to-readback interval");
+            assert!(error.contains("already held"));
+            b_rejected_tx.send(()).expect("signal B was rejected");
+
+            allow_b_retry_rx.recv().expect("wait for A's readback and release");
+            let _b_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+                &b_path,
+                Some(parent_uid),
+            )
+            .expect("B retries after A releases the coordinator");
+            let snapshot = {
+                let mut current = b_state.lock().expect("state mutex");
+                // This re-observation is after acquiring the coordinator:
+                // B must not rely on the stale 'prior' state from before A.
+                assert_eq!(current.selected_profile, "A");
+                assert_eq!(current.running_closure, "A");
+                current.selected_profile = "B";
+                current.generation_links.push("B");
+                current.running_closure = "B";
+                current.activation_order.push("B");
+                (
+                    current.selected_profile,
+                    current.running_closure,
+                    current.activation_order.clone(),
+                    current.generation_links.clone(),
+                )
+            };
+            b_finished_tx.send(snapshot).expect("return B post-state");
+        });
+
+        b_attempted_rx.recv().expect("B has requested a transition");
+        b_rejected_rx.recv().expect("B was excluded by A's lease");
+        {
+            let mut current = state.lock().expect("state mutex");
+            // B's rejected attempt cannot mutate selected profile or runtime.
+            assert_eq!(current.selected_profile, "A");
+            assert_eq!(current.running_closure, "prior");
+            assert!(current.activation_order.is_empty());
+            current.running_closure = "A";
+            current.activation_order.push("A");
+            // A's readback oracle is the A/A pair before lease release.
+            assert_eq!(current.selected_profile, "A");
+            assert_eq!(current.running_closure, "A");
+        }
+
+        drop(a_lock);
+        allow_b_retry_tx.send(()).expect("allow B only after A readback");
+        let b_snapshot = b_finished_rx.recv().expect("B must complete after A");
+        assert_eq!(b_snapshot.0, "B");
+        assert_eq!(b_snapshot.1, "B");
+        assert_eq!(b_snapshot.2, vec!["A", "B"]);
+        assert_eq!(b_snapshot.3, vec!["prior", "A", "B"]);
+        actor_b.join().expect("B thread completes without panic");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nixward.lock");
