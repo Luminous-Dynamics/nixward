@@ -271,7 +271,9 @@ pub fn verify_release_tree(
             return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
         }
 
-        let mut path = root.to_path_buf();
+        // Use the same canonical root that was enumerated above, rather than
+        // re-traversing the caller's possibly aliased root path.
+        let mut path = canonical_root.to_path_buf();
         let mut leaf_metadata = None;
         for (index, component) in components.iter().enumerate() {
             match component {
