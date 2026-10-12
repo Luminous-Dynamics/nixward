@@ -126,7 +126,10 @@ impl NetworkResourceCapability {
     }
 }
 
-/// A directly observed state or an explicit statement that the state is unknown.
+/// A normalized resource-state fingerprint. Adapters must domain-separate it
+/// and bind it to target, scope, resource id, resource kind, schema version,
+/// and the normalized non-secret semantics. Do not fingerprint secrets, raw
+/// packet payloads, volatile counters, or wall-clock timestamps as state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "observation", rename_all = "kebab-case")]
 pub enum NetworkResourceObservation {
@@ -209,9 +212,18 @@ pub struct NetworkDeviceSnapshot {
     pub target: NetworkDeviceTarget,
     pub scope_id: String,
     pub observation_generation: u64,
+    /// Identity of the collector that assembled this snapshot.
+    pub collector_id: String,
+    /// Digest of the exact collector build/configuration used to collect it.
+    pub collector_build_blake3: String,
     pub resources: BTreeMap<NetworkResourceId, ObservedNetworkResource>,
     pub capabilities: BTreeMap<NetworkResourceKind, NetworkResourceCapability>,
+    /// A kind is complete only when its evidence digest is present below.
     pub complete_kinds: BTreeSet<NetworkResourceKind>,
+    /// Digests of artifacts supporting the completeness claim, keyed by kind.
+    /// This planner binds these digests; a separate verifier must validate the
+    /// evidence artifact before an inventory is trusted for actuation.
+    pub completeness_evidence_blake3: BTreeMap<NetworkResourceKind, String>,
 }
 
 impl NetworkDeviceSnapshot {
@@ -221,6 +233,19 @@ impl NetworkDeviceSnapshot {
         }
         self.target.validate()?;
         validate_token("inventory scope id", &self.scope_id, 256)?;
+        validate_token("collector id", &self.collector_id, 256)?;
+        validate_digest(&self.collector_build_blake3)?;
+        let evidence_kinds = self
+            .completeness_evidence_blake3
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if evidence_kinds != self.complete_kinds {
+            return Err(NetworkDevicePlanError::CompletenessEvidenceMismatch);
+        }
+        for digest in self.completeness_evidence_blake3.values() {
+            validate_digest(digest)?;
+        }
         for (key, resource) in &self.resources {
             key.validate()?;
             resource.validate()?;
@@ -545,6 +570,8 @@ pub enum NetworkDevicePlanError {
     InvalidDigest,
     #[error("resource map key does not match its embedded resource id")]
     ResourceKeyMismatch,
+    #[error("complete resource kinds and completeness evidence keys differ")]
+    CompletenessEvidenceMismatch,
     #[error("snapshot and desired state target identities differ")]
     TargetMismatch,
     #[error("snapshot and desired state scopes differ")]
@@ -622,12 +649,18 @@ mod tests {
             target: target(),
             scope_id: "lab-router-networking-v1".into(),
             observation_generation: 1,
+            collector_id: "fixture:network-device-planner-tests".into(),
+            collector_build_blake3: fingerprint('d'),
             resources: BTreeMap::new(),
             capabilities: BTreeMap::from([(
                 NetworkResourceKind::Link,
                 NetworkResourceCapability::Supported,
             )]),
             complete_kinds: BTreeSet::from([NetworkResourceKind::Link]),
+            completeness_evidence_blake3: BTreeMap::from([(
+                NetworkResourceKind::Link,
+                fingerprint('c'),
+            )]),
         }
     }
 
@@ -704,9 +737,21 @@ mod tests {
     }
 
     #[test]
+    fn complete_kinds_require_matching_completeness_evidence() {
+        let mut snapshot = snapshot();
+        snapshot.completeness_evidence_blake3.clear();
+
+        assert_eq!(
+            snapshot.validate(),
+            Err(NetworkDevicePlanError::CompletenessEvidenceMismatch)
+        );
+    }
+
+    #[test]
     fn incomplete_inventory_never_infers_resource_absence() {
         let mut snapshot = snapshot();
         snapshot.complete_kinds.clear();
+        snapshot.completeness_evidence_blake3.clear();
 
         let plan = NetworkDevicePlanner::plan(
             &snapshot,
