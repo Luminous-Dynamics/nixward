@@ -275,6 +275,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "native")]
     fn sign_test_tree(
         signing: &SigningKey,
         artifacts: Vec<ReleaseArtifact>,
@@ -369,7 +370,6 @@ mod tests {
 
     #[test]
     fn release_manifest_rejects_parent_segments_and_duplicate_paths() {
-        let signing = SigningKey::from_bytes(&[46u8; 32]);
         let traversal = ReleaseManifest {
             schema_version: RELEASE_SCHEMA_VERSION,
             kind: RELEASE_MANIFEST_KIND.into(),
@@ -394,10 +394,6 @@ mod tests {
         };
         assert_eq!(duplicate.validate(), Err(ReleaseIntegrityError::InvalidManifest));
 
-        // Keep the test's signing key initialization live and ensure helper output
-        // is validated through the exact same canonical signing path as production.
-        let signed = sign_test_tree(&signing, vec![test_artifact("inside.bin", b"x", false)]);
-        assert!(signed.manifest.signing_bytes().is_ok());
     }
 
 }
