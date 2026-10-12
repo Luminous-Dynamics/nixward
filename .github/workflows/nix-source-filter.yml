@@ -37,6 +37,13 @@ jobs:
       - name: Record Nix version
         run: nix --version
 
+      - name: Parse Nix source and flake expressions
+        run: |
+          nix-instantiate --parse flake.nix >/dev/null
+          nix-instantiate --parse nix/source-filter.nix >/dev/null
+          nix-instantiate --parse tests/nix-source-filter/flake.nix >/dev/null
+          nix-instantiate --parse tests/nix-source-filter/check.nix >/dev/null
+
       - name: Test actual symlinks against the shared filter
         shell: bash
         run: |
