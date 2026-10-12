@@ -91,11 +91,141 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), S
     Ok(())
 }
 
+fn resolve_seed_path(path: &Path, release_root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect signing seed path: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("signing seed must be a regular, non-symlink file".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize signing seed path: {error}"))?;
+    if canonical.starts_with(release_root) {
+        return Err("signing seed must be outside the signed release root".into());
+    }
+    Ok(canonical)
+}
+
+fn resolve_output_path(path: &Path) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("output manifest path must not be a symbolic link".into());
+            }
+            if !metadata.is_file() {
+                return Err("output manifest path must be a regular file".into());
+            }
+            path.canonicalize()
+                .map_err(|error| format!("cannot canonicalize output manifest path: {error}"))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| "output manifest path must name a file".to_string())?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|error| format!("cannot canonicalize output directory: {error}"))?;
+            Ok(canonical_parent.join(file_name))
+        }
+        Err(error) => Err(format!("cannot inspect output manifest path: {error}")),
+    }
+}
+
+fn require_outside_release_root(
+    release_root: &Path,
+    candidate: &Path,
+    label: &str,
+) -> Result<(), String> {
+    if candidate.starts_with(release_root) {
+        return Err(format!("{label} must be outside the signed release root"));
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn signing_seed_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = release_root.join("release-seed");
+        std::fs::write(&seed, [7u8; 32]).unwrap();
+        let canonical_root = release_root.canonicalize().unwrap();
+
+        assert!(resolve_seed_path(&seed, &canonical_root)
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn signing_seed_symbolic_link_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = temp.path().join("seed");
+        let alias = temp.path().join("seed-link");
+        std::fs::write(&seed, [8u8; 32]).unwrap();
+        symlink(&seed, &alias).unwrap();
+
+        assert!(resolve_seed_path(&alias, &release_root.canonicalize().unwrap())
+            .unwrap_err()
+            .contains("non-symlink"));
+    }
+
+    #[test]
+    fn relative_or_aliased_output_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let canonical_root = release_root.canonicalize().unwrap();
+        let output = resolve_output_path(&release_root.join("manifest.json")).unwrap();
+
+        assert!(require_outside_release_root(&canonical_root, &output, "output manifest")
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn output_through_symlinked_parent_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let alias = temp.path().join("release-alias");
+        symlink(&release_root, &alias).unwrap();
+
+        let output = resolve_output_path(&alias.join("manifest.json")).unwrap();
+        assert!(require_outside_release_root(&release_root.canonicalize().unwrap(), &output, "output manifest")
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn existing_output_symlink_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.json");
+        let alias = temp.path().join("manifest.json");
+        std::fs::write(&target, "{}").unwrap();
+        symlink(&target, &alias).unwrap();
+
+        assert!(resolve_output_path(&alias)
+            .unwrap_err()
+            .contains("must not be a symbolic link"));
+    }
 }
 
 fn main() {
@@ -125,12 +255,19 @@ fn main() {
         eprintln!("cannot canonicalize release root: {e}");
         std::process::exit(2)
     });
-    if output.starts_with(&root) {
-        eprintln!(
-            "output manifest must be outside the signed release root to avoid self-reference"
-        );
-        std::process::exit(2);
-    }
+    let seed_file = resolve_seed_path(&seed_file, &root).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    let output = resolve_output_path(&output).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    require_outside_release_root(&root, &output, "output manifest").unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+
     let seed = read_seed(&seed_file).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2)
