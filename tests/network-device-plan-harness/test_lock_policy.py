@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from check_lock_policy import KNOWN_MALICIOUS_CRATE_NAMES, KNOWN_MALICIOUS_RELEASES
+
 POLICY = Path(__file__).with_name("check_lock_policy.py")
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 CHECKSUM = "0" * 64
@@ -51,6 +53,20 @@ class LockPolicyTests(unittest.TestCase):
         result = self.run_policy(make_lock(("proc-macro1", "1.0.107")))
         self.assertEqual(result.returncode, 1)
         self.assertIn("proc-macro1", result.stderr)
+
+    def test_every_known_malicious_crate_name_is_rejected(self) -> None:
+        for name in sorted(KNOWN_MALICIOUS_CRATE_NAMES):
+            with self.subTest(name=name):
+                result = self.run_policy(make_lock((name, "0.0.0")))
+                self.assertEqual(result.returncode, 1, f"{name}: {result.stdout} {result.stderr}")
+                self.assertIn(name, result.stderr)
+
+    def test_every_known_malicious_release_is_rejected(self) -> None:
+        for name, version in sorted(KNOWN_MALICIOUS_RELEASES):
+            with self.subTest(name=name, version=version):
+                result = self.run_policy(make_lock((name, version)))
+                self.assertEqual(result.returncode, 1, f"{name}@{version}: {result.stdout} {result.stderr}")
+                self.assertIn(f"{name}@{version}", result.stderr)
 
     def test_unrecognized_arrayref_version_fails_closed(self) -> None:
         result = self.run_policy(make_lock(("arrayref", "main")))
