@@ -36,9 +36,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - name: Checkout Nixward source
+      - name: Checkout exact Nixward source revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: nixward-source
           persist-credentials: false
 
@@ -59,10 +61,19 @@ jobs:
 
       - name: Overlay reviewed Nixward tree into workspace member path
         shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           set -euo pipefail
           test -f nixward-source/Cargo.toml
           test -f symthaea/Cargo.toml
+
+          NIXWARD_SHA="$(git -C nixward-source rev-parse HEAD)"
+          if [[ -n "${PR_HEAD_SHA}" ]]; then
+            test "${NIXWARD_SHA}" = "${PR_HEAD_SHA}"
+          fi
+
           rsync -a --delete \
             --exclude='.git' \
             --exclude='.github' \
@@ -70,11 +81,20 @@ jobs:
 
           {
             echo "### Resolver assurance inputs"
-            echo "- Nixward source: $(git -C nixward-source rev-parse HEAD)"
-            echo "- Symthaea workspace: $(git -C symthaea rev-parse HEAD)"
+            echo "- Exact Nixward source revision: ${NIXWARD_SHA}"
+            if [[ -n "${PR_HEAD_SHA}" ]]; then
+              echo "- Pull request head revision: ${PR_HEAD_SHA}"
+              echo "- Pull request base revision: ${PR_BASE_SHA}"
+            fi
+            echo "- Workflow trigger SHA: ${GITHUB_SHA}"
+            echo "- Symthaea workspace revision: $(git -C symthaea rev-parse HEAD)"
             echo "- Rust: $(rustc --version)"
             echo "- Test target: nixward library module tests"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Test signed release manifest and filesystem integrity
+        working-directory: symthaea
+        run: cargo test -p nixward --lib release_integrity::tests
 
       - name: Test structured resolver, signed runtime, and evidence fixtures
         working-directory: symthaea
