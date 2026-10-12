@@ -922,6 +922,213 @@ impl AiProposalValidationEvidence {
     }
 }
 
+
+const AI_RESOLVER_RUNTIME_BINDING_DOMAIN: &[u8] =
+    b"nixward-ai-resolver-runtime-binding-v1\0";
+
+fn require_safe_release_relative_path(path: &str) -> Result<(), AiProposalBindingError> {
+    if path.trim().is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(AiProposalBindingError::ResolverRuntimeVerification(
+            format!("unsafe release-relative artifact path: {path}"),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_runtime_binding_from_bundle(
+    root: &Path,
+    signed_release: &SignedReleaseManifest,
+    trusted_release_public_key_hex: &str,
+    runtime_executable_path: &Path,
+    runtime_executable_bytes: &[u8],
+    resolver_source_relative_path: &str,
+    plan: &ChangePlan,
+    resolution: &AiProposalResolutionReceipt,
+) -> Result<VerifiedResolverRuntimeBinding, AiProposalBindingError> {
+    require_safe_release_relative_path(resolver_source_relative_path)?;
+
+    let canonical_root = root.canonicalize().map_err(|error| {
+        AiProposalBindingError::ResolverRuntimeVerification(format!(
+            "cannot canonicalize signed release root: {error}"
+        ))
+    })?;
+    let canonical_executable = runtime_executable_path.canonicalize().map_err(|error| {
+        AiProposalBindingError::ResolverRuntimeVerification(format!(
+            "cannot canonicalize running executable: {error}"
+        ))
+    })?;
+    let runtime_relative = canonical_executable
+        .strip_prefix(&canonical_root)
+        .map_err(|_| {
+            AiProposalBindingError::ResolverRuntimeVerification(
+                "running executable is outside the signed release root".into(),
+            )
+        })?
+        .to_str()
+        .ok_or_else(|| {
+            AiProposalBindingError::ResolverRuntimeVerification(
+                "running executable path is not UTF-8".into(),
+            )
+        })?
+        .replace('\\', "/");
+    require_safe_release_relative_path(&runtime_relative)?;
+    if runtime_relative == resolver_source_relative_path {
+        return Err(AiProposalBindingError::ResolverRuntimeVerification(
+            "runtime executable and resolver source paths must be distinct".into(),
+        ));
+    }
+
+    let verified = verify_release_tree(root, signed_release, trusted_release_public_key_hex)
+        .map_err(|error| {
+            AiProposalBindingError::ResolverRuntimeVerification(format!(
+                "signed release verification failed: {error}"
+            ))
+        })?;
+    let source_artifact = signed_release
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == resolver_source_relative_path)
+        .ok_or_else(|| {
+            AiProposalBindingError::ResolverRuntimeVerification(
+                "signed release manifest omits the resolver source artifact".into(),
+            )
+        })?;
+    let executable_artifact = signed_release
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.path == runtime_relative)
+        .ok_or_else(|| {
+            AiProposalBindingError::ResolverRuntimeVerification(
+                "signed release manifest omits the current executable".into(),
+            )
+        })?;
+
+    let actual_executable_digest = blake3::hash(runtime_executable_bytes).to_hex().to_string();
+    if runtime_executable_bytes.len() as u64 != executable_artifact.size_bytes
+        || actual_executable_digest != executable_artifact.blake3.to_ascii_lowercase()
+    {
+        return Err(AiProposalBindingError::ResolverRuntimeVerification(
+            "running executable bytes differ from the signed release manifest".into(),
+        ));
+    }
+
+    let resolver_source_bytes = std::fs::read(canonical_root.join(resolver_source_relative_path))
+        .map_err(|error| {
+            AiProposalBindingError::ResolverRuntimeVerification(format!(
+                "cannot read signed resolver source artifact: {error}"
+            ))
+        })?;
+    let source_digest = digest_artifact(ProposalArtifactKind::ResolverSource, &resolver_source_bytes);
+    if source_digest != resolution.resolver_source_digest() {
+        return Err(AiProposalBindingError::ResolverRuntimeVerification(
+            "signed resolver source differs from the source embedded in the resolver receipt"
+                .into(),
+        ));
+    }
+
+    Ok(VerifiedResolverRuntimeBinding {
+        release_id: verified.release_id,
+        release_manifest_digest: verified.manifest_blake3,
+        release_source_revision: signed_release.manifest.source_revision.clone(),
+        release_signer_public_key_hex: verified.signer_public_key_hex,
+        runtime_binary_relative_path: runtime_relative,
+        runtime_binary_digest: *blake3::hash(runtime_executable_bytes).as_bytes(),
+        resolver_source_relative_path: source_artifact.path.clone(),
+        resolver_source_digest: source_digest,
+        plan_digest: plan.digest(),
+        resolution_receipt_digest: resolution.digest()?,
+    })
+}
+
+/// An opaque, in-memory result of checking the current executable against a
+/// release manifest signed by a separately trusted release root.
+///
+/// This type deliberately does not implement Deserialize: a JSON claim cannot
+/// manufacture verified runtime evidence. It is software-level evidence under
+/// the running OS/kernel trust assumption, not TPM/measured-boot attestation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedResolverRuntimeBinding {
+    release_id: String,
+    release_manifest_digest: String,
+    release_source_revision: String,
+    release_signer_public_key_hex: String,
+    runtime_binary_relative_path: String,
+    runtime_binary_digest: [u8; 32],
+    resolver_source_relative_path: String,
+    resolver_source_digest: [u8; 32],
+    plan_digest: [u8; 32],
+    resolution_receipt_digest: [u8; 32],
+}
+
+impl VerifiedResolverRuntimeBinding {
+    pub fn digest(&self) -> [u8; 32] {
+        fn push(hasher: &mut blake3::Hasher, value: &str) {
+            hasher.update(&(value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AI_RESOLVER_RUNTIME_BINDING_DOMAIN);
+        push(&mut hasher, &self.release_id);
+        push(&mut hasher, &self.release_manifest_digest);
+        push(&mut hasher, &self.release_source_revision);
+        push(&mut hasher, &self.release_signer_public_key_hex);
+        push(&mut hasher, &self.runtime_binary_relative_path);
+        hasher.update(&self.runtime_binary_digest);
+        push(&mut hasher, &self.resolver_source_relative_path);
+        hasher.update(&self.resolver_source_digest);
+        hasher.update(&self.plan_digest);
+        hasher.update(&self.resolution_receipt_digest);
+        *hasher.finalize().as_bytes()
+    }
+
+    pub fn release_id(&self) -> &str {
+        &self.release_id
+    }
+
+    pub fn release_manifest_digest(&self) -> &str {
+        &self.release_manifest_digest
+    }
+
+    pub fn release_source_revision(&self) -> &str {
+        &self.release_source_revision
+    }
+
+    pub fn release_signer_public_key_hex(&self) -> &str {
+        &self.release_signer_public_key_hex
+    }
+
+    pub fn runtime_binary_relative_path(&self) -> &str {
+        &self.runtime_binary_relative_path
+    }
+
+    pub fn runtime_binary_digest(&self) -> [u8; 32] {
+        self.runtime_binary_digest
+    }
+
+    pub fn resolver_source_relative_path(&self) -> &str {
+        &self.resolver_source_relative_path
+    }
+
+    pub fn resolver_source_digest(&self) -> [u8; 32] {
+        self.resolver_source_digest
+    }
+
+    pub fn plan_digest(&self) -> [u8; 32] {
+        self.plan_digest
+    }
+
+    pub fn resolution_receipt_digest(&self) -> [u8; 32] {
+        self.resolution_receipt_digest
+    }
+}
+
 /// Validation envelope for a proposal whose raw provider response was resolved
 /// by the built-in JSON resolver and linked to a plan.
 ///
