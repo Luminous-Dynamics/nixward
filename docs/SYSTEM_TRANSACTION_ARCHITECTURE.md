@@ -750,23 +750,43 @@ profile lock before activation, another writer can change the selected profile
 between A's successful set and A's activation. A final pre-release observation
 only narrows that interval.
 
-For the end-to-end guarantee in Issue #9, require a profile-lock lease or a
-single shared system-deployment coordinator to remain in force through
-profile publication, exact activation and profile/runtime read-back. Audit and
-migrate every supported writer/front-end, including `nixos-rebuild-ng`,
-legacy rebuild commands and self-deploy services. Any lock handoff must prove
-inode and lock ownership, inherited descriptor lifetime, stale-lock
-semantics, and cleanup. Profile CAS tests and activation-isolation tests are
-separate mandatory gates. The implementation proposal now records this as an
-explicit design requirement; it is not yet implemented.
+For the end-to-end guarantee in Issue #9, the preferred proposal now
+separates two lock scopes: a stable coordinator lease held by one privileged
+transaction supervisor across expected-old observation, profile publication,
+exact activation, profile/runtime read-back and durable disposition; and the
+native Nix profile lock held only while the Nix-native conditional update
+compares the expected-old closure and publishes the candidate. All supported
+writers/frontends must acquire the coordinator first and use the native
+mutation path second, including `nixos-rebuild-ng`, supported legacy rebuild,
+self-deploy, auto-upgrade and configured third-party deployment services.
+
+The distinction follows a fresh source inspection of Nix 2.35.2
+[`pathlocks.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/unix/pathlocks.cc)
+and [`profiles.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/profiles.cc):
+native profile locking uses `<profile>.lock`, `O_CLOEXEC`, an exclusive
+`flock`, stale-inode detection/retry, and deletion-on-unlock behavior. It is
+not safe to assume that the native lock file can simply be retained as a
+cross-activation lease or passed to a second unmodified Nix process. The
+coordinator therefore needs a separate stable file whose pathname/inode is
+not unlinked during an active service lifetime. The lock order is
+**coordinator → native profile lock**; no path may invert it.
+
+The transaction supervisor must also outlive client disconnects and must not
+release its coordinator while the activation it authorized can still run.
+Service shutdown/crash must either reliably terminate and confirm the
+activation before releasing the lease or be shown to preserve lease ownership
+through that activation's terminal result. After failure following profile
+publication, disposition is indeterminate until activation termination and
+fresh profile/runtime evidence permit recovery. These are design requirements,
+not implemented behavior.
 
 The follow-on
 [`NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md`](NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md)
-audits the adjacent legacy writer paths, specifies a proposed conditional
-`--set` contract inside Nix's profile lock, and enumerates the upstream
-functional/interleaving tests needed to prove it. This remains a design only:
-no Nix patch or test execution is claimed. Newer `nix profile` paths and other
-host-side writers still require their own source audit.
+now specifies this two-lock proposal, frontend participation, crash/lifetime
+contract and forced A/B test oracles. This remains design only: no Nix patch,
+coordinator service, frontend migration or test execution is claimed. Newer
+`nix profile` paths and other host-side writers still require their own source
+audit, and direct root bypass remains outside the managed-writer guarantee.
 
 ## Parent-gated worker launch (2026-10-09)
 
