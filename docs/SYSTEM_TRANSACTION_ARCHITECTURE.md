@@ -860,12 +860,14 @@ remain unimplemented; direct privileged/root bypass remains out of scope.
 
 ## Admission guard for unresolved peer journals (2026-10-12)
 
-The journaled activation and recovery entry points now perform an additional
-admission check after acquiring the existing Nixward interlock and before
-issuing a journal-owned capability. The check enumerates the trusted transaction
-journal directory, securely loads each *.json journal, binds the filename to
-the journal's transaction ID, and refuses a new mutation if a different
-transaction remains in ProfileTransitionStarted, ProfileCommitted,
+All exact activation entry points, together with journaled recovery, now perform
+an additional admission check after acquiring the existing Nixward interlock.
+The journaled flow exempts its own transaction ID so recovery can proceed; the
+non-journaled exact-activation path has no current transaction to exempt and
+therefore blocks on any unresolved journal. The check enumerates the trusted
+transaction journal directory, securely loads each *.json journal, binds the
+filename to the journal's transaction ID, and refuses a new mutation if a
+different transaction remains in ProfileTransitionStarted, ProfileCommitted,
 IndeterminateProfileTransition, ActivationStarted,
 IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
 RecoveryMutationStarted.
@@ -877,7 +879,7 @@ do not block system activation.
 
 This closes one Nixward-peer admission gap after loss of the old process's
 flock: even if the kernel makes the interlock available while an activation
-worker could still be alive, a subsequent journaled Nixward transaction must
+worker could still be alive, a subsequent Nixward exact activation must
 reconcile the nonterminal journal before starting another mutation. It is a
 conservative journal gate, not a crash-proof lease keeper. It does not itself
 terminate or supervise a surviving process, protect non-participating profile
