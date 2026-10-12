@@ -100,6 +100,24 @@ class CorpusValidatorTests(unittest.TestCase):
         with self.assertRaises(SchemaDefinitionError):
             check_schema_supported(schema)
 
+    def test_invalid_schema_regex_fails_closed(self):
+        schema = copy.deepcopy(self.schema)
+        schema["properties"]["tasks"]["items"]["properties"]["task_id"]["pattern"] = "["
+        with self.assertRaises(SchemaDefinitionError):
+            check_schema_supported(schema)
+
+    def test_non_string_mode_is_rejected_without_crashing(self):
+        corpus = self.fresh()
+        corpus["tasks"][0]["mode"] = ["read-only"]
+        errors = self.errors(corpus)
+        self.assertTrue(any("expected string" in error for error in errors))
+
+    def test_non_string_shared_stop_is_rejected_without_crashing(self):
+        corpus = self.fresh()
+        corpus["common_hard_stops"][0] = {"not": "a string"}
+        errors = self.errors(corpus)
+        self.assertTrue(any("expected string" in error for error in errors))
+
     def test_design_status_is_not_an_executable_authorization(self):
         corpus = self.fresh()
         self.assertEqual("qualification-design-only", corpus["status"])
