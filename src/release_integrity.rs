@@ -465,7 +465,7 @@ mod tests {
         assert!(matches!(
             verify_release_tree(temp.path(), &signed, &trusted),
             Err(ReleaseIntegrityError::UnsafePath(path))
-                if path == "linked/nested/artifact.bin"
+                if path == "linked"
         ));
     }
 
