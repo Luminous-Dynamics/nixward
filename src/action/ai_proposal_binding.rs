@@ -414,8 +414,6 @@ impl AiProposalResolutionReceipt {
         Ok(())
     }
 
-    /// Stable digest to join this receipt into a resolved validation envelope.
-
     /// Verify this receipt against a signed release tree and the current process.
     ///
     /// The trusted key must come from an independently provisioned release-root
@@ -484,6 +482,7 @@ impl AiProposalResolutionReceipt {
         }
     }
 
+    /// Stable digest to join this receipt into a resolved validation envelope.
     pub fn digest(&self) -> Result<[u8; 32], AiProposalBindingError> {
         self.validate_shape()?;
         let mut hasher = blake3::Hasher::new();
