@@ -1,0 +1,92 @@
+name: Network automation scenario harness
+
+on:
+  pull_request:
+    branches:
+      - "research/sovereign-network-os-architecture-2026-10-12"
+    paths:
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.json"
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json"
+      - "tests/network-automation-corpus/**"
+      - "tests/network-automation-scenario-harness/**"
+      - ".github/workflows/network-automation-scenario-harness.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-automation-scenario-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scenario-harness:
+    name: Scenario harness (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.96.0", "1.99.0"]
+    steps:
+      - name: Checkout exact triggering revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt
+
+      - name: Record compiler and exact source identity
+        run: |
+          rustc --version --verbose
+          cargo --version
+          git rev-parse HEAD
+          printf 'Trigger SHA: %s\n' '${{ github.event.pull_request.head.sha || github.sha }}'
+
+      - name: Run Python schema/corpus mutation suite
+        run: python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -v
+
+      - name: Validate task corpus, fixture corpus and cross-references
+        run: python3 tests/network-automation-corpus/validate_corpus.py
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path tests/network-automation-scenario-harness/Cargo.toml -- --check
+
+      - name: Run locked Rust decision-model tests
+        run: cargo test --locked --manifest-path tests/network-automation-scenario-harness/Cargo.toml --all-targets --verbose
+
+      - name: Emit and verify deterministic machine-readable receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-a.json
+          cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-b.json
+          cmp /tmp/scenario-receipt-a.json /tmp/scenario-receipt-b.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          envelope = json.loads(Path("/tmp/scenario-receipt-a.json").read_text(encoding="utf-8"))
+          receipt = envelope["receipt"]
+          assert receipt["status"] == "pass", receipt["status"]
+          assert len(envelope["receipt_blake3"]) == 64
+          assert receipt["task_count"] == 16, receipt["task_count"]
+          assert receipt["scenario_count"] == 25, receipt["scenario_count"]
+          assert receipt["unique_task_ids"] == 16
+          assert receipt["unique_scenario_ids"] == 25
+          assert receipt["production_mutation_enabled"] is False
+          assert all(not row["production_mutation_applied"] for row in receipt["results"])
+          assert all(row["passed"] for row in receipt["results"])
+          assert receipt["rustc_version"].startswith("rustc ")
+          print("PASS: stable receipt bytes, all scenario oracles matched, no production mutation")
+          print("LIMIT: deterministic decision model only; no network adapter or live-state qualification")
+          PY
