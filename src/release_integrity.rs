@@ -58,6 +58,8 @@ pub enum ReleaseIntegrityError {
     ArtifactSizeMismatch(String),
     #[error("release artifact executable mode mismatch: {0}")]
     ArtifactModeMismatch(String),
+    #[error("release tree contains an unlisted artifact: {0}")]
+    UnlistedArtifact(String),
     #[error("unsafe release artifact path: {0}")]
     UnsafePath(String),
 }
@@ -181,6 +183,53 @@ pub fn verify_release_signature(
 }
 
 #[cfg(feature = "native")]
+fn collect_release_tree_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut std::collections::BTreeSet<String>,
+) -> Result<(), ReleaseIntegrityError> {
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|_| ReleaseIntegrityError::MissingArtifact(directory.display().to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ReleaseIntegrityError::MissingArtifact(directory.display().to_string()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| ReleaseIntegrityError::MissingArtifact(path.display().to_string()))?;
+        if metadata.file_type().is_symlink() {
+            let relative = path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|value| value.to_str())
+                .unwrap_or("<non-utf8-path>")
+                .replace('\\', "/");
+            return Err(ReleaseIntegrityError::UnsafePath(relative));
+        }
+
+        if metadata.is_dir() {
+            collect_release_tree_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| ReleaseIntegrityError::UnsafePath(path.display().to_string()))?
+                .to_str()
+                .ok_or_else(|| ReleaseIntegrityError::UnsafePath(path.display().to_string()))?
+                .replace('\\', "/");
+            if !safe_relative_path(&relative) {
+                return Err(ReleaseIntegrityError::UnsafePath(relative));
+            }
+            files.insert(relative);
+        } else {
+            return Err(ReleaseIntegrityError::UnsafePath(path.display().to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "native")]
 pub fn verify_release_tree(
     root: &std::path::Path,
     signed: &SignedReleaseManifest,
@@ -190,6 +239,24 @@ pub fn verify_release_tree(
     let canonical_root = root
         .canonicalize()
         .map_err(|_| ReleaseIntegrityError::MissingArtifact("release-root".into()))?;
+
+    // A signed release is a closed-world tree: extra files and symlinks must
+    // not be allowed to appear after signing but before verification.
+    let mut actual_files = std::collections::BTreeSet::new();
+    collect_release_tree_files(&canonical_root, &canonical_root, &mut actual_files)?;
+    let expected_files = signed
+        .manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(unlisted) = actual_files
+        .iter()
+        .find(|path| !expected_files.contains(path.as_str()))
+    {
+        return Err(ReleaseIntegrityError::UnlistedArtifact(unlisted.clone()));
+    }
+
     for artifact in &signed.manifest.artifacts {
         // Inspect each component, not just the leaf. Checking only the final
         // file would allow an intermediate symlink to redirect a manifest path
@@ -399,6 +466,28 @@ mod tests {
             verify_release_tree(temp.path(), &signed, &trusted),
             Err(ReleaseIntegrityError::UnsafePath(path))
                 if path == "linked/nested/artifact.bin"
+        ));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_rejects_unlisted_files_added_after_signing() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"listed release payload";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+        std::fs::write(temp.path().join("unlisted.bin"), b"late extra file").unwrap();
+
+        let signing = SigningKey::from_bytes(&[48u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnlistedArtifact(path))
+                if path == "unlisted.bin"
         ));
     }
 
