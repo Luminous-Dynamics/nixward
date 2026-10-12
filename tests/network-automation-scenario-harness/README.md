@@ -12,15 +12,20 @@ python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -
 python3 tests/network-automation-corpus/validate_corpus.py
 cargo fmt --manifest-path tests/network-automation-scenario-harness/Cargo.toml -- --check
 cargo test --locked --manifest-path tests/network-automation-scenario-harness/Cargo.toml --all-targets
-cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > scenario-receipt.json
+NIXWARD_GIT_COMMIT="$(git rev-parse HEAD)" cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > scenario-receipt.json
 ```
 
-The emitted JSON envelope includes BLAKE3 identities for exact raw task corpus,
-task schema, fault fixtures, fixture schema, Cargo.lock and evaluator source
-bytes. It includes the compiler identity captured by the build script and a
-digest over the serialized receipt. No wall-clock timestamp or random value is
-included so repeated execution under the same source, lockfile, inputs and
-toolchain yields byte-identical output.
+The emitted JSON envelope includes domain-separated BLAKE3 identities for exact
+raw task corpus, task schema, fault fixtures, fixture schema, Cargo.toml,
+Cargo.lock and evaluator source bytes. It includes the source revision passed
+through `NIXWARD_GIT_COMMIT`, compiler and Cargo identities captured by the
+build script, target OS/architecture, and a digest over the serialized receipt.
+The serializer recomputes that digest and refuses to emit a receipt if the
+payload no longer matches. No wall-clock timestamp or random value is included,
+so repeated execution under the same source, lockfile, inputs and toolchain
+yields byte-identical output. If `NIXWARD_GIT_COMMIT` is not supplied, the
+receipt says `source-revision-not-injected`; that is honest but less useful
+provenance than a pinned commit.
 
 The evaluator uses an explicit fault-class-to-outcome table that is independent
 of each fixture's expected decision. It fails closed for unknown fault kinds,
