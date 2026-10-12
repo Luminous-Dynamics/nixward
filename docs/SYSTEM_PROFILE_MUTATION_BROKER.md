@@ -298,3 +298,36 @@ Tests are mandatory before deployment. Use barrier/channel synchronization and e
 ## Current implementation status
 
 PR #62 has a pre-release exact-profile recheck and deterministic in-memory race simulations. Those reduce and demonstrate race windows, respectively; they do not implement this broker or native CAS. The simulations and new tests have not been compiled/executed in the current environment. No broker, upstream patch, CAS guarantee, or qualification is claimed by this decision record.
+
+
+## Existing Nixward interlock: implementation and residuals (2026-10-12)
+
+Nixward's current `NixwardTransactionInterlock` in `src/action/executor.rs`
+is a machine-wide coordinator at `/run/nixward-system-transaction.lock`.
+The journaled activation and recovery paths retain the guard while their
+transaction function runs; overlapping Nixward operations fail closed instead
+of waiting. This is a Nixward-peer exclusion boundary, not a shared boundary
+for stock `nixos-rebuild`, auto-upgrade, self-deploy, or arbitrary privileged
+writers.
+
+The lock acquisition path is now hardened in source to:
+
+- reject a symlink or non-directory parent and a group/world-writable parent;
+- open with `O_NOFOLLOW | O_CLOEXEC`;
+- require a regular lock file whose owner matches the trusted parent, whose
+  mode grants owner read/write only, and whose link count is exactly one;
+- compare the opened descriptor's device/inode against the pathname after open;
+- retain the lock file and inode across unlock/reacquisition rather than
+  unlinking it on drop.
+
+Four Unix regression tests were added for symlink rejection, writable-parent
+rejection, group/other lock-file permission rejection, and stable path/inode
+across release/reacquisition. These are source changes, **not passing test
+evidence**; Rust compilation and execution have not been performed here.
+
+This remains deliberately narrower than the preferred two-lock implementation
+above. The current interlock is machine-wide rather than a registry-keyed
+per-profile coordinator; it does not make Nix-native expected-old CAS exist,
+does not cause unmodified frontends to honor the lock, and cannot constrain a
+privileged root actor that bypasses or replaces its files. The trusted runtime
+directory and its ownership/mode are part of the security assumption.
