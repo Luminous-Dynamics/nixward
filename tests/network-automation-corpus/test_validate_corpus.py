@@ -10,11 +10,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from validate_corpus import SchemaDefinitionError, check_schema_supported, validate_corpus  # noqa: E402
+from validate_corpus import (  # noqa: E402
+    SchemaDefinitionError,
+    check_schema_supported,
+    validate_corpus,
+    validate_fault_fixtures,
+)
 
 
 CORPUS_PATH = ROOT / "docs" / "NETWORK_AUTOMATION_TASK_CORPUS_V1.json"
 SCHEMA_PATH = ROOT / "docs" / "NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"
+FIXTURE_PATH = ROOT / "docs" / "NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json"
+FIXTURE_SCHEMA_PATH = ROOT / "docs" / "NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json"
 
 
 def read_json(path: Path):
@@ -27,12 +34,24 @@ class CorpusValidatorTests(unittest.TestCase):
     def setUpClass(cls):
         cls.original_corpus = read_json(CORPUS_PATH)
         cls.schema = read_json(SCHEMA_PATH)
+        cls.original_fixtures = read_json(FIXTURE_PATH)
+        cls.fixture_schema = read_json(FIXTURE_SCHEMA_PATH)
 
     def fresh(self):
         return copy.deepcopy(self.original_corpus)
 
     def errors(self, corpus):
         return validate_corpus(corpus, self.schema)
+
+    def fresh_fixtures(self):
+        return copy.deepcopy(self.original_fixtures)
+
+    def fixture_errors(self, fixtures, corpus=None):
+        return validate_fault_fixtures(
+            fixtures,
+            self.fixture_schema,
+            corpus if corpus is not None else self.fresh(),
+        )
 
     def test_repository_corpus_passes(self):
         self.assertEqual([], self.errors(self.fresh()))
@@ -124,6 +143,47 @@ class CorpusValidatorTests(unittest.TestCase):
         normalized = " ".join(corpus["claim_boundaries"]).lower()
         self.assertIn("not an authorization grant", normalized)
         self.assertIn("not representative", normalized)
+
+    def test_repository_fault_fixtures_pass(self):
+        fixtures = self.fresh_fixtures()
+        self.assertEqual([], self.fixture_errors(fixtures))
+        self.assertEqual(25, len(fixtures["scenarios"]))
+
+    def test_duplicate_scenario_id_is_rejected(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["scenarios"][1]["scenario_id"] = fixtures["scenarios"][0]["scenario_id"]
+        self.assertTrue(any("scenario_id values must be unique" in error for error in self.fixture_errors(fixtures)))
+
+    def test_unknown_task_reference_is_rejected(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["scenarios"][0]["task_id"] = "NOPE-999"
+        self.assertTrue(any("unknown task ID" in error for error in self.fixture_errors(fixtures)))
+
+    def test_missing_task_coverage_is_rejected(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["scenarios"] = [case for case in fixtures["scenarios"] if case["task_id"] != "FIX-001"]
+        self.assertTrue(any("task IDs without any fixture: FIX-001" in error for error in self.fixture_errors(fixtures)))
+
+    def test_production_mutation_must_remain_false(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["scenarios"][0]["production_mutation"] = True
+        self.assertTrue(any("value does not match const" in error for error in self.fixture_errors(fixtures)))
+
+    def test_decision_and_receipt_state_must_agree(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["scenarios"][0]["expected_decision"] = "MarkIndeterminate"
+        self.assertTrue(any("receipt state" in error and "inconsistent" in error for error in self.fixture_errors(fixtures)))
+
+    def test_positive_mutation_oracle_is_virtual_lab_only(self):
+        fixtures = self.fresh_fixtures()
+        case = next(case for case in fixtures["scenarios"] if case["scenario_id"] == "FX-024")
+        case["layer"] = "offline-model"
+        self.assertTrue(any("allowed only in a virtual-lab fixture" in error for error in self.fixture_errors(fixtures)))
+
+    def test_wrong_task_corpus_identity_is_rejected(self):
+        fixtures = self.fresh_fixtures()
+        fixtures["task_corpus_artifact_id"] = "another-corpus"
+        self.assertTrue(any("does not match the loaded task corpus" in error for error in self.fixture_errors(fixtures)))
 
 
 if __name__ == "__main__":
