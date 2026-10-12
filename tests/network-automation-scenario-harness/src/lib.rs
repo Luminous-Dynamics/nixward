@@ -545,6 +545,9 @@ fn execute_scenario(
     let conflicting_write_blocked = if fence_required {
         model.apply(resource, "conflicting-state").is_err()
     } else {
+        model
+            .transition_trace
+            .push("conflicting_retry:not_required".into());
         true
     };
     let modeled_fence_matches_outcome = model.is_fenced(resource) == outcome.resource_fenced;
@@ -602,7 +605,7 @@ fn execute_scenario(
             passed: !fence_required || model.is_fenced(resource),
         },
         CheckResult {
-            check_id: "required_fenced_retry_is_rejected".into(),
+            check_id: "fenced_retry_is_rejected_when_required".into(),
             passed: conflicting_write_blocked,
         },
         CheckResult {
@@ -1019,6 +1022,41 @@ mod tests {
             .expect("result");
         assert!(!row.passed);
         assert!(!row.simulated_mutation_applied);
+    }
+
+    #[test]
+    fn modeled_transition_traces_cover_apply_fence_recovery_and_success() {
+        let (receipt, _) =
+            evaluate_repository(&repository_root().expect("root")).expect("receipt");
+        let trace_for = |scenario_id: &str| {
+            receipt
+                .receipt
+                .results
+                .iter()
+                .find(|result| result.scenario_id == scenario_id)
+                .expect("scenario result")
+                .modeled_transition_trace
+                .clone()
+        };
+
+        let disconnect = trace_for("FX-010");
+        assert!(disconnect.iter().any(|step| step == "modeled_apply:applied-before-recovery"));
+        assert!(disconnect
+            .iter()
+            .any(|step| step == "modeled_recovery:prior_state_restored_and_readback_verified"));
+
+        let crash = trace_for("FX-011");
+        assert!(crash.iter().any(|step| step == "modeled_apply:applied-but-unconfirmed"));
+        assert!(crash.iter().any(|step| step == "resource_fenced:indeterminate"));
+        assert!(crash
+            .iter()
+            .any(|step| step == "conflicting_write_rejected_by_fence"));
+
+        let create = trace_for("FX-024");
+        assert!(create.iter().any(|step| step == "modeled_apply:desired-state"));
+        assert!(create
+            .iter()
+            .any(|step| step == "modeled_poststate_readback:matched"));
     }
 
     #[test]
