@@ -6,6 +6,8 @@ on:
     paths:
       - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.json"
       - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json"
       - "tests/network-automation-corpus/**"
       - ".github/workflows/network-automation-task-corpus.yml"
   workflow_dispatch:
@@ -19,7 +21,7 @@ concurrency:
 
 jobs:
   validate-corpus:
-    name: Validate schema contract and mutation tests
+    name: Validate task and fault fixture contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -40,5 +42,5 @@ jobs:
       - name: Run dependency-free mutation tests
         run: python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -v
 
-      - name: Validate checked-in corpus against its schema
+      - name: Validate task corpus, fault fixtures and cross-references
         run: python3 tests/network-automation-corpus/validate_corpus.py
