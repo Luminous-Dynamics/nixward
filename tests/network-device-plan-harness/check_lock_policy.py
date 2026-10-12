@@ -130,7 +130,7 @@ def main() -> int:
             print(f"ERROR: malformed dependency list for {identity[0]}@{identity[1]}", file=sys.stderr)
             return 1
         for dependency in dependency_specs:
-            match = re.fullmatch(r"(.+?) ([0-9][^ ]*)(?: \\((.+)\\))?", dependency)
+            match = re.fullmatch(r"(.+?) ([0-9][^ ]*)(?: \((.+)\))?", dependency)
             if match is None:
                 dependency_name, dependency_version, dependency_source = dependency, None, None
             else:
