@@ -888,8 +888,9 @@ terminate or supervise a surviving process, protect non-participating profile
 writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
 crash test and the long-lived shared coordinator remain required.
 
-Five source-level regressions cover blocking an activation_started peer
+Eight source-level regressions cover blocking an ActivationStarted peer
 after interlock reacquisition, exempting the current transaction while allowing
-a pre-mutation peer, rejecting writable and multiply-linked journal files, and
-failing closed on a malformed peer journal. They have
-not been compiled or executed. No qualification result is claimed.
+a pre-mutation peer, rejecting writable and multiply-linked journal files,
+rejecting symlinked and filename-mismatched records, failing closed on malformed
+JSON, and exhaustively classifying lifecycle phases. They have not been compiled
+or executed. No qualification result is claimed.
