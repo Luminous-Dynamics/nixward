@@ -285,15 +285,29 @@ fn evaluate_fault(fault_class: &str, layer: &str) -> Result<Outcome, String> {
             simulated_mutation_applied: false,
             postconditions_modelled_verified: false,
         },
-        "unknown-field" | "out-of-domain-model" | "physical-state-ambiguous" => Outcome {
-            decision: if fault_class == "unknown-field" { "BlockMutation" } else { "EscalateHuman" },
+        "unknown-field" => Outcome {
+            decision: "BlockMutation",
             receipt_state: "Unsupported",
             resource_fenced: false,
             simulated_mutation_applied: false,
             postconditions_modelled_verified: false,
         },
-        "management-path-loss" | "route-leak" | "canary-health-regression" => Outcome {
-            decision: if fault_class == "canary-health-regression" { "AbortRollout" } else { "BlockMutation" },
+        "out-of-domain-model" | "physical-state-ambiguous" => Outcome {
+            decision: "EscalateHuman",
+            receipt_state: "Unsupported",
+            resource_fenced: false,
+            simulated_mutation_applied: false,
+            postconditions_modelled_verified: false,
+        },
+        "management-path-loss" | "route-leak" => Outcome {
+            decision: "BlockMutation",
+            receipt_state: "Blocked",
+            resource_fenced: false,
+            simulated_mutation_applied: false,
+            postconditions_modelled_verified: false,
+        },
+        "canary-health-regression" => Outcome {
+            decision: "AbortRollout",
             receipt_state: "Blocked",
             resource_fenced: false,
             simulated_mutation_applied: false,
@@ -396,21 +410,52 @@ fn execute_scenario(
     let outcome = evaluate_fault(&scenario.fault_class, &scenario.layer)?;
     let fence_required = matches!(
         scenario.fault_class.as_str(),
-        "ownership-conflict" | "external-writer-race" | "broker-crash-after-apply" | "rollback-failure"
+        "ownership-conflict"
+            | "external-writer-race"
+            | "broker-crash-after-apply"
+            | "rollback-failure"
     ) || outcome.receipt_state == "Indeterminate";
     let mutation_layer_safe =
         !outcome.simulated_mutation_applied || scenario.layer == "virtual-lab";
     let fence_satisfied = !fence_required || outcome.resource_fenced;
 
     let checks = vec![
-        CheckResult { check_id: "expected_decision_matches".into(), passed: outcome.decision == scenario.expected_decision },
-        CheckResult { check_id: "expected_receipt_state_matches".into(), passed: outcome.receipt_state == scenario.expected_receipt_state },
-        CheckResult { check_id: "production_mutation_forbidden".into(), passed: !scenario.production_mutation },
-        CheckResult { check_id: "positive_mutation_is_virtual_lab_only".into(), passed: mutation_layer_safe },
-        CheckResult { check_id: "required_resource_fence_is_active".into(), passed: fence_satisfied },
-        CheckResult { check_id: "recovered_or_applied_state_has_modelled_postconditions".into(), passed: !matches!(outcome.receipt_state, "Recovered" | "AppliedAndVerified") || outcome.postconditions_modelled_verified },
-        CheckResult { check_id: "expected_pair_is_supported".into(), passed: expected_pair_is_supported(&scenario.expected_decision, &scenario.expected_receipt_state) },
-        CheckResult { check_id: "declared_assertions_non_empty".into(), passed: !scenario.assertions.is_empty() },
+        CheckResult {
+            check_id: "expected_decision_matches".into(),
+            passed: outcome.decision == scenario.expected_decision,
+        },
+        CheckResult {
+            check_id: "expected_receipt_state_matches".into(),
+            passed: outcome.receipt_state == scenario.expected_receipt_state,
+        },
+        CheckResult {
+            check_id: "production_mutation_forbidden".into(),
+            passed: !scenario.production_mutation,
+        },
+        CheckResult {
+            check_id: "positive_mutation_is_virtual_lab_only".into(),
+            passed: mutation_layer_safe,
+        },
+        CheckResult {
+            check_id: "required_resource_fence_is_active".into(),
+            passed: fence_satisfied,
+        },
+        CheckResult {
+            check_id: "recovered_or_applied_state_has_modelled_postconditions".into(),
+            passed: !matches!(outcome.receipt_state, "Recovered" | "AppliedAndVerified")
+                || outcome.postconditions_modelled_verified,
+        },
+        CheckResult {
+            check_id: "expected_pair_is_supported".into(),
+            passed: expected_pair_is_supported(
+                &scenario.expected_decision,
+                &scenario.expected_receipt_state,
+            ),
+        },
+        CheckResult {
+            check_id: "declared_assertions_non_empty".into(),
+            passed: !scenario.assertions.is_empty(),
+        },
     ];
     let passed = checks.iter().all(|check| check.passed);
 
@@ -459,7 +504,9 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
     if fault_corpus.common_invariants.is_empty() {
         return Err("fault fixture common_invariants must not be empty".into());
     }
-    if task_schema.properties.get("tasks").is_none() || fault_schema.properties.get("scenarios").is_none() {
+    if task_schema.properties.get("tasks").is_none()
+        || fault_schema.properties.get("scenarios").is_none()
+    {
         return Err("schema is missing its required top-level collection property".into());
     }
 
@@ -559,7 +606,8 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
 }
 
 pub fn serialize_envelope(envelope: &ReceiptEnvelope) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(envelope).map_err(|error| format!("cannot serialize receipt envelope: {error}"))
+    serde_json::to_vec(envelope)
+        .map_err(|error| format!("cannot serialize receipt envelope: {error}"))
 }
 
 pub fn evaluate_repository(root: &Path) -> Result<(ReceiptEnvelope, Vec<u8>), String> {
