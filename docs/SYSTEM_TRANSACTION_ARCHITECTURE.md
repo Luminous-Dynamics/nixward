@@ -194,12 +194,22 @@ share/nixward/src/action/ai_proposal_binding.rs. The release signing process mus
 bind source_revision to the reviewed source revision under its own release policy;
 the field is a signed release-root assertion, not independent proof of a build.
 
+**Important build-provenance limit:** this verifies that the trusted release signer
+signed both the current executable bytes and the matching resolver-source artifact
+as members of the same release. It does not independently prove that those source
+bytes were compiled to produce that executable. A stronger source-to-binary claim
+requires a controlled/reproducible build with independent rebuild comparison or
+a separately trusted build-provenance verifier whose claim binds the exact source
+revision and executable digest. The release signer must not be treated as proof of
+that relationship unless its build process actually establishes it.
+
 This path uses the existing offline signing root; it adds no CI OIDC permission and
 does not trust a public key merely because the manifest embeds it. It provides
 software-level evidence under the assumption that the running OS/kernel and
 process memory are trustworthy. It is **not** TPM/secure-boot measured runtime
-attestation, proof against a compromised kernel, or proof that the model's claims
-are true. Those remain separate assurance claims.
+attestation, proof against a compromised kernel, proof of reproducible source-to-
+binary linkage, or proof that the model's claims are true. Those remain separate
+assurance claims.
 
 ### 4. Authorize
 
