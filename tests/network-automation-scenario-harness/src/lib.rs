@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 const TASK_SCHEMA_ID: &str = "urn:luminous-dynamics:nixward:network-automation-task-corpus:v1";
 const FAULT_SCHEMA_ID: &str = "urn:luminous-dynamics:nixward:network-automation-fault-fixtures:v1";
+const TASK_ARTIFACT_ID: &str = "nixward.network-automation-task-corpus.v1";
+const FAULT_ARTIFACT_ID: &str = "nixward.network-automation-fault-fixtures.v1";
 const ARTIFACT_DOMAIN: &[u8] = b"nixward:network-automation-scenario-harness:artifact:v1\0";
 const RECEIPT_DOMAIN: &[u8] = b"nixward:network-automation-scenario-harness:receipt:v1\0";
 
@@ -478,6 +480,48 @@ fn execute_scenario(
     })
 }
 
+#[derive(Debug, Default)]
+struct SimulatedResourceFence {
+    fenced_resources: BTreeSet<String>,
+    write_counts: BTreeMap<String, u64>,
+}
+
+impl SimulatedResourceFence {
+    fn record_write(&mut self, resource: &str) -> Result<u64, String> {
+        if self.fenced_resources.contains(resource) {
+            return Err(format!("resource {resource} is fenced pending terminal evidence"));
+        }
+        let count = self.write_counts.entry(resource.to_owned()).or_insert(0);
+        *count += 1;
+        Ok(*count)
+    }
+
+    fn mark_indeterminate(&mut self, resource: &str) {
+        self.fenced_resources.insert(resource.to_owned());
+    }
+
+    fn is_fenced(&self, resource: &str) -> bool {
+        self.fenced_resources.contains(resource)
+    }
+
+    fn write_count(&self, resource: &str) -> u64 {
+        self.write_counts.get(resource).copied().unwrap_or(0)
+    }
+
+    fn clear_after_verified_recovery(
+        &mut self,
+        resource: &str,
+        recovery_receipt_blake3: Option<&str>,
+    ) -> Result<(), String> {
+        let digest = recovery_receipt_blake3.unwrap_or_default();
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("fence removal requires a verified 32-byte receipt digest".into());
+        }
+        self.fenced_resources.remove(resource);
+        Ok(())
+    }
+}
+
 pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> {
     let task_schema = check_schema_identity(
         &input.task_schema_bytes,
@@ -492,11 +536,17 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
     let task_corpus: TaskCorpus = parse_json(&input.task_corpus_bytes, "task corpus")?;
     let fault_corpus: FaultCorpus = parse_json(&input.fault_fixture_bytes, "fault fixture corpus")?;
 
-    if task_corpus.schema_version != 1 || task_corpus.status != "qualification-design-only" {
-        return Err("task corpus version/status is unsupported".into());
+    if task_corpus.schema_version != 1
+        || task_corpus.status != "qualification-design-only"
+        || task_corpus.artifact_id != TASK_ARTIFACT_ID
+    {
+        return Err("task corpus identity/version/status is unsupported".into());
     }
-    if fault_corpus.schema_version != 1 || fault_corpus.status != "qualification-design-only" {
-        return Err("fault fixture version/status is unsupported".into());
+    if fault_corpus.schema_version != 1
+        || fault_corpus.status != "qualification-design-only"
+        || fault_corpus.artifact_id != FAULT_ARTIFACT_ID
+    {
+        return Err("fault fixture identity/version/status is unsupported".into());
     }
     if fault_corpus.task_corpus_artifact_id != task_corpus.artifact_id {
         return Err("fault fixtures reference a different task corpus identity".into());
@@ -760,6 +810,34 @@ mod tests {
         scenarios.retain(|case| case["task_id"] != "FIX-001");
         replace_fixture_value(&mut input, &value);
         assert!(build_receipt(&input).unwrap_err().contains("tasks without fixtures: FIX-001"));
+    }
+
+    #[test]
+    fn indeterminate_transaction_fences_follow_up_writes() {
+        let mut ledger = SimulatedResourceFence::default();
+        let resource = "lab:firewall-management";
+        assert_eq!(ledger.record_write(resource).expect("first simulated write"), 1);
+        ledger.mark_indeterminate(resource);
+
+        assert!(ledger.is_fenced(resource));
+        assert!(ledger.record_write(resource).is_err());
+        assert_eq!(ledger.write_count(resource), 1);
+        assert_eq!(ledger.record_write("lab:unrelated-interface").expect("unrelated scope"), 1);
+    }
+
+    #[test]
+    fn only_verified_recovery_receipt_can_clear_resource_fence() {
+        let mut ledger = SimulatedResourceFence::default();
+        let resource = "lab:default-route";
+        ledger.mark_indeterminate(resource);
+
+        assert!(ledger.clear_after_verified_recovery(resource, None).is_err());
+        assert!(ledger.is_fenced(resource));
+        assert!(ledger
+            .clear_after_verified_recovery(resource, Some(&"a".repeat(64)))
+            .is_ok());
+        assert!(!ledger.is_fenced(resource));
+        assert_eq!(ledger.record_write(resource).expect("write after verified recovery"), 1);
     }
 
     #[test]
