@@ -66,50 +66,17 @@
         # SYMTHAEA_NIXOS_MANAGEMENT_IMPROVEMENT_PLAN_2026-07-26.md
         # "Remaining work plan" item 1.
         monorepoRoot = ../../../..;
-        excludedDirNames = [ "target" "node_modules" ".git" ".jj" "dist" "result" ];
-        # The build source is intentionally broad because Cargo workspace
-        # manifests resolve optional cross-workspace dependencies. Keep local
-        # credential stores and environment files out of the Nix store copy.
-        # This is defense in depth, not permission to keep plaintext secrets
-        # in the workspace. Keep safe, checked-in environment templates.
-        sensitiveDirNames = [ ".aws" ".azure" ".docker" ".gnupg" ".kube" ".ssh" ];
-        sensitiveFileNames = [
-          ".env"
-          ".netrc"
-          ".npmrc"
-          ".pypirc"
-          "application_default_credentials.json"
-          "credentials.json"
-          "service-account.json"
-        ];
-        privateKeyPrefixes = [ "id_dsa" "id_ecdsa" "id_ed25519" "id_rsa" ];
-        sensitiveFileSuffixes = [ ".key" ".p12" ".pfx" ];
-        safeEnvTemplateNames = [ ".env.defaults" ".env.example" ".env.sample" ".env.template" ];
+        # The build source remains broad enough for Cargo workspace resolution,
+        # but local credential material must not enter the Nix store closure.
+        # This is defense in depth, not a substitute for secret management.
+        sourceFilter = root: import ./nix/source-filter.nix {
+          lib = pkgs.lib;
+          inherit root;
+        };
         monorepoSrc = pkgs.lib.cleanSourceWith {
           name = "luminous-dynamics-nixward-src";
           src = monorepoRoot;
-          filter = path: type:
-            let
-              relPath = pkgs.lib.removePrefix (toString monorepoRoot) (toString path);
-              baseName = pkgs.lib.toLower (baseNameOf path);
-              excludedBuildOrVcsNoise =
-                builtins.elem (baseNameOf path) excludedDirNames
-                || builtins.any (d: pkgs.lib.hasInfix "/${d}/" relPath) excludedDirNames;
-              # Match sensitive names independent of file type. A credential
-              # symlink must not bypass a filter intended for regular files.
-              excludedCredentialDirectory = builtins.elem baseName sensitiveDirNames;
-              isEnvFile =
-                baseName == ".env" || pkgs.lib.hasPrefix ".env." baseName;
-              excludedCredentialPath =
-                builtins.elem baseName sensitiveFileNames
-                || (
-                  builtins.any (prefix: pkgs.lib.hasPrefix prefix baseName) privateKeyPrefixes
-                  && !(pkgs.lib.hasSuffix ".pub" baseName)
-                )
-                || builtins.any (suffix: pkgs.lib.hasSuffix suffix baseName) sensitiveFileSuffixes
-                || (isEnvFile && !(builtins.elem baseName safeEnvTemplateNames));
-            in
-            !(excludedBuildOrVcsNoise || excludedCredentialDirectory || excludedCredentialPath);
+          filter = sourceFilter monorepoRoot;
         };
 
         # Base package derivation
@@ -171,6 +138,10 @@
         checks.network-runtime-lab = import ./tests/network-runtime-lab/network-runtime-lab.nix {
           inherit pkgs;
           lib = pkgs.lib;
+        };
+
+        checks.nix-source-filter = import ./tests/nix-source-filter/check.nix {
+          inherit pkgs sourceFilter;
         };
 
         packages = {
