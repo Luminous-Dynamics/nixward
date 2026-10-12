@@ -1,0 +1,86 @@
+name: Network device planner M0
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/network_device_plan.rs"
+      - "tests/network-device-plan-harness/**"
+      - ".github/workflows/network-device-plan-m0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-device-plan-m0-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pure-planner:
+    name: Format and unit-test pure planner (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.96.0 matches the monorepo's pinned compiler; 1.99.0 checks current stable.
+        toolchain: ["1.96.0", "1.99.0"]
+    steps:
+      - name: Checkout exact triggering revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt
+
+      - name: Record compiler identity
+        run: |
+          rustc --version --verbose
+          cargo --version
+
+      - name: Check formatting outside the repository config tree
+        working-directory: ${{ runner.temp }}
+        run: cargo fmt --manifest-path "${GITHUB_WORKSPACE}/tests/network-device-plan-harness/Cargo.toml" -- --check
+
+      - name: Test known supply-chain deny rules
+        working-directory: ${{ runner.temp }}
+        run: python3 -m unittest discover -s "${GITHUB_WORKSPACE}/tests/network-device-plan-harness" -p 'test_lock_policy.py'
+
+      - name: Enforce known supply-chain deny rules against the committed lock
+        working-directory: ${{ runner.temp }}
+        run: python3 "${GITHUB_WORKSPACE}/tests/network-device-plan-harness/check_lock_policy.py" "${GITHUB_WORKSPACE}/tests/network-device-plan-harness/Cargo.lock"
+
+      - name: Run exact-source unit tests with locked dependencies
+        working-directory: ${{ runner.temp }}
+        run: cargo test --locked --manifest-path "${GITHUB_WORKSPACE}/tests/network-device-plan-harness/Cargo.toml" --all-targets --verbose
+
+  dependency-audit:
+    name: Audit the locked planner dependency graph
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout lockfile source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.99.0"
+
+      - name: Install pinned RustSec dependency auditor
+        working-directory: ${{ runner.temp }}
+        run: cargo install --locked cargo-audit --version 0.22.2
+
+      # Run outside the checkout and pass the lockfile explicitly. cargo-audit
+      # documents that this avoids generating/updating a lockfile or loading
+      # repository-local Cargo configuration for an untrusted project.
+      - name: Audit locked dependencies
+        working-directory: ${{ runner.temp }}
+        run: cargo audit --file "${{ github.workspace }}/tests/network-device-plan-harness/Cargo.lock"
