@@ -206,7 +206,10 @@ the field is a signed release-root assertion, not independent proof of a build.
 The offline `nixward-release-sign` utility also rejects a signing-seed path
 inside the signed release root or supplied through a symlink, denies group/other
 permission bits on the seed file, and rejects a seed sharing a device/inode with
-any release-tree file (including an external hard link). It canonicalizes output
+any release-tree file (including an external hard link). Seed reads now use a
+no-follow open and validate the opened file's metadata before using its bytes,
+which reduces leaf-path substitution risk; signing directories still require
+normal access controls against concurrent changes to parent directories. It canonicalizes output
 parent directories (including aliased parents) and rejects output paths inside
 the signed tree. It only creates a new manifest file: existing output paths are
 rejected, and `create_new` prevents overwriting an existing path between the
