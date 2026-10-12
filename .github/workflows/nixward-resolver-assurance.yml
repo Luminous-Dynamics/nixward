@@ -92,6 +92,42 @@ jobs:
             echo "- Test target: nixward library module tests"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Repair and record pinned workspace manifest gap
+        working-directory: symthaea
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ORIGINAL_MANIFEST_SHA256="$(sha256sum Cargo.toml | cut -d ' ' -f 1)"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("Cargo.toml")
+          member = Path("crates/core/symthaea-observation-attestation")
+          text = manifest.read_text()
+          marker = "exclude = [\\n"
+          entry = '    "crates/core/symthaea-observation-attestation", # no Cargo.toml at pinned revision\\n'
+
+          # Fail closed if the pinned workspace changes unexpectedly. This
+          # excludes only the malformed glob match; it doesn't fabricate a crate
+          # or alter Nixward's source/dependency declarations.
+          if not member.is_dir() or (member / "Cargo.toml").exists() or not (member / "src/lib.rs").is_file():
+              raise SystemExit("pinned workspace no longer matches the reviewed manifest-gap exception")
+          if entry in text:
+              raise SystemExit("workspace exclusion unexpectedly already present")
+          if text.count(marker) != 1:
+              raise SystemExit("could not identify one workspace exclude list")
+          manifest.write_text(text.replace(marker, marker + entry, 1))
+          PY
+
+          REPAIRED_MANIFEST_SHA256="$(sha256sum Cargo.toml | cut -d ' ' -f 1)"
+          {
+            echo "- Pinned Symthaea workspace Cargo.toml SHA-256: ${ORIGINAL_MANIFEST_SHA256}"
+            echo "- Ephemeral workspace Cargo.toml SHA-256 after explicit exclusion: ${REPAIRED_MANIFEST_SHA256}"
+            echo "- Temporary exclusion: crates/core/symthaea-observation-attestation"
+            echo "- Reason: pinned tree contains src/lib.rs but no Cargo.toml; the `crates/core/*` member glob otherwise makes cargo metadata fail."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Resolve and freeze the overlaid workspace dependency graph
         working-directory: symthaea
         shell: bash
