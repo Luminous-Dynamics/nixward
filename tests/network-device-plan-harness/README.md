@@ -20,7 +20,7 @@ change the dependency graph. Rust tools and Python policy checks run from the
 runner's temporary directory with explicit absolute paths, outside the checkout's
 `.cargo` configuration tree. The workflow runs the exact same source on the
 monorepo's pinned Rust 1.96.0 baseline and Rust 1.99.0, and records compiler
-identities. The workflow also runs 18 standard-library-only regression tests for its dependency-free
+identities. The workflow also runs 24 standard-library-only regression tests for its dependency-free
 policy guard. Its name-level denylist tracks the published RustSec malicious catalog
 as reviewed on 2026-10-12; separate exact-version rules cover affected releases.
 The checker also rejects Git/alternate-registry sources, source-less packages
