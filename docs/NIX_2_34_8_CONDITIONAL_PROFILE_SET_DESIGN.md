@@ -203,6 +203,111 @@ before activation cannot by itself meet steps 4–5. An unrelated activation loc
 is not a substitute for a profile lock. Nor is a Nixward-only lock sufficient
 unless every in-scope external writer is required to honor it.
 
+### Preferred lease protocol: keep coordinator and native Nix locks separate
+
+The inspected Nix 2.35.2 implementation rules out a tempting shortcut: simply
+open and retain the existing `<profile>.lock` descriptor across activation.
+Nix's `PathLocks` opens that pathname with `O_CLOEXEC`, takes an exclusive
+`flock`, checks the opened inode for the stale-file marker, and retries if
+the lock pathname was unlinked. The profile-lock helper enables deletion on
+unlock; unlock may unlink the path and mark the old descriptor stale. This
+behavior is deliberate concurrency handling, not a stable cross-process lease
+ABI ([`pathlocks.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/unix/pathlocks.cc),
+[`profiles.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/profiles.cc)).
+A second independent open of the same flock inode can also block on the lease
+holder, so an unmodified Nix subprocess cannot safely be assumed to “borrow”
+the held lock. `O_CLOEXEC` alone is not the core problem; inode replacement,
+Nix's stale-lock protocol, independent-open locking, and lock lifetime all
+need an explicit API contract.
+
+The preferred implementation to evaluate first is a **broker-owned,
+two-lock protocol**:
+
+1. **Coordinator lease.** A single privileged system-deployment transaction
+   owner takes an exclusive lock on a separate, stable per-managed-profile
+   coordinator file. The key is derived from a trusted registry of managed
+   profile identities and aliases—not an arbitrary caller-provided string.
+   Store the lock under a root-owned runtime directory; open relative to a
+   trusted directory descriptor with no-follow semantics, verify the opened
+   file is a regular file with expected owner/mode, and do not unlink or
+   replace its pathname while the supervisor can be alive. The kernel releases
+   the flock when the final owning descriptor closes; the persistent pathname
+   is not a PID-based “stale lock” and must not be deleted as cleanup.
+2. **Expected-old CAS.** While retaining the coordinator lease, the owner
+   performs a Nix-native conditional profile update. That Nix operation takes
+   Nix's ordinary native profile lock for the short mutation critical section,
+   resolves and compares the current profile closure against the exact
+   expected-old closure under that lock, and either refuses without generation
+   mutation or creates/selects the candidate generation and switches the
+   profile before releasing the native lock.
+3. **Activation under the same lease.** The transaction owner keeps the
+   coordinator lock through invocation of the exact candidate's
+   `switch-to-configuration`, activation-result collection, profile/runtime
+   read-back, and durable journal disposition. Another managed system-profile
+   transaction must acquire the same coordinator lock *before* it re-observes
+   its expected-old state; it cannot publish a competing profile between A's
+   publication and A's read-back.
+4. **One lock order.** All managed writers take the coordinator lease first,
+   then the native Nix mutation lock. No path may acquire the native profile
+   lock and then wait for the coordinator lease. The transaction owner must
+   call a private lease-authorized mutation API/broker endpoint rather than
+   recursively reacquiring its own coordinator lock. A command-line child that
+   independently tries to take the same lease would deadlock; bypassing the
+   lease without authenticating the owner would be equally incorrect.
+
+The coordinator serializes only operations that participate in this protocol.
+Every in-scope writer must be migrated: Nixward, `nixos-rebuild-ng`, any
+supported legacy `nixos-rebuild`, self-deploy, auto-upgrade, and configured
+third-party deployment services that can select the same managed system
+profile. An unintegrated writer is not “covered because it usually uses Nix”;
+it is an explicit guarantee gap. Direct root mutation remains outside the
+threat model, as stated below. Keep the target profile identity and supported
+writer inventory as rollout evidence.
+
+### Lease-owner lifetime and crash semantics
+
+The lock-holder must outlive the client request and must not release its lease
+while the activation it authorized can still be running. Prefer one supervised
+transaction service that owns the coordinator descriptor, starts/observes the
+exact activation child, and retains ownership until activation is terminal and
+post-state read-back completes. If activation is launched as a separate
+systemd transient service that may outlive the caller, the design must prove
+that the lease owner remains alive for that unit's complete lifetime or that
+owner failure reliably terminates and confirms termination of that activation
+before the lease can be released. A lock released by a crashed CLI while
+activation continues is a failing interleaving, not successful crash recovery.
+
+After owner crash, signal loss, or an error after profile publication, do not
+infer rollback or “not activated.” Mark the transaction outcome indeterminate;
+establish that the prior activation is no longer running, collect fresh
+runtime/profile and generation evidence, then admit recovery only against the
+original transaction's exact allowed predecessor/candidate identities. Lock
+release provides mutual exclusion, not recovery truth.
+
+### Acceptance oracles for the two-lock protocol
+
+- Instrument acquisition and release of the coordinator lock and native Nix
+  lock separately. Assert lock order, descriptor/inode identity, lease lifetime,
+  and the exact transaction owner for every phase.
+- In forced A/B interleaving, pause A after publication and before activation.
+  B must be blocked before its final expected-old observation/publication until
+  A's activation and read-back finish; B then re-observes the new state and
+  either proceeds or refuses.
+- Kill or disconnect the initiating client at each boundary: before CAS, after
+  profile publication, before activation exec, during activation, after
+  activation exit, and during read-back. Verify the supervisor continues or
+  stops activation before lease release and leaves an evidence-based recovery
+  disposition.
+- Exercise lock-file unlink/recreate, alias-to-profile mapping, symlink swap,
+  wrong owner/mode, open failure, cancellation, and service restart. No test
+  may use the live host system profile.
+- Assert selected profile closure, runtime closure, activation order, generation
+  links and GC-root inventory; exit codes alone are insufficient.
+
+This is a concrete protocol proposal, not implemented behavior. The native CAS
+patch, coordinator service, frontend migrations, forced-interleaving suite and
+supervisor crash tests remain unimplemented and unexecuted.
+ 
 ### Integration paths that must participate
 
 The source audit found NixOS-managed callers as well as Nix itself. At minimum,
