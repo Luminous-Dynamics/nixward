@@ -18,10 +18,10 @@ Direct dependencies are exact-pinned and the harness has a committed
 `Cargo.lock`. CI uses `--locked`, so dependency resolution must not silently
 change the dependency graph. The workflow runs the exact same source on the
 monorepo's pinned Rust 1.96.0 baseline and Rust 1.99.0, and records compiler
-identities. The workflow also runs dependency-free policy checks for malicious crate names
-and explicitly reported compromised releases, including `arrayref 0.3.10`,
+identities. The workflow also runs 11 standard-library-only regression tests for its dependency-free
+policy guard, checking all listed malicious crate names/releases and verifying `arrayref 0.3.10`,
 `append-only-vec 0.1.9`, `internment 0.8.7`, and the affected Greentic release.
-The version policy blocks `arrayref >=0.3.10` until a maintainer reviews it.
+The version policy blocks `arrayref >=0.3.10` until a maintainer reviews it. The local denylist is supplemental to `cargo-audit`, not a replacement for current advisory-database checks.
 A separate job runs pinned `cargo-audit 0.22.2` against the lock file from
 outside the checkout, without asking Cargo to resolve or rewrite the project's
 dependencies. These are supplemental guards, not a substitute for fresh
