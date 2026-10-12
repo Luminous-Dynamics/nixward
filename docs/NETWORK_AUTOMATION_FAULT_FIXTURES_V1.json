@@ -1,0 +1,350 @@
+{
+  "schema_version": 1,
+  "artifact_id": "nixward.network-automation-fault-fixtures.v1",
+  "status": "qualification-design-only",
+  "created_on": "2026-10-13",
+  "purpose": "Seed deterministic failure cases for future planner, observer, simulator and broker acceptance tests. Descriptions define expected assertions; they do not execute a network change.",
+  "claim_boundaries": [
+    "Every fixture is non-production and production_mutation is false.",
+    "A fixture pass proves only the stated assertion at the declared test layer.",
+    "No fixture result proves fleet-wide safety or production readiness.",
+    "An uncertain apply or recovery outcome is Indeterminate, not success.",
+    "A model or simulator result cannot certify live observation completeness."
+  ],
+  "common_invariants": [
+    "Exact target and scope remain bound to the receipt.",
+    "No AI recommendation or confidence value increases authority.",
+    "Missing, stale, inconsistent or unsupported evidence never becomes a pass.",
+    "Unexpected or ambiguous side effects block further conflicting mutations.",
+    "Production network mutation is forbidden in this fixture corpus."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "FX-001",
+      "task_id": "OBS-001",
+      "layer": "observer-fixture",
+      "fault_class": "missing-terminal",
+      "setup": "Provide a zero-object link dump with no family-appropriate successful terminal marker.",
+      "expected_decision": "Incomplete",
+      "expected_receipt_state": "Incomplete",
+      "assertions": [
+        "Zero resources are not accepted as authoritative empty inventory.",
+        "Completeness is false for the affected family.",
+        "No mutation is proposed from inferred absence."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-002",
+      "task_id": "OBS-001",
+      "layer": "observer-fixture",
+      "fault_class": "interrupted-dump",
+      "setup": "Set NLM_F_DUMP_INTR on an intermediate message and separately on a terminal message.",
+      "expected_decision": "Incomplete",
+      "expected_receipt_state": "Incomplete",
+      "assertions": [
+        "Either interruption invalidates the attempt as complete.",
+        "Only a bounded retry may produce a new accepted attempt.",
+        "Exhausted retries preserve an Incomplete outcome."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-003",
+      "task_id": "OBS-001",
+      "layer": "observer-fixture",
+      "fault_class": "receive-loss",
+      "setup": "Inject ENOBUFS or a receive-loss marker during a multipart dump.",
+      "expected_decision": "Incomplete",
+      "expected_receipt_state": "Incomplete",
+      "assertions": [
+        "The partial sample cannot be accepted as complete.",
+        "Loss is retained in the failure evidence.",
+        "No partial-success shortcut is allowed."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-004",
+      "task_id": "OBS-001",
+      "layer": "observer-fixture",
+      "fault_class": "target-substitution",
+      "setup": "Make the envelope target or namespace differ from the caller's requested target.",
+      "expected_decision": "Reject",
+      "expected_receipt_state": "Invalid",
+      "assertions": [
+        "The verifier rejects the envelope.",
+        "The receipt identifies target/scope mismatch.",
+        "No resource data from the substituted target is accepted."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-005",
+      "task_id": "PLAN-001",
+      "layer": "planner-unit",
+      "fault_class": "plan-tampering",
+      "setup": "Change one action, target, resource fingerprint or impact field after deterministic plan construction.",
+      "expected_decision": "Reject",
+      "expected_receipt_state": "Invalid",
+      "assertions": [
+        "Independent recomputation does not match the candidate plan.",
+        "The altered candidate is rejected before authorization or execution."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-006",
+      "task_id": "OWN-001",
+      "layer": "planner-unit",
+      "fault_class": "ownership-conflict",
+      "setup": "The observed effective manager and declared configuration authority conflict while the resource fingerprint matches.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "Matching state does not erase an ownership conflict.",
+        "No controller is silently selected.",
+        "An explicit ownership-adoption transaction is required."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-007",
+      "task_id": "DRIFT-001",
+      "layer": "observer-fixture",
+      "fault_class": "unknown-field",
+      "setup": "Supply an unknown field whose semantics may affect the policy predicate.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Unsupported",
+      "assertions": [
+        "The unknown decision-critical field is not treated as compliant.",
+        "The limitation appears in the result.",
+        "No automatic remediation is proposed."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-008",
+      "task_id": "ROUTE-001",
+      "layer": "offline-model",
+      "fault_class": "management-path-loss",
+      "setup": "Model the proposed default-route change with no independently verified management return path.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "The plan is blocked unless the recovery path is proven.",
+        "A model success over unrelated flows cannot override this invariant."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-009",
+      "task_id": "ROUTE-001",
+      "layer": "virtual-lab",
+      "fault_class": "external-writer-race",
+      "setup": "After precondition capture but before simulated apply, modify the same route through a second writer.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Conflict",
+      "assertions": [
+        "The writer conflict is detected or the operation remains blocked by missing writer coordination.",
+        "Stale pre-state is not reused.",
+        "No success receipt is emitted."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-010",
+      "task_id": "FW-001",
+      "layer": "virtual-lab",
+      "fault_class": "management-disconnect",
+      "setup": "Drop the in-band management session during a simulated firewall change while an independent recovery channel is available.",
+      "expected_decision": "RequireApproval",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "A session loss cannot count as confirmation.",
+        "The independent supervisor retains recovery authority.",
+        "Recovery result requires independent read-back."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-011",
+      "task_id": "FW-001",
+      "layer": "transaction-simulator",
+      "fault_class": "broker-crash-after-apply",
+      "setup": "Crash the simulated broker after backend apply but before the terminal receipt is durably committed.",
+      "expected_decision": "MarkIndeterminate",
+      "expected_receipt_state": "Indeterminate",
+      "assertions": [
+        "The restart reconciles durable journal and fresh target state.",
+        "Conflicting writes remain fenced until outcome resolves.",
+        "The operation is not counted as success."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-012",
+      "task_id": "FW-001",
+      "layer": "transaction-simulator",
+      "fault_class": "rollback-failure",
+      "setup": "Force both the intended postcondition and the pre-tested recovery action to fail independently.",
+      "expected_decision": "MarkIndeterminate",
+      "expected_receipt_state": "Indeterminate",
+      "assertions": [
+        "The journal records unresolved outcome and evidence.",
+        "Further conflicting writes are blocked.",
+        "No success or clean-recovery claim is emitted."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-013",
+      "task_id": "FW-001",
+      "layer": "approval-unit",
+      "fault_class": "approval-replay",
+      "setup": "Submit a previously consumed approval nonce for the same plan again.",
+      "expected_decision": "Reject",
+      "expected_receipt_state": "Invalid",
+      "assertions": [
+        "The one-use nonce is rejected on replay.",
+        "The original approval record remains auditable.",
+        "The rejected attempt cannot authorize a second execution."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-014",
+      "task_id": "FW-001",
+      "layer": "approval-unit",
+      "fault_class": "target-substitution",
+      "setup": "Use a valid signed approval for a different target set or altered plan digest.",
+      "expected_decision": "Reject",
+      "expected_receipt_state": "Invalid",
+      "assertions": [
+        "The signed transcript does not authorize the substituted target or plan.",
+        "The broker independently checks the exact binding."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-015",
+      "task_id": "ROLL-001",
+      "layer": "virtual-lab",
+      "fault_class": "canary-health-regression",
+      "setup": "After canary rollout begins in simulation, breach a pinned forwarding or service-health threshold.",
+      "expected_decision": "AbortRollout",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "No later fleet target is progressed.",
+        "Only the canary's tested recovery protocol may run.",
+        "Recovery remains unverified until independent checks pass."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-016",
+      "task_id": "SEC-001",
+      "layer": "offline-policy",
+      "fault_class": "critical-asset-misclassification",
+      "setup": "Contradict the endpoint's critical-asset classification across two required evidence sources.",
+      "expected_decision": "EscalateHuman",
+      "expected_receipt_state": "Conflict",
+      "assertions": [
+        "Containment is not applied to an ambiguous critical asset.",
+        "The contradictory source evidence is preserved.",
+        "A named human authority is required to resolve the classification."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-017",
+      "task_id": "OBS-002",
+      "layer": "evidence-fixture",
+      "fault_class": "secret-leak",
+      "setup": "Insert a synthetic credential canary into collector output and exercise the configured redaction/persistence path.",
+      "expected_decision": "Reject",
+      "expected_receipt_state": "Invalid",
+      "assertions": [
+        "The canary is not present in persisted evidence or logs.",
+        "Redaction cannot silently remove required semantic fields and still declare completeness.",
+        "Failure cleanup is verified."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-018",
+      "task_id": "CAP-001",
+      "layer": "model-fixture",
+      "fault_class": "out-of-domain-model",
+      "setup": "Evaluate a capacity estimate for a device profile or sampling regime outside the model's declared domain.",
+      "expected_decision": "EscalateHuman",
+      "expected_receipt_state": "Unsupported",
+      "assertions": [
+        "The forecast reports unsupported scope or uncertainty.",
+        "The recommendation cannot trigger mutation.",
+        "Missing samples are not imputed as zero without an explicit model."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-019",
+      "task_id": "BGP-001",
+      "layer": "offline-model",
+      "fault_class": "route-leak",
+      "setup": "Use a policy fixture that permits a forbidden prefix across an import/export boundary.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "The policy invariant fails the plan gate.",
+        "Affected prefix/peer scope is explicit.",
+        "No rollout is authorized by a high model confidence score."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-020",
+      "task_id": "INC-001",
+      "layer": "incident-replay",
+      "fault_class": "contradictory-timeline",
+      "setup": "Provide source timelines with an unbounded clock discontinuity and competing causal hypotheses.",
+      "expected_decision": "EscalateHuman",
+      "expected_receipt_state": "Conflict",
+      "assertions": [
+        "The system does not declare a single root cause as proven.",
+        "Evidence gaps and hypotheses remain explicit.",
+        "Only a human-led, separately authorized decision may proceed."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-021",
+      "task_id": "PHYS-001",
+      "layer": "human-review",
+      "fault_class": "physical-state-ambiguous",
+      "setup": "Show stale optic telemetry that conflicts with an intermittent-link symptom and unverified port mapping.",
+      "expected_decision": "EscalateHuman",
+      "expected_receipt_state": "Unsupported",
+      "assertions": [
+        "Telemetry is not presented as proof of a physical fault.",
+        "No simulated command is described as a physical repair.",
+        "Human inspection is requested before recovery is claimed."
+      ],
+      "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-022",
+      "task_id": "OBS-003",
+      "layer": "telemetry-replay",
+      "fault_class": "event-gap",
+      "setup": "Drop a sequence range from a telemetry source while deduplication/suppression is enabled.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Incomplete",
+      "assertions": [
+        "The gap is represented explicitly.",
+        "Suppression is disabled or constrained for the affected source.",
+        "Original event evidence remains linkable."
+      ],
+      "production_mutation": false
+    }
+  ]
+}
