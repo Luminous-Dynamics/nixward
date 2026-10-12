@@ -181,11 +181,12 @@ SystemTransaction::record_validation_with_runtime_verified_ai_proposal.
 This reuses Nixward's existing offline Ed25519 SignedReleaseManifest verifier:
 the caller supplies the release manifest and a trusted release public key obtained
 from an independently provisioned trust root. Verification checks the signature,
-the declared release tree's artifact bytes/sizes/executable modes, that no
-component of a manifest-listed artifact path is a symbolic link, that the current
-process's Linux /proc/self/exe bytes match the manifest-listed executable, and
-that a manifest-listed resolver source file matches the source digest in the
-resolution receipt. The resulting opaque in-memory runtime binding is committed
+the declared release tree's exact file set and artifact bytes/sizes/executable
+modes, rejects unlisted files and symbolic links anywhere in the tree, checks that
+no component of a manifest-listed artifact path is a symbolic link, verifies the
+current process's Linux /proc/self/exe bytes against the manifest-listed
+executable, and checks that a manifest-listed resolver source file matches the
+source digest in the resolution receipt. The resulting opaque in-memory runtime binding is committed
 through AiProposalRuntimeVerifiedValidationEvidence into the existing transaction
 validation digest before the transaction may advance.
 
