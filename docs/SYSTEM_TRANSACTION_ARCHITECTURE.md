@@ -856,3 +856,35 @@ lock does not force unmodified `nixos-rebuild`, self-deploy, auto-upgrade or
 third-party tools to participate. The Nix-native expected-old conditional
 profile update and the supervised whole-deployment coordinator integration
 remain unimplemented; direct privileged/root bypass remains out of scope.
+
+
+## Admission guard for unresolved peer journals (2026-10-12)
+
+The journaled activation and recovery entry points now perform an additional
+admission check after acquiring the existing Nixward interlock and before
+issuing a journal-owned capability. The check enumerates the trusted transaction
+journal directory, securely loads each *.json journal, binds the filename to
+the journal's transaction ID, and refuses a new mutation if a different
+transaction remains in ProfileTransitionStarted, ProfileCommitted,
+IndeterminateProfileTransition, ActivationStarted,
+IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
+RecoveryMutationStarted.
+
+Malformed, unreadable, noncanonical, symlinked, or identity-mismatched JSON
+journal entries fail closed instead of being ignored. The current transaction
+is exempt so a legitimate recovery can reconcile itself; pre-mutation journals
+do not block system activation.
+
+This closes one Nixward-peer admission gap after loss of the old process's
+flock: even if the kernel makes the interlock available while an activation
+worker could still be alive, a subsequent journaled Nixward transaction must
+reconcile the nonterminal journal before starting another mutation. It is a
+conservative journal gate, not a crash-proof lease keeper. It does not itself
+terminate or supervise a surviving process, protect non-participating profile
+writers, or provide Nix-native expected-old CAS. An actual subprocess/systemd
+crash test and the long-lived shared coordinator remain required.
+
+Three source-level regressions cover blocking an activation_started peer
+after interlock reacquisition, exempting the current transaction while allowing
+a pre-mutation peer, and failing closed on a malformed peer journal. They have
+not been compiled or executed. No qualification result is claimed.
