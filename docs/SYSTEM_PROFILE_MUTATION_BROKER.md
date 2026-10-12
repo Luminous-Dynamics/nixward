@@ -344,9 +344,11 @@ blocks on any nonterminal profile-transition, activation, or recovery phase.
 Journaled activation/recovery exempts its own transaction ID so that the
 current operation can proceed; non-journaled exact activation has no such
 exemption. Unreadable, malformed, symlinked, noncanonical, or
-filename/transaction-ID-mismatched journal records also block admission. Production journal files must be root-owned, not
-group/world-writable, and single-linked; the scanner checks these properties
-before parsing.
+filename/transaction-ID-mismatched journal records also block admission. Production validates every component of the absolute
+journal-root path as a real root-owned directory that is not group/world-writable.
+Journal files must be root-owned, single-linked, free of special permission bits,
+and private from group/other read or execute access; the scanner checks those
+properties before parsing.
 
 This reduces the risk that a replacement Nixward request proceeds merely
 because the previous process's flock was released on supervisor exit while its
@@ -356,10 +358,11 @@ not terminate or prove the death of a surviving activation process, and does
 not serialize stock rebuild/self-deploy/auto-upgrade or other non-participating
 writers. It also does not close the Nix-native expected-old compare-and-set gap.
 
-Eight source regressions cover an unresolved peer after lock reacquisition,
-current-transaction exemption plus a pre-mutation peer, writable and
-multiply-linked journal rejection, symlink and filename/identity substitution,
-malformed-journal rejection, and exhaustive phase classification.
+Eleven source regressions cover an unresolved peer after lock reacquisition,
+current-transaction exemption plus a pre-mutation peer, writable/group-readable/
+special-bit/multiply-linked journal rejection, symlinked root/entry and
+filename/identity substitution, malformed-journal rejection, and exhaustive
+phase classification.
 No Rust test has been compiled or run at this head. A real subprocess/systemd
 crash test, native CAS, the privileged coordinator service, supported-writer
 migration, and exact-head hosted qualification remain mandatory. The current
