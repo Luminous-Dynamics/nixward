@@ -320,10 +320,11 @@ The lock acquisition path is now hardened in source to:
 - retain the lock file and inode across unlock/reacquisition rather than
   unlinking it on drop.
 
-Seven new Unix regression tests cover unexpected parent-owner rejection, symlink
+Eight new Unix regression tests cover unexpected parent-owner rejection, symlink
 lock-path rejection, writable-parent rejection, unsafe lock-file permissions, special-mode-bit rejection,
-multiple hard links, and stable path/inode across release/reacquisition. The
-pre-existing deterministic two-thread exclusion test remains separate. These are source changes, **not passing test
+multiple hard links, stable path/inode across release/reacquisition, and the forced A/B
+profile-publication-to-activation/read-back interleaving. The pre-existing
+deterministic two-thread exclusion test remains separate. These are source changes, **not passing test
 evidence**; Rust compilation and execution have not been performed here.
 
 This remains deliberately narrower than the preferred two-lock implementation
