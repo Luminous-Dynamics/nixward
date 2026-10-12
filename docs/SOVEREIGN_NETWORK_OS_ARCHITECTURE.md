@@ -161,6 +161,10 @@ Measure throughput by packet size; p50/p99/p99.9 latency and jitter under load; 
 
 A credible early win could be safer audited changes, reproducible fleet provisioning and lower commodity-appliance cost. A claim to beat a carrier router must separately demonstrate protocol scale, throughput, convergence, redundancy and lifecycle behavior on the target hardware.
 
+## Network administration automation and Xenia
+
+The companion [Network Administration Automation and Xenia Integration](NETWORK_ADMIN_AUTOMATION_AND_XENIA_INTEGRATION.md) describes task-level autonomy tiers and a future, exact-plan approval integration with Xenia. It explicitly keeps Xenia's current remote-control consent semantics separate from network-change authority and acknowledges that Xenia remains pre-alpha. The follow-on implementation is tracked in [Issue #69](https://github.com/Luminous-Dynamics/nixward/issues/69); the independent evidence verifier remains [Issue #68](https://github.com/Luminous-Dynamics/nixward/issues/68).
+
 ## Decision and immediate next work
 
 1. Keep PR #65 strictly read-only M0; do not add a mutation adapter to it.
