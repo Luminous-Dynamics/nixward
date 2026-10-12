@@ -1,0 +1,44 @@
+name: Network automation task corpus
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.json"
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"
+      - "tests/network-automation-corpus/**"
+      - ".github/workflows/network-automation-task-corpus.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-automation-task-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-corpus:
+    name: Validate schema contract and mutation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact triggering revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Record Python and exact source identity
+        run: |
+          python3 --version
+          git rev-parse HEAD
+          printf 'Trigger SHA: %s\n' '${{ github.event.pull_request.head.sha || github.sha }}'
+
+      - name: Run dependency-free mutation tests
+        run: python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -v
+
+      - name: Validate checked-in corpus against its schema
+        run: python3 tests/network-automation-corpus/validate_corpus.py
