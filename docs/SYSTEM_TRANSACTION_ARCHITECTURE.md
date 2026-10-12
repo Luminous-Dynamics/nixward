@@ -844,8 +844,8 @@ production `/run` has UID 0), opens the lock with `O_NOFOLLOW | O_CLOEXEC`,
 verifies parent/file owner agreement,
 requires owner-only read/write permissions and a single hard link, and checks
 that the file descriptor and current path resolve to the same device/inode.
-The guard does not unlink the lock path on release. Six new Unix regression tests cover unexpected parent-owner rejection, symlink
-lock paths, writable parents, unsafe lock-file modes, multiple hard links, and
+The guard does not unlink the lock path on release. Seven new Unix regression tests cover unexpected parent-owner rejection, symlink
+lock paths, writable parents, unsafe lock-file modes including special-bit rejection, multiple hard links, and
 stable path/inode across reacquisition; the existing two-thread exclusion test
 remains separate.
 
