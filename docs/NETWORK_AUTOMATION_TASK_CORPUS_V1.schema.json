@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:luminous-dynamics:nixward:network-automation-task-corpus:v1",
+  "title": "Nixward Network Automation Task Corpus v1",
+  "description": "Qualification-design corpus only. This schema validates shape, not the truth of evidence, safety of a task, authorization, or representativeness.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "status",
+    "created_on",
+    "purpose",
+    "claim_boundaries",
+    "autonomy_tiers",
+    "evaluation_semantics",
+    "common_hard_stops",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "const": "nixward.network-automation-task-corpus.v1"
+    },
+    "status": {
+      "const": "qualification-design-only"
+    },
+    "created_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claim_boundaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "autonomy_tiers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+        "A5"
+      ],
+      "properties": {
+        "A0": {
+          "type": "string",
+          "minLength": 1
+        },
+        "A1": {
+          "type": "string",
+          "minLength": 1
+        },
+        "A2": {
+          "type": "string",
+          "minLength": 1
+        },
+        "A3": {
+          "type": "string",
+          "minLength": 1
+        },
+        "A4": {
+          "type": "string",
+          "minLength": 1
+        },
+        "A5": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evaluation_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shared_stop_condition_reference",
+        "tier_ceiling",
+        "pass_definition",
+        "indeterminate_definition",
+        "measurement",
+        "corpus_limit"
+      ],
+      "properties": {
+        "shared_stop_condition_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier_ceiling": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pass_definition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "indeterminate_definition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "measurement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "corpus_limit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "common_hard_stops": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "task_id",
+          "family",
+          "task",
+          "mode",
+          "max_tier_after_qualification",
+          "required_evidence",
+          "preconditions",
+          "stop_conditions",
+          "postconditions",
+          "recovery",
+          "fault_fixtures",
+          "measurement_unit"
+        ],
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]{3}$"
+          },
+          "family": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "enum": [
+              "read-only",
+              "plan-only",
+              "bounded-change",
+              "approval-gated-change",
+              "bounded-or-approval-gated-change",
+              "approval-gated-progression",
+              "recommendation",
+              "human-led-exception",
+              "human-led-physical-work"
+            ]
+          },
+          "max_tier_after_qualification": {
+            "enum": [
+              "A1",
+              "A2",
+              "A3",
+              "A4",
+              "A5"
+            ]
+          },
+          "required_evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "preconditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "stop_conditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "postconditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "recovery": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fault_fixtures": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "measurement_unit": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
