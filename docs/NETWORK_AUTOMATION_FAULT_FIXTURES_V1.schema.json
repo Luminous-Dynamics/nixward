@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:luminous-dynamics:nixward:network-automation-fault-fixtures:v1",
+  "title": "Nixward Network Automation Fault Fixtures v1",
+  "description": "Specification-only fault corpus. Every case is forbidden from mutating production networking.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "status",
+    "created_on",
+    "purpose",
+    "claim_boundaries",
+    "common_invariants",
+    "scenarios"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "artifact_id": {
+      "const": "nixward.network-automation-fault-fixtures.v1"
+    },
+    "status": {
+      "const": "qualification-design-only"
+    },
+    "created_on": {
+      "type": "string",
+      "format": "date"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "claim_boundaries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "common_invariants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scenario_id",
+          "task_id",
+          "layer",
+          "fault_class",
+          "setup",
+          "expected_decision",
+          "expected_receipt_state",
+          "assertions",
+          "production_mutation"
+        ],
+        "properties": {
+          "scenario_id": {
+            "type": "string",
+            "pattern": "^FX-[0-9]{3}$"
+          },
+          "task_id": {
+            "type": "string",
+            "pattern": "^[A-Z]+-[0-9]{3}$"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "observer-fixture",
+              "planner-unit",
+              "offline-model",
+              "virtual-lab",
+              "transaction-simulator",
+              "approval-unit",
+              "offline-policy",
+              "evidence-fixture",
+              "model-fixture",
+              "incident-replay",
+              "human-review",
+              "telemetry-replay"
+            ]
+          },
+          "fault_class": {
+            "type": "string",
+            "enum": [
+              "missing-terminal",
+              "interrupted-dump",
+              "receive-loss",
+              "target-substitution",
+              "plan-tampering",
+              "ownership-conflict",
+              "unknown-field",
+              "management-path-loss",
+              "external-writer-race",
+              "management-disconnect",
+              "broker-crash-after-apply",
+              "rollback-failure",
+              "approval-replay",
+              "canary-health-regression",
+              "critical-asset-misclassification",
+              "secret-leak",
+              "out-of-domain-model",
+              "route-leak",
+              "contradictory-timeline",
+              "physical-state-ambiguous",
+              "event-gap"
+            ]
+          },
+          "setup": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_decision": {
+            "type": "string",
+            "enum": [
+              "AcceptReadOnly",
+              "Incomplete",
+              "Reject",
+              "BlockMutation",
+              "RequireApproval",
+              "MarkIndeterminate",
+              "EscalateHuman",
+              "AbortRollout"
+            ]
+          },
+          "expected_receipt_state": {
+            "type": "string",
+            "enum": [
+              "CompleteForDeclaredScope",
+              "Incomplete",
+              "Invalid",
+              "Expired",
+              "Conflict",
+              "Indeterminate",
+              "Blocked",
+              "Unsupported"
+            ]
+          },
+          "assertions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "production_mutation": {
+            "const": false
+          }
+        }
+      }
+    }
+  }
+}
