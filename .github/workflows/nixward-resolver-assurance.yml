@@ -11,7 +11,6 @@ on:
   push:
     branches:
       - main
-      - "feat/**"
     paths:
       - "Cargo.toml"
       - "src/**"
@@ -24,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nixward-resolver-assurance-${{ github.event.pull_request.head.sha || github.sha }}
+  group: nixward-resolver-assurance-${{ github.event.pull_request.head.ref || github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
   cancel-in-progress: true
 
 env:
