@@ -333,3 +333,29 @@ per-profile coordinator; it does not make Nix-native expected-old CAS exist,
 does not cause unmodified frontends to honor the lock, and cannot constrain a
 privileged root actor that bypasses or replaces its files. The trusted runtime
 directory and its ownership/mode are part of the security assumption.
+
+
+## Admission check after prior coordinator loss (2026-10-12)
+
+The current PR now adds a conservative journal-admission check to the existing
+journaled activation and recovery entry points. After taking the local
+Nixward interlock, a new transaction scans the root-owned transaction journal
+directory and blocks on any *other* transaction in a nonterminal
+profile-transition, activation, or recovery phase. Unreadable, malformed,
+symlinked, noncanonical, or filename/transaction-ID-mismatched journal records
+also block admission. The current transaction is exempt so its own recovery
+can proceed.
+
+This reduces the risk that a replacement Nixward request proceeds merely
+because the previous process's flock was released on supervisor exit while its
+activation worker might still be alive. It intentionally fails closed until the
+old transaction reaches a durable terminal phase. It is not a lease keeper, does
+not terminate or prove the death of a surviving activation process, and does
+not serialize stock rebuild/self-deploy/auto-upgrade or other non-participating
+writers. It also does not close the Nix-native expected-old compare-and-set gap.
+
+Source regressions cover an unresolved peer after lock reacquisition, current
+transaction exemption plus a pre-mutation peer, and malformed-journal rejection.
+No Rust test has been compiled or run at this head. A real subprocess/systemd
+crash test, native CAS, the privileged coordinator service, supported-writer
+migration, and exact-head hosted qualification remain mandatory.
