@@ -337,14 +337,14 @@ directory and its ownership/mode are part of the security assumption.
 
 ## Admission check after prior coordinator loss (2026-10-12)
 
-The current PR now adds a conservative journal-admission check to the existing
-journaled activation and recovery entry points. After taking the local
-Nixward interlock, a new transaction scans the root-owned transaction journal
-directory and blocks on any *other* transaction in a nonterminal
-profile-transition, activation, or recovery phase. Unreadable, malformed,
-symlinked, noncanonical, or filename/transaction-ID-mismatched journal records
-also block admission. The current transaction is exempt so its own recovery
-can proceed.
+The current PR now adds a conservative journal-admission check to every
+exact-system activation path and to journaled recovery. After taking the local
+Nixward interlock, it scans the root-owned transaction journal directory and
+blocks on any nonterminal profile-transition, activation, or recovery phase.
+Journaled activation/recovery exempts its own transaction ID so that the
+current operation can proceed; non-journaled exact activation has no such
+exemption. Unreadable, malformed, symlinked, noncanonical, or
+filename/transaction-ID-mismatched journal records also block admission.
 
 This reduces the risk that a replacement Nixward request proceeds merely
 because the previous process's flock was released on supervisor exit while its
@@ -358,4 +358,7 @@ Source regressions cover an unresolved peer after lock reacquisition, current
 transaction exemption plus a pre-mutation peer, and malformed-journal rejection.
 No Rust test has been compiled or run at this head. A real subprocess/systemd
 crash test, native CAS, the privileged coordinator service, supported-writer
-migration, and exact-head hosted qualification remain mandatory.
+migration, and exact-head hosted qualification remain mandatory. The current
+regression uses a barrier-controlled test thread to model a still-running
+worker after lock release; it is not evidence of actual child-process survival
+or systemd kill behavior.
