@@ -8,6 +8,8 @@ a second implementation and has no networking adapter.
 Run from the Nixward repository root:
 
 ```sh
+python3 -m unittest discover -s tests/network-device-plan-harness -p 'test_lock_policy.py'
+python3 tests/network-device-plan-harness/check_lock_policy.py tests/network-device-plan-harness/Cargo.lock
 cargo fmt --manifest-path tests/network-device-plan-harness/Cargo.toml -- --check
 cargo test --locked --manifest-path tests/network-device-plan-harness/Cargo.toml --all-targets
 ```
