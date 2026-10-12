@@ -205,21 +205,27 @@ bind source_revision to the reviewed source revision under its own release polic
 the field is a signed release-root assertion, not independent proof of a build.
 The offline `nixward-release-sign` utility also rejects a signing-seed path
 inside the signed release root or supplied through a symlink, denies group/other
-permission bits on the seed file, and rejects a seed sharing a device/inode with
-any release-tree file (including an external hard link). Seed reads now use a
-no-follow open and validate the opened file's metadata before using its bytes,
-which reduces leaf-path substitution risk; signing directories still require
-normal access controls against concurrent changes to parent directories. It canonicalizes output
-parent directories (including aliased parents) and rejects output paths inside
-the signed tree. It only creates a new manifest file: existing output paths are
-rejected, and `create_new` prevents overwriting an existing path between the
-pre-check and the write. This also rejects existing hard-link aliases to the
-seed or a release artifact. Focused binary tests cover these path-boundary and
-secret-handling cases. These controls reduce accidental secret inclusion and
-path confusion; they do not replace an appropriately protected signing-key
-store or an immutable release root. New manifests are written with exclusive
-creation and the file is synced before success is reported; on a handled write or
-sync failure the signer attempts to remove the incomplete output. The signer walk
+permission bits on the seed file, rejects every seed with more than one hard
+link (inside or outside the release tree), and caps accepted seed input at 128
+bytes. Seed reads use a no-follow open and validate permissions, link count, and
+inode identity from the opened descriptor. Temporary seed input buffers and the
+decoded seed use `zeroize::Zeroizing`; `ed25519-dalek`'s `zeroize` feature is
+enabled so the signing key is zeroized on drop. These reduce process-memory
+residue and path substitution risk but cannot guarantee erasure of copies made
+by the OS, allocator, compiler, or hardware. Signing directories still require
+normal access controls against concurrent changes to parent directories.
+
+The signer canonicalizes output parent directories (including aliased parents)
+and rejects output paths inside the signed tree. It only creates a new manifest
+file: existing output paths are rejected, and `create_new` prevents overwriting
+an existing path between the pre-check and creation. This also rejects existing
+hard-link aliases to the seed or a release artifact. Focused binary tests cover
+these path-boundary and secret-handling cases. These controls reduce accidental
+secret inclusion and path confusion; they do not replace an appropriately
+protected signing-key store or an immutable release root. New manifests are
+written with exclusive creation and the file is synced before success is
+reported; on a handled write or sync failure the signer attempts to remove the
+incomplete output. The signer walk
 and verifier scan both assume the release tree is not concurrently modified by an
 untrusted actor.
 
