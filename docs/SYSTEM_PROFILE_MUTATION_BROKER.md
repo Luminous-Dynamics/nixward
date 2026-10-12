@@ -159,14 +159,55 @@ A while the selected profile names B. An immediate profile recheck narrows but
 does not eliminate the final check-to-activation gap. Do not describe native
 CAS alone as end-to-end transaction isolation.
 
-To close that gap for cooperating supported writers, the transaction owner
-must hold a profile mutation lease from expected-old comparison and generation
-publication through exact activation and profile/runtime read-back, or every
-supported frontend must participate in one privileged system-deployment
-coordinator. Any Nix profile-lock lease/FD handoff needs explicit proof of
-inode identity, exclusive ownership, descriptor inheritance, lease lifetime,
-stale lock-file handling, cleanup and error behavior. Nixward's unprivileged
-observer daemon must not be silently turned into that privileged owner.
+To close that gap for cooperating supported writers, one privileged
+transaction owner must retain a per-profile coordinator lease from before the
+final expected-old observation through native CAS/publication, exact activation,
+profile/runtime read-back, and durable transaction disposition. The lease
+serializes *whole deployments*; the Nix-native profile lock remains a shorter
+critical section for the expected-old comparison and generation publication.
+These two locks have different scopes and must not be conflated.
+
+Nix 2.35.2's actual `PathLocks` implementation makes a naive long-lived
+native-profile-lock handoff unsafe: `pathlocks.cc` opens `<profile>.lock`
+with `O_CLOEXEC`, takes `flock`, checks for a stale/unlinked lock inode, and
+retries; `lockProfile` enables delete-on-unlock, and unlock may unlink the
+lock pathname and mark the old inode stale ([source](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/unix/pathlocks.cc),
+[profile helper](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/profiles.cc)).
+An independently opened child can also block on a descriptor held by its parent.
+Do not hold that lock across activation or claim that passing its FD is a valid
+lease without a new Nix-supported API and explicit inode/lifetime semantics.
+
+Preferred design: a **stable coordinator lease distinct from `<profile>.lock`**
+plus a Nix-native CAS primitive. A root-owned supervisor holds a stable
+per-managed-profile lock file without unlinking/replacing it during a live
+transaction. It obtains the coordinator lease before the native Nix mutation
+lock, asks the native API to compare expected-old and publish the profile while
+the native lock is held, then retains the coordinator lease through activation
+and read-back. All supported frontends that can change that managed system
+profile must use the same coordinator; otherwise the guarantee is narrowed and
+the unintegrated frontend remains a blocker. A private lease-authorized API or
+broker endpoint is needed so the owner does not deadlock by trying to acquire
+its own coordinator lock twice. The Nixward observer daemon remains
+unprivileged; the privileged supervisor is a separate, explicitly reviewed
+authority.
+
+Coordinator identity must come from a trusted managed-profile registry and
+must cover configured aliases to the same system profile. The coordinator
+file should live in a root-owned runtime directory, be opened relative to a
+trusted directory FD with no-follow checks, have its owner/mode/type validated,
+and keep a stable inode/path throughout the active service lifetime. Never
+use a PID file or unlink-on-exit as a lock protocol.
+
+The lease owner must also outlive the activation it authorized. A client
+disconnect cannot drop the lease while an activation can still run. The
+supervisor must either retain control until the activation is terminal and
+read-back is complete, or on supervisor failure ensure the activation has
+terminated before releasing the lease. If an activation is started in an
+independent transient systemd unit, its lifetime and the lease holder's
+lifetime must be explicitly coupled and tested. A released lock is not proof
+that activation stopped, and a crash after profile publication means the
+outcome is indeterminate until fresh evidence permits recovery.
+
 Unintegrated frontends and direct root bypass remain explicit residuals.
 
 At minimum, acceptance tests must pause A after profile publication but before
@@ -198,8 +239,38 @@ Only ExpectedStateMatchedAndSelected with durable evidence and subsequent indepe
 | Keep the current guard + nix-env --set | Helps detect drift around worker release, but cannot atomically protect the expected-old check | Keep as mitigation; disclose residual |
 | Parent holds profile lock then starts nix-env | May deadlock or serialize incorrectly because the child uses the native update path independently; not a conditional update | Reject unless Nix explicitly supports lock handoff |
 | Rewrite only the profile symlink in Rust | Risks bypassing generation links, manifests, history, and GC-root conventions | Reject |
-| Dedicated root broker wrapping nix-env --set | Serializes cooperating clients but still has a pre-check-to-write gap and permits root bypass | Optional coordination plane only; no CAS claim |
-| Nix-native conditional update (upstream feature or supported API) | Expected-old check can happen inside Nix's profile-update serialization while preserving generation semantics | Preferred |
+| Dedicated broker wrapping an unmodified nix-env --set | Serializes participating callers but leaves the pre-check-to-write gap; a wrapper lock cannot make the child operation conditional | Coordination only; reject as CAS |
+| Retain Nix's existing `<profile>.lock` across activation | Conflicts with normal child locking, `O_CLOEXEC`, stale-inode detection, and profile-lock deletion semantics | Reject unless a new Nix-supported lease API changes and specifies those semantics |
+| Stable per-profile coordinator lease + Nix-native conditional update | Coordinator spans publication, activation and read-back; Nix's native lock protects the narrow expected-old comparison/update; every managed writer participates | **Preferred design to implement and test** |
+| Nix-native full transaction/lease API | Could unify locking only if it provides documented lock lifetime, stale-lock semantics, activation boundary, crash behavior and supported frontend integration | Valid alternative only with upstream API contract and concurrency evidence |
+
+## Coordinator lock order and lifetime contract
+
+The implementation contract is intentionally two-layered:
+
+1. The privileged transaction supervisor resolves the managed-profile identity
+   through a trusted registry, opens and validates the stable coordinator lock,
+   and acquires the exclusive lease.
+2. With the lease held, it takes a fresh pre-state observation and calls the
+   Nix-native expected-old CAS. The native operation uses Nix's ordinary profile
+   mutation lock only around comparison plus generation/profile publication.
+3. It keeps the coordinator lease while activation runs, collects activation
+   completion, re-reads profile and runtime identity, and commits the durable
+   journal disposition.
+4. A competing managed writer first waits for the coordinator lease, then
+   re-observes expected-old. It must not cache a pre-wait observation as the
+   expected-old truth.
+5. The coordinator holder must not die while an independently surviving
+   activation continues. Client cancellation, owner crash, systemd unit stop,
+   child exec failure, read-back failure, and a service restart each have a
+   specified fail-closed disposition and deterministic test oracle.
+
+The lock file used by the coordinator is not Nix's `<profile>.lock`; its stable
+pathname is never unlinked while the manager may be running. All supported
+managed writers take locks in the order **coordinator → native profile lock**.
+A direct/root writer that bypasses the coordinator is explicitly outside this
+managed-writer guarantee; the deployment's writer inventory must say so rather
+than implying universal serialization.
 
 ## Deterministic acceptance plan
 
