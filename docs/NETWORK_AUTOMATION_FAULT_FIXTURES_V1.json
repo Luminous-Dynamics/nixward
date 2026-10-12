@@ -157,13 +157,13 @@
       "task_id": "FW-001",
       "layer": "virtual-lab",
       "fault_class": "management-disconnect",
-      "setup": "Drop the in-band management session during a simulated firewall change while an independent recovery channel is available.",
-      "expected_decision": "RequireApproval",
-      "expected_receipt_state": "Blocked",
+      "setup": "Drop the in-band management session during a simulated firewall change, while an independently supervised tested restore path remains available and succeeds on read-back.",
+      "expected_decision": "RecoverAndVerify",
+      "expected_receipt_state": "Recovered",
       "assertions": [
-        "A session loss cannot count as confirmation.",
-        "The independent supervisor retains recovery authority.",
-        "Recovery result requires independent read-back."
+        "Session loss is never treated as confirmation.",
+        "The independent recovery supervisor survives client/session loss.",
+        "The recovery result is terminal only after independent read-back verifies restoration."
       ],
       "production_mutation": false
     },
