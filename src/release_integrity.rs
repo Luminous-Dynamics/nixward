@@ -191,12 +191,42 @@ pub fn verify_release_tree(
         .canonicalize()
         .map_err(|_| ReleaseIntegrityError::MissingArtifact("release-root".into()))?;
     for artifact in &signed.manifest.artifacts {
-        let path = root.join(&artifact.path);
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        // Inspect each component, not just the leaf. Checking only the final
+        // file would allow an intermediate symlink to redirect a manifest path
+        // to another location within the release root.
+        let components = std::path::Path::new(&artifact.path)
+            .components()
+            .collect::<Vec<_>>();
+        if components.is_empty() {
             return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
         }
+
+        let mut path = root.to_path_buf();
+        let mut leaf_metadata = None;
+        for (index, component) in components.iter().enumerate() {
+            match component {
+                std::path::Component::Normal(part) => path.push(part),
+                _ => return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone())),
+            }
+
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+            }
+
+            let is_leaf = index + 1 == components.len();
+            if is_leaf {
+                if !metadata.is_file() {
+                    return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+                }
+                leaf_metadata = Some(metadata);
+            } else if !metadata.is_dir() {
+                return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+            }
+        }
+        let metadata = leaf_metadata
+            .ok_or_else(|| ReleaseIntegrityError::UnsafePath(artifact.path.clone()))?;
         let canonical = path
             .canonicalize()
             .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
@@ -337,6 +367,38 @@ mod tests {
             verify_release_tree(temp.path(), &signed, &trusted),
             Err(ReleaseIntegrityError::ArtifactDigestMismatch(path))
                 if path == "artifact.bin"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_symlinked_parent_directories_inside_release_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"intermediate directory must not be a symlink";
+        let linked_dir = temp.path().join("linked");
+        let target_dir = temp.path().join("payload");
+        std::fs::create_dir_all(linked_dir.join("nested")).unwrap();
+        std::fs::create_dir_all(target_dir.join("nested")).unwrap();
+        std::fs::write(linked_dir.join("nested/artifact.bin"), payload).unwrap();
+        std::fs::write(target_dir.join("nested/artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[47u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("linked/nested/artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        // Replace a previously ordinary parent directory with an in-root symlink.
+        std::fs::remove_dir_all(&linked_dir).unwrap();
+        symlink(&target_dir, &linked_dir).unwrap();
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "linked/nested/artifact.bin"
         ));
     }
 
