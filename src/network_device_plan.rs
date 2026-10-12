@@ -736,6 +736,10 @@ mod tests {
 
     fn desired(mode: NetworkManagementMode) -> DesiredNetworkState {
         let id = id("link:lan0");
+        let expected_runtime_owner = match mode {
+            NetworkManagementMode::NixOsDeclarative => NetworkRuntimeOwner::SystemdNetworkd,
+            NetworkManagementMode::NixwardRuntime => NetworkRuntimeOwner::NixwardRuntime,
+        };
         DesiredNetworkState {
             schema_version: NETWORK_DEVICE_PLAN_SCHEMA_VERSION,
             target: target(),
@@ -747,6 +751,7 @@ mod tests {
                     kind: NetworkResourceKind::Link,
                     desired_fingerprint_blake3: fingerprint('a'),
                     management_mode: mode,
+                    expected_runtime_owner,
                 },
             )]),
         }
@@ -754,14 +759,16 @@ mod tests {
 
     fn known_observation(
         fingerprint_blake3: String,
-        owner: NetworkResourceOwner,
+        configuration_owner: NetworkConfigurationOwner,
+        runtime_owner: NetworkRuntimeOwner,
     ) -> ObservedNetworkResource {
         ObservedNetworkResource {
             id: id("link:lan0"),
             kind: NetworkResourceKind::Link,
             observation: NetworkResourceObservation::Known {
                 fingerprint_blake3,
-                owner,
+                configuration_owner,
+                runtime_owner,
             },
         }
     }
@@ -775,7 +782,11 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.resources.insert(
             id("link:lan0"),
-            known_observation(fingerprint('a'), NetworkResourceOwner::NixwardRuntime),
+            known_observation(
+                fingerprint('a'),
+                NetworkConfigurationOwner::NixwardDesiredState,
+                NetworkRuntimeOwner::NixwardRuntime,
+            ),
         );
 
         let plan = NetworkDevicePlanner::plan(
@@ -842,7 +853,11 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.resources.insert(
             id("link:lan0"),
-            known_observation(fingerprint('b'), NetworkResourceOwner::NixOsDeclarative),
+            known_observation(
+                fingerprint('b'),
+                NetworkConfigurationOwner::NixOsDeclarative,
+                NetworkRuntimeOwner::SystemdNetworkd,
+            ),
         );
 
         let plan = NetworkDevicePlanner::plan(
@@ -864,7 +879,8 @@ mod tests {
             id("link:lan0"),
             known_observation(
                 fingerprint('b'),
-                NetworkResourceOwner::NetworkManager,
+                NetworkConfigurationOwner::NixwardDesiredState,
+                NetworkRuntimeOwner::NetworkManager,
             ),
         );
 
@@ -935,7 +951,8 @@ mod tests {
                 kind: NetworkResourceKind::Bridge,
                 observation: NetworkResourceObservation::Known {
                     fingerprint_blake3: fingerprint('b'),
-                    owner: NetworkResourceOwner::NixwardRuntime,
+                    configuration_owner: NetworkConfigurationOwner::NixwardDesiredState,
+                    runtime_owner: NetworkRuntimeOwner::NixwardRuntime,
                 },
             },
         );
@@ -983,20 +1000,29 @@ mod tests {
     }
 
     #[test]
-    fn matching_fingerprint_is_no_op_even_if_another_owner_is_recorded() {
+    fn matching_fingerprint_does_not_hide_ownership_conflict() {
         let mut snapshot = snapshot();
         snapshot.resources.insert(
             id("link:lan0"),
-            known_observation(fingerprint('a'), NetworkResourceOwner::NetworkManager),
+            known_observation(
+                fingerprint('a'),
+                NetworkConfigurationOwner::NixOsDeclarative,
+                NetworkRuntimeOwner::SystemdNetworkd,
+            ),
         );
 
         let plan = NetworkDevicePlanner::plan(
             &snapshot,
             &desired(NetworkManagementMode::NixwardRuntime),
         )
-        .expect("no-op plan");
+        .expect("valid blocked plan");
 
-        assert_eq!(entry(&plan).decision, NetworkPlanDecision::NoOp);
+        assert_eq!(
+            entry(&plan).decision,
+            NetworkPlanDecision::Blocked {
+                reason: NetworkPlanBlockReason::ResourceOwnerConflict
+            }
+        );
     }
 
     #[test]
@@ -1033,7 +1059,8 @@ mod tests {
                 kind: NetworkResourceKind::Link,
                 observation: NetworkResourceObservation::Known {
                     fingerprint_blake3: fingerprint('b'),
-                    owner: NetworkResourceOwner::NixwardRuntime,
+                    configuration_owner: NetworkConfigurationOwner::NixwardDesiredState,
+                    runtime_owner: NetworkRuntimeOwner::NixwardRuntime,
                 },
             },
         );
