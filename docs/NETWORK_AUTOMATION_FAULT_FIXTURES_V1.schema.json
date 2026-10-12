@@ -13,6 +13,7 @@
     "purpose",
     "claim_boundaries",
     "common_invariants",
+    "task_corpus_artifact_id",
     "scenarios"
   ],
   "properties": {
@@ -167,6 +168,9 @@
           }
         }
       }
+    },
+    "task_corpus_artifact_id": {
+      "const": "nixward.network-automation-task-corpus.v1"
     }
   }
 }
