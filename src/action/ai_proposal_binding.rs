@@ -1432,6 +1432,11 @@ impl AiProposalRuntimeVerifiedValidationEvidence {
 mod tests {
     use super::*;
     use crate::action::executor::NixOSCommand;
+    use crate::release_integrity::{
+        RELEASE_MANIFEST_KIND, RELEASE_SCHEMA_VERSION, RELEASE_SIGNATURE_KIND, ReleaseArtifact,
+        ReleaseManifest,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn plan(machine_id: &str) -> ChangePlan {
         ChangePlan::command_only(
@@ -1450,6 +1455,65 @@ mod tests {
             .unwrap()
             .canonical_bytes()
             .unwrap()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn signed_runtime_bundle(
+        root: &Path,
+        resolver_source_relative_path: &str,
+        runtime_binary_relative_path: &str,
+        source_bytes: &[u8],
+        runtime_binary_bytes: &[u8],
+        signing: &SigningKey,
+    ) -> SignedReleaseManifest {
+        let source_path = root.join(resolver_source_relative_path);
+        let binary_path = root.join(runtime_binary_relative_path);
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(binary_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, source_bytes).unwrap();
+        std::fs::write(&binary_path, runtime_binary_bytes).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&binary_path, permissions).unwrap();
+        }
+
+        let artifacts = vec![
+            ReleaseArtifact {
+                path: resolver_source_relative_path.into(),
+                blake3: blake3::hash(source_bytes).to_hex().to_string(),
+                size_bytes: source_bytes.len() as u64,
+                executable: false,
+            },
+            ReleaseArtifact {
+                path: runtime_binary_relative_path.into(),
+                blake3: blake3::hash(runtime_binary_bytes).to_hex().to_string(),
+                size_bytes: runtime_binary_bytes.len() as u64,
+                executable: true,
+            },
+        ];
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "nixward-runtime-binding-test".into(),
+            created_at_ms: 1_800_000_000_000,
+            source_revision: "test-commit-revision".into(),
+            artifacts,
+        };
+        let signature = signing.sign(&manifest.signing_bytes().unwrap());
+        SignedReleaseManifest {
+            kind: RELEASE_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            signer_public_key_hex: hex(signing.verifying_key().as_bytes()),
+            signature_hex: hex(&signature.to_bytes()),
+            manifest,
+        }
     }
 
     fn binding(plan: &ChangePlan) -> AiProposalBinding {
@@ -1793,6 +1857,143 @@ mod tests {
         let mut short = serde_json::to_value(binding(&plan)).unwrap();
         short["plan_digest"] = serde_json::json!("abcd");
         assert!(serde_json::from_value::<AiProposalBinding>(short).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signed_release_binding_checks_manifest_root_source_and_executable_bytes() {
+        let plan = plan("machine-a");
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let raw = serde_json::to_vec_pretty(&intent).unwrap();
+        let (receipt, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = "share/nixward/src/action/ai_proposal_binding.rs";
+        let binary_path = "bin/nixward-daemon";
+        let source_bytes = include_bytes!("ai_proposal_binding.rs");
+        let binary_bytes = b"test-runtime-executable";
+        let signing = SigningKey::from_bytes(&[71u8; 32]);
+        let signed = signed_runtime_bundle(
+            temp.path(),
+            source_path,
+            binary_path,
+            source_bytes,
+            binary_bytes,
+            &signing,
+        );
+
+        let binding = verify_runtime_binding_from_bundle(
+            temp.path(),
+            &signed,
+            &hex(signing.verifying_key().as_bytes()),
+            &temp.path().join(binary_path),
+            binary_bytes,
+            source_path,
+            &plan,
+            &receipt,
+        )
+        .unwrap();
+
+        assert_eq!(binding.release_id(), "nixward-runtime-binding-test");
+        assert_eq!(binding.release_source_revision(), "test-commit-revision");
+        assert_eq!(binding.runtime_binary_relative_path(), binary_path);
+        assert_eq!(binding.resolver_source_relative_path(), source_path);
+        assert_eq!(binding.plan_digest(), plan.digest());
+        assert_eq!(binding.resolution_receipt_digest(), receipt.digest().unwrap());
+        assert_eq!(binding.resolver_source_digest(), receipt.resolver_source_digest());
+        assert_ne!(binding.digest(), [0; 32]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_binding_rejects_untrusted_root_and_changed_executable_bytes() {
+        let plan = plan("machine-a");
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let raw = serde_json::to_vec_pretty(&intent).unwrap();
+        let (receipt, _) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = "share/nixward/src/action/ai_proposal_binding.rs";
+        let binary_path = "bin/nixward-daemon";
+        let source_bytes = include_bytes!("ai_proposal_binding.rs");
+        let binary_bytes = b"test-runtime-executable";
+        let signing = SigningKey::from_bytes(&[72u8; 32]);
+        let signed = signed_runtime_bundle(
+            temp.path(),
+            source_path,
+            binary_path,
+            source_bytes,
+            binary_bytes,
+            &signing,
+        );
+
+        let untrusted = SigningKey::from_bytes(&[73u8; 32]);
+        assert!(matches!(
+            verify_runtime_binding_from_bundle(
+                temp.path(),
+                &signed,
+                &hex(untrusted.verifying_key().as_bytes()),
+                &temp.path().join(binary_path),
+                binary_bytes,
+                source_path,
+                &plan,
+                &receipt,
+            ),
+            Err(AiProposalBindingError::ResolverRuntimeVerification(_))
+        ));
+
+        assert!(matches!(
+            verify_runtime_binding_from_bundle(
+                temp.path(),
+                &signed,
+                &hex(signing.verifying_key().as_bytes()),
+                &temp.path().join(binary_path),
+                b"tampered-runtime-executable",
+                source_path,
+                &plan,
+                &receipt,
+            ),
+            Err(AiProposalBindingError::ResolverRuntimeVerification(_))
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_binding_rejects_source_not_matching_embedded_resolver_digest() {
+        let plan = plan("machine-a");
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        let raw = serde_json::to_vec_pretty(&intent).unwrap();
+        let (receipt, _) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source_path = "share/nixward/src/action/ai_proposal_binding.rs";
+        let binary_path = "bin/nixward-daemon";
+        let mut source_bytes = include_bytes!("ai_proposal_binding.rs").to_vec();
+        source_bytes.push(b'\n');
+        let binary_bytes = b"test-runtime-executable";
+        let signing = SigningKey::from_bytes(&[74u8; 32]);
+        let signed = signed_runtime_bundle(
+            temp.path(),
+            source_path,
+            binary_path,
+            &source_bytes,
+            binary_bytes,
+            &signing,
+        );
+
+        assert!(matches!(
+            verify_runtime_binding_from_bundle(
+                temp.path(),
+                &signed,
+                &hex(signing.verifying_key().as_bytes()),
+                &temp.path().join(binary_path),
+                binary_bytes,
+                source_path,
+                &plan,
+                &receipt,
+            ),
+            Err(AiProposalBindingError::ResolverRuntimeVerification(_))
+        ));
     }
 
     #[test]
