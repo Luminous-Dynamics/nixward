@@ -32,7 +32,11 @@
         "Completeness is false for the affected family.",
         "No mutation is proposed from inferred absence."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Incomplete",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-002",
@@ -47,7 +51,11 @@
         "Only a bounded retry may produce a new accepted attempt.",
         "Exhausted retries preserve an Incomplete outcome."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Incomplete",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-003",
@@ -62,7 +70,11 @@
         "Loss is retained in the failure evidence.",
         "No partial-success shortcut is allowed."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Incomplete",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-004",
@@ -77,7 +89,11 @@
         "The receipt identifies target/scope mismatch.",
         "No resource data from the substituted target is accepted."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Reject",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-005",
@@ -91,7 +107,11 @@
         "Independent recomputation does not match the candidate plan.",
         "The altered candidate is rejected before authorization or execution."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Reject",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-006",
@@ -106,7 +126,12 @@
         "No controller is silently selected.",
         "An explicit ownership-adoption transaction is required."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "resource_fenced:blocked",
+        "conflicting_write_rejected_by_fence"
+      ]
     },
     {
       "scenario_id": "FX-007",
@@ -121,7 +146,11 @@
         "The limitation appears in the result.",
         "No automatic remediation is proposed."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-008",
@@ -135,7 +164,11 @@
         "The plan is blocked unless the recovery path is proven.",
         "A model success over unrelated flows cannot override this invariant."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-009",
@@ -150,7 +183,12 @@
         "Stale pre-state is not reused.",
         "No success receipt is emitted."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "resource_fenced:conflict",
+        "conflicting_write_rejected_by_fence"
+      ]
     },
     {
       "scenario_id": "FX-010",
@@ -165,7 +203,12 @@
         "The independent recovery supervisor survives client/session loss.",
         "The recovery result is terminal only after independent read-back verifies restoration."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "modeled_apply:applied-before-recovery",
+        "conflicting_retry:not_required",
+        "modeled_recovery:prior_state_restored_and_readback_verified"
+      ]
     },
     {
       "scenario_id": "FX-011",
@@ -180,7 +223,12 @@
         "Conflicting writes remain fenced until outcome resolves.",
         "The operation is not counted as success."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "modeled_apply:applied-but-unconfirmed",
+        "resource_fenced:indeterminate",
+        "conflicting_write_rejected_by_fence"
+      ]
     },
     {
       "scenario_id": "FX-012",
@@ -195,7 +243,12 @@
         "Further conflicting writes are blocked.",
         "No success or clean-recovery claim is emitted."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "modeled_apply:applied-but-unconfirmed",
+        "resource_fenced:indeterminate",
+        "conflicting_write_rejected_by_fence"
+      ]
     },
     {
       "scenario_id": "FX-013",
@@ -210,7 +263,11 @@
         "The original approval record remains auditable.",
         "The rejected attempt cannot authorize a second execution."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Reject",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-014",
@@ -224,7 +281,11 @@
         "The signed transcript does not authorize the substituted target or plan.",
         "The broker independently checks the exact binding."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Reject",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-015",
@@ -239,7 +300,11 @@
         "Only the canary's tested recovery protocol may run.",
         "Recovery remains unverified until independent checks pass."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:AbortRollout",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-016",
@@ -254,7 +319,11 @@
         "The contradictory source evidence is preserved.",
         "A named human authority is required to resolve the classification."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:EscalateHuman",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-017",
@@ -269,7 +338,11 @@
         "Redaction cannot silently remove required semantic fields and still declare completeness.",
         "Failure cleanup is verified."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:Reject",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-018",
@@ -284,7 +357,11 @@
         "The recommendation cannot trigger mutation.",
         "Missing samples are not imputed as zero without an explicit model."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:EscalateHuman",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-019",
@@ -299,7 +376,11 @@
         "Affected prefix/peer scope is explicit.",
         "No rollout is authorized by a high model confidence score."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-020",
@@ -314,7 +395,11 @@
         "Evidence gaps and hypotheses remain explicit.",
         "Only a human-led, separately authorized decision may proceed."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:EscalateHuman",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-021",
@@ -329,7 +414,11 @@
         "No simulated command is described as a physical repair.",
         "Human inspection is requested before recovery is claimed."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:EscalateHuman",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-022",
@@ -344,7 +433,11 @@
         "Suppression is disabled or constrained for the affected source.",
         "Original event evidence remains linkable."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-023",
@@ -359,7 +452,11 @@
         "The receipt still reports target, freshness and temporal-coherence limitations.",
         "No write capability is created by accepting read-only evidence."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:AcceptReadOnly",
+        "conflicting_retry:not_required"
+      ]
     },
     {
       "scenario_id": "FX-024",
@@ -374,7 +471,12 @@
         "Independent read-back proves the exact VLAN ID and parent relationship.",
         "No host or production network is touched."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "modeled_apply:desired-state",
+        "conflicting_retry:not_required",
+        "modeled_poststate_readback:matched"
+      ]
     },
     {
       "scenario_id": "FX-025",
@@ -389,7 +491,11 @@
         "No repair action is applied in the lab state machine.",
         "The event is escalated or returned to observation rather than retried blindly."
       ],
-      "production_mutation": false
+      "production_mutation": false,
+      "expected_transition_trace": [
+        "no_apply:BlockMutation",
+        "conflicting_retry:not_required"
+      ]
     }
   ],
   "task_corpus_artifact_id": "nixward.network-automation-task-corpus.v1"

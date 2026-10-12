@@ -1,0 +1,130 @@
+name: Network automation scenario harness
+
+on:
+  pull_request:
+    branches:
+      - "research/sovereign-network-os-architecture-2026-10-12"
+    paths:
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.json"
+      - "docs/NETWORK_AUTOMATION_TASK_CORPUS_V1.schema.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.json"
+      - "docs/NETWORK_AUTOMATION_FAULT_FIXTURES_V1.schema.json"
+      - "tests/network-automation-corpus/**"
+      - "tests/network-automation-scenario-harness/**"
+      - ".github/workflows/network-automation-scenario-harness.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-automation-scenario-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scenario-harness:
+    name: Scenario harness (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.96.0", "1.99.0"]
+    steps:
+      - name: Checkout exact triggering revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt
+
+      - name: Record compiler and exact source identity
+        run: |
+          rustc --version --verbose
+          cargo --version
+          git rev-parse HEAD
+          printf 'Trigger SHA: %s\n' '${{ github.event.pull_request.head.sha || github.sha }}'
+          printf 'NIXWARD_GIT_COMMIT=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Run Python schema/corpus mutation suite
+        run: python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -v
+
+      - name: Validate task corpus, fixture corpus and cross-references
+        run: python3 tests/network-automation-corpus/validate_corpus.py
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path tests/network-automation-scenario-harness/Cargo.toml -- --check
+
+      - name: Run locked Rust decision-model tests
+        run: cargo test --locked --manifest-path tests/network-automation-scenario-harness/Cargo.toml --all-targets --verbose
+
+      - name: Emit and verify deterministic machine-readable receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-a.json
+          cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-b.json
+          cmp /tmp/scenario-receipt-a.json /tmp/scenario-receipt-b.json
+          mkdir -p artifacts
+          cp /tmp/scenario-receipt-a.json artifacts/scenario-run-receipt.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          envelope = json.loads(Path("/tmp/scenario-receipt-a.json").read_text(encoding="utf-8"))
+          receipt = envelope["receipt"]
+          assert receipt["status"] == "pass", receipt["status"]
+          assert len(envelope["receipt_blake3"]) == 64
+          assert receipt["task_count"] == 16, receipt["task_count"]
+          assert receipt["scenario_count"] == 25, receipt["scenario_count"]
+          assert receipt["unique_task_ids"] == 16
+          assert receipt["unique_scenario_ids"] == 25
+          assert receipt["production_mutation_enabled"] is False
+          assert all(not row["production_mutation_applied"] for row in receipt["results"])
+          assert all(row["passed"] for row in receipt["results"])
+          assert receipt["rustc_version"].startswith("rustc ")
+          assert receipt["cargo_version"].startswith("cargo ")
+          assert receipt["source_revision"] == os.environ["NIXWARD_GIT_COMMIT"]
+          assert receipt["target_os"] == "linux"
+          for digest in receipt["input_digests"].values():
+              assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), digest
+          assert all(
+              row["resource_fenced"]
+              for row in receipt["results"]
+              if row["actual_receipt_state"] == "Indeterminate"
+          )
+          by_id = {row["scenario_id"]: row for row in receipt["results"]}
+          assert all(
+              row["expected_transition_trace"] == row["modeled_transition_trace"]
+              for row in receipt["results"]
+          )
+          assert all(
+              any(
+                  check["check_id"] == "expected_transition_trace_matches" and check["passed"]
+                  for check in row["checks"]
+              )
+              for row in receipt["results"]
+          )
+          assert "conflicting_write_rejected_by_fence" in by_id["FX-011"]["modeled_transition_trace"]
+          assert "modeled_recovery:prior_state_restored_and_readback_verified" in by_id["FX-010"]["modeled_transition_trace"]
+          assert "modeled_poststate_readback:matched" in by_id["FX-024"]["modeled_transition_trace"]
+          print("PASS: stable receipt bytes, outcome and trace oracles matched, no production mutation")
+          print("LIMIT: deterministic decision model only; no network adapter or live-state qualification")
+          PY
+
+      - name: Upload deterministic scenario receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: network-automation-scenario-receipt-${{ matrix.toolchain }}
+          path: artifacts/scenario-run-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
