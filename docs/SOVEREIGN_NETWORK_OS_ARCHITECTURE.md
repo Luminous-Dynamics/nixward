@@ -121,6 +121,8 @@ Implement one network-namespace-scoped collector. No mutation. Validate Netlink 
 
 **Gate:** the test matrix demonstrates all partial/lost/malformed states remain incomplete; exact snapshot identity and independent verification reproduce the result.
 
+The new [Network Observation Evidence Contract](NETWORK_OBSERVATION_EVIDENCE_CONTRACT.md) makes the M1 gate concrete: separate per-source integrity and coverage from cross-source temporal coherence; never silently label a multi-source inventory globally atomic; retain byte-exact evidence; recompute acceptance in an independent verifier; model manager authority separately from effective kernel state; and fail closed on interrupted/lost/malformed dumps or unknown decision-critical fields. The contract is a specification, not implemented code or passing test evidence.
+
 ### M2 — Closed-loop simulator
 
 Use network namespaces, veth pairs, nftables fixtures, FRR labs and a topology harness to exercise routing-policy and ownership changes. Inject collector loss, conflicting writers, link loss, route withdrawal, process termination and stale snapshots. No production-host mutation.
