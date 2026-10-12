@@ -92,14 +92,23 @@ jobs:
             echo "- Test target: nixward library module tests"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Resolve and freeze the overlaid workspace dependency graph
+        working-directory: symthaea
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 > /dev/null
+          LOCK_SHA256="$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
+          echo "- Resolved workspace Cargo.lock SHA-256: ${LOCK_SHA256}" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Test signed release manifest and filesystem integrity
         working-directory: symthaea
-        run: cargo test -p nixward --lib release_integrity::tests
+        run: cargo test --locked -p nixward --lib release_integrity::tests
 
       - name: Test structured resolver, signed runtime, and evidence fixtures
         working-directory: symthaea
-        run: cargo test -p nixward --lib action::ai_proposal_binding::tests
+        run: cargo test --locked -p nixward --lib action::ai_proposal_binding::tests
 
       - name: Test transaction integration and fail-closed state transitions
         working-directory: symthaea
-        run: cargo test -p nixward --lib action::system_transaction::tests
+        run: cargo test --locked -p nixward --lib action::system_transaction::tests
