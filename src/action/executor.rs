@@ -2469,14 +2469,50 @@ impl NixOSExecutor {
         #[cfg(unix)]
         {
             if let Some(expected_uid) = expected_root_uid {
-                if root_metadata.uid() != expected_uid {
-                    return Err(format!(
-                        "transaction journal root {} has owner uid {}, expected {}",
-                        root.display(), root_metadata.uid(), expected_uid
-                    ));
+                if !root.is_absolute() {
+                    return Err("production transaction journal root must be an absolute path".into());
                 }
-            }
-            if root_metadata.mode() & 0o022 != 0 {
+                // Validate every path component with lstat semantics. Checking
+                // only the final directory would trust a replaceable/symlinked
+                // ancestor such as /var/lib/nixward.
+                let mut cursor = PathBuf::from("/");
+                for component in root.components() {
+                    match component {
+                        std::path::Component::RootDir => continue,
+                        std::path::Component::Normal(name) => cursor.push(name),
+                        _ => {
+                            return Err(format!(
+                                "transaction journal root has a noncanonical path component: {}",
+                                root.display()
+                            ));
+                        }
+                    }
+                    let metadata = std::fs::symlink_metadata(&cursor).map_err(|error| {
+                        format!(
+                            "failed to inspect trusted transaction journal path component {}: {error}",
+                            cursor.display()
+                        )
+                    })?;
+                    if !metadata.file_type().is_dir() {
+                        return Err(format!(
+                            "trusted transaction journal path component {} is not a real directory",
+                            cursor.display()
+                        ));
+                    }
+                    if metadata.uid() != expected_uid {
+                        return Err(format!(
+                            "trusted transaction journal path component {} has owner uid {}, expected {}",
+                            cursor.display(), metadata.uid(), expected_uid
+                        ));
+                    }
+                    if metadata.mode() & 0o022 != 0 {
+                        return Err(format!(
+                            "trusted transaction journal path component {} is group/world-writable",
+                            cursor.display()
+                        ));
+                    }
+                }
+            } else if root_metadata.mode() & 0o022 != 0 {
                 return Err(format!(
                     "transaction journal root {} is group/world-writable",
                     root.display()
@@ -2524,6 +2560,18 @@ impl NixOSExecutor {
                 if metadata.mode() & 0o022 != 0 {
                     return Err(format!(
                         "transaction journal {} is group/world-writable",
+                        path.display()
+                    ));
+                }
+                if metadata.mode() & 0o7000 != 0 {
+                    return Err(format!(
+                        "transaction journal {} has forbidden special permission bits",
+                        path.display()
+                    ));
+                }
+                if metadata.mode() & 0o055 != 0 {
+                    return Err(format!(
+                        "transaction journal {} grants group/other read or execute access",
                         path.display()
                     ));
                 }
@@ -5383,11 +5431,15 @@ mod tests {
         let transaction_id = transaction.transaction_id().to_string();
         let mut value = serde_json::to_value(&transaction).expect("serialize test journal");
         value["phase"] = serde_json::Value::String(phase.to_string());
+        let journal_path = root.join(format!("{transaction_id}.json"));
         std::fs::write(
-            root.join(format!("{transaction_id}.json")),
+            &journal_path,
             serde_json::to_vec(&value).expect("encode test journal"),
         )
         .expect("persist test journal");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make fixture journal owner-only");
         transaction_id
     }
 
@@ -5574,11 +5626,79 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn peer_journal_rejects_group_read_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "e".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("make journal group-readable");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("private journals must not grant group/other read access");
+        assert!(error.contains("group/other read or execute access"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_special_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "f".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4600))
+            .expect("set a deliberately unsafe special bit");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal scanner must reject special mode bits");
+        assert!(error.contains("forbidden special permission bits"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_root_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("fixture root");
+        let target = dir.path().join("target");
+        let link = dir.path().join("root-link");
+        std::fs::create_dir(&target).expect("create real target directory");
+        symlink(&target, &link).expect("create root symlink");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            &link,
+            None,
+            None,
+        )
+        .expect_err("journal root symlink must be rejected");
+        assert!(error.contains("not a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn malformed_peer_journal_blocks_new_transaction_fail_closed() {
         let dir = tempfile::tempdir().expect("journal root");
         let peer_id = "a".repeat(64);
-        std::fs::write(dir.path().join(format!("{peer_id}.json")), b"not-json")
-            .expect("write malformed journal");
+        let malformed_path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&malformed_path, b"not-json").expect("write malformed journal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&malformed_path, std::fs::Permissions::from_mode(0o600))
+                .expect("make malformed fixture owner-only");
+        }
 
         let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
             dir.path(),
