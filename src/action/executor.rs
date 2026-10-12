@@ -2418,7 +2418,15 @@ impl NixOSExecutor {
     fn ensure_no_unresolved_peer_transactions(current_transaction_id: &str) -> Result<(), String> {
         Self::ensure_no_unresolved_peer_transactions_at(
             Path::new(Self::TRANSACTION_JOURNAL_ROOT),
-            current_transaction_id,
+            Some(current_transaction_id),
+            Some(0),
+        )
+    }
+
+    fn ensure_no_unresolved_transactions() -> Result<(), String> {
+        Self::ensure_no_unresolved_peer_transactions_at(
+            Path::new(Self::TRANSACTION_JOURNAL_ROOT),
+            None,
             Some(0),
         )
     }
@@ -2446,7 +2454,7 @@ impl NixOSExecutor {
     /// established safely.
     fn ensure_no_unresolved_peer_transactions_at(
         root: &Path,
-        current_transaction_id: &str,
+        current_transaction_id: Option<&str>,
         expected_root_uid: Option<u32>,
     ) -> Result<(), String> {
         let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
@@ -2527,7 +2535,7 @@ impl NixOSExecutor {
                     path.display()
                 ));
             }
-            if journal_id == current_transaction_id {
+            if current_transaction_id == Some(journal_id) {
                 continue;
             }
 
@@ -3489,7 +3497,17 @@ impl NixOSExecutor {
             && matches!(command, NixOSCommand::ActivateSystemClosure { .. })
         {
             match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => Some(lock),
+                Ok(lock) => {
+                    if let Err(reason) = Self::ensure_no_unresolved_transactions() {
+                        let blocked = ExecutionResult::Blocked {
+                            reason,
+                            safety_level: safety,
+                        };
+                        self.record_execution(&command, decision_quality, &authorization, &blocked);
+                        return blocked;
+                    }
+                    Some(lock)
+                }
                 Err(reason) => {
                     let blocked = ExecutionResult::Blocked {
                         reason,
@@ -5369,7 +5387,7 @@ mod tests {
             .expect("kernel lock is available after prior owner exits");
         let result = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
             dir.path(),
-            &current_id,
+            Some(&current_id),
             None,
         );
 
@@ -5377,7 +5395,7 @@ mod tests {
         worker.join().expect("simulated activation worker exits cleanly");
         let error = result.expect_err("unresolved activation journal must block next mutation");
         assert!(error.contains(&peer_id));
-        assert!(error.contains("activation_started"));
+        assert!(error.contains("ActivationStarted"));
         assert!(error.contains("reconcile it"));
     }
 
@@ -5390,7 +5408,7 @@ mod tests {
 
         NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
             dir.path(),
-            &current_id,
+            Some(&current_id),
             None,
         )
         .expect("the current transaction is exempt and pre-mutation peers are safe");
@@ -5406,7 +5424,7 @@ mod tests {
 
         let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
             dir.path(),
-            &"f".repeat(64),
+            None,
             None,
         )
         .expect_err("unparseable peer journal prevents proving no outstanding mutation");
