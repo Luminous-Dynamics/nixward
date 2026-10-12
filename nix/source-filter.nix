@@ -8,6 +8,8 @@ let
     ".netrc"
     ".npmrc"
     ".pypirc"
+    ".git-credentials"
+    ".gitcookies"
     "application_default_credentials.json"
     "credentials.json"
     "service-account.json"
@@ -16,6 +18,7 @@ let
   sensitiveFileSuffixes = [ ".key" ".p8" ".p12" ".pfx" ".jks" ".keystore" ];
   sensitivePathFragments = [
     "/.cargo/credentials"
+    "/.config/nix/nix.conf"
     "/.config/gh/hosts.yml"
     "/.config/gcloud/"
     "/.config/azure/"
