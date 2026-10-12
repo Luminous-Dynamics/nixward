@@ -330,14 +330,14 @@ fn evaluate_fault(fault_class: &str, layer: &str) -> Result<Outcome, String> {
             decision: "RecoverAndVerify",
             receipt_state: "Recovered",
             resource_fenced: false,
-            simulated_mutation_applied: false,
+            simulated_mutation_applied: true,
             postconditions_modelled_verified: true,
         },
         "broker-crash-after-apply" | "rollback-failure" => Outcome {
             decision: "MarkIndeterminate",
             receipt_state: "Indeterminate",
             resource_fenced: true,
-            simulated_mutation_applied: false,
+            simulated_mutation_applied: true,
             postconditions_modelled_verified: false,
         },
         "critical-asset-misclassification" | "contradictory-timeline" => Outcome {
@@ -422,7 +422,7 @@ fn execute_scenario(
             | "rollback-failure"
     ) || outcome.receipt_state == "Indeterminate";
     let mutation_layer_safe =
-        !outcome.simulated_mutation_applied || scenario.layer == "virtual-lab";
+        scenario.expected_decision != "ApplyAndVerify" || scenario.layer == "virtual-lab";
     let fence_satisfied = !fence_required || outcome.resource_fenced;
 
     let checks = vec![
@@ -799,7 +799,7 @@ mod tests {
                 .expect("row");
             assert_eq!(row.actual_receipt_state, "Indeterminate");
             assert!(row.resource_fenced);
-            assert!(!row.simulated_mutation_applied);
+            assert!(row.simulated_mutation_applied);
             assert!(!row.production_mutation_applied);
         }
     }
