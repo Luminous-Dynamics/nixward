@@ -833,3 +833,23 @@ now checks the exact-match, drift, and observation-error outcomes used by the
 pre-release guard. These tests and the full compiler/test matrix must complete
 on the exact subject before it may be qualified; no passing execution result is
 claimed for this source-only pass.
+
+
+## Transaction coordinator lock-file hardening (2026-10-12)
+
+The current Nixward-peer interlock in `src/action/executor.rs` remains a
+machine-wide `/run/nixward-system-transaction.lock`. Acquisition now validates
+that the parent is a real directory not writable by group/other, opens the
+lock with `O_NOFOLLOW | O_CLOEXEC`, verifies parent/file owner agreement,
+requires owner-only read/write permissions and a single hard link, and checks
+that the file descriptor and current path resolve to the same device/inode.
+The guard does not unlink the lock path on release. Four Unix regression tests
+cover symlink paths, writable parents, permissive lock-file modes, and inode
+stability across reacquisition.
+
+These changes harden the *Nixward interlock file*, not the full system writer
+boundary. The tests have not been compiled or executed, and the machine-wide
+lock does not force unmodified `nixos-rebuild`, self-deploy, auto-upgrade or
+third-party tools to participate. The Nix-native expected-old conditional
+profile update and the supervised whole-deployment coordinator integration
+remain unimplemented; direct privileged/root bypass remains out of scope.
