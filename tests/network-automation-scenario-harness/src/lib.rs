@@ -648,11 +648,31 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
         production_mutation_enabled: false,
         results,
         limitations: vec![
-            "This is a deterministic decision-model evaluation over declared fixture labels, not execution of real kernel, routing, or firewall operations.".into(),
-            "The declared natural-language assertions are included for traceability; only the named machine checks are evaluated by this harness.".into(),
-            "A pass does not qualify a live observer, Netlink completeness, Batfish model, containerlab topology, network mutation broker, hardware, or production deployment.".into(),
-            "The positive create case mutates only a modeled virtual state; it does not touch a host or network.".into(),
-            "The checked-in Python validator is required for the supported JSON Schema keyword subset; this Rust crate is not a general JSON Schema implementation.".into(),
+            concat!(
+                "This is a deterministic decision-model evaluation over declared fixture labels, ",
+                "not execution of real kernel, routing, or firewall operations."
+            )
+            .into(),
+            concat!(
+                "The declared natural-language assertions are included for traceability; ",
+                "only the named machine checks are evaluated by this harness."
+            )
+            .into(),
+            concat!(
+                "A pass does not qualify a live observer, Netlink completeness, Batfish model, ",
+                "containerlab topology, network mutation broker, hardware, or production deployment."
+            )
+            .into(),
+            concat!(
+                "The positive create case mutates only a modeled virtual state; ",
+                "it does not touch a host or network."
+            )
+            .into(),
+            concat!(
+                "The checked-in Python validator is required for the supported JSON Schema keyword ",
+                "subset; this Rust crate is not a general JSON Schema implementation."
+            )
+            .into(),
         ],
     };
     let receipt_bytes =
