@@ -115,7 +115,9 @@
               "route-leak",
               "contradictory-timeline",
               "physical-state-ambiguous",
-              "event-gap"
+              "event-gap",
+              "complete-empty-family",
+              "bounded-create-success"
             ]
           },
           "setup": {
@@ -133,7 +135,8 @@
               "MarkIndeterminate",
               "EscalateHuman",
               "AbortRollout",
-              "RecoverAndVerify"
+              "RecoverAndVerify",
+              "ApplyAndVerify"
             ]
           },
           "expected_receipt_state": {
