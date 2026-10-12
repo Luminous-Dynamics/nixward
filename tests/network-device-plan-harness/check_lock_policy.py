@@ -44,6 +44,12 @@ KNOWN_MALICIOUS_RELEASES = {
     ("onering", "1.4.1"),
 }
 ARRAYREF_REVIEW_FLOOR = (0, 3, 10)
+ALLOWED_REGISTRY_SOURCES = {
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "registry+sparse+https://index.crates.io/",
+}
+LOCAL_HARNESS_PACKAGE = ("nixward-network-device-plan-m0-harness", "0.1.0")
+CHECKSUM_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def parse_release(version: str) -> tuple[int, int, int] | None:
@@ -69,6 +75,47 @@ def main() -> int:
     if not isinstance(packages, list):
         print("ERROR: Cargo.lock has no package array", file=sys.stderr)
         return 2
+    if document.get("version") != 4:
+        print("ERROR: planner harness Cargo.lock must use reviewed format version 4", file=sys.stderr)
+        return 1
+
+    # The harness intentionally uses only registry crates plus its one local
+    # package. Reject Git/path/alternate-registry sources and missing checksums
+    # before advisory policy: a valid-looking version is not source integrity.
+    identities: set[tuple[str, str, str | None]] = set()
+    local_harness_count = 0
+    for package in packages:
+        if not isinstance(package, dict):
+            print("ERROR: malformed package entry in Cargo.lock", file=sys.stderr)
+            return 1
+        name, version, source = package.get("name"), package.get("version"), package.get("source")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            print("ERROR: Cargo.lock package is missing a valid name/version", file=sys.stderr)
+            return 1
+        identity = (name, version, source if isinstance(source, str) else None)
+        if identity in identities:
+            print(f"ERROR: duplicate Cargo.lock package identity: {identity}", file=sys.stderr)
+            return 1
+        identities.add(identity)
+        if source is None:
+            if (name, version) != LOCAL_HARNESS_PACKAGE:
+                print(f"ERROR: unexpected source-less package: {name}@{version}", file=sys.stderr)
+                return 1
+            local_harness_count += 1
+            if "checksum" in package:
+                print("ERROR: local harness package must not have a registry checksum", file=sys.stderr)
+                return 1
+            continue
+        if source not in ALLOWED_REGISTRY_SOURCES:
+            print(f"ERROR: unapproved dependency source for {name}@{version}: {source}", file=sys.stderr)
+            return 1
+        checksum = package.get("checksum")
+        if not isinstance(checksum, str) or CHECKSUM_RE.fullmatch(checksum) is None:
+            print(f"ERROR: missing or invalid registry checksum for {name}@{version}", file=sys.stderr)
+            return 1
+    if local_harness_count != 1:
+        print(f"ERROR: expected exactly one local harness package, found {local_harness_count}", file=sys.stderr)
+        return 1
 
     found_names = sorted(
         {
