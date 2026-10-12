@@ -1190,7 +1190,7 @@ mod tests {
             &source_path,
         );
 
-        assert!(result.unwrap_err().contains("release signature verification failed"));
+        assert!(result.unwrap_err().contains("signed release verification failed"));
         assert_eq!(tx.phase, TransactionPhase::Planned);
         assert!(tx.validation.is_none());
         assert!(tx.authorization.is_none());
