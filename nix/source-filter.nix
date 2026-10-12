@@ -1,10 +1,12 @@
 # Nix source closure filter shared by package builds and its regression check.
 { lib, root }:
 let
-  excludedDirNames = [ "target" "node_modules" ".git" ".jj" "dist" "result" ];
+  excludedDirNames = [ "target" "node_modules" ".git" ".jj" ".direnv" "dist" "result" ];
   sensitiveDirNames = [ ".aws" ".azure" ".docker" ".gnupg" ".kube" ".ssh" ];
   sensitiveFileNames = [
     ".env"
+    ".envrc"
+    "direnvrc"
     ".netrc"
     ".npmrc"
     ".pypirc"
@@ -15,7 +17,7 @@ let
     "service-account.json"
   ];
   privateKeyPrefixes = [ "id_dsa" "id_ecdsa" "id_ed25519" "id_rsa" ];
-  sensitiveFileSuffixes = [ ".key" ".p8" ".p12" ".pfx" ".jks" ".keystore" ];
+  sensitiveFileSuffixes = [ ".key" ".pem" ".p8" ".p12" ".pfx" ".jks" ".keystore" ];
   sensitivePathFragments = [
     "/.cargo/credentials"
     "/.config/nix/nix.conf"
