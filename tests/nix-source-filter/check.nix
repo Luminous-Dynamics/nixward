@@ -26,11 +26,11 @@ pkgs.runCommand "nixward-source-filter-regression" { src = filteredFixtures; } '
   # Credential and local configuration paths must never enter the closure.
   for path in \
     ".env" ".env.local" ".env.production" \
-    ".netrc" ".npmrc" ".pypirc" \
+    ".netrc" ".npmrc" ".pypirc" ".git-credentials" ".gitcookies" \
     "application_default_credentials.json" "credentials.json" "service-account.json" \
     "id_rsa" "private.key" "private.p8" "keystore.jks" "bundle.p12" "bundle.pfx" \
     ".aws" ".ssh" ".docker" \
-    ".cargo/credentials.toml" ".config/gh/hosts.yml" \
+    ".cargo/credentials.toml" ".config/gh/hosts.yml" ".config/nix/nix.conf" \
     ".config/gcloud/application_default_credentials.json" ".local/share/keyrings/login.keyring"; do
     if [ -e "$src/$path" ] || [ -L "$src/$path" ]; then
       echo "unexpected sensitive path in Nix source closure: $path" >&2
