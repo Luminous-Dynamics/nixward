@@ -839,13 +839,15 @@ claimed for this source-only pass.
 
 The current Nixward-peer interlock in `src/action/executor.rs` remains a
 machine-wide `/run/nixward-system-transaction.lock`. Acquisition now validates
-that the parent is a real directory not writable by group/other, opens the
-lock with `O_NOFOLLOW | O_CLOEXEC`, verifies parent/file owner agreement,
+that the parent is a real directory not writable by group/other (and that
+production `/run` has UID 0), opens the lock with `O_NOFOLLOW | O_CLOEXEC`,
+verifies parent/file owner agreement,
 requires owner-only read/write permissions and a single hard link, and checks
 that the file descriptor and current path resolve to the same device/inode.
-The guard does not unlink the lock path on release. Six Unix regression tests
-cover symlink paths, writable parents, permissive lock-file modes, and inode
-stability across reacquisition.
+The guard does not unlink the lock path on release. Six new Unix regression tests cover unexpected parent-owner rejection, symlink
+lock paths, writable parents, unsafe lock-file modes, multiple hard links, and
+stable path/inode across reacquisition; the existing two-thread exclusion test
+remains separate.
 
 These changes harden the *Nixward interlock file*, not the full system writer
 boundary. The tests have not been compiled or executed, and the machine-wide
