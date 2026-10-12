@@ -5533,6 +5533,9 @@ mod tests {
         let path = dir.path().join(format!("{peer_id}.json"));
         let alias = dir.path().join("alias.json");
         std::fs::write(&path, b"not-json").expect("write fixture");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("make fixture owner-only");
         std::fs::hard_link(&path, &alias).expect("create hard link");
 
         let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
