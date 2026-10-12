@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nixward-resolver-assurance-${{ github.ref }}-${{ github.event_name }}
+  group: nixward-resolver-assurance-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 env:
