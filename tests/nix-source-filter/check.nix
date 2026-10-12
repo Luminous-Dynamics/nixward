@@ -28,8 +28,10 @@ pkgs.runCommand "nixward-source-filter-regression" { src = filteredFixtures; } '
     ".env" ".env.local" ".env.production" \
     ".netrc" ".npmrc" ".pypirc" \
     "application_default_credentials.json" "credentials.json" "service-account.json" \
-    "id_rsa" "private.key" "bundle.p12" "bundle.pfx" \
-    ".aws" ".ssh" ".docker"; do
+    "id_rsa" "private.key" "private.p8" "keystore.jks" "bundle.p12" "bundle.pfx" \
+    ".aws" ".ssh" ".docker" \
+    ".cargo/credentials.toml" ".config/gh/hosts.yml" \
+    ".config/gcloud/application_default_credentials.json" ".local/share/keyrings/login.keyring"; do
     if [ -e "$src/$path" ] || [ -L "$src/$path" ]; then
       echo "unexpected sensitive path in Nix source closure: $path" >&2
       exit 1
