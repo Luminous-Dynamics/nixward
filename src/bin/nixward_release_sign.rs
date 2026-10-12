@@ -246,6 +246,25 @@ fn ensure_seed_not_linked_into_release_tree(
     scan(release_root, seed_metadata.dev(), seed_metadata.ino())
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = std::fs::File::open(parent)
+        .map_err(|error| format!("cannot open output parent directory for sync: {error}"))?;
+    directory
+        .sync_all()
+        .map_err(|error| format!("cannot sync output parent directory: {error}"))
+}
+
+fn remove_partial_output(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path)
+        .map_err(|error| format!("cannot remove incomplete manifest {}: {error}", path.display()))?;
+    sync_parent_directory(path)
+        .map_err(|error| format!("partial output removed but directory cleanup sync failed: {error}"))
+}
+
 fn write_new_manifest(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut output_file = std::fs::OpenOptions::new()
         .write(true)
@@ -257,10 +276,22 @@ fn write_new_manifest(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
     if let Err(error) = output_file.write_all(bytes).and_then(|_| output_file.sync_all()) {
         drop(output_file);
-        return match std::fs::remove_file(path) {
+        return match remove_partial_output(path) {
             Ok(()) => Err(format!("cannot persist signed manifest; incomplete output removed: {error}")),
             Err(cleanup_error) => Err(format!(
-                "cannot persist signed manifest: {error}; could not remove incomplete output: {cleanup_error}"
+                "cannot persist signed manifest: {error}; cleanup was incomplete: {cleanup_error}"
+            )),
+        };
+    }
+
+    drop(output_file);
+    if let Err(error) = sync_parent_directory(path) {
+        return match remove_partial_output(path) {
+            Ok(()) => Err(format!(
+                "cannot establish durable manifest directory entry; output removed: {error}"
+            )),
+            Err(cleanup_error) => Err(format!(
+                "cannot establish durable manifest directory entry: {error}; cleanup was incomplete: {cleanup_error}"
             )),
         };
     }
