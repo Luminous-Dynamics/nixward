@@ -83,6 +83,7 @@ def main() -> int:
     # package. Reject Git/path/alternate-registry sources and missing checksums
     # before advisory policy: a valid-looking version is not source integrity.
     identities: set[tuple[str, str, str | None]] = set()
+    package_records: list[tuple[tuple[str, str, str | None], dict[str, object]]] = []
     local_harness_count = 0
     for package in packages:
         if not isinstance(package, dict):
@@ -97,6 +98,7 @@ def main() -> int:
             print(f"ERROR: duplicate Cargo.lock package identity: {identity}", file=sys.stderr)
             return 1
         identities.add(identity)
+        package_records.append((identity, package))
         if source is None:
             if (name, version) != LOCAL_HARNESS_PACKAGE:
                 print(f"ERROR: unexpected source-less package: {name}@{version}", file=sys.stderr)
@@ -116,6 +118,38 @@ def main() -> int:
     if local_harness_count != 1:
         print(f"ERROR: expected exactly one local harness package, found {local_harness_count}", file=sys.stderr)
         return 1
+
+    # Verify that every lockfile edge resolves to exactly one package identity.
+    # This does not replace Cargo's own resolver; it catches truncated or
+    # hand-edited lockfiles before they reach cargo-audit or cargo test.
+    for identity, package in package_records:
+        dependency_specs = package.get("dependencies", [])
+        if not isinstance(dependency_specs, list) or any(
+            not isinstance(dependency, str) for dependency in dependency_specs
+        ):
+            print(f"ERROR: malformed dependency list for {identity[0]}@{identity[1]}", file=sys.stderr)
+            return 1
+        for dependency in dependency_specs:
+            match = re.fullmatch(r"(.+?) ([0-9][^ ]*)(?: \\((.+)\\))?", dependency)
+            if match is None:
+                dependency_name, dependency_version, dependency_source = dependency, None, None
+            else:
+                dependency_name, dependency_version, dependency_source = match.groups()
+            candidates = [
+                candidate
+                for candidate, _record in package_records
+                if candidate[0] == dependency_name
+                and (dependency_version is None or candidate[1] == dependency_version)
+                and (dependency_source is None or candidate[2] == dependency_source)
+            ]
+            if len(candidates) != 1:
+                print(
+                    f"ERROR: unresolved or ambiguous dependency edge "
+                    f"{identity[0]}@{identity[1]} -> {dependency!r} "
+                    f"(matched {len(candidates)} package identities)",
+                    file=sys.stderr,
+                )
+                return 1
 
     found_names = sorted(
         {
