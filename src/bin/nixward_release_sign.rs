@@ -150,7 +150,21 @@ fn require_distinct_seed_and_output(seed_path: &Path, output_path: &Path) -> Res
     if seed_path == output_path {
         return Err("output manifest must not overwrite the signing seed".into());
     }
-    Ok(())
+
+    use std::os::unix::fs::MetadataExt;
+    let seed_metadata = std::fs::metadata(seed_path)
+        .map_err(|error| format!("cannot inspect signing seed identity: {error}"))?;
+    match std::fs::metadata(output_path) {
+        Ok(output_metadata)
+            if seed_metadata.dev() == output_metadata.dev()
+                && seed_metadata.ino() == output_metadata.ino() =>
+        {
+            Err("output manifest must not overwrite the signing seed".into())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("cannot inspect output file identity: {error}")),
+    }
 }
 
 fn now_ms() -> u64 {
@@ -229,6 +243,21 @@ mod tests {
         let canonical_seed = seed.canonicalize().unwrap();
         let output = resolve_output_path(&seed).unwrap();
 
+        assert!(require_distinct_seed_and_output(&canonical_seed, &output)
+            .unwrap_err()
+            .contains("must not overwrite the signing seed"));
+    }
+
+    #[test]
+    fn output_hard_link_to_signing_seed_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        let output_alias = temp.path().join("manifest.json");
+        std::fs::write(&seed, [10u8; 32]).unwrap();
+        std::fs::hard_link(&seed, &output_alias).unwrap();
+
+        let canonical_seed = seed.canonicalize().unwrap();
+        let output = resolve_output_path(&output_alias).unwrap();
         assert!(require_distinct_seed_and_output(&canonical_seed, &output)
             .unwrap_err()
             .contains("must not overwrite the signing seed"));
