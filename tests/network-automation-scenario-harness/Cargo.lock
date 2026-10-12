@@ -348,4 +348,5 @@ dependencies = [
  "blake3",
  "serde",
  "serde_json",
+ "thiserror",
 ]
