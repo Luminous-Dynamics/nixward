@@ -51,6 +51,7 @@ jobs:
           cargo --version
           git rev-parse HEAD
           printf 'Trigger SHA: %s\n' '${{ github.event.pull_request.head.sha || github.sha }}'
+          printf 'NIXWARD_GIT_COMMIT=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Run Python schema/corpus mutation suite
         run: python3 -m unittest discover -s tests/network-automation-corpus -p 'test_*.py' -v
@@ -71,8 +72,11 @@ jobs:
           cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-a.json
           cargo run --locked --quiet --manifest-path tests/network-automation-scenario-harness/Cargo.toml --bin nixward-network-automation-scenario-harness > /tmp/scenario-receipt-b.json
           cmp /tmp/scenario-receipt-a.json /tmp/scenario-receipt-b.json
+          mkdir -p artifacts
+          cp /tmp/scenario-receipt-a.json artifacts/scenario-run-receipt.json
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           envelope = json.loads(Path("/tmp/scenario-receipt-a.json").read_text(encoding="utf-8"))
@@ -88,6 +92,10 @@ jobs:
           assert all(row["passed"] for row in receipt["results"])
           assert receipt["rustc_version"].startswith("rustc ")
           assert receipt["cargo_version"].startswith("cargo ")
+          assert receipt["source_revision"] == os.environ["NIXWARD_GIT_COMMIT"]
+          assert receipt["target_os"] == "linux"
+          for digest in receipt["input_digests"].values():
+              assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), digest
           assert all(
               row["resource_fenced"]
               for row in receipt["results"]
@@ -95,4 +103,13 @@ jobs:
           )
           print("PASS: stable receipt bytes, all scenario oracles matched, no production mutation")
           print("LIMIT: deterministic decision model only; no network adapter or live-state qualification")
+
+      - name: Upload deterministic scenario receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: network-automation-scenario-receipt-${{ matrix.toolchain }}
+          path: artifacts/scenario-run-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
           PY
