@@ -34,6 +34,7 @@ name = "nixward-owner-key"
 path = "src/bin/nixward_owner_key.rs"
 
 [dependencies]
+libc = "0.2"
 symthaea-core = { path = "../symthaea-core" }
 # Native-only (C FFI, async)
 tree-sitter = { workspace = true, optional = true }
