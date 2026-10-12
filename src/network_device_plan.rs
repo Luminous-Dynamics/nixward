@@ -561,29 +561,53 @@ fn plan_entry(
             })
             .unwrap_or((None, None, None));
 
-    let decision = match observed {
-        Some(resource) if resource.kind != desired.kind => NetworkPlanDecision::Blocked {
-            reason: NetworkPlanBlockReason::ResourceKindMismatch,
-        },
-        Some(resource) => match &resource.observation {
-            NetworkResourceObservation::Unknown { .. } => NetworkPlanDecision::Blocked {
-                reason: NetworkPlanBlockReason::ObservationUnknown,
+    // A partial family dump must never authorize a change to a resource that
+    // happened to appear in the partial results. Its neighbours, dependencies,
+    // or conflicting owners may have been omitted. Fail closed for the entire
+    // desired resource kind until completeness evidence is available.
+    let decision = if !snapshot.complete_kinds.contains(&desired.kind) {
+        NetworkPlanDecision::Blocked {
+            reason: NetworkPlanBlockReason::InventoryIncomplete,
+        }
+    } else {
+        match observed {
+            Some(resource) if resource.kind != desired.kind => NetworkPlanDecision::Blocked {
+                reason: NetworkPlanBlockReason::ResourceKindMismatch,
             },
-            NetworkResourceObservation::Known {
-                fingerprint_blake3,
-                configuration_owner,
-                runtime_owner,
-            } => {
-                // Matching state must not hide that another controller owns it.
-                if configuration_owner != &desired.management_mode.expected_configuration_owner()
-                    || runtime_owner != &desired.expected_runtime_owner
-                {
-                    NetworkPlanDecision::Blocked {
-                        reason: NetworkPlanBlockReason::ResourceOwnerConflict,
+            Some(resource) => match &resource.observation {
+                NetworkResourceObservation::Unknown { .. } => NetworkPlanDecision::Blocked {
+                    reason: NetworkPlanBlockReason::ObservationUnknown,
+                },
+                NetworkResourceObservation::Known {
+                    fingerprint_blake3,
+                    configuration_owner,
+                    runtime_owner,
+                } => {
+                    // Matching state must not hide that another controller owns it.
+                    if configuration_owner != &desired.management_mode.expected_configuration_owner()
+                        || runtime_owner != &desired.expected_runtime_owner
+                    {
+                        NetworkPlanDecision::Blocked {
+                            reason: NetworkPlanBlockReason::ResourceOwnerConflict,
+                        }
+                    } else if fingerprint_blake3 == &desired.desired_fingerprint_blake3 {
+                        NetworkPlanDecision::NoOp
+                    } else if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
+                        NetworkPlanDecision::Blocked { reason }
+                    } else {
+                        match desired.management_mode {
+                            NetworkManagementMode::NixOsDeclarative => {
+                                NetworkPlanDecision::RequiresDeclarativeChange
+                            }
+                            NetworkManagementMode::NixwardRuntime => {
+                                NetworkPlanDecision::ProposedRuntimeUpdate
+                            }
+                        }
                     }
-                } else if fingerprint_blake3 == &desired.desired_fingerprint_blake3 {
-                    NetworkPlanDecision::NoOp
-                } else if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
+                }
+            },
+            None => {
+                if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
                     NetworkPlanDecision::Blocked { reason }
                 } else {
                     match desired.management_mode {
@@ -591,27 +615,8 @@ fn plan_entry(
                             NetworkPlanDecision::RequiresDeclarativeChange
                         }
                         NetworkManagementMode::NixwardRuntime => {
-                            NetworkPlanDecision::ProposedRuntimeUpdate
+                            NetworkPlanDecision::ProposedRuntimeCreate
                         }
-                    }
-                }
-            }
-        },
-        None if !snapshot.complete_kinds.contains(&desired.kind) => {
-            NetworkPlanDecision::Blocked {
-                reason: NetworkPlanBlockReason::InventoryIncomplete,
-            }
-        }
-        None => {
-            if let Some(reason) = capability_block_reason(snapshot, desired.kind) {
-                NetworkPlanDecision::Blocked { reason }
-            } else {
-                match desired.management_mode {
-                    NetworkManagementMode::NixOsDeclarative => {
-                        NetworkPlanDecision::RequiresDeclarativeChange
-                    }
-                    NetworkManagementMode::NixwardRuntime => {
-                        NetworkPlanDecision::ProposedRuntimeCreate
                     }
                 }
             }
@@ -853,6 +858,37 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.complete_kinds.clear();
         snapshot.completeness_evidence_blake3.clear();
+
+        let plan = NetworkDevicePlanner::plan(
+            &snapshot,
+            &desired(NetworkManagementMode::NixwardRuntime),
+        )
+        .expect("valid blocked plan");
+
+        assert_eq!(
+            entry(&plan).decision,
+            NetworkPlanDecision::Blocked {
+                reason: NetworkPlanBlockReason::InventoryIncomplete
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_inventory_blocks_update_even_when_resource_appears_in_partial_dump() {
+        let mut snapshot = snapshot();
+        // Model a partial/interrupted link-family dump. The target resource
+        // happened to arrive, but the family is not complete and must not be
+        // used to authorize updates.
+        snapshot.complete_kinds.clear();
+        snapshot.completeness_evidence_blake3.clear();
+        snapshot.resources.insert(
+            id("link:lan0"),
+            known_observation(
+                fingerprint('b'),
+                NetworkConfigurationOwner::NixwardDesiredState,
+                NetworkRuntimeOwner::NixwardRuntime,
+            ),
+        );
 
         let plan = NetworkDevicePlanner::plan(
             &snapshot,
