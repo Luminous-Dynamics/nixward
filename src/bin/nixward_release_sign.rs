@@ -145,6 +145,68 @@ fn require_outside_release_root(
     Ok(())
 }
 
+fn validate_seed_permissions(seed_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(seed_path)
+        .map_err(|error| format!("cannot inspect signing seed permissions: {error}"))?;
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(
+            "signing seed permissions must deny group and other access (for example, mode 0600)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_seed_not_linked_into_release_tree(
+    seed_path: &Path,
+    release_root: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let seed_metadata = std::fs::metadata(seed_path)
+        .map_err(|error| format!("cannot inspect signing seed identity: {error}"))?;
+
+    fn scan(directory: &Path, seed_dev: u64, seed_ino: u64) -> Result<(), String> {
+        let mut entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("cannot scan release directory {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("cannot enumerate release directory: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect release path {}: {error}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "release tree contains symbolic link {}; refusing to sign",
+                    path.display()
+                ));
+            }
+            if metadata.is_dir() {
+                scan(&path, seed_dev, seed_ino)?;
+            } else if metadata.is_file() {
+                if metadata.dev() == seed_dev && metadata.ino() == seed_ino {
+                    return Err(format!(
+                        "signing seed shares a hard link with release artifact {}; refusing to sign",
+                        path.display()
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "release tree contains unsupported non-file {}; refusing to sign",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    scan(release_root, seed_metadata.dev(), seed_metadata.ino())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -156,6 +218,42 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn signing_seed_with_group_or_other_permissions_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [11u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(validate_seed_permissions(&seed)
+            .unwrap_err()
+            .contains("deny group and other access"));
+
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(validate_seed_permissions(&seed).is_ok());
+    }
+
+    #[test]
+    fn signing_seed_hard_linked_into_release_tree_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [12u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let leaked = release_root.join("artifact.bin");
+        std::fs::hard_link(&seed, &leaked).unwrap();
+
+        let canonical_seed = seed.canonicalize().unwrap();
+        assert!(ensure_seed_not_linked_into_release_tree(&canonical_seed, &release_root)
+            .unwrap_err()
+            .contains("shares a hard link with release artifact"));
+    }
 
     #[test]
     fn signing_seed_inside_release_root_is_rejected() {
@@ -294,6 +392,14 @@ fn main() {
         std::process::exit(2)
     });
     let seed_file = resolve_seed_path(&seed_file, &root).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    validate_seed_permissions(&seed_file).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    ensure_seed_not_linked_into_release_tree(&seed_file, &root).unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2)
     });
