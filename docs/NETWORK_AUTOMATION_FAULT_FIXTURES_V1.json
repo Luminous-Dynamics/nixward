@@ -376,5 +376,6 @@
       ],
       "production_mutation": false
     }
-  ]
+  ],
+  "task_corpus_artifact_id": "nixward.network-automation-task-corpus.v1"
 }
