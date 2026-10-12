@@ -8,7 +8,9 @@ let
   };
 in
 assert !(sourceFilter fixtureRoot "${toString fixtureRoot}/symlink-case/.env.local" "symlink");
+assert !(sourceFilter fixtureRoot "${toString fixtureRoot}/symlink-case/.env.example" "symlink");
 assert !(sourceFilter fixtureRoot "${toString fixtureRoot}/symlink-case/.ssh" "symlink");
+assert !(sourceFilter fixtureRoot "${toString fixtureRoot}/symlink-case/id_rsa.pub" "symlink");
 pkgs.runCommand "nixward-source-filter-regression" { src = filteredFixtures; } ''
   set -eu
 
