@@ -36,7 +36,7 @@ fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
 
 fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
     use std::io::Read;
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     // Open without following a leaf symlink, then derive the key bytes,
     // permission check, and inode identity from this same file descriptor.
@@ -74,7 +74,6 @@ fn read_seed(path: &Path) -> Result<([u8; 32], std::fs::Metadata), String> {
 
     // Keep the metadata from the opened descriptor so link checks use the
     // exact inode from which these key bytes were read.
-    let _ = metadata.dev();
     Ok((seed, metadata))
 }
 
@@ -318,6 +317,19 @@ mod tests {
         assert!(resolve_seed_path(&seed, &canonical_root)
             .unwrap_err()
             .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn no_follow_seed_open_rejects_leaf_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("seed");
+        let alias = temp.path().join("seed-link");
+        std::fs::write(&seed, [13u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&seed, &alias).unwrap();
+
+        assert!(read_seed(&alias)
+            .unwrap_err()
+            .contains("without following symlinks"));
     }
 
     #[test]
