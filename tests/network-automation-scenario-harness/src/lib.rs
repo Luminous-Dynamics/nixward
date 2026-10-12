@@ -517,14 +517,55 @@ impl SimulatedResourceFence {
     fn clear_after_verified_recovery(
         &mut self,
         resource: &str,
-        recovery_receipt_blake3: Option<&str>,
+        evidence: &VerifiedRecoveryEvidence,
     ) -> Result<(), String> {
-        let digest = recovery_receipt_blake3.unwrap_or_default();
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("fence removal requires a verified 32-byte receipt digest".into());
+        if evidence.resource_id != resource {
+            return Err("recovery evidence targets a different resource".into());
         }
         self.fenced_resources.remove(resource);
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryEvidence {
+    resource_id: String,
+    receipt_state: String,
+    receipt_blake3: String,
+    target_identity_matches: bool,
+    post_state_matches_expected: bool,
+    independent_readback_passed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedRecoveryEvidence {
+    resource_id: String,
+    receipt_blake3: String,
+}
+
+impl RecoveryEvidence {
+    fn verify(self) -> Result<VerifiedRecoveryEvidence, String> {
+        if self.receipt_state != "Recovered" {
+            return Err("recovery evidence is not in the Recovered terminal state".into());
+        }
+        if !self.target_identity_matches {
+            return Err("recovery target identity mismatch".into());
+        }
+        if !self.post_state_matches_expected {
+            return Err("recovery post-state does not match expected state".into());
+        }
+        if !self.independent_readback_passed {
+            return Err("recovery lacks independent read-back".into());
+        }
+        if self.receipt_blake3.len() != 64
+            || !self.receipt_blake3.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("recovery receipt digest is malformed".into());
+        }
+        Ok(VerifiedRecoveryEvidence {
+            resource_id: self.resource_id,
+            receipt_blake3: self.receipt_blake3,
+        })
     }
 }
 
@@ -856,21 +897,62 @@ mod tests {
     }
 
     #[test]
-    fn only_verified_recovery_receipt_can_clear_resource_fence() {
+    fn unverified_recovery_evidence_cannot_clear_resource_fence() {
         let mut ledger = SimulatedResourceFence::default();
         let resource = "lab:default-route";
         ledger.mark_indeterminate(resource);
 
-        assert!(ledger.clear_after_verified_recovery(resource, None).is_err());
+        let invalid_evidence = RecoveryEvidence {
+            resource_id: resource.into(),
+            receipt_state: "Recovered".into(),
+            receipt_blake3: "a".repeat(64),
+            target_identity_matches: true,
+            post_state_matches_expected: true,
+            independent_readback_passed: false,
+        };
+        assert!(invalid_evidence.verify().is_err());
         assert!(ledger.is_fenced(resource));
+
+        let valid_evidence = RecoveryEvidence {
+            resource_id: resource.into(),
+            receipt_state: "Recovered".into(),
+            receipt_blake3: "a".repeat(64),
+            target_identity_matches: true,
+            post_state_matches_expected: true,
+            independent_readback_passed: true,
+        }
+        .verify()
+        .expect("valid modeled evidence");
+
         assert!(ledger
-            .clear_after_verified_recovery(resource, Some(&"a".repeat(64)))
+            .clear_after_verified_recovery(resource, &valid_evidence)
             .is_ok());
         assert!(!ledger.is_fenced(resource));
         assert_eq!(
-            ledger.record_write(resource).expect("write after verified recovery"),
+            ledger.record_write(resource).expect("write after modeled recovery"),
             1
         );
+    }
+
+    #[test]
+    fn recovery_evidence_cannot_clear_a_different_resource_fence() {
+        let mut ledger = SimulatedResourceFence::default();
+        ledger.mark_indeterminate("lab:default-route");
+        let evidence = RecoveryEvidence {
+            resource_id: "lab:other-route".into(),
+            receipt_state: "Recovered".into(),
+            receipt_blake3: "b".repeat(64),
+            target_identity_matches: true,
+            post_state_matches_expected: true,
+            independent_readback_passed: true,
+        }
+        .verify()
+        .expect("valid evidence for another resource");
+
+        assert!(ledger
+            .clear_after_verified_recovery("lab:default-route", &evidence)
+            .is_err());
+        assert!(ledger.is_fenced("lab:default-route"));
     }
 
     #[test]
