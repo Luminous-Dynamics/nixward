@@ -375,6 +375,21 @@
         "No host or production network is touched."
       ],
       "production_mutation": false
+    },
+    {
+      "scenario_id": "FX-025",
+      "task_id": "FIX-001",
+      "layer": "virtual-lab",
+      "fault_class": "false-positive-signature",
+      "setup": "Replay a telemetry signature that initially resembles a known repair condition, then inject a disconfirming observation before the bounded action.",
+      "expected_decision": "BlockMutation",
+      "expected_receipt_state": "Blocked",
+      "assertions": [
+        "The disconfirming observation invalidates the repair precondition.",
+        "No repair action is applied in the lab state machine.",
+        "The event is escalated or returned to observation rather than retried blindly."
+      ],
+      "production_mutation": false
     }
   ],
   "task_corpus_artifact_id": "nixward.network-automation-task-corpus.v1"
