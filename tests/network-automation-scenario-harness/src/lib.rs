@@ -168,6 +168,17 @@ fn artifact_digest(bytes: &[u8]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+fn receipt_digest(receipt: &RunReceipt) -> Result<String, String> {
+    let bytes = serde_json::to_vec(receipt)
+        .map_err(|error| format!("cannot serialize receipt digest input: {error}"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RECEIPT_DOMAIN);
+    hasher.update(&(bytes.len() as u64).to_be_bytes());
+    hasher.update(&bytes);
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+
 fn evaluator_source_digest() -> String {
     // Bind the execution evaluator, its entrypoint, and build-identity script.
     let mut hasher = blake3::Hasher::new();
@@ -735,17 +746,15 @@ pub fn build_receipt(input: &InputArtifacts) -> Result<ReceiptEnvelope, String> 
             .into(),
         ],
     };
-    let receipt_bytes =
-        serde_json::to_vec(&receipt).map_err(|error| format!("cannot serialize receipt: {error}"))?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(RECEIPT_DOMAIN);
-    hasher.update(&(receipt_bytes.len() as u64).to_be_bytes());
-    hasher.update(&receipt_bytes);
-    let receipt_blake3 = hasher.finalize().to_hex().to_string();
+    let receipt_blake3 = receipt_digest(&receipt)?;
     Ok(ReceiptEnvelope { receipt_blake3, receipt })
 }
 
 pub fn serialize_envelope(envelope: &ReceiptEnvelope) -> Result<Vec<u8>, String> {
+    let expected = receipt_digest(&envelope.receipt)?;
+    if expected != envelope.receipt_blake3 {
+        return Err("receipt digest does not match receipt payload".into());
+    }
     serde_json::to_vec(envelope)
         .map_err(|error| format!("cannot serialize receipt envelope: {error}"))
 }
