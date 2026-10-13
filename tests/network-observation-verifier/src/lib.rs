@@ -449,6 +449,7 @@ fn verify_envelope(
         Some(expected) if *expected != envelope.target => {
             reasons.push("envelope_target_identity_does_not_match_external_expected_target".to_owned());
             fatal_invalid = true;
+            target_binding_valid = false;
         }
         Some(_) => target_binding_valid = true,
         None => {
@@ -1022,13 +1023,13 @@ fn parse_link_dump(
         if flags & NLM_F_DUMP_INTR != 0 {
             interrupted = true;
         }
-        if flags & NLM_F_MULTI == 0 {
-            return Err(AttemptStatus::Invalid("multipart_dump_message_missing_nlm_f_multi".to_owned()));
-        }
         let payload_start = offset + NLMSG_HDR_LEN;
         let payload_end = offset + message_len;
         match message_type {
             NLMSG_DONE => {
+                if flags & NLM_F_MULTI == 0 {
+                    return Err(AttemptStatus::Invalid("terminal_signal_missing_nlm_f_multi".to_owned()));
+                }
                 let payload = &bytes[payload_start..payload_end];
                 if payload.len() < 4 {
                     return Err(AttemptStatus::Incomplete(
@@ -1054,6 +1055,9 @@ fn parse_link_dump(
                 )));
             }
             RTM_NEWLINK => {
+                if flags & NLM_F_MULTI == 0 {
+                    return Err(AttemptStatus::Invalid("link_message_missing_nlm_f_multi".to_owned()));
+                }
                 if terminal_seen {
                     return Err(AttemptStatus::Invalid("link_object_after_terminal_signal".to_owned()));
                 }
@@ -1696,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_critical_address_attribute_is_unsupported_in_this_projection() {
+    fn link_address_attribute_is_preserved_in_canonical_projection() {
         let mut payload = vec![0, 0];
         payload.extend_from_slice(&encode_u16(1));
         payload.extend_from_slice(&encode_i32(2));
@@ -1710,9 +1714,10 @@ mod tests {
             message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
             done(7, 0, NLM_F_MULTI),
         ]);
-        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        let envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
         let receipt = verify_envelope_for_test(&envelope);
-        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+        assert_eq!(receipt.receipt.source_results[0].observed_links[0].address_hex.as_deref(), Some("000102030405"));
     }
 
     #[test]
