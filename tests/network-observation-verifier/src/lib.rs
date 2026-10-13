@@ -44,6 +44,7 @@ const IFLA_LINK: u16 = 5;
 const IFLA_MASTER: u16 = 10;
 const IFLA_LINKINFO: u16 = 18;
 const NLM_F_ATOMIC: u16 = 0x0400;
+const NLM_F_ACK_TLVS: u16 = 0x0200;
 const NLA_TYPE_MASK: u16 = 0x3fff;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1259,6 +1260,21 @@ fn parse_link_dump(
                         "negative_or_nonzero_dump_completion_status:{status}"
                     )));
                 }
+                if payload.len() > 4 {
+                    if flags & NLM_F_ACK_TLVS != 0 {
+                        return Err(AttemptStatus::Unsupported(
+                            "terminal_extended_ack_tlvs_not_supported_by_m1a_profile".to_owned(),
+                        ));
+                    }
+                    return Err(AttemptStatus::Invalid(
+                        "terminal_payload_has_unflagged_trailing_bytes".to_owned(),
+                    ));
+                }
+                if flags & NLM_F_ACK_TLVS != 0 {
+                    return Err(AttemptStatus::Invalid(
+                        "terminal_ack_tlvs_flag_without_attribute_payload".to_owned(),
+                    ));
+                }
                 terminal_seen = true;
             }
             NLMSG_ERROR => {
@@ -1668,6 +1684,27 @@ mod tests {
     fn negative_terminal_status_is_incomplete() {
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&done(7, -5, NLM_F_MULTI), 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn unflagged_trailing_terminal_payload_is_invalid() {
+        let raw = message(NLMSG_DONE, NLM_F_MULTI, 7, &[0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unflagged_trailing_bytes")));
+    }
+
+    #[test]
+    fn flagged_extended_ack_payload_is_not_silently_ignored() {
+        let raw = message(
+            NLMSG_DONE,
+            NLM_F_MULTI | NLM_F_ACK_TLVS,
+            7,
+            &[0, 0, 0, 0, 4, 0, 1, 0],
+        );
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("extended_ack_tlvs")));
     }
 
     #[test]
