@@ -1468,6 +1468,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_observed_dry_run_is_not_application_evidence() {
+        let search = NixOSCommand::Search {
+            query: "vim".to_string(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&search).unwrap();
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+
+        let observation = executor
+            .execute_authorized_observed(search, authorization, None)
+            .await;
+
+        assert!(matches!(observation.result, ExecutionResult::Success { .. }));
+        assert!(observation.dry_run);
+        assert_eq!(
+            observation.primary,
+            InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::DryRun,
+            }
+        );
+        assert!(observation.rollback.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_observed_authorization_mismatch_never_starts_process() {
+        let approved = NixOSCommand::Search {
+            query: "vim".to_string(),
+            json: false,
+        };
+        let changed = NixOSCommand::Search {
+            query: "different-query".to_string(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&approved).unwrap();
+        let mut executor = NixOSExecutor::new();
+
+        let observation = executor
+            .execute_authorized_observed(changed, authorization, None)
+            .await;
+
+        assert!(matches!(observation.result, ExecutionResult::Blocked { .. }));
+        assert_eq!(
+            observation.primary,
+            InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::AuthorizationRejected,
+            }
+        );
+        assert!(observation.rollback.is_none());
+        assert!(!observation.dry_run);
+    }
+
+    #[tokio::test]
     async fn test_decision_quality_never_authorizes_modification() {
         let mut executor = NixOSExecutor::new().with_dry_run(true);
 
