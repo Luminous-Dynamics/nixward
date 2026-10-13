@@ -801,7 +801,8 @@ pub struct CommandInvocationEvidence {
     pub disposition: ProcessDisposition,
 }
 
-/// Explicitly represents the difference between no launch and a process attempt.
+/// Distinguishes a prevented launch from an attempt to launch; `SpawnFailed`
+/// means the attempt produced no child process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationStatus {
     NotStarted { reason: InvocationNotStartedReason },
@@ -825,6 +826,8 @@ pub struct ExecutionEvidenceEnvelope {
     /// Present only when a rollback command was actually attempted. This records
     /// its process disposition, not proof that the machine's prior state returned.
     pub rollback: Option<CommandInvocationEvidence>,
+    /// True only when dry-run itself prevented launch; false when policy or
+    /// authorization rejection took precedence even if the executor is configured dry-run.
     pub dry_run: bool,
 }
 
@@ -839,6 +842,8 @@ pub struct ExecutionObservation {
     pub command_digest_blake3: String,
     pub primary: InvocationStatus,
     pub rollback: Option<CommandInvocationEvidence>,
+    /// True only when dry-run itself prevented launch; false when another guard
+    /// took precedence.
     pub dry_run: bool,
 }
 
