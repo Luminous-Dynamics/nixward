@@ -1241,6 +1241,18 @@ fn parse_link_dump(
         if flags & NLM_F_DUMP_FILTERED != 0 {
             return Err(AttemptStatus::Incomplete("kernel_reports_filtered_dump".to_owned()));
         }
+        let allowed_flags = match message_type {
+            RTM_NEWLINK => NLM_F_MULTI | NLM_F_DUMP_INTR,
+            NLMSG_DONE => NLM_F_MULTI | NLM_F_DUMP_INTR | NLM_F_ACK_TLVS,
+            // Errors are rejected below regardless; their flags are retained in the raw artifact.
+            NLMSG_ERROR => u16::MAX,
+            _ => u16::MAX,
+        };
+        if flags & !allowed_flags != 0 {
+            return Err(AttemptStatus::Unsupported(
+                "unrecognized_netlink_response_flags".to_owned(),
+            ));
+        }
         let payload_start = offset + NLMSG_HDR_LEN;
         let payload_end = offset + message_len;
         match message_type {
@@ -1380,6 +1392,13 @@ fn parse_link_message(
         }
         if !seen_attributes.insert(attr_type) {
             return Err(AttemptStatus::Invalid("duplicate_link_attribute".to_owned()));
+        }
+        // The three attributes interpreted by this profile are scalar/string/binary
+        // fields, never nested or network-byte-order-marked attributes.
+        if matches!(attr_type, IFLA_ADDRESS | IFLA_IFNAME | IFLA_MTU) && raw_type != attr_type {
+            return Err(AttemptStatus::Invalid(
+                "unexpected_type_flags_on_interpreted_link_attribute".to_owned(),
+            ));
         }
         let value = &attributes[offset + 4..offset + attr_len];
         match attr_type {
@@ -1798,6 +1817,42 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+    }
+
+    #[test]
+    fn interpreted_attribute_type_flags_are_rejected() {
+        let mut payload = vec![0, 0];
+        payload.extend_from_slice(&encode_u16(1));
+        payload.extend_from_slice(&encode_i32(2));
+        payload.extend_from_slice(&encode_u32(0x41));
+        payload.extend_from_slice(&encode_u32(u32::MAX));
+        let mut name = b"eth0".to_vec();
+        name.push(0);
+        push_attr(&mut payload, IFLA_IFNAME, &name);
+        let value = encode_u32(1500);
+        let length = (4 + value.len()) as u16;
+        payload.extend_from_slice(&encode_u16(length));
+        payload.extend_from_slice(&encode_u16(IFLA_MTU | 0x4000));
+        payload.extend_from_slice(&value);
+        pad4(&mut payload);
+        let raw = raw_join(&[
+            message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
+            done(7, 0, NLM_F_MULTI),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("type_flags")));
+    }
+
+    #[test]
+    fn unknown_response_flag_is_not_ignored_on_a_link_record() {
+        let raw = raw_join(&[
+            link_message(2, "eth0", None, NLM_F_MULTI | NLM_F_ACK_TLVS, 7),
+            done(7, 0, NLM_F_MULTI),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unrecognized_netlink_response_flags")));
     }
 
     #[test]
