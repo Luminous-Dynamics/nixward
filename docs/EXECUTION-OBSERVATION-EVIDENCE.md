@@ -9,7 +9,7 @@ The legacy `ExecutionResult` is optimized for callers and CLI presentation. It d
 ## Evidence types
 
 - `InvocationStatus::NotStarted` records why a command did not launch: dry-run, forbidden host policy, rejected authorization, incomplete replay evidence, rejected replay, or unavailable clock needed for replay protection.
-- `InvocationStatus::Attempted` includes the command's BLAKE3 digest, observed wall-clock timestamps when available, monotonic elapsed time, and a process disposition.
+- `InvocationStatus::Attempted` includes the command's BLAKE3 digest, caller-observed wall-clock timestamps bracketing `Command::output()` when available, monotonic elapsed time, and a process disposition. These timestamps are not an independent measurement of the kernel's exact process birth/exit times.
 - `ProcessDisposition::Exited` retains the actual exit code. `TerminatedWithoutExitCode` records the signal when the platform exposes one. `SpawnFailed` preserves the spawn error instead of inventing an exit code.
 - An optional rollback observation retains the rollback command digest, timing, and process disposition. It does not prove that the old machine state was restored.
 
