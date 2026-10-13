@@ -527,6 +527,10 @@ fn verify_envelope(
             fatal_invalid = true;
         }
     }
+    if resource_kinds.is_empty() || !resource_kinds.contains("links") {
+        reasons.push("required_links_resource_kind_missing_from_declared_scope".to_owned());
+        fatal_invalid = true;
+    }
     if scope.resource_kinds.iter().any(|kind| kind != "links") {
         reasons.push("resource_kind_outside_m1a_supported_profile".to_owned());
         unsupported = true;
@@ -1833,6 +1837,15 @@ mod tests {
         assert_eq!(receipt.receipt.coverage, Coverage::Complete);
         assert_eq!(receipt.receipt.freshness, Freshness::Expired);
         assert_eq!(receipt.receipt.decision, Decision::Expired);
+    }
+
+    #[test]
+    fn empty_resource_kind_scope_cannot_be_complete() {
+        let mut envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        envelope.scope.resource_kinds.clear();
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("resource_kind_missing")));
     }
 
     #[test]
