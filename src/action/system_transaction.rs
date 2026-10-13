@@ -9,6 +9,7 @@
 //! exchange one stable, digest-addressed transaction vocabulary.
 
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
+use super::executor::{NixOSCommand, SystemActivation};
 use serde::{Deserialize, Serialize};
 
 const TRANSACTION_DOMAIN: &[u8] = b"nixward-system-transaction-v1\0";
@@ -29,6 +30,28 @@ fn transaction_id(plan: &ChangePlan) -> String {
     hasher.update(&plan.digest());
     hasher.update(&plan.nonce());
     digest_hex(hasher.finalize().as_bytes())
+}
+
+/// Only generation-changing operations need a positive boot-health observation
+/// before promotion. Non-boot transactions still require post-state verification.
+fn requires_boot_health_evidence(plan: &ChangePlan) -> bool {
+    match plan.command() {
+        Some(
+            NixOSCommand::RebuildSwitch { .. }
+            | NixOSCommand::RebuildBoot { .. }
+            | NixOSCommand::ActivateSystemClosure {
+                action: SystemActivation::Switch | SystemActivation::Boot,
+                ..
+            },
+        ) => true,
+        Some(NixOSCommand::Custom { command, args, .. }) => {
+            command == "nixos-rebuild"
+                && args.len() == 2
+                && args[0] == "switch"
+                && args[1] == "--rollback"
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,12 +325,14 @@ impl SystemTransaction {
         if !matches!(self.phase, TransactionPhase::Verified) {
             return Err("promotion requires verified post-state evidence".into());
         }
-        let boot_healthy = self
-            .verification
-            .as_ref()
-            .and_then(|receipt| receipt.boot_healthy);
-        if boot_healthy != Some(true) {
-            return Err("promotion requires explicit healthy boot evidence".into());
+        let Some(verification) = self.verification.as_ref() else {
+            return Err("promotion requires post-state verification evidence".into());
+        };
+        if verification.boot_healthy == Some(false) {
+            return Err("unhealthy boot cannot be promoted".into());
+        }
+        if requires_boot_health_evidence(plan) && verification.boot_healthy != Some(true) {
+            return Err("boot-changing promotion requires explicit healthy boot evidence".into());
         }
         self.phase = TransactionPhase::Promoted;
         self.outcome = Some(OutcomeReceipt {
@@ -631,5 +656,30 @@ mod tests {
         assert!(tx.promote(&plan).is_err());
         assert_eq!(tx.phase, TransactionPhase::Verified);
         assert!(tx.outcome.is_none());
+    }
+
+    #[test]
+    fn non_boot_transaction_does_not_require_boot_health_observation() {
+        let plan = ChangePlan::command_only(
+            crate::action::change_covenant::MachineBinding::new("machine-a").unwrap(),
+            NixOSCommand::HomeManagerSwitch {
+                flake: Some("path:/tmp/home-config".to_string()),
+            },
+            60_000,
+        )
+        .unwrap();
+        let auth = authorization(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &auth).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        tx.record_verification(&plan, [6; 32], [8; 32], None)
+            .unwrap();
+
+        tx.promote(&plan).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Promoted);
     }
 }
