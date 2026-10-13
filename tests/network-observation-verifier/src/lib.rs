@@ -39,6 +39,10 @@ const NLM_F_DUMP_INTR: u16 = 0x0010;
 const IFLA_ADDRESS: u16 = 1;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
+const IFLA_LINK: u16 = 5;
+const IFLA_MASTER: u16 = 10;
+const IFLA_LINKINFO: u16 = 18;
+const NLM_F_ATOMIC: u16 = 0x0400;
 const NLA_TYPE_MASK: u16 = 0x3fff;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -532,7 +536,16 @@ fn verify_envelope(
         .iter()
         .copied()
         .collect();
-    let mandatory_critical_ids = BTreeSet::from([IFLA_IFNAME, IFLA_MTU, IFLA_ADDRESS]);
+    // The baseline profile treats parent/master/link-kind data as decision-critical
+    // topology semantics. Envelopes may add stricter IDs but cannot omit this floor.
+    let mandatory_critical_ids = BTreeSet::from([
+        IFLA_ADDRESS,
+        IFLA_IFNAME,
+        IFLA_MTU,
+        IFLA_LINK,
+        IFLA_MASTER,
+        IFLA_LINKINFO,
+    ]);
     if critical_ids.len() != envelope.policy.decision_critical_link_attribute_ids.len()
         || !mandatory_critical_ids.is_subset(&critical_ids)
     {
@@ -1142,6 +1155,15 @@ fn parse_link_request(
         return Err(AttemptStatus::Incomplete(
             "request_does_not_request_whole_link_dump".to_owned(),
         ));
+    }
+    let expected_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    if flags != expected_flags {
+        let reason = if flags & NLM_F_ATOMIC != 0 {
+            "atomic_dump_request_not_supported_by_m1a_profile"
+        } else {
+            "request_has_unexpected_flags_or_changes_scope"
+        };
+        return Err(AttemptStatus::Unsupported(reason.to_owned()));
     }
 
     let payload = &bytes[NLMSG_HDR_LEN..];
@@ -1894,6 +1916,32 @@ mod tests {
     }
 
     #[test]
+    fn atomic_dump_request_is_unsupported_even_when_response_is_successful() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut item = attempt(&raw, 7, 0);
+        let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
+        let flags = NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ATOMIC;
+        request[6..8].copy_from_slice(&flags.to_le_bytes());
+        item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
+        item.raw_request_blake3 = hash_raw_request(&request);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("atomic_dump_request")));
+    }
+
+    #[test]
+    fn extra_request_flags_cannot_change_dump_semantics_silently() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut item = attempt(&raw, 7, 0);
+        let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
+        request[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ATOMIC).to_le_bytes());
+        item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
+        item.raw_request_blake3 = hash_raw_request(&request);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_ne!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+    }
+
+    #[test]
     fn omitted_mandatory_semantic_attribute_from_policy_is_rejected() {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
@@ -1912,12 +1960,14 @@ mod tests {
     }
 
     #[test]
-    fn byte_limit_blocks_oversized_raw_artifact() {
+    fn byte_limit_counts_request_and_response_artifacts_together() {
         let raw = done(7, 0, NLM_F_MULTI);
+        let request = dump_request(7);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
-        envelope.policy.max_total_raw_bytes = raw.len() - 1;
+        envelope.policy.max_total_raw_bytes = request.len() + raw.len() - 1;
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("total_raw_artifact_byte_limit_exceeded")));
     }
 
     #[test]
