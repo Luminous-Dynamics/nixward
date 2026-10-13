@@ -14,7 +14,10 @@
       "required": [
         "verifier_id",
         "verifier_version",
+        "verifier_source_revision",
+        "verifier_source_digest_blake3",
         "envelope_raw_blake3",
+        "policy_digest_blake3",
         "target",
         "scope",
         "policy_id",
@@ -35,7 +38,10 @@
       "properties": {
         "verifier_id": { "const": "nixward.network-observation-verifier" },
         "verifier_version": { "type": "string", "minLength": 1 },
+        "verifier_source_revision": { "type": "string", "minLength": 1 },
+        "verifier_source_digest_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "envelope_raw_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_digest_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "target": {
           "type": "object",
           "additionalProperties": false,
