@@ -1171,6 +1171,7 @@ impl NixOSExecutor {
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Blocked {
                     reason,
                     safety_level: safety,
@@ -1184,6 +1185,7 @@ impl NixOSExecutor {
         }
         if let Err(reason) = authorization.validate_for(&command) {
             return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Blocked {
                     reason,
                     safety_level: safety,
@@ -1208,6 +1210,7 @@ impl NixOSExecutor {
 
         if self.dry_run {
             return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Success {
                     stdout: format!("[DRY-RUN] Would execute: {} {}", cmd, args.join(" ")),
                     stderr: String::new(),
@@ -1231,6 +1234,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
                 return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: blocked,
                     primary: InvocationStatus::NotStarted {
                         reason: InvocationNotStartedReason::ReplayEvidenceIncomplete,
@@ -1246,6 +1250,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
                 return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: blocked,
                     primary: InvocationStatus::NotStarted {
                         reason: InvocationNotStartedReason::ReplayEvidenceIncomplete,
@@ -1261,6 +1266,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
                 return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: blocked,
                     primary: InvocationStatus::NotStarted {
                         reason: InvocationNotStartedReason::ClockUnavailable,
@@ -1282,6 +1288,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
                 return ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: blocked,
                     primary: InvocationStatus::NotStarted {
                         reason: InvocationNotStartedReason::ReplayRejected,
