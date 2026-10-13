@@ -1566,7 +1566,15 @@ mod tests {
                 max_messages_per_attempt: 128,
                 max_objects_per_attempt: 64,
                 max_retries: 2,
-                decision_critical_link_attribute_ids: vec![IFLA_IFNAME, IFLA_MTU, IFLA_ADDRESS, 999],
+                decision_critical_link_attribute_ids: vec![
+                    IFLA_ADDRESS,
+                    IFLA_IFNAME,
+                    IFLA_MTU,
+                    IFLA_LINK,
+                    IFLA_MASTER,
+                    IFLA_LINKINFO,
+                    999,
+                ],
             },
             captured_at_unix_ms: 1_000_000,
             verification_time_unix_ms: 1_000_500,
@@ -1945,9 +1953,16 @@ mod tests {
     fn omitted_mandatory_semantic_attribute_from_policy_is_rejected() {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
-        envelope.policy.decision_critical_link_attribute_ids = vec![IFLA_IFNAME];
+        envelope.policy.decision_critical_link_attribute_ids = vec![
+            IFLA_ADDRESS,
+            IFLA_IFNAME,
+            IFLA_MTU,
+            IFLA_MASTER,
+            IFLA_LINKINFO,
+        ];
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("mandatory_semantic_fields")));
     }
 
     #[test]
