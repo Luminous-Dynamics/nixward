@@ -827,6 +827,27 @@ impl NixOSExecutor {
         self.dry_run
     }
 
+    /// Validate and simulate a plan step without launching a process, even if
+    /// this executor was otherwise configured for live execution. Existing host
+    /// policy and authorization checks still run through the ordinary APIs.
+    pub(crate) async fn execute_simulated(
+        &mut self,
+        command: NixOSCommand,
+        authorization: Option<ExecutionAuthorization>,
+        decision_quality: f32,
+    ) -> ExecutionResult {
+        let was_dry_run = self.dry_run;
+        self.dry_run = true;
+        let result = if let Some(authorization) = authorization {
+            self.execute_authorized(command, authorization, Some(decision_quality))
+                .await
+        } else {
+            self.execute(command, decision_quality).await
+        };
+        self.dry_run = was_dry_run;
+        result
+    }
+
     /// Override persistent replay storage (primarily for tests or a deliberately
     /// relocated state directory). Signed authority is never accepted without
     /// one-shot replay consumption on a real execution path.
