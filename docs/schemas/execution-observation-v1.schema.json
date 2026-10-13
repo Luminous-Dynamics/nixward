@@ -146,18 +146,21 @@
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "finished_at_ms": {
           "type": [
             "integer",
             "null"
           ],
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "elapsed_ms": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "disposition": {
           "$ref": "#/$defs/processDisposition"
