@@ -818,6 +818,8 @@ pub const EXECUTION_OBSERVATION_VERSION: u16 = 1;
 pub struct ExecutionEvidenceEnvelope {
     pub schema: String,
     pub version: u16,
+    /// Digest of the requested exact command, present even when no launch occurs.
+    pub command_digest_blake3: String,
     pub primary: InvocationStatus,
     /// Present only when a rollback command was actually attempted. This records
     /// its process disposition, not proof that the machine's prior state returned.
@@ -832,6 +834,8 @@ pub struct ExecutionEvidenceEnvelope {
 #[derive(Debug, Clone)]
 pub struct ExecutionObservation {
     pub result: ExecutionResult,
+    /// Digest of the requested exact command, whether or not it launched.
+    pub command_digest_blake3: String,
     pub primary: InvocationStatus,
     pub rollback: Option<CommandInvocationEvidence>,
     pub dry_run: bool,
@@ -843,6 +847,7 @@ impl ExecutionObservation {
         ExecutionEvidenceEnvelope {
             schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
             version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: self.command_digest_blake3.clone(),
             primary: self.primary.clone(),
             rollback: self.rollback.clone(),
             dry_run: self.dry_run,
@@ -865,6 +870,9 @@ impl ExecutionEvidenceEnvelope {
             || self.version != EXECUTION_OBSERVATION_VERSION
         {
             return Err("unsupported execution-observation schema/version".into());
+        }
+        if !is_lower_hex_digest(&self.command_digest_blake3) {
+            return Err("requested command digest is invalid".into());
         }
 
         let validate_evidence = |label: &str, evidence: &CommandInvocationEvidence| {
@@ -895,6 +903,9 @@ impl ExecutionEvidenceEnvelope {
                     return Err("attempted invocation cannot be marked dry-run".into());
                 }
                 validate_evidence("primary", evidence)?;
+                if evidence.command_digest_blake3 != self.command_digest_blake3 {
+                    return Err("primary evidence command digest differs from requested command".into());
+                }
             }
         }
 
@@ -1156,6 +1167,7 @@ impl NixOSExecutor {
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionObservation {
+        let requested_command_digest_blake3 = command_digest_hex(&command);
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return ExecutionObservation {
@@ -1297,6 +1309,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
                 ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: exec_result,
                     primary: InvocationStatus::Attempted { evidence },
                     rollback: None,
@@ -1399,6 +1412,7 @@ impl NixOSExecutor {
 
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
                 ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: exec_result,
                     primary: InvocationStatus::Attempted {
                         evidence: primary_evidence,
@@ -1423,6 +1437,7 @@ impl NixOSExecutor {
                 };
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
                 ExecutionObservation {
+                    command_digest_blake3: requested_command_digest_blake3.clone(),
                     result: exec_result,
                     primary: InvocationStatus::Attempted { evidence },
                     rollback: None,
@@ -1674,6 +1689,7 @@ mod tests {
     #[test]
     fn test_evidence_envelope_excludes_raw_command_output() {
         let observation = ExecutionObservation {
+            command_digest_blake3: "a".repeat(64),
             result: ExecutionResult::Success {
                 stdout: "sensitive-stdout-fixture".to_string(),
                 stderr: "sensitive-stderr-fixture".to_string(),
@@ -1701,6 +1717,7 @@ mod tests {
         let envelope = ExecutionEvidenceEnvelope {
             schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
             version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: "0".repeat(64),
             primary: InvocationStatus::Attempted {
                 evidence: CommandInvocationEvidence {
                     command_digest_blake3: "0".repeat(64),
@@ -1728,6 +1745,7 @@ mod tests {
         let envelope = ExecutionEvidenceEnvelope {
             schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
             version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: "a".repeat(64),
             primary: InvocationStatus::NotStarted {
                 reason: InvocationNotStartedReason::DryRun,
             },
