@@ -1694,6 +1694,28 @@ mod tests {
     }
 
     #[test]
+    fn test_versioned_execution_evidence_fixtures_validate() {
+        let fixtures = [
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/docs/fixtures/execution-observation-dry-run-v1.json"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/docs/fixtures/execution-observation-spawn-failure-v1.json"
+            )),
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/docs/fixtures/execution-observation-nonzero-exit-v1.json"
+            )),
+        ];
+        for raw in fixtures {
+            let envelope: ExecutionEvidenceEnvelope = serde_json::from_str(raw).unwrap();
+            envelope.validate_wire().unwrap();
+        }
+    }
+
+    #[test]
     fn test_evidence_envelope_excludes_raw_command_output() {
         let observation = ExecutionObservation {
             command_digest_blake3: "a".repeat(64),
