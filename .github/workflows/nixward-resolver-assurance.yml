@@ -1,0 +1,154 @@
+name: Nixward Resolver Assurance
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "src/**"
+      - "docs/fixtures/**"
+      - "docs/SYSTEM_TRANSACTION_ARCHITECTURE.md"
+      - ".github/workflows/nixward-resolver-assurance.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "src/**"
+      - "docs/fixtures/**"
+      - "docs/SYSTEM_TRANSACTION_ARCHITECTURE.md"
+      - ".github/workflows/nixward-resolver-assurance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nixward-resolver-assurance-${{ github.event.pull_request.head.ref || github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'auto' }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  resolver-tests:
+    name: Structured proposal, signed runtime, and transaction tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout exact Nixward source revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: nixward-source
+          persist-credentials: false
+
+      # Nixward is a workspace member of Symthaea. Pin the workspace revision so
+      # dependency/API context is explicit and the same inputs can be reconstructed.
+      - name: Checkout pinned Symthaea workspace
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Luminous-Dynamics/symthaea
+          ref: b9af191f380d635f0459b24284c1d1fd6a5516aa
+          path: symthaea
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.96.0
+
+      - name: Overlay reviewed Nixward tree into workspace member path
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          set -euo pipefail
+          test -f nixward-source/Cargo.toml
+          test -f symthaea/Cargo.toml
+
+          NIXWARD_SHA="$(git -C nixward-source rev-parse HEAD)"
+          if [[ -n "${PR_HEAD_SHA}" ]]; then
+            test "${NIXWARD_SHA}" = "${PR_HEAD_SHA}"
+          fi
+
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github' \
+            nixward-source/ symthaea/crates/core/nixward/
+
+          {
+            echo "### Resolver assurance inputs"
+            echo "- Exact Nixward source revision: ${NIXWARD_SHA}"
+            if [[ -n "${PR_HEAD_SHA}" ]]; then
+              echo "- Pull request head revision: ${PR_HEAD_SHA}"
+              echo "- Pull request base revision: ${PR_BASE_SHA}"
+            fi
+            echo "- Workflow trigger SHA: ${GITHUB_SHA}"
+            echo "- Symthaea workspace revision: $(git -C symthaea rev-parse HEAD)"
+            echo "- Rust: $(rustc --version)"
+            echo "- Test target: nixward library module tests"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Repair and record pinned workspace manifest gap
+        working-directory: symthaea
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ORIGINAL_MANIFEST_SHA256="$(sha256sum Cargo.toml | cut -d ' ' -f 1)"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          manifest = Path("Cargo.toml")
+          member = Path("crates/core/symthaea-observation-attestation")
+          text = manifest.read_text()
+          marker = "exclude = [\n"
+          entry = '    "crates/core/symthaea-observation-attestation", # no Cargo.toml at pinned revision\n'
+
+          # Fail closed if the pinned workspace changes unexpectedly. This
+          # excludes only the malformed glob match; it doesn't fabricate a crate
+          # or alter Nixward's source/dependency declarations.
+          if not member.is_dir() or (member / "Cargo.toml").exists() or not (member / "src/lib.rs").is_file():
+              raise SystemExit("pinned workspace no longer matches the reviewed manifest-gap exception")
+          if entry in text:
+              raise SystemExit("workspace exclusion unexpectedly already present")
+          if text.count(marker) != 1:
+              raise SystemExit("could not identify one workspace exclude list")
+          manifest.write_text(text.replace(marker, marker + entry, 1))
+          PY
+
+          REPAIRED_MANIFEST_SHA256="$(sha256sum Cargo.toml | cut -d ' ' -f 1)"
+          {
+            echo "- Pinned Symthaea workspace Cargo.toml SHA-256: ${ORIGINAL_MANIFEST_SHA256}"
+            echo "- Ephemeral workspace Cargo.toml SHA-256 after explicit exclusion: ${REPAIRED_MANIFEST_SHA256}"
+            echo "- Temporary exclusion: crates/core/symthaea-observation-attestation"
+            echo "- Reason: pinned tree contains src/lib.rs but no Cargo.toml; the `crates/core/*` member glob otherwise makes cargo metadata fail."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Resolve and freeze the overlaid workspace dependency graph
+        working-directory: symthaea
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 > /dev/null
+          LOCK_SHA256="$(sha256sum Cargo.lock | cut -d ' ' -f 1)"
+          echo "- Resolved workspace Cargo.lock SHA-256: ${LOCK_SHA256}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Test signed release manifest and filesystem integrity
+        working-directory: symthaea
+        run: cargo test --locked -p nixward --lib release_integrity::tests
+
+      - name: Test structured resolver, signed runtime, and evidence fixtures
+        working-directory: symthaea
+        run: cargo test --locked -p nixward --lib action::ai_proposal_binding::tests
+
+      - name: Test offline release signer path safety
+        working-directory: symthaea
+        run: cargo test --locked -p nixward --bin nixward-release-sign
+
+      - name: Test transaction integration and fail-closed state transitions
+        working-directory: symthaea
+        run: cargo test --locked -p nixward --lib action::system_transaction::tests

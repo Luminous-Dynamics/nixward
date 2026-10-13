@@ -1,0 +1,1 @@
+{"schema_version":1,"machine_id":"machine-a","config_patch":null,"command":{"Search":{"query":"nixpkgs#hello","json":true}}}

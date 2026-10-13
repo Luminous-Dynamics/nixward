@@ -8,6 +8,13 @@
 //! receipts so the installer, management UI, and remote transports can
 //! exchange one stable, digest-addressed transaction vocabulary.
 
+use super::ai_proposal_binding::{
+    AiProposalBinding, AiProposalOutputIntent, AiProposalResolutionReceipt,
+    AiProposalResolvedValidationEvidence, AiProposalRuntimeVerifiedValidationEvidence,
+    AiProposalValidationEvidence,
+};
+use crate::release_integrity::SignedReleaseManifest;
+use std::path::Path;
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +202,202 @@ impl SystemTransaction {
         });
         self.phase = TransactionPhase::Validated;
         Ok(())
+    }
+
+    /// Record normal validation while binding it to exact AI-proposal provenance.
+    ///
+    /// The returned evidence envelope must be persisted by the caller alongside
+    /// the referenced validation evidence and proposal binding. Its digest is
+    /// stored in the existing validation receipt, so the transaction wire shape
+    /// and authorization protocol remain unchanged.
+    ///
+    /// This method validates byte/digest correspondence and checks that the
+    /// canonical structured proposal intent equals the exact plan. It does not
+    /// prove upstream natural-language conversion fidelity, input truth, policy
+    /// quality, or proof soundness. It never authorizes or executes the change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        proposal_output_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+    ) -> Result<AiProposalValidationEvidence, String> {
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                proposal_output_canonical_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let evidence = AiProposalValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+        )
+        .map_err(|error| format!("AI proposal validation envelope is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("AI proposal validation envelope is invalid: {error}"))?;
+
+        // All proposal and artifact checks happen before this state transition.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
+    }
+
+    /// Record validation while binding raw provider JSON to a deterministic
+    /// resolution receipt, the exact ChangePlan, and AI-proposal provenance.
+    ///
+    /// The returned resolved envelope's digest is stored in the existing
+    /// ValidationReceipt. Persist that envelope plus the resolution receipt,
+    /// proposal binding, raw response, canonical intent, referenced artifacts,
+    /// and ordinary validation evidence. All resolution and artifact checks
+    /// happen before the transaction changes phase.
+    ///
+    /// The receipt identifies this build's embedded resolver source; it is not
+    /// a software attestation proving that the executing binary is untampered.
+    /// This method neither authorizes nor executes the change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_resolved_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+    ) -> Result<AiProposalResolvedValidationEvidence, String> {
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                canonical_intent_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let evidence = AiProposalResolvedValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+            resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )
+        .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("AI proposal resolved validation envelope is invalid: {error}"))?;
+
+        // No transaction state mutation occurs until all referenced evidence is checked.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
+    }
+
+    /// Record validation only after the current process executable is found in a
+    /// release tree signed by the independently trusted offline release root.
+    ///
+    /// The signed release manifest must include both the current executable and
+    /// the resolver source file at resolver_source_relative_path. The resolver
+    /// source file must exactly match the source digest in the resolution receipt.
+    /// The returned runtime-verified evidence digest occupies the existing
+    /// ValidationReceipt field; no new authorization mechanism is introduced.
+    ///
+    /// On Linux this checks /proc/self/exe bytes plus the signed release tree.
+    /// It is software-level evidence under the OS/kernel trust assumption, not
+    /// hardware-backed measured boot or remote runtime attestation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_validation_with_runtime_verified_ai_proposal(
+        &mut self,
+        plan: &ChangePlan,
+        validation_evidence_digest: [u8; 32],
+        summary: impl Into<String>,
+        proposal: &AiProposalBinding,
+        resolution: &AiProposalResolutionReceipt,
+        raw_model_output_bytes: &[u8],
+        canonical_intent_bytes: &[u8],
+        model_artifact_bytes: &[u8],
+        input_canonical_bytes: &[u8],
+        policy_canonical_bytes: &[u8],
+        verifier_artifact_bytes: &[u8],
+        evaluation_evidence_canonical_bytes: &[u8],
+        release_root: &Path,
+        signed_release: &SignedReleaseManifest,
+        trusted_release_public_key_hex: &str,
+        resolver_source_relative_path: &str,
+    ) -> Result<AiProposalRuntimeVerifiedValidationEvidence, String> {
+        proposal
+            .validate_against_artifacts(
+                plan,
+                model_artifact_bytes,
+                input_canonical_bytes,
+                policy_canonical_bytes,
+                canonical_intent_bytes,
+                verifier_artifact_bytes,
+                evaluation_evidence_canonical_bytes,
+            )
+            .map_err(|error| format!("AI proposal provenance validation failed: {error}"))?;
+
+        let runtime = resolution
+            .verify_current_runtime(
+                release_root,
+                signed_release,
+                trusted_release_public_key_hex,
+                plan,
+                raw_model_output_bytes,
+                canonical_intent_bytes,
+                resolver_source_relative_path,
+            )
+            .map_err(|error| format!("resolver runtime verification failed: {error}"))?;
+
+        let resolved = AiProposalResolvedValidationEvidence::new(
+            plan,
+            validation_evidence_digest,
+            proposal,
+            resolution,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )
+        .map_err(|error| format!("resolved AI proposal evidence is invalid: {error}"))?;
+
+        let evidence = AiProposalRuntimeVerifiedValidationEvidence::new(
+            plan,
+            &resolved,
+            proposal,
+            resolution,
+            &runtime,
+            raw_model_output_bytes,
+            canonical_intent_bytes,
+        )
+        .map_err(|error| format!("runtime-verified AI proposal evidence is invalid: {error}"))?;
+        let evidence_digest = evidence
+            .digest()
+            .map_err(|error| format!("runtime-verified AI proposal evidence is invalid: {error}"))?;
+
+        // Release signature, artifact tree, current executable, source, raw response,
+        // structured intent, and model artifact checks all precede this state change.
+        self.record_validation(plan, evidence_digest, summary)?;
+        Ok(evidence)
     }
 
     pub fn record_snapshot(
@@ -480,6 +683,12 @@ impl SystemTransaction {
 mod tests {
     use super::*;
     use crate::action::executor::NixOSCommand;
+    use crate::action::ai_proposal_binding::{digest_artifact, ProposalArtifactKind};
+    use crate::release_integrity::{
+        RELEASE_MANIFEST_KIND, RELEASE_SCHEMA_VERSION, RELEASE_SIGNATURE_KIND, ReleaseArtifact,
+        ReleaseManifest,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn plan() -> ChangePlan {
         ChangePlan::command_only(
@@ -495,6 +704,98 @@ mod tests {
 
     fn authorization(plan: &ChangePlan) -> ChangeAuthorization {
         ChangeAuthorization::from_verified_approval(plan, "test-owner", [7; 32]).unwrap()
+    }
+
+    fn ai_proposal_output(plan: &ChangePlan) -> Vec<u8> {
+        AiProposalOutputIntent::new(plan.machine(), None, plan.command())
+            .unwrap()
+            .canonical_bytes()
+            .unwrap()
+    }
+
+    fn raw_ai_proposal_output(plan: &ChangePlan) -> Vec<u8> {
+        let intent = AiProposalOutputIntent::new(plan.machine(), None, plan.command()).unwrap();
+        serde_json::to_vec_pretty(&intent).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sign_current_process_release(
+        release_root: &Path,
+        resolver_source_relative_path: &str,
+        source_bytes: &[u8],
+        signing: &SigningKey,
+    ) -> SignedReleaseManifest {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_path = std::fs::read_link("/proc/self/exe").unwrap();
+        let runtime_path = runtime_path.canonicalize().unwrap();
+        let runtime_relative = runtime_path
+            .strip_prefix(release_root)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let source_path = release_root.join(resolver_source_relative_path);
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&source_path, source_bytes).unwrap();
+
+        let runtime_bytes = std::fs::read("/proc/self/exe").unwrap();
+        let runtime_metadata = std::fs::metadata(&runtime_path).unwrap();
+        let source_metadata = std::fs::metadata(&source_path).unwrap();
+        let mut artifacts = vec![
+            ReleaseArtifact {
+                path: resolver_source_relative_path.into(),
+                blake3: blake3::hash(source_bytes).to_hex().to_string(),
+                size_bytes: source_bytes.len() as u64,
+                executable: source_metadata.permissions().mode() & 0o111 != 0,
+            },
+            ReleaseArtifact {
+                path: runtime_relative,
+                blake3: blake3::hash(&runtime_bytes).to_hex().to_string(),
+                size_bytes: runtime_bytes.len() as u64,
+                executable: runtime_metadata.permissions().mode() & 0o111 != 0,
+            },
+        ];
+        artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "nixward-runtime-transaction-test".into(),
+            created_at_ms: 1_800_000_000_000,
+            source_revision: format!("test-revision-{}", std::process::id()),
+            artifacts,
+        };
+        let signature = signing.sign(&manifest.signing_bytes().unwrap());
+        SignedReleaseManifest {
+            kind: RELEASE_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            signer_public_key_hex: signing
+                .verifying_key()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            signature_hex: signature
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            manifest,
+        }
+    }
+
+    fn ai_proposal(plan: &ChangePlan) -> AiProposalBinding {
+        let output = ai_proposal_output(plan);
+        AiProposalBinding::new(
+            plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &output,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap()
     }
 
     #[test]
@@ -534,6 +835,398 @@ mod tests {
         assert_eq!(tx.plan_digest, digest_hex(&plan.digest()));
         assert_eq!(tx.target_machine_digest, digest_hex(&plan.machine().digest()));
         assert_eq!(tx.transaction_id, transaction_id(&plan));
+    }
+
+    #[test]
+    fn ai_proposal_validation_is_committed_to_transaction_validation_receipt() {
+        let plan = plan();
+        let proposal = ai_proposal(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+
+        let evidence = tx
+            .record_validation_with_ai_proposal(
+                &plan,
+                [31; 32],
+                "validated proposal and policy",
+                &proposal,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                &ai_proposal_output(&plan),
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(evidence.validation_evidence_digest(), [31; 32]);
+        assert_eq!(
+            evidence.proposal_binding_digest(),
+            proposal.digest().unwrap()
+        );
+
+        // The returned envelope is the persisted evidence whose digest is in the receipt.
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        let decoded: AiProposalValidationEvidence = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.validate_for(&plan, &proposal).is_ok());
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&decoded.digest().unwrap())
+        );
+        assert!(tx.validate_wire().is_ok());
+
+        // Provenance records evidence only; normal authorization remains required.
+        assert!(tx.authorization.is_none());
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+    }
+
+    #[test]
+    fn invalid_ai_proposal_artifact_leaves_transaction_unmodified() {
+        let plan = plan();
+        let proposal = ai_proposal(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+
+        let result = tx.record_validation_with_ai_proposal(
+            &plan,
+            [31; 32],
+            "validated proposal and policy",
+            &proposal,
+            b"SUBSTITUTED-model-artifact",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &ai_proposal_output(&plan),
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result.is_err());
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+    }
+
+    #[test]
+    fn forged_binding_with_matching_digest_but_wrong_intent_does_not_advance_transaction() {
+        let plan = plan();
+        let wrong_command = NixOSCommand::Search {
+            query: "nixpkgs#different".into(),
+            json: true,
+        };
+        let wrong_output = AiProposalOutputIntent::new(
+            plan.machine(),
+            None,
+            Some(&wrong_command),
+        )
+        .unwrap()
+        .canonical_bytes()
+        .unwrap();
+
+        // Simulate a decoded, attacker-constructed envelope whose output digest
+        // honestly matches the wrong bytes. The digest alone must not suffice.
+        let mut value = serde_json::to_value(ai_proposal(&plan)).unwrap();
+        let output_digest =
+            digest_artifact(ProposalArtifactKind::ProposalOutput, &wrong_output);
+        value["proposal_output_digest"] = serde_json::json!(digest_hex(&output_digest));
+        let forged: AiProposalBinding = serde_json::from_value(value).unwrap();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_ai_proposal(
+            &plan,
+            [31; 32],
+            "validated proposal and policy",
+            &forged,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &wrong_output,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result
+            .unwrap_err()
+            .contains("AI proposal output intent does not exactly match the ChangePlan"));
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+    }
+
+    #[test]
+    fn resolved_ai_proposal_commits_raw_output_and_resolver_receipt_before_validation() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let evidence = tx
+            .record_validation_with_resolved_ai_proposal(
+                &plan,
+                [32; 32],
+                "resolved and validated model proposal",
+                &proposal,
+                &resolution,
+                &raw,
+                &canonical,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(evidence.validation_evidence_digest(), [32; 32]);
+        assert_eq!(
+            evidence.resolution_receipt_digest(),
+            resolution.digest().unwrap()
+        );
+        let encoded = serde_json::to_vec(&evidence).unwrap();
+        let decoded: AiProposalResolvedValidationEvidence =
+            serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.validate_for(&plan, &proposal, &resolution, &raw, &canonical).is_ok());
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&decoded.digest().unwrap())
+        );
+        assert!(tx.validate_wire().is_ok());
+
+        // Even resolved evidence is not authority.
+        assert!(tx.authorization.is_none());
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+    }
+
+    #[test]
+    fn resolved_ai_proposal_rejects_raw_response_substitution_without_state_change() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+        let mut substituted_raw = raw.clone();
+        substituted_raw.push(b' '); // Same parsed intent, different exact source bytes.
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_resolved_ai_proposal(
+            &plan,
+            [32; 32],
+            "resolved and validated model proposal",
+            &proposal,
+            &resolution,
+            &substituted_raw,
+            &canonical,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        );
+
+        assert!(result.unwrap_err().contains("AI proposal resolution receipt does not match"));
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_verified_proposal_validation_binds_signed_current_executable() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let release_root = executable.parent().unwrap().to_path_buf();
+        let source_path = format!(
+            "share/nixward/runtime-evidence-positive-{}.rs",
+            std::process::id()
+        );
+        let signing = SigningKey::from_bytes(&[121u8; 32]);
+        let signed = sign_current_process_release(
+            &release_root,
+            &source_path,
+            include_bytes!("ai_proposal_binding.rs"),
+            &signing,
+        );
+        let trusted_key: String = signing
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let evidence = tx
+            .record_validation_with_runtime_verified_ai_proposal(
+                &plan,
+                [33; 32],
+                "release-verified proposal",
+                &proposal,
+                &resolution,
+                &raw,
+                &canonical,
+                b"model-artifact-v1",
+                b"canonical-input-v1",
+                b"canonical-policy-v1",
+                b"verifier-artifact-v1",
+                b"canonical-evaluation-evidence-v1",
+                &release_root,
+                &signed,
+                &trusted_key,
+                &source_path,
+            )
+            .unwrap();
+
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert_eq!(evidence.plan_digest(), plan.digest());
+        assert_eq!(
+            evidence.resolution_receipt_digest(),
+            resolution.digest().unwrap()
+        );
+        assert_ne!(evidence.runtime_binding_digest(), [0; 32]);
+        assert_eq!(
+            tx.validation.as_ref().unwrap().evidence_digest,
+            digest_hex(&evidence.digest().unwrap())
+        );
+
+        let runtime = resolution
+            .verify_current_runtime(
+                &release_root,
+                &signed,
+                &trusted_key,
+                &plan,
+                &raw,
+                &canonical,
+                &source_path,
+            )
+            .unwrap();
+        let resolved = AiProposalResolvedValidationEvidence::new(
+            &plan,
+            [33; 32],
+            &proposal,
+            &resolution,
+            &raw,
+            &canonical,
+        )
+        .unwrap();
+        assert!(evidence
+            .validate_for(
+                &plan,
+                &resolved,
+                &proposal,
+                &resolution,
+                &runtime,
+                &raw,
+                &canonical,
+            )
+            .is_ok());
+        assert!(tx.authorization.is_none());
+
+        // Signed provenance binds code/runtime identity, but does not confer authority.
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+        std::fs::remove_file(release_root.join(&source_path)).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_verified_proposal_rejects_untrusted_release_root_without_state_change() {
+        let plan = plan();
+        let raw = raw_ai_proposal_output(&plan);
+        let (resolution, canonical) =
+            AiProposalResolutionReceipt::resolve_provider_json(&plan, &raw).unwrap();
+        let proposal = AiProposalBinding::new(
+            &plan,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            &canonical,
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+        )
+        .unwrap();
+
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let release_root = executable.parent().unwrap().to_path_buf();
+        let source_path = format!(
+            "share/nixward/runtime-evidence-untrusted-{}.rs",
+            std::process::id()
+        );
+        let signing = SigningKey::from_bytes(&[122u8; 32]);
+        let signed = sign_current_process_release(
+            &release_root,
+            &source_path,
+            include_bytes!("ai_proposal_binding.rs"),
+            &signing,
+        );
+        let wrong_trust_root = SigningKey::from_bytes(&[123u8; 32]);
+        let wrong_key: String = wrong_trust_root
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let mut tx = SystemTransaction::planned(&plan);
+        let result = tx.record_validation_with_runtime_verified_ai_proposal(
+            &plan,
+            [33; 32],
+            "release-verified proposal",
+            &proposal,
+            &resolution,
+            &raw,
+            &canonical,
+            b"model-artifact-v1",
+            b"canonical-input-v1",
+            b"canonical-policy-v1",
+            b"verifier-artifact-v1",
+            b"canonical-evaluation-evidence-v1",
+            &release_root,
+            &signed,
+            &wrong_key,
+            &source_path,
+        );
+
+        assert!(result.unwrap_err().contains("signed release verification failed"));
+        assert_eq!(tx.phase, TransactionPhase::Planned);
+        assert!(tx.validation.is_none());
+        assert!(tx.authorization.is_none());
+        std::fs::remove_file(release_root.join(&source_path)).unwrap();
     }
 
     #[test]
