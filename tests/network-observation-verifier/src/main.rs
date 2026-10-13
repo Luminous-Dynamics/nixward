@@ -1,8 +1,10 @@
 use nixward_network_observation_verifier::{verify_bytes_for_target, TargetIdentity};
 use std::env;
-use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
+
+const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
     match run() {
@@ -64,15 +66,12 @@ fn run() -> Result<ExitCode, String> {
     };
     let path = path.ok_or_else(usage)?;
 
-    let mut input = Vec::new();
-    if path == "-" {
-        io::stdin()
-            .read_to_end(&mut input)
-            .map_err(|error| format!("cannot read envelope from stdin: {error}"))?;
+    let input = if path == "-" {
+        read_bounded(io::stdin())?
     } else {
-        input = fs::read(&path)
-            .map_err(|error| format!("cannot read envelope {path}: {error}"))?;
-    }
+        let file = File::open(&path).map_err(|error| format!("cannot open envelope {path}: {error}"))?;
+        read_bounded(file)?
+    };
 
     let receipt = verify_bytes_for_target(&input, &expected_target)?;
     let output = receipt.serialize_checked()?;
@@ -89,6 +88,19 @@ fn run() -> Result<ExitCode, String> {
     } else {
         Ok(ExitCode::from(1))
     }
+}
+
+fn read_bounded(mut reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut input = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut input)
+        .map_err(|error| format!("cannot read evidence envelope: {error}"))?;
+    if input.len() as u64 > MAX_INPUT_BYTES {
+        return Err(format!("evidence envelope exceeds {MAX_INPUT_BYTES}-byte input limit"));
+    }
+    Ok(input)
 }
 
 fn set_once(
