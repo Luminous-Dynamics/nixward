@@ -775,6 +775,7 @@ pub enum InvocationNotStartedReason {
     AuthorizationRejected,
     ReplayEvidenceIncomplete,
     ReplayRejected,
+    ClockUnavailable,
 }
 
 /// The operating-system process disposition observed for an invocation attempt.
@@ -787,14 +788,15 @@ pub enum ProcessDisposition {
 
 /// Process-level evidence for one exact command attempt.
 ///
-/// Timestamps use Unix epoch milliseconds; `elapsed_ms` uses a monotonic
-/// clock. A consumer must reject the evidence if the wall-clock interval is
-/// not ordered rather than reconstructing timestamps from elapsed time.
+/// Timestamps use Unix epoch milliseconds when the system clock provides them;
+/// `elapsed_ms` uses a monotonic clock. Missing wall-clock values stay `None`;
+/// consumers must not fabricate them from elapsed time. Reject evidence whose
+/// two wall-clock values are present but not ordered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandInvocationEvidence {
     pub command_digest_blake3: String,
-    pub started_at_ms: u64,
-    pub finished_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
     pub elapsed_ms: u64,
     pub disposition: ProcessDisposition,
 }
@@ -819,11 +821,11 @@ pub struct ExecutionObservation {
     pub dry_run: bool,
 }
 
-fn unix_epoch_millis() -> u64 {
+fn unix_epoch_millis() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
+        .ok()
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
 }
 
 fn command_digest_hex(command: &NixOSCommand) -> String {
@@ -855,8 +857,8 @@ fn process_disposition(status: &std::process::ExitStatus) -> ProcessDisposition 
 
 fn invocation_evidence(
     command: &NixOSCommand,
-    started_at_ms: u64,
-    finished_at_ms: u64,
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
     elapsed_ms: u64,
     disposition: ProcessDisposition,
 ) -> CommandInvocationEvidence {
@@ -1115,12 +1117,27 @@ impl NixOSExecutor {
                     dry_run: false,
                 };
             };
+            let Some(replay_now_ms) = unix_epoch_millis() else {
+                let blocked = ExecutionResult::Blocked {
+                    reason: "system clock unavailable; refusing replay-protected execution".into(),
+                    safety_level: safety,
+                };
+                self.record_execution(&command, decision_quality, &authorization, &blocked);
+                return ExecutionObservation {
+                    result: blocked,
+                    primary: InvocationStatus::NotStarted {
+                        reason: InvocationNotStartedReason::ClockUnavailable,
+                    },
+                    rollback: None,
+                    dry_run: false,
+                };
+            };
             if let Err(error) = self.authority_replay_ledger.consume(
                 replay_key,
                 challenge_blake3,
                 authorization.evidence_digest(),
                 subject_blake3,
-                unix_epoch_millis(),
+                replay_now_ms,
             ) {
                 let blocked = ExecutionResult::Blocked {
                     reason: format!("authority replay consumption failed: {error}"),
