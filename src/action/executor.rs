@@ -1183,7 +1183,7 @@ impl NixOSExecutor {
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return ExecutionObservation {
-                    command_digest_blake3: requested_command_digest_blake3.clone(),
+                command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Blocked {
                     reason,
                     safety_level: safety,
@@ -1192,12 +1192,12 @@ impl NixOSExecutor {
                     reason: InvocationNotStartedReason::ForbiddenPolicy,
                 },
                 rollback: None,
-                dry_run: self.dry_run,
+                dry_run: false,
             };
         }
         if let Err(reason) = authorization.validate_for(&command) {
             return ExecutionObservation {
-                    command_digest_blake3: requested_command_digest_blake3.clone(),
+                command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Blocked {
                     reason,
                     safety_level: safety,
@@ -1206,7 +1206,7 @@ impl NixOSExecutor {
                     reason: InvocationNotStartedReason::AuthorizationRejected,
                 },
                 rollback: None,
-                dry_run: self.dry_run,
+                dry_run: false,
             };
         }
 
@@ -1222,7 +1222,7 @@ impl NixOSExecutor {
 
         if self.dry_run {
             return ExecutionObservation {
-                    command_digest_blake3: requested_command_digest_blake3.clone(),
+                command_digest_blake3: requested_command_digest_blake3.clone(),
                 result: ExecutionResult::Success {
                     stdout: format!("[DRY-RUN] Would execute: {} {}", cmd, args.join(" ")),
                     stderr: String::new(),
@@ -1877,6 +1877,55 @@ mod tests {
         assert!(value["finished_at_ms"].is_null());
         assert_eq!(value["elapsed_ms"], 5);
         assert_eq!(value["disposition"]["SpawnFailed"]["error"], "fixture spawn error");
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_configuration_does_not_override_forbidden_reason() {
+        let command = NixOSCommand::Custom {
+            command: "arbitrary-forbidden-fixture".to_string(),
+            args: Vec::new(),
+            safety_level: SafetyLevel::ReadOnly,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&command).unwrap();
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let observation = executor
+            .execute_authorized_observed(command, authorization, None)
+            .await;
+        assert_eq!(
+            observation.primary,
+            InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::ForbiddenPolicy,
+            }
+        );
+        let envelope = observation.evidence_envelope();
+        assert!(!envelope.dry_run);
+        envelope.validate_wire().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_dry_run_configuration_does_not_override_authorization_rejection() {
+        let approved = NixOSCommand::Search {
+            query: "approved".to_string(),
+            json: false,
+        };
+        let changed = NixOSCommand::Search {
+            query: "substituted".to_string(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&approved).unwrap();
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let observation = executor
+            .execute_authorized_observed(changed, authorization, None)
+            .await;
+        assert_eq!(
+            observation.primary,
+            InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::AuthorizationRejected,
+            }
+        );
+        let envelope = observation.evidence_envelope();
+        assert!(!envelope.dry_run);
+        envelope.validate_wire().unwrap();
     }
 
     #[tokio::test]
