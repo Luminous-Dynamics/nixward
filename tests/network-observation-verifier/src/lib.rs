@@ -593,7 +593,12 @@ fn verify_envelope(
 
         let mut attempt_evaluations = Vec::new();
         let mut sequences = BTreeSet::new();
-        for (position, attempt) in source.attempts.iter().enumerate() {
+        for (position, attempt) in source
+            .attempts
+            .iter()
+            .take(envelope.policy.max_retries as usize + 1)
+            .enumerate()
+        {
             let mut attempt_metadata_invalid = false;
             if attempt.retry_index != position as u32 {
                 source_reasons.push("retry_indices_not_contiguous_from_zero".to_owned());
@@ -622,6 +627,22 @@ fn verify_envelope(
                 source_reasons.push("invalid_or_excessive_source_time_window".to_owned());
                 fatal_invalid = true;
                 attempt_metadata_invalid = true;
+            }
+            if attempt.raw_artifact_hex.len()
+                > envelope.policy.max_total_raw_bytes.saturating_mul(2)
+            {
+                source_reasons.push("raw_artifact_hex_exceeds_policy_byte_bound".to_owned());
+                total_raw_bytes = total_raw_bytes.saturating_add(
+                    envelope.policy.max_total_raw_bytes.saturating_add(1),
+                );
+                every_required_source_complete = false;
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Incomplete("raw_artifact_hex_exceeds_policy_byte_bound".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
             }
             let raw = match decode_hex(&attempt.raw_artifact_hex) {
                 Ok(bytes) => bytes,
@@ -1680,6 +1701,25 @@ mod tests {
         let item = attempt(&[], 7, 0);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn caller_cannot_relax_pinned_policy_ceiling() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        envelope.policy.max_age_ms = POLICY_MAX_AGE_MS + 1;
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("policy_exceeds")));
+    }
+
+    #[test]
+    fn omitted_mandatory_semantic_attribute_from_policy_is_rejected() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        envelope.policy.decision_critical_link_attribute_ids = vec![IFLA_IFNAME];
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
     }
 
     #[test]
