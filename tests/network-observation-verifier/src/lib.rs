@@ -1106,6 +1106,58 @@ fn verify_envelope(
     }
 }
 
+fn parse_link_request(
+    bytes: &[u8],
+    expected_sequence: u32,
+    byte_order: ByteOrder,
+) -> Result<(), AttemptStatus> {
+    if bytes.is_empty() {
+        return Err(AttemptStatus::Incomplete("empty_request_artifact".to_owned()));
+    }
+    if bytes.len() < NLMSG_HDR_LEN {
+        return Err(AttemptStatus::Invalid("request_shorter_than_netlink_header".to_owned()));
+    }
+
+    let message_len = read_u32(&bytes[..4], byte_order) as usize;
+    let message_type = read_u16(&bytes[4..6], byte_order);
+    let flags = read_u16(&bytes[6..8], byte_order);
+    let sequence = read_u32(&bytes[8..12], byte_order);
+    if message_len != bytes.len()
+        || message_len != NLMSG_HDR_LEN + IFINFOMSG_LEN
+        || align4(message_len) != bytes.len()
+    {
+        return Err(AttemptStatus::Invalid(
+            "request_must_be_one_exact_ifinfomsg_without_attributes".to_owned(),
+        ));
+    }
+    if sequence != expected_sequence || expected_sequence == 0 {
+        return Err(AttemptStatus::Invalid("request_sequence_mismatch_or_zero".to_owned()));
+    }
+    if message_type != RTM_GETLINK {
+        return Err(AttemptStatus::Incomplete(
+            "request_is_not_rtm_getlink".to_owned(),
+        ));
+    }
+    if flags & NLM_F_REQUEST == 0 || flags & NLM_F_DUMP != NLM_F_DUMP {
+        return Err(AttemptStatus::Incomplete(
+            "request_does_not_request_whole_link_dump".to_owned(),
+        ));
+    }
+
+    let payload = &bytes[NLMSG_HDR_LEN..];
+    if payload[0] != 0
+        || read_u16(&payload[2..4], byte_order) != 0
+        || read_i32(&payload[4..8], byte_order) != 0
+        || read_u32(&payload[8..12], byte_order) != 0
+        || read_u32(&payload[12..16], byte_order) != 0
+    {
+        return Err(AttemptStatus::Incomplete(
+            "request_contains_link_filter_or_restricted_scope".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_link_dump(
     bytes: &[u8],
     expected_sequence: u32,
@@ -1157,6 +1209,9 @@ fn parse_link_dump(
         }
         if flags & NLM_F_DUMP_INTR != 0 {
             interrupted = true;
+        }
+        if flags & NLM_F_DUMP_FILTERED != 0 {
+            return Err(AttemptStatus::Incomplete("kernel_reports_filtered_dump".to_owned()));
         }
         let payload_start = offset + NLMSG_HDR_LEN;
         let payload_end = offset + message_len;
