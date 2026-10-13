@@ -850,6 +850,71 @@ impl ExecutionObservation {
     }
 }
 
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl ExecutionEvidenceEnvelope {
+    /// Fail closed on malformed identities, clocks, or contradictory invocation states.
+    pub fn validate_wire(&self) -> Result<(), String> {
+        if self.schema != EXECUTION_OBSERVATION_SCHEMA
+            || self.version != EXECUTION_OBSERVATION_VERSION
+        {
+            return Err("unsupported execution-observation schema/version".into());
+        }
+
+        let validate_evidence = |label: &str, evidence: &CommandInvocationEvidence| {
+            if !is_lower_hex_digest(&evidence.command_digest_blake3) {
+                return Err(format!("{label} command digest is invalid"));
+            }
+            if let (Some(start), Some(finish)) =
+                (evidence.started_at_ms, evidence.finished_at_ms)
+            {
+                if finish < start {
+                    return Err(format!("{label} timestamp interval is invalid"));
+                }
+            }
+            Ok(())
+        };
+
+        match &self.primary {
+            InvocationStatus::NotStarted { reason } => {
+                if self.rollback.is_some() {
+                    return Err("not-started invocation cannot have rollback evidence".into());
+                }
+                if self.dry_run != (*reason == InvocationNotStartedReason::DryRun) {
+                    return Err("dry_run flag contradicts not-started reason".into());
+                }
+            }
+            InvocationStatus::Attempted { evidence } => {
+                if self.dry_run {
+                    return Err("attempted invocation cannot be marked dry-run".into());
+                }
+                validate_evidence("primary", evidence)?;
+            }
+        }
+
+        if let Some(rollback) = &self.rollback {
+            validate_evidence("rollback", rollback)?;
+            let InvocationStatus::Attempted { evidence: primary } = &self.primary else {
+                return Err("rollback evidence requires a primary invocation attempt".into());
+            };
+            match primary.disposition {
+                ProcessDisposition::Exited { code: 0 } | ProcessDisposition::SpawnFailed { .. } => {
+                    return Err("rollback evidence requires a failed or signal-terminated primary process".into());
+                }
+                ProcessDisposition::Exited { .. }
+                | ProcessDisposition::TerminatedWithoutExitCode { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
+}
+
 fn unix_epoch_millis() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1620,6 +1685,7 @@ mod tests {
             dry_run: true,
         };
         let envelope = observation.evidence_envelope();
+        envelope.validate_wire().unwrap();
         let serialized = serde_json::to_string(&envelope).unwrap();
         let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(value["schema"], EXECUTION_OBSERVATION_SCHEMA);
@@ -1627,6 +1693,47 @@ mod tests {
         assert_eq!(value["primary"]["NotStarted"]["reason"], "DryRun");
         assert!(!serialized.contains("sensitive-stdout-fixture"));
         assert!(!serialized.contains("sensitive-stderr-fixture"));
+    }
+
+    #[test]
+    fn test_evidence_envelope_rejects_zero_command_digest() {
+        let envelope = ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            primary: InvocationStatus::Attempted {
+                evidence: CommandInvocationEvidence {
+                    command_digest_blake3: "0".repeat(64),
+                    started_at_ms: Some(10),
+                    finished_at_ms: Some(11),
+                    elapsed_ms: 1,
+                    disposition: ProcessDisposition::Exited { code: 0 },
+                },
+            },
+            rollback: None,
+            dry_run: false,
+        };
+        assert!(envelope.validate_wire().unwrap_err().contains("command digest is invalid"));
+    }
+
+    #[test]
+    fn test_evidence_envelope_rejects_rollback_without_primary_attempt() {
+        let evidence = CommandInvocationEvidence {
+            command_digest_blake3: "a".repeat(64),
+            started_at_ms: Some(10),
+            finished_at_ms: Some(11),
+            elapsed_ms: 1,
+            disposition: ProcessDisposition::Exited { code: 0 },
+        };
+        let envelope = ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            primary: InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::DryRun,
+            },
+            rollback: Some(evidence),
+            dry_run: true,
+        };
+        assert!(envelope.validate_wire().unwrap_err().contains("not-started invocation cannot have rollback"));
     }
 
     #[test]
