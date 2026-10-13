@@ -20,6 +20,7 @@ The legacy `ExecutionResult` is optimized for callers and CLI presentation. It d
 2. Do not infer a process exit code from `RolledBack`, `FailedNoRollback`, `Blocked`, or `PendingConfirmation`.
 3. A spawn failure is not process exit status 1 or 127. Preserve `SpawnFailed` as a distinct disposition.
 4. Missing wall-clock timestamps are `None`, serialized as JSON `null`. Never replace them with epoch zero or derive absolute time from elapsed duration.
+   The envelope also bounds timestamps and elapsed values to the IEEE-754 safe-integer maximum (2^53−1) so JavaScript consumers cannot silently round larger Rust `u64` values.
 5. A consumer mapping to `SystemTransaction::ApplicationReceipt` must require real exit-code evidence and present, ordered timestamps. SystemTransaction v1 cannot faithfully encode spawn failure, signal termination, dry-run, or rollback details as currently shaped. Do not coerce these into its `exit_status` field; define a versioned receipt update or a separate failure observation first.
 6. A rollback command's exit code indicates only its process outcome. Verified recovery requires a fresh read-only observation of the target's post-recovery state.
 
