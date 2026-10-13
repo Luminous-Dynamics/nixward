@@ -6,7 +6,7 @@ This crate is the first implementation slice for [Issue #68](https://github.com/
 
 - Exact envelope schema ID/version and strict typed fields (unknown fields are rejected).
 - Stable target ID, boot ID and network-namespace inode copied consistently through the envelope and each source attempt.
-- Collector build-digest shape, policy identity, bounded monotonic source-window duration, freshness under the envelope's explicitly supplied evaluation clock, retry budget and total input-byte bounds.
+- Collector build-digest shape, a verifier-pinned policy ID/version and hard maximum ceilings for freshness, monotonic source-window duration, raw bytes, messages, objects and retries. Tighter caller policies are permitted; caller-supplied limits cannot exceed verifier ceilings.
 - Domain-separated BLAKE3 over byte-exact raw Netlink artifacts, a separately recomputed canonical semantic digest, deterministic receipt bytes, and a receipt digest rechecked before serialization.
 - Netlink header bounds/alignment, sequence binding, message limits, \`NLM_F_DUMP_INTR\`, \`NLMSG_ERROR\`, successful \`NLMSG_DONE\` terminal status, and no bytes/messages after the terminal marker.
 - rtnetlink \`RTM_NEWLINK\`/\`ifinfomsg\`/\`rtattr\` framing, required \`IFLA_IFNAME\`, duplicate attribute rejection, duplicate interface identity checks, bounded objects, and policy-declared decision-critical attributes.
@@ -19,7 +19,7 @@ A collector's \`complete\` boolean is not part of the envelope contract and cann
 This is an M1a verifier profile, not the live M1 observer.
 
 - Only \`linux.rtnetlink.links.v1\` is supported. Address/route/rule dumps, nftables, WireGuard, NetworkManager, systemd-networkd, FRR, gNMI and hardware-specific sources are unsupported.
-- The canonical link projection covers ifindex, interface name, hardware link type, flags and optional MTU. Other attributes remain bound by the raw artifact digest but are not semantically interpreted. The caller's versioned policy must mark attributes decision-critical for its invariant; if this profile cannot interpret a marked attribute, it returns \`Unsupported\`.
+- The canonical link projection covers ifindex, interface name, hardware link type, flags, optional MTU and link-layer address bytes. Other attributes remain bound by the raw artifact digest but are not semantically interpreted. The caller's versioned policy must mark attributes decision-critical for its invariant; if this profile cannot interpret a marked attribute, it returns \`Unsupported\`.
 - A single bounded source window is not a global atomic snapshot. A complete result means only that this verifier accepted the supplied bytes and metadata for the one declared profile.
 - \`ownership\` is always \`Unknown\`. A link dump does not prove which manager has write authority.
 - A BLAKE3 digest proves equality against a supplied value, not who produced it or whether the kernel/collector told the truth. This receipt is not a signature, hardware attestation or protected local provenance.
@@ -34,7 +34,7 @@ From the repository root:
 cargo fmt --manifest-path tests/network-observation-verifier/Cargo.toml -- --check
 cargo test --locked --manifest-path tests/network-observation-verifier/Cargo.toml --all-targets
 cargo run --locked --manifest-path tests/network-observation-verifier/Cargo.toml --bin emit_synthetic_evidence > /tmp/m1a-synthetic-envelope.json
-cargo run --locked --manifest-path tests/network-observation-verifier/Cargo.toml --bin nixward-network-observation-verifier -- /tmp/m1a-synthetic-envelope.json > /tmp/m1a-receipt.json
+cargo run --locked --manifest-path tests/network-observation-verifier/Cargo.toml --bin nixward-network-observation-verifier -- --target-id synthetic-lab-router --boot-id synthetic-boot-id --netns-inode 4026533001 /tmp/m1a-synthetic-envelope.json > /tmp/m1a-receipt.json
 \`\`\`
 
 The synthetic fixture generator is explicitly named and emits a fabricated \`NLMSG_DONE(status=0)\` for a valid empty link dump. It is useful only to prove deterministic serialization and control flow; it is not collected network state. The verifier exits \`0\` for \`CompleteForDeclaredScope\`, \`1\` for a parsed envelope that does not qualify, and \`2\` for I/O or malformed-JSON errors. Non-complete decisions still produce a receipt where the envelope can be parsed.
