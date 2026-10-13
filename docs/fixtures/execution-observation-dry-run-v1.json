@@ -1,0 +1,12 @@
+{
+  "schema": "luminous-nixward-execution-observation",
+  "version": 1,
+  "command_digest_blake3": "1111111111111111111111111111111111111111111111111111111111111111",
+  "primary": {
+    "NotStarted": {
+      "reason": "DryRun"
+    }
+  },
+  "rollback": null,
+  "dry_run": true
+}
