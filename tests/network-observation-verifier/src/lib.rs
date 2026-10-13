@@ -156,6 +156,7 @@ pub enum Ownership {
 #[serde(deny_unknown_fields)]
 pub struct ReceiptBody {
     pub verifier_id: String,
+    pub target_identity_bound_externally: bool,
     pub verifier_version: String,
     pub rustc_version: String,
     pub cargo_version: String,
@@ -377,13 +378,29 @@ fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 pub fn verify_bytes(input: &[u8]) -> Result<ReceiptEnvelope, String> {
+    verify_bytes_inner(input, None)
+}
+
+/// Verifies the envelope against an expected identity obtained outside the envelope itself.
+/// The supplied identity must come from a trusted caller, not from the untrusted evidence.
+pub fn verify_bytes_for_target(
+    input: &[u8],
+    expected_target: &TargetIdentity,
+) -> Result<ReceiptEnvelope, String> {
+    verify_bytes_inner(input, Some(expected_target))
+}
+
+fn verify_bytes_inner(
+    input: &[u8],
+    expected_target: Option<&TargetIdentity>,
+) -> Result<ReceiptEnvelope, String> {
     if input.len() > MAX_ENVELOPE_BYTES {
         return Err(format!("envelope exceeds hard input limit of {MAX_ENVELOPE_BYTES} bytes"));
     }
     let envelope: Envelope = serde_json::from_slice(input)
         .map_err(|error| format!("invalid or nonconforming envelope JSON: {error}"))?;
     let envelope_digest = hash_domain(HASH_ENVELOPE_DOMAIN, input);
-    let receipt = verify_envelope(&envelope, envelope_digest);
+    let receipt = verify_envelope(&envelope, envelope_digest, expected_target);
     let receipt_bytes = serde_json::to_vec(&receipt)
         .map_err(|error| format!("receipt serialization failed: {error}"))?;
     let receipt_blake3 = hash_domain(HASH_RECEIPT_DOMAIN, &receipt_bytes);
@@ -393,7 +410,11 @@ pub fn verify_bytes(input: &[u8]) -> Result<ReceiptEnvelope, String> {
     })
 }
 
-fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody {
+fn verify_envelope(
+    envelope: &Envelope,
+    envelope_digest: String,
+    expected_target: Option<&TargetIdentity>,
+) -> ReceiptBody {
     let mut reasons = Vec::new();
     let mut integrity = Integrity::Valid;
     let mut coverage = Coverage::Incomplete;
@@ -406,7 +427,8 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     let mut unsupported = false;
     let mut every_required_source_complete = true;
 
-    let target = envelope.target.clone();
+    let target = expected_target.cloned().unwrap_or_else(|| envelope.target.clone());
+    let mut target_binding_valid = expected_target.is_some();
     let scope = envelope.scope.clone();
     let policy_id = envelope.policy.policy_id.clone();
     let policy_version = envelope.policy.policy_version.clone();
@@ -422,6 +444,17 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     if envelope.schema_id != ENVELOPE_SCHEMA_ID || envelope.schema_version != 1 {
         reasons.push("unsupported_or_mismatched_envelope_schema".to_owned());
         fatal_invalid = true;
+    }
+    match expected_target {
+        Some(expected) if *expected != envelope.target => {
+            reasons.push("envelope_target_identity_does_not_match_external_expected_target".to_owned());
+            fatal_invalid = true;
+        }
+        Some(_) => target_binding_valid = true,
+        None => {
+            reasons.push("trusted_expected_target_identity_not_supplied".to_owned());
+            every_required_source_complete = false;
+        }
     }
     if envelope.collection_id.trim().is_empty()
         || target.target_id.trim().is_empty()
@@ -890,6 +923,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     }
     ReceiptBody {
         verifier_id: VERIFIER_ID.to_owned(),
+        target_identity_bound_externally: target_binding_valid,
         verifier_version: VERIFIER_VERSION.to_owned(),
         rustc_version: option_env!("NIXWARD_VERIFIER_RUSTC_VERSION")
             .unwrap_or("toolchain-version-unavailable")
@@ -1317,7 +1351,8 @@ mod tests {
 
     fn verify_envelope_for_test(envelope: &Envelope) -> ReceiptEnvelope {
         let bytes = serde_json::to_vec(envelope).expect("fixture serializes");
-        verify_bytes(&bytes).expect("fixture envelope is well-formed JSON")
+        verify_bytes_for_target(&bytes, &envelope.target)
+            .expect("fixture envelope is well-formed JSON")
     }
 
     fn link_and_done(name: &str) -> Vec<u8> {
@@ -1616,6 +1651,26 @@ mod tests {
     }
 
     #[test]
+    fn missing_external_target_identity_fails_closed() {
+        let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        let input = serde_json::to_vec(&envelope).expect("fixture serializes");
+        let receipt = verify_bytes(&input).expect("well-formed envelope");
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(!receipt.receipt.target_identity_bound_externally);
+    }
+
+    #[test]
+    fn external_target_substitution_is_invalid() {
+        let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        let input = serde_json::to_vec(&envelope).expect("fixture serializes");
+        let mut expected = envelope.target.clone();
+        expected.network_namespace_inode += 1;
+        let receipt = verify_bytes_for_target(&input, &expected).expect("well-formed envelope");
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("external_expected_target")));
+    }
+
+    #[test]
     fn zero_byte_artifact_is_not_a_valid_empty_dump() {
         let item = attempt(&[], 7, 0);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
@@ -1676,8 +1731,8 @@ mod tests {
         let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
         let compact = serde_json::to_vec(&envelope).expect("fixture serializes");
         let pretty = serde_json::to_vec_pretty(&envelope).expect("fixture pretty-serializes");
-        let compact_receipt = verify_bytes(&compact).expect("compact JSON verifies");
-        let pretty_receipt = verify_bytes(&pretty).expect("pretty JSON verifies");
+        let compact_receipt = verify_bytes_for_target(&compact, &envelope.target).expect("compact JSON verifies");
+        let pretty_receipt = verify_bytes_for_target(&pretty, &envelope.target).expect("pretty JSON verifies");
         assert_ne!(compact_receipt.receipt.envelope_raw_blake3, pretty_receipt.receipt.envelope_raw_blake3);
         assert_ne!(compact_receipt.receipt_blake3, pretty_receipt.receipt_blake3);
     }
