@@ -16,8 +16,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0, 0, 0, 0, // sender port ID
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // unfiltered ifinfomsg
     ];
+    // Successful ACK with the original request header, as specified by struct nlmsgerr.
+    let ack: [u8; 36] = [
+        36, 0, 0, 0, // nlmsg_len
+        2, 0, // NLMSG_ERROR
+        0, 1, // NLM_F_CAPPED
+        7, 0, 0, 0, // request sequence
+        0, 0, 0, 0, // sender port ID
+        0, 0, 0, 0, // error = 0 (success ACK)
+        32, 0, 0, 0, // original request nlmsg_len
+        18, 0, // RTM_GETLINK
+        5, 3, // NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP
+        7, 0, 0, 0, // original request sequence
+        0, 0, 0, 0, // original request sender port ID
+    ];
     // A byte-exact little-endian NLMSG_DONE(status=0), sequence 7, for a valid empty dump.
-    let raw: [u8; 20] = [
+    let terminal: [u8; 20] = [
         20, 0, 0, 0, // nlmsg_len
         3, 0, // NLMSG_DONE
         2, 0, // NLM_F_MULTI
@@ -25,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0, 0, 0, 0, // sender port ID
         0, 0, 0, 0, // successful completion status
     ];
+    let raw: Vec<u8> = [ack.as_slice(), terminal.as_slice()].concat();
     let envelope = Envelope {
         schema_id: ENVELOPE_SCHEMA_ID.to_owned(),
         schema_version: 1,

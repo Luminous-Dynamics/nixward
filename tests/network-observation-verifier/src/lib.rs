@@ -43,6 +43,7 @@ const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
 const NLM_F_ATOMIC: u16 = 0x0400;
 const NLM_F_ACK_TLVS: u16 = 0x0200;
+const NLM_F_CAPPED: u16 = 0x0100;
 const NLA_TYPE_MASK: u16 = 0x3fff;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1205,6 +1206,70 @@ fn parse_link_request(
     Ok(())
 }
 
+fn validate_nlmsg_error_ack(
+    payload: &[u8],
+    response_flags: u16,
+    expected_sequence: u32,
+    byte_order: ByteOrder,
+) -> Result<(), AttemptStatus> {
+    // struct nlmsgerr begins with error + the original nlmsghdr. The success
+    // ACK does not include the original request body, even without NLM_F_CAPPED.
+    const NLMSGERR_BASE_LEN: usize = 4 + NLMSG_HDR_LEN;
+    if payload.len() < NLMSGERR_BASE_LEN {
+        return Err(AttemptStatus::Invalid(
+            "nlmsg_error_missing_original_request_header".to_owned(),
+        ));
+    }
+
+    let error = read_i32(payload, byte_order);
+    let original = &payload[4..NLMSGERR_BASE_LEN];
+    let original_length = read_u32(&original[0..4], byte_order) as usize;
+    let original_type = read_u16(&original[4..6], byte_order);
+    let original_flags = read_u16(&original[6..8], byte_order);
+    let original_sequence = read_u32(&original[8..12], byte_order);
+    let original_port_id = read_u32(&original[12..16], byte_order);
+    let expected_request_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP;
+
+    if original_length != NLMSG_HDR_LEN + IFINFOMSG_LEN
+        || original_type != RTM_GETLINK
+        || original_flags != expected_request_flags
+        || original_sequence != expected_sequence
+        || original_port_id != 0
+    {
+        return Err(AttemptStatus::Invalid(
+            "nlmsg_error_original_request_header_mismatch".to_owned(),
+        ));
+    }
+
+    if error < 0 {
+        return Err(AttemptStatus::Incomplete(format!(
+            "nlmsg_error_received:{error}"
+        )));
+    }
+    if error > 0 {
+        return Err(AttemptStatus::Invalid(
+            "nlmsg_error_has_positive_errno".to_owned(),
+        ));
+    }
+
+    if response_flags & NLM_F_ACK_TLVS != 0 {
+        if payload.len() == NLMSGERR_BASE_LEN {
+            return Err(AttemptStatus::Invalid(
+                "success_ack_tlvs_flag_without_tlv_payload".to_owned(),
+            ));
+        }
+        return Err(AttemptStatus::Unsupported(
+            "success_ack_extended_tlvs_not_supported_by_m1a_profile".to_owned(),
+        ));
+    }
+    if payload.len() != NLMSGERR_BASE_LEN {
+        return Err(AttemptStatus::Invalid(
+            "success_ack_has_unflagged_trailing_payload".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_link_dump(
     bytes: &[u8],
     expected_sequence: u32,
@@ -1223,6 +1288,7 @@ fn parse_link_dump(
     let mut message_count = 0usize;
     let mut object_count = 0usize;
     let mut terminal_seen = false;
+    let mut success_ack_seen = false;
     // Duplicate identity comparison must include the exact frame, not only the
     // reduced semantic projection: two rows can differ in currently unmodeled attrs.
     let mut links: BTreeMap<i32, (Link, Vec<u8>)> = BTreeMap::new();
@@ -1230,9 +1296,6 @@ fn parse_link_dump(
     let mut interrupted = false;
 
     while offset < bytes.len() {
-        if terminal_seen {
-            return Err(AttemptStatus::Invalid("message_bytes_after_terminal_signal".to_owned()));
-        }
         if bytes.len().saturating_sub(offset) < NLMSG_HDR_LEN {
             return Err(AttemptStatus::Invalid("trailing_partial_netlink_header".to_owned()));
         }
@@ -1253,6 +1316,11 @@ fn parse_link_dump(
         if align4(message_len) > bytes.len().saturating_sub(offset) {
             return Err(AttemptStatus::Invalid("netlink_message_alignment_exceeds_artifact".to_owned()));
         }
+        // An ACK can be delivered after NLMSG_DONE. No more dump rows or a second
+        // terminal signal may follow NLMSG_DONE; only the matching request ACK is allowed.
+        if terminal_seen && message_type != NLMSG_ERROR {
+            return Err(AttemptStatus::Invalid("message_bytes_after_terminal_signal".to_owned()));
+        }
         if sequence != expected_sequence {
             return Err(AttemptStatus::Invalid("unexpected_netlink_request_sequence".to_owned()));
         }
@@ -1265,8 +1333,8 @@ fn parse_link_dump(
         let allowed_flags = match message_type {
             RTM_NEWLINK => NLM_F_MULTI | NLM_F_DUMP_INTR,
             NLMSG_DONE => NLM_F_MULTI | NLM_F_DUMP_INTR | NLM_F_ACK_TLVS,
-            // Errors are rejected below regardless; their flags are retained in the raw artifact.
-            NLMSG_ERROR => u16::MAX,
+            // A response ACK may carry only the capped-payload and extended-ACK flags.
+            NLMSG_ERROR => NLM_F_CAPPED | NLM_F_ACK_TLVS,
             _ => u16::MAX,
         };
         if flags & !allowed_flags != 0 {
@@ -1312,13 +1380,11 @@ fn parse_link_dump(
             }
             NLMSG_ERROR => {
                 let payload = &bytes[payload_start..payload_end];
-                if payload.len() < 4 {
-                    return Err(AttemptStatus::Incomplete("malformed_nlmsg_error_payload".to_owned()));
+                validate_nlmsg_error_ack(payload, flags, expected_sequence, byte_order)?;
+                if success_ack_seen {
+                    return Err(AttemptStatus::Invalid("duplicate_success_ack_for_request".to_owned()));
                 }
-                let error = read_i32(payload, byte_order);
-                return Err(AttemptStatus::Incomplete(format!(
-                    "nlmsg_error_received:{error}"
-                )));
+                success_ack_seen = true;
             }
             RTM_NEWLINK => {
                 if flags & NLM_F_MULTI == 0 {
@@ -1365,6 +1431,9 @@ fn parse_link_dump(
     }
     if !terminal_seen {
         return Err(AttemptStatus::Incomplete("missing_nlmsg_done_terminal_signal".to_owned()));
+    }
+    if !success_ack_seen {
+        return Err(AttemptStatus::Incomplete("missing_success_ack_for_acknowledged_dump".to_owned()));
     }
     let mut by_name = BTreeSet::new();
     if links.values().any(|link| !by_name.insert(link.ifname.clone())) {
@@ -1555,8 +1624,31 @@ mod tests {
         bytes
     }
 
-    fn done(sequence: u32, status: i32, flags: u16) -> Vec<u8> {
+    fn nlmsgerr_payload(sequence: u32, error: i32) -> Vec<u8> {
+        let mut payload = encode_i32(error).to_vec();
+        payload.extend_from_slice(&encode_u32((NLMSG_HDR_LEN + IFINFOMSG_LEN) as u32));
+        payload.extend_from_slice(&encode_u16(RTM_GETLINK));
+        payload.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP).to_le_bytes());
+        payload.extend_from_slice(&encode_u32(sequence));
+        payload.extend_from_slice(&encode_u32(0));
+        payload
+    }
+
+    fn success_ack(sequence: u32) -> Vec<u8> {
+        message(
+            NLMSG_ERROR,
+            NLM_F_CAPPED,
+            sequence,
+            &nlmsgerr_payload(sequence, 0),
+        )
+    }
+
+    fn done_only(sequence: u32, status: i32, flags: u16) -> Vec<u8> {
         message(NLMSG_DONE, flags, sequence, &encode_i32(status))
+    }
+
+    fn done(sequence: u32, status: i32, flags: u16) -> Vec<u8> {
+        raw_join(&[success_ack(sequence), done_only(sequence, status, flags)])
     }
 
     fn link_message(index: i32, name: &str, mtu: Option<u32>, flags: u16, sequence: u32) -> Vec<u8> {
@@ -1673,8 +1765,9 @@ mod tests {
 
     fn link_and_done(name: &str) -> Vec<u8> {
         raw_join(&[
+            success_ack(7),
             link_message(2, name, Some(1500), NLM_F_MULTI, 7),
-            done(7, 0, NLM_F_MULTI),
+            done_only(7, 0, NLM_F_MULTI),
         ])
     }
 
@@ -1734,9 +1827,70 @@ mod tests {
 
     #[test]
     fn error_message_cannot_establish_completeness() {
-        let error = message(NLMSG_ERROR, 0, 7, &encode_i32(-105));
+        let error = message(
+            NLMSG_ERROR,
+            NLM_F_CAPPED,
+            7,
+            &nlmsgerr_payload(7, -105),
+        );
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&error, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("nlmsg_error_received:-105")));
+    }
+
+    #[test]
+    fn success_ack_must_be_present_for_an_acknowledged_dump() {
+        let raw = done_only(7, 0, NLM_F_MULTI);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("missing_success_ack")));
+    }
+
+    #[test]
+    fn success_ack_binds_the_exact_original_request_header() {
+        let mut raw = success_ack(7);
+        raw[28..32].copy_from_slice(&encode_u32(8));
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("original_request_header_mismatch")));
+    }
+
+    #[test]
+    fn duplicate_success_ack_is_invalid() {
+        let raw = raw_join(&[
+            success_ack(7),
+            success_ack(7),
+            done_only(7, 0, NLM_F_MULTI),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("duplicate_success_ack")));
+    }
+
+    #[test]
+    fn success_ack_after_terminal_is_accepted_when_it_matches_request() {
+        let raw = raw_join(&[
+            done_only(7, 0, NLM_F_MULTI),
+            success_ack(7),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+    }
+
+    #[test]
+    fn success_ack_extended_tlvs_are_explicitly_unsupported() {
+        let mut payload = nlmsgerr_payload(7, 0);
+        payload.extend_from_slice(&[4, 0, 1, 0]);
+        let ack = message(
+            NLMSG_ERROR,
+            NLM_F_CAPPED | NLM_F_ACK_TLVS,
+            7,
+            &payload,
+        );
+        let raw = raw_join(&[ack, done_only(7, 0, NLM_F_MULTI)]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("success_ack_extended_tlvs")));
     }
 
     #[test]
