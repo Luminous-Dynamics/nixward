@@ -1514,6 +1514,21 @@ mod tests {
         assert!(observation.rollback.is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_process_disposition_preserves_exit_code_and_signal() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exited = std::process::ExitStatus::from_raw(23 << 8);
+        assert_eq!(process_disposition(&exited), ProcessDisposition::Exited { code: 23 });
+
+        let signaled = std::process::ExitStatus::from_raw(9);
+        assert_eq!(
+            process_disposition(&signaled),
+            ProcessDisposition::TerminatedWithoutExitCode { signal: Some(9) }
+        );
+    }
+
     #[test]
     fn test_observation_does_not_invent_epoch_zero_when_clock_is_missing() {
         let evidence = CommandInvocationEvidence {
