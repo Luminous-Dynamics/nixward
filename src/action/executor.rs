@@ -855,6 +855,7 @@ fn is_lower_hex_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value.bytes().any(|byte| byte != b'0')
 }
 
 impl ExecutionEvidenceEnvelope {
@@ -902,7 +903,7 @@ impl ExecutionEvidenceEnvelope {
             let InvocationStatus::Attempted { evidence: primary } = &self.primary else {
                 return Err("rollback evidence requires a primary invocation attempt".into());
             };
-            match primary.disposition {
+            match &primary.disposition {
                 ProcessDisposition::Exited { code: 0 } | ProcessDisposition::SpawnFailed { .. } => {
                     return Err("rollback evidence requires a failed or signal-terminated primary process".into());
                 }
