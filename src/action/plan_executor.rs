@@ -17,6 +17,10 @@ pub enum StepStatus {
     Running,
     Completed,
     Failed(String),
+    /// A rollback command exited successfully; target restoration is not yet proven.
+    RollbackProcessSucceeded,
+    /// The final state is uncertain after a rollback limitation or failed attempt.
+    Indeterminate,
     RolledBack,
     Skipped,
 }
@@ -32,7 +36,11 @@ pub struct PlanStep {
     pub status: StepStatus,
     /// Whether this step is critical (failure triggers rollback of all prior steps).
     pub critical: bool,
-    /// Whether to verify state after execution (e.g., service started, package installed).
+    /// Request postcondition verification after execution.
+    ///
+    /// Until a typed postcondition observer is configured, setting this to true
+    /// fails closed before launching the command. A successful process exit is
+    /// not a substitute for checking the resulting target state.
     pub verify: bool,
     /// Exact-command authorization for modifying steps. Read-only steps need none.
     pub authorization: Option<ExecutionAuthorization>,
@@ -47,9 +55,11 @@ pub struct PlanExecutionResult {
     pub success: bool,
     /// Number of steps completed before failure (if any).
     pub completed_count: usize,
-    /// Number of steps rolled back (if any).
+    /// Number of rollback commands attempted.
+    pub rollback_attempted_count: usize,
+    /// Number of rollback commands that exited successfully. This does not prove restoration.
     pub rolled_back_count: usize,
-    /// Rollback failures: (step_index, error_description).
+    /// Rollback failures or unverified restoration limits: (step_index, error_description).
     pub rollback_failures: Vec<(usize, String)>,
 }
 
@@ -147,7 +157,12 @@ impl PlanExecutor {
             self.steps[i].status = StepStatus::Running;
 
             let command = self.steps[i].command.clone();
-            let result = if let Some(authorization) = self.steps[i].authorization.clone() {
+            let result = if self.steps[i].verify {
+                ExecutionResult::Blocked {
+                    reason: "step requested postcondition verification, but no typed observer is configured; refusing to launch the command".into(),
+                    safety_level: command.safety_level(),
+                }
+            } else if let Some(authorization) = self.steps[i].authorization.clone() {
                 executor
                     .execute_authorized(command, authorization, Some(self.decision_quality))
                     .await
@@ -166,8 +181,8 @@ impl PlanExecutor {
                 self.steps[i].status = StepStatus::Failed(format!("{result:?}"));
                 results.push((self.steps[i].clone(), Some(result)));
 
-                let (rolled_back, rollback_failures) = self
-                    .rollback_completed(executor, &mut results, completed)
+                let (rollback_attempted, rolled_back, rollback_failures) = self
+                    .rollback_completed(executor, &mut results, i)
                     .await;
 
                 // Mark remaining steps as skipped
@@ -180,6 +195,7 @@ impl PlanExecutor {
                     steps: results,
                     success: false,
                     completed_count: completed,
+                    rollback_attempted_count: rollback_attempted,
                     rolled_back_count: rolled_back,
                     rollback_failures,
                 };
@@ -194,63 +210,94 @@ impl PlanExecutor {
             steps: results,
             success: true,
             completed_count: completed,
+            rollback_attempted_count: 0,
             rolled_back_count: 0,
             rollback_failures: Vec::new(),
         }
     }
 
-    /// Roll back completed steps in reverse order.
+    /// Attempt rollback for prior steps that actually completed, in reverse order.
     ///
-    /// Returns `(rolled_back_count, rollback_failures)`.
+    /// Returns `(attempted_count, process_success_count, failures)`. A successful
+    /// rollback process does not prove that target state was restored.
     async fn rollback_completed(
-        &self,
+        &mut self,
         executor: &mut NixOSExecutor,
-        _results: &mut Vec<(PlanStep, Option<ExecutionResult>)>,
-        completed: usize,
-    ) -> (usize, Vec<(usize, String)>) {
-        let mut rolled_back = 0;
+        results: &mut Vec<(PlanStep, Option<ExecutionResult>)>,
+        before_index: usize,
+    ) -> (usize, usize, Vec<(usize, String)>) {
+        let mut attempted = 0;
+        let mut process_succeeded = 0;
         let mut failures = Vec::new();
 
-        for i in (0..completed).rev() {
-            if let Some(rollback_cmd) = self.steps[i].command.rollback_command() {
-                let rb_result = match self.steps[i]
-                    .authorization
-                    .as_ref()
-                    .and_then(|auth| auth.for_rollback(&rollback_cmd).ok())
-                {
-                    Some(rollback_authorization) => {
-                        executor
-                            .execute_authorized(
-                                rollback_cmd,
-                                rollback_authorization,
-                                Some(self.decision_quality),
-                            )
-                            .await
+        // Successful steps need not be a contiguous prefix: optional failures may
+        // precede successful mutations. Select by actual status, not a count.
+        for i in (0..before_index).rev() {
+            if self.steps[i].status != StepStatus::Completed {
+                continue;
+            }
+
+            let Some(rollback_cmd) = self.steps[i].command.rollback_command() else {
+                let message = "no rollback command exists; target state is indeterminate".to_string();
+                self.steps[i].status = StepStatus::Indeterminate;
+                if let Some((step, _)) = results.get_mut(i) {
+                    step.status = StepStatus::Indeterminate;
+                }
+                failures.push((i, message));
+                continue;
+            };
+
+            attempted += 1;
+            let authorization = self.steps[i]
+                .authorization
+                .as_ref()
+                .and_then(|auth| auth.for_rollback(&rollback_cmd).ok());
+            let rb_result = match authorization {
+                Some(rollback_authorization) => {
+                    executor
+                        .execute_authorized(
+                            rollback_cmd.clone(),
+                            rollback_authorization,
+                            Some(self.decision_quality),
+                        )
+                        .await
+                }
+                None => ExecutionResult::Blocked {
+                    reason:
+                        "rollback command was not covered by the original execution capability"
+                            .into(),
+                    safety_level: rollback_cmd.safety_level(),
+                },
+            };
+
+            match &rb_result {
+                ExecutionResult::Success { .. } => {
+                    process_succeeded += 1;
+                    // Do not call this Restored/RolledBack: fresh state observation
+                    // is needed to establish that the intended prior state returned.
+                    self.steps[i].status = StepStatus::RollbackProcessSucceeded;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::RollbackProcessSucceeded;
                     }
-                    None => ExecutionResult::Blocked {
-                        reason:
-                            "rollback command was not covered by the original execution capability"
-                                .into(),
-                        safety_level: rollback_cmd.safety_level(),
-                    },
-                };
-                match &rb_result {
-                    ExecutionResult::Success { .. } => {
-                        rolled_back += 1;
+                }
+                ExecutionResult::FailedNoRollback { error, .. } => {
+                    self.steps[i].status = StepStatus::Indeterminate;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::Indeterminate;
                     }
-                    ExecutionResult::FailedNoRollback { error, .. } => {
-                        rolled_back += 1; // attempted
-                        failures.push((i, format!("rollback failed: {error}")));
+                    failures.push((i, format!("rollback failed; target state is indeterminate: {error}")));
+                }
+                other => {
+                    self.steps[i].status = StepStatus::Indeterminate;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::Indeterminate;
                     }
-                    other => {
-                        rolled_back += 1;
-                        failures.push((i, format!("rollback unexpected result: {other:?}")));
-                    }
+                    failures.push((i, format!("rollback did not complete; target state is indeterminate: {other:?}")));
                 }
             }
         }
 
-        (rolled_back, failures)
+        (attempted, process_succeeded, failures)
     }
 }
 
@@ -443,9 +490,15 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 1, "Only step 0 should complete");
+        assert_eq!(result.rollback_attempted_count, 1);
         assert_eq!(
             result.rolled_back_count, 1,
-            "Step 0 (EnvInstall) should be rolled back"
+            "One rollback process should exit successfully in dry-run mode"
+        );
+        assert_eq!(
+            result.steps[0].0.status,
+            StepStatus::RollbackProcessSucceeded,
+            "Successful rollback process is not a proof of restored target state"
         );
         assert_eq!(result.steps.len(), 3);
 
@@ -545,6 +598,68 @@ mod tests {
         );
         assert_eq!(result.rolled_back_count, 0, "Nothing to roll back");
         assert_eq!(result.steps[1].0.status, StepStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn optional_failure_does_not_skip_later_successful_step_rollback() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.35);
+
+        // Step 0 fails and is non-critical; its position must not be mistaken
+        // for the count of successful steps during rollback.
+        plan.add_optional_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Optional unapproved rebuild",
+        );
+        plan.add_step(
+            NixOSCommand::EnvInstall {
+                packages: vec!["vim".into()],
+            },
+            "Install vim",
+        );
+        // Step 2 fails critically, triggering rollback of step 1.
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Critical unapproved rebuild",
+        );
+        authorize_step(&mut plan, 1);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.completed_count, 1);
+        assert_eq!(result.rollback_attempted_count, 1);
+        assert_eq!(result.rolled_back_count, 1);
+        assert!(result.rollback_failures.is_empty());
+        assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
+        assert_eq!(result.steps[1].0.status, StepStatus::RollbackProcessSucceeded);
+        assert!(matches!(result.steps[2].0.status, StepStatus::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn requested_verification_fails_closed_before_command_launch() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.8);
+        let step = plan.add_step(
+            NixOSCommand::Search {
+                query: "vim".into(),
+                json: false,
+            },
+            "Search with requested postcondition verification",
+        );
+        step.verify = true;
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.steps.len(), 1);
+        assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
+        assert!(matches!(result.steps[0].1, Some(ExecutionResult::Blocked { .. })));
     }
 
     #[test]
