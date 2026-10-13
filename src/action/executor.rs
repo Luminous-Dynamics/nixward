@@ -1741,6 +1741,50 @@ mod tests {
     }
 
     #[test]
+    fn test_evidence_envelope_rejects_primary_command_substitution() {
+        let envelope = ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: "a".repeat(64),
+            primary: InvocationStatus::Attempted {
+                evidence: CommandInvocationEvidence {
+                    command_digest_blake3: "b".repeat(64),
+                    started_at_ms: Some(10),
+                    finished_at_ms: Some(11),
+                    elapsed_ms: 1,
+                    disposition: ProcessDisposition::Exited { code: 0 },
+                },
+            },
+            rollback: None,
+            dry_run: false,
+        };
+        assert!(envelope.validate_wire().unwrap_err().contains(
+            "primary evidence command digest differs from requested command"
+        ));
+    }
+
+    #[test]
+    fn test_evidence_envelope_rejects_reversed_wall_clock_interval() {
+        let envelope = ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: "a".repeat(64),
+            primary: InvocationStatus::Attempted {
+                evidence: CommandInvocationEvidence {
+                    command_digest_blake3: "a".repeat(64),
+                    started_at_ms: Some(12),
+                    finished_at_ms: Some(11),
+                    elapsed_ms: 1,
+                    disposition: ProcessDisposition::Exited { code: 0 },
+                },
+            },
+            rollback: None,
+            dry_run: false,
+        };
+        assert!(envelope.validate_wire().unwrap_err().contains("timestamp interval is invalid"));
+    }
+
+    #[test]
     fn test_evidence_envelope_rejects_rollback_without_primary_attempt() {
         let evidence = CommandInvocationEvidence {
             command_digest_blake3: "a".repeat(64),
