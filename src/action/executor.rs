@@ -871,7 +871,6 @@ fn invocation_evidence(
     }
 }
 
-
 /// NixOS-aware command executor.
 ///
 /// Φ/confidence remains available as decision telemetry, but privileged
@@ -1229,7 +1228,11 @@ impl NixOSExecutor {
                                     .stderr(Stdio::piped())
                                     .output()
                                     .await;
-                                let rb_elapsed = rb_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                                let rb_elapsed = rb_start
+                                    .elapsed()
+                                    .as_millis()
+                                    .min(u64::MAX as u128)
+                                    as u64;
                                 let rb_finished_at_ms = unix_epoch_millis();
 
                                 match rb_result {
@@ -1252,7 +1255,8 @@ impl NixOSExecutor {
                                             ExecutionResult::FailedNoRollback {
                                                 error,
                                                 rollback_error: Some(
-                                                    String::from_utf8_lossy(&rb_output.stderr).to_string(),
+                                                    String::from_utf8_lossy(&rb_output.stderr)
+                                                            .to_string(),
                                                 ),
                                             }
                                         }
@@ -1263,7 +1267,9 @@ impl NixOSExecutor {
                                             rb_started_at_ms,
                                             rb_finished_at_ms,
                                             rb_elapsed,
-                                            ProcessDisposition::SpawnFailed { error: e.to_string() },
+                                            ProcessDisposition::SpawnFailed {
+                                                error: e.to_string(),
+                                            },
                                         ));
                                         ExecutionResult::FailedNoRollback {
                                             error,
