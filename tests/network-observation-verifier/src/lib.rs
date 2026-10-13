@@ -31,6 +31,7 @@ const RTM_NEWLINK: u16 = 16;
 const RTM_GETLINK: u16 = 18;
 const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_ACK: u16 = 0x0004;
+const NLM_F_ECHO: u16 = 0x0008;
 const NLM_F_MULTI: u16 = 0x0002;
 const NLM_F_ROOT: u16 = 0x0100;
 const NLM_F_MATCH: u16 = 0x0200;
@@ -1173,7 +1174,9 @@ fn parse_link_request(
             "request_does_not_request_whole_link_dump".to_owned(),
         ));
     }
-    let expected_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    // Linux Netlink's documented dump request flags include ACK; verify the full
+    // request profile so a future collector cannot silently change request semantics.
+    let expected_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP;
     if flags != expected_flags {
         let reason = if flags & NLM_F_ATOMIC != 0 {
             "atomic_dump_request_not_supported_by_m1a_profile"
@@ -1581,7 +1584,7 @@ mod tests {
     fn dump_request(sequence: u32) -> Vec<u8> {
         message(
             RTM_GETLINK,
-            NLM_F_REQUEST | NLM_F_DUMP,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP,
             sequence,
             &[0; IFINFOMSG_LEN],
         )
@@ -2186,11 +2189,25 @@ mod tests {
     }
 
     #[test]
+    fn dump_request_requires_the_documented_ack_flag() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut item = attempt(&raw, 7, 0);
+        let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
+        let flags = NLM_F_REQUEST | NLM_F_DUMP;
+        request[6..8].copy_from_slice(&flags.to_le_bytes());
+        item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
+        item.raw_request_blake3 = hash_raw_request(&request);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("whole_link_dump")));
+    }
+
+    #[test]
     fn atomic_dump_request_is_unsupported_even_when_response_is_successful() {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut item = attempt(&raw, 7, 0);
         let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
-        let flags = NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ATOMIC;
+        let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP | NLM_F_ATOMIC;
         request[6..8].copy_from_slice(&flags.to_le_bytes());
         item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
         item.raw_request_blake3 = hash_raw_request(&request);
@@ -2204,7 +2221,9 @@ mod tests {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut item = attempt(&raw, 7, 0);
         let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
-        request[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ACK).to_le_bytes());
+        request[6..8].copy_from_slice(
+            &(NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP | NLM_F_ECHO).to_le_bytes(),
+        );
         item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
