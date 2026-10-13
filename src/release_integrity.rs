@@ -60,6 +60,8 @@ pub enum ReleaseIntegrityError {
     ArtifactModeMismatch(String),
     #[error("release tree contains an unlisted artifact: {0}")]
     UnlistedArtifact(String),
+    #[error("release artifact has external or shared hard links: {0}")]
+    HardLinkedArtifact(String),
     #[error("unsafe release artifact path: {0}")]
     UnsafePath(String),
 }
@@ -222,6 +224,13 @@ fn collect_release_tree_files(
                 .replace('\\', "/");
             if !safe_relative_path(&relative) {
                 return Err(ReleaseIntegrityError::UnsafePath(relative));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    return Err(ReleaseIntegrityError::HardLinkedArtifact(relative));
+                }
             }
             files.insert(relative);
         } else {
@@ -538,6 +547,32 @@ mod tests {
             verify_release_tree(temp.path(), &signed, &trusted),
             Err(ReleaseIntegrityError::UnsafePath(path))
                 if path == "linked"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_artifact_hard_linked_outside_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let outside = temp.path().join("outside.bin");
+        let artifact = release_root.join("artifact.bin");
+        let payload = b"externally linked artifact bytes";
+        std::fs::write(&outside, payload).unwrap();
+        std::fs::hard_link(&outside, &artifact).unwrap();
+
+        let signing = SigningKey::from_bytes(&[51u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(&release_root, &signed, &trusted),
+            Err(ReleaseIntegrityError::HardLinkedArtifact(path))
+                if path == "artifact.bin"
         ));
     }
 
