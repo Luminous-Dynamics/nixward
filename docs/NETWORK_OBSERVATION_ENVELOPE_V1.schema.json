@@ -107,27 +107,8 @@
           "items": { "type": "integer", "minimum": 0, "maximum": 16383 },
           "allOf": [
             { "contains": { "const": 1 } },
-            { "contains": { "const": 2 } },
             { "contains": { "const": 3 } },
-            { "contains": { "const": 4 } },
-            { "contains": { "const": 5 } },
-            { "contains": { "const": 6 } },
-            { "contains": { "const": 10 } },
-            { "contains": { "const": 13 } },
-            { "contains": { "const": 16 } },
-            { "contains": { "const": 17 } },
-            { "contains": { "const": 18 } },
-            { "contains": { "const": 19 } },
-            { "contains": { "const": 27 } },
-            { "contains": { "const": 28 } },
-            { "contains": { "const": 30 } },
-            { "contains": { "const": 33 } },
-            { "contains": { "const": 34 } },
-            { "contains": { "const": 35 } },
-            { "contains": { "const": 36 } },
-            { "contains": { "const": 37 } },
-            { "contains": { "const": 38 } },
-            { "contains": { "const": 39 } }
+            { "contains": { "const": 4 } }
           ],
           "uniqueItems": true
         }
