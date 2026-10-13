@@ -1248,15 +1248,17 @@ impl NixOSExecutor {
                                         if rb_output.status.success() {
                                             ExecutionResult::RolledBack {
                                                 error,
-                                                rollback_output: String::from_utf8_lossy(&rb_output.stdout)
-                                                    .to_string(),
+                                                rollback_output: String::from_utf8_lossy(
+                                                    &rb_output.stdout,
+                                                )
+                                                .to_string(),
                                             }
                                         } else {
                                             ExecutionResult::FailedNoRollback {
                                                 error,
                                                 rollback_error: Some(
                                                     String::from_utf8_lossy(&rb_output.stderr)
-                                                            .to_string(),
+                                                .to_string(),
                                                 ),
                                             }
                                         }
@@ -1520,7 +1522,10 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
 
         let exited = std::process::ExitStatus::from_raw(23 << 8);
-        assert_eq!(process_disposition(&exited), ProcessDisposition::Exited { code: 23 });
+        assert_eq!(
+            process_disposition(&exited),
+            ProcessDisposition::Exited { code: 23 }
+        );
 
         let signaled = std::process::ExitStatus::from_raw(9);
         assert_eq!(
