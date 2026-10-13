@@ -308,6 +308,7 @@ impl From<&Link> for LinkSummary {
             link_type: link.link_type,
             flags: link.flags,
             mtu: link.mtu,
+            address_hex: link.address_hex.clone(),
         }
     }
 }
