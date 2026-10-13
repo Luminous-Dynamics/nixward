@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nixward.luminousdynamics.org/schemas/execution-observation-v1.schema.json",
+  "title": "Nixward Execution Evidence Envelope v1",
+  "description": "Output-free, requested-command-bound caller-side process observation. The top-level command_digest_blake3 hashes the serialized NixOSCommand request; it is not a digest of the resolved executable, native argv, environment or kernel process identity, is not signed attestation, and does not attest target state. Cross-field invariants are checked by ExecutionEvidenceEnvelope::validate_wire().",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "command_digest_blake3",
+    "primary",
+    "rollback",
+    "dry_run"
+  ],
+  "properties": {
+    "schema": {
+      "const": "luminous-nixward-execution-observation"
+    },
+    "version": {
+      "const": 1
+    },
+    "command_digest_blake3": {
+      "type": "string",
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "description": "BLAKE3 digest of the serialized requested NixOSCommand. Binds intent, including when the command was not started; does not prove the resolved executable image or native argv."
+    },
+    "primary": {
+      "$ref": "#/$defs/invocationStatus"
+    },
+    "rollback": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/commandInvocationEvidence"
+        }
+      ]
+    },
+    "dry_run": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "notStartedReason": {
+      "enum": [
+        "DryRun",
+        "ForbiddenPolicy",
+        "AuthorizationRejected",
+        "ReplayEvidenceIncomplete",
+        "ReplayRejected",
+        "ClockUnavailable"
+      ]
+    },
+    "processDisposition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "Exited"
+          ],
+          "properties": {
+            "Exited": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code"
+              ],
+              "properties": {
+                "code": {
+                  "type": "integer",
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "TerminatedWithoutExitCode"
+          ],
+          "properties": {
+            "TerminatedWithoutExitCode": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "signal"
+              ],
+              "properties": {
+                "signal": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "SpawnFailed"
+          ],
+          "properties": {
+            "SpawnFailed": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "error"
+              ],
+              "properties": {
+                "error": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "commandInvocationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_digest_blake3",
+        "started_at_ms",
+        "finished_at_ms",
+        "elapsed_ms",
+        "disposition"
+      ],
+      "properties": {
+        "command_digest_blake3": {
+          "type": "string",
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "description": "BLAKE3 digest of the serialized NixOSCommand associated with this observation (the requested command for primary evidence, or the rollback command for rollback evidence); not resolved executable/argv identity."
+        },
+        "started_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "finished_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "disposition": {
+          "$ref": "#/$defs/processDisposition"
+        }
+      }
+    },
+    "invocationStatus": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "NotStarted"
+          ],
+          "properties": {
+            "NotStarted": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "$ref": "#/$defs/notStartedReason"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "Attempted"
+          ],
+          "properties": {
+            "Attempted": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidence"
+              ],
+              "properties": {
+                "evidence": {
+                  "$ref": "#/$defs/commandInvocationEvidence"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

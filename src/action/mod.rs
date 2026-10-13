@@ -38,8 +38,11 @@ pub use change_covenant::{
 pub use config_writer::{ConfigPatch, ConfigWriter, WriteResult};
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
-    ChannelOperation, ExecutionRecord, ExecutionResult, FlakeOperation, HostExecutionPolicy,
-    NixOSCommand, NixOSExecutor, SafetyLevel, SystemActivation,
+    ChannelOperation, CommandInvocationEvidence, ExecutionEvidenceEnvelope,
+    ExecutionObservation, ExecutionRecord, ExecutionResult, FlakeOperation,
+    HostExecutionPolicy, InvocationNotStartedReason, InvocationStatus, NixOSCommand,
+    NixOSExecutor, ProcessDisposition, SafetyLevel, SystemActivation,
+    EXECUTION_OBSERVATION_SCHEMA, EXECUTION_OBSERVATION_VERSION,
 };
 pub use flake_ops::{FlakeCheckResult, FlakeMetadata, FlakeOps};
 pub use gc_manager::{GcAnalysis, GcManager, GcRecommendation};
