@@ -1643,7 +1643,7 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.is_empty() || receipt.receipt.source_results[0].status == "incomplete");
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("nlm_f_dump_intr")));
     }
 
     #[test]
@@ -1935,7 +1935,7 @@ mod tests {
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("atomic_dump_request")));
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("atomic_dump_request")));
     }
 
     #[test]
@@ -1948,7 +1948,7 @@ mod tests {
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("unexpected_flags")));
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unexpected_flags")));
     }
 
     #[test]
