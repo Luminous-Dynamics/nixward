@@ -764,6 +764,112 @@ pub enum ExecutionResult {
     },
 }
 
+/// Why an authorized command was not launched.
+///
+/// This is deliberately separate from `ExecutionResult`: a dry-run preserves
+/// the legacy `Success` UI behavior, but it is not application evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvocationNotStartedReason {
+    DryRun,
+    ForbiddenPolicy,
+    AuthorizationRejected,
+    ReplayEvidenceIncomplete,
+    ReplayRejected,
+}
+
+/// The operating-system process disposition observed for an invocation attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessDisposition {
+    Exited { code: i32 },
+    TerminatedWithoutExitCode { signal: Option<i32> },
+    SpawnFailed { error: String },
+}
+
+/// Process-level evidence for one exact command attempt.
+///
+/// Timestamps use Unix epoch milliseconds; `elapsed_ms` uses a monotonic
+/// clock. A consumer must reject the evidence if the wall-clock interval is
+/// not ordered rather than reconstructing timestamps from elapsed time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandInvocationEvidence {
+    pub command_digest_blake3: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: u64,
+    pub elapsed_ms: u64,
+    pub disposition: ProcessDisposition,
+}
+
+/// Explicitly represents the difference between no launch and a process attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InvocationStatus {
+    NotStarted { reason: InvocationNotStartedReason },
+    Attempted { evidence: CommandInvocationEvidence },
+}
+
+/// Additive execution evidence API. `result` preserves the legacy UX contract;
+/// process and rollback claims must be derived from these explicit observations,
+/// never inferred from `ExecutionResult` alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionObservation {
+    pub result: ExecutionResult,
+    pub primary: InvocationStatus,
+    /// Present only when a rollback command was actually attempted. This records
+    /// its process disposition, not proof that the machine's prior state returned.
+    pub rollback: Option<CommandInvocationEvidence>,
+    pub dry_run: bool,
+}
+
+fn unix_epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn command_digest_hex(command: &NixOSCommand) -> String {
+    command
+        .command_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn process_disposition(status: &std::process::ExitStatus) -> ProcessDisposition {
+    if let Some(code) = status.code() {
+        return ProcessDisposition::Exited { code };
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ProcessDisposition::TerminatedWithoutExitCode {
+            signal: status.signal(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ProcessDisposition::TerminatedWithoutExitCode { signal: None }
+    }
+}
+
+fn invocation_evidence(
+    command: &NixOSCommand,
+    started_at_ms: u64,
+    finished_at_ms: u64,
+    elapsed_ms: u64,
+    disposition: ProcessDisposition,
+) -> CommandInvocationEvidence {
+    CommandInvocationEvidence {
+        command_digest_blake3: command_digest_hex(command),
+        started_at_ms,
+        finished_at_ms,
+        elapsed_ms,
+        disposition,
+    }
+}
+
+
 /// NixOS-aware command executor.
 ///
 /// Φ/confidence remains available as decision telemetry, but privileged
@@ -898,23 +1004,56 @@ impl NixOSExecutor {
     }
 
     /// Execute an exact command under an evidence-bound capability.
+    /// Backwards-compatible result-only API. Consumers requiring truthful
+    /// process status/timing evidence should call `execute_authorized_observed`.
     pub async fn execute_authorized(
         &mut self,
         command: NixOSCommand,
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        self.execute_authorized_observed(command, authorization, decision_quality)
+            .await
+            .result
+    }
+
+    /// Execute an exact command and retain process-level evidence that the
+    /// legacy `ExecutionResult` intentionally does not expose.
+    ///
+    /// `Success` on a dry-run remains compatible with existing callers, while
+    /// `primary = NotStarted { DryRun }` makes it impossible to treat that
+    /// display result as proof of application.
+    pub async fn execute_authorized_observed(
+        &mut self,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+        decision_quality: Option<f32>,
+    ) -> ExecutionObservation {
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
+            return ExecutionObservation {
+                result: ExecutionResult::Blocked {
+                    reason,
+                    safety_level: safety,
+                },
+                primary: InvocationStatus::NotStarted {
+                    reason: InvocationNotStartedReason::ForbiddenPolicy,
+                },
+                rollback: None,
+                dry_run: self.dry_run,
             };
         }
         if let Err(reason) = authorization.validate_for(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
+            return ExecutionObservation {
+                result: ExecutionResult::Blocked {
+                    reason,
+                    safety_level: safety,
+                },
+                primary: InvocationStatus::NotStarted {
+                    reason: InvocationNotStartedReason::AuthorizationRejected,
+                },
+                rollback: None,
+                dry_run: self.dry_run,
             };
         }
 
@@ -929,16 +1068,22 @@ impl NixOSExecutor {
         );
 
         if self.dry_run {
-            return ExecutionResult::Success {
-                stdout: format!("[DRY-RUN] Would execute: {} {}", cmd, args.join(" ")),
-                stderr: String::new(),
-                execution_time_ms: 0,
+            return ExecutionObservation {
+                result: ExecutionResult::Success {
+                    stdout: format!("[DRY-RUN] Would execute: {} {}", cmd, args.join(" ")),
+                    stderr: String::new(),
+                    execution_time_ms: 0,
+                },
+                primary: InvocationStatus::NotStarted {
+                    reason: InvocationNotStartedReason::DryRun,
+                },
+                rollback: None,
+                dry_run: true,
             };
         }
 
-        // Verification is deliberately read-only. Burn the replay key only on
-        // the real mutation path, after all authorization/command checks and
-        // immediately before spawning the privileged command.
+        // Burn replay keys only on the real mutation path immediately before
+        // launch. A rejected/malformed replay proof is recorded as not started.
         if let Some(replay_key) = authorization.authority_replay_key() {
             let Some(challenge_blake3) = authorization.authority_challenge_blake3() else {
                 let blocked = ExecutionResult::Blocked {
@@ -946,7 +1091,14 @@ impl NixOSExecutor {
                     safety_level: safety,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
-                return blocked;
+                return ExecutionObservation {
+                    result: blocked,
+                    primary: InvocationStatus::NotStarted {
+                        reason: InvocationNotStartedReason::ReplayEvidenceIncomplete,
+                    },
+                    rollback: None,
+                    dry_run: false,
+                };
             };
             let Some(subject_blake3) = authorization.authority_subject_blake3() else {
                 let blocked = ExecutionResult::Blocked {
@@ -954,27 +1106,39 @@ impl NixOSExecutor {
                     safety_level: safety,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
-                return blocked;
+                return ExecutionObservation {
+                    result: blocked,
+                    primary: InvocationStatus::NotStarted {
+                        reason: InvocationNotStartedReason::ReplayEvidenceIncomplete,
+                    },
+                    rollback: None,
+                    dry_run: false,
+                };
             };
             if let Err(error) = self.authority_replay_ledger.consume(
                 replay_key,
                 challenge_blake3,
                 authorization.evidence_digest(),
                 subject_blake3,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_millis() as u64)
-                    .unwrap_or(0),
+                unix_epoch_millis(),
             ) {
                 let blocked = ExecutionResult::Blocked {
                     reason: format!("authority replay consumption failed: {error}"),
                     safety_level: safety,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &blocked);
-                return blocked;
+                return ExecutionObservation {
+                    result: blocked,
+                    primary: InvocationStatus::NotStarted {
+                        reason: InvocationNotStartedReason::ReplayRejected,
+                    },
+                    rollback: None,
+                    dry_run: false,
+                };
             }
         }
 
+        let started_at_ms = unix_epoch_millis();
         let start = std::time::Instant::now();
         let result = Command::new(&cmd)
             .args(&args)
@@ -982,127 +1146,162 @@ impl NixOSExecutor {
             .stderr(Stdio::piped())
             .output()
             .await;
-        let elapsed = start.elapsed().as_millis() as u64;
+        let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let finished_at_ms = unix_epoch_millis();
 
         match result {
             Ok(output) if output.status.success() => {
+                let evidence = invocation_evidence(
+                    &command,
+                    started_at_ms,
+                    finished_at_ms,
+                    elapsed,
+                    process_disposition(&output.status),
+                );
                 let exec_result = ExecutionResult::Success {
                     stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                     stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                     execution_time_ms: elapsed,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
-                exec_result
+                ExecutionObservation {
+                    result: exec_result,
+                    primary: InvocationStatus::Attempted { evidence },
+                    rollback: None,
+                    dry_run: false,
+                }
             }
             Ok(output) => {
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
+                let primary_evidence = invocation_evidence(
+                    &command,
+                    started_at_ms,
+                    finished_at_ms,
+                    elapsed,
+                    process_disposition(&output.status),
+                );
                 warn!(error = %error, "Command failed, attempting authorized rollback");
 
-                if let Some(rollback_cmd) = command.rollback_command() {
+                let mut rollback_evidence = None;
+                let exec_result = if let Some(rollback_cmd) = command.rollback_command() {
                     match authorization.for_rollback(&rollback_cmd) {
                         Ok(rollback_authorization) => {
-                            if let Err(reason) = rollback_authorization.validate_for(&rollback_cmd)
-                            {
-                                let exec_result = ExecutionResult::FailedNoRollback {
+                            if let Err(reason) = rollback_authorization.validate_for(&rollback_cmd) {
+                                ExecutionResult::FailedNoRollback {
                                     error,
                                     rollback_error: Some(format!(
                                         "rollback authorization invalid: {reason}"
                                     )),
-                                };
-                                self.record_execution(
-                                    &command,
-                                    decision_quality,
-                                    &authorization,
-                                    &exec_result,
-                                );
-                                return exec_result;
-                            }
-
-                            if let HostExecutionPolicy::Forbidden { reason } =
+                                }
+                            } else if let HostExecutionPolicy::Forbidden { reason } =
                                 rollback_cmd.host_execution_policy()
                             {
-                                let exec_result = ExecutionResult::FailedNoRollback {
+                                ExecutionResult::FailedNoRollback {
                                     error,
                                     rollback_error: Some(format!(
                                         "rollback violates sovereign host execution policy: {reason}"
                                     )),
-                                };
-                                self.record_execution(
-                                    &command,
-                                    decision_quality,
-                                    &authorization,
-                                    &exec_result,
-                                );
-                                return exec_result;
-                            }
+                                }
+                            } else {
+                                let (rb_cmd, rb_args) = rollback_cmd.to_command();
+                                let rb_started_at_ms = unix_epoch_millis();
+                                let rb_start = std::time::Instant::now();
+                                let rb_result = Command::new(&rb_cmd)
+                                    .args(&rb_args)
+                                    .stdout(Stdio::piped())
+                                    .stderr(Stdio::piped())
+                                    .output()
+                                    .await;
+                                let rb_elapsed = rb_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                                let rb_finished_at_ms = unix_epoch_millis();
 
-                            let (rb_cmd, rb_args) = rollback_cmd.to_command();
-                            let rb_result = Command::new(&rb_cmd)
-                                .args(&rb_args)
-                                .stdout(Stdio::piped())
-                                .stderr(Stdio::piped())
-                                .output()
-                                .await;
-
-                            let exec_result = match rb_result {
-                                Ok(rb_output) if rb_output.status.success() => {
-                                    ExecutionResult::RolledBack {
-                                        error,
-                                        rollback_output: String::from_utf8_lossy(&rb_output.stdout)
-                                            .to_string(),
+                                match rb_result {
+                                    Ok(rb_output) => {
+                                        let disposition = process_disposition(&rb_output.status);
+                                        rollback_evidence = Some(invocation_evidence(
+                                            &rollback_cmd,
+                                            rb_started_at_ms,
+                                            rb_finished_at_ms,
+                                            rb_elapsed,
+                                            disposition,
+                                        ));
+                                        if rb_output.status.success() {
+                                            ExecutionResult::RolledBack {
+                                                error,
+                                                rollback_output: String::from_utf8_lossy(&rb_output.stdout)
+                                                    .to_string(),
+                                            }
+                                        } else {
+                                            ExecutionResult::FailedNoRollback {
+                                                error,
+                                                rollback_error: Some(
+                                                    String::from_utf8_lossy(&rb_output.stderr).to_string(),
+                                                ),
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        rollback_evidence = Some(invocation_evidence(
+                                            &rollback_cmd,
+                                            rb_started_at_ms,
+                                            rb_finished_at_ms,
+                                            rb_elapsed,
+                                            ProcessDisposition::SpawnFailed { error: e.to_string() },
+                                        ));
+                                        ExecutionResult::FailedNoRollback {
+                                            error,
+                                            rollback_error: Some(e.to_string()),
+                                        }
                                     }
                                 }
-                                Ok(rb_output) => ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(
-                                        String::from_utf8_lossy(&rb_output.stderr).to_string(),
-                                    ),
-                                },
-                                Err(e) => ExecutionResult::FailedNoRollback {
-                                    error,
-                                    rollback_error: Some(e.to_string()),
-                                },
-                            };
-                            self.record_execution(
-                                &command,
-                                decision_quality,
-                                &authorization,
-                                &exec_result,
-                            );
-                            exec_result
+                            }
                         }
-                        Err(reason) => {
-                            let exec_result = ExecutionResult::FailedNoRollback {
-                                error,
-                                rollback_error: Some(format!(
-                                    "rollback was not included in the execution capability: {reason}"
-                                )),
-                            };
-                            self.record_execution(
-                                &command,
-                                decision_quality,
-                                &authorization,
-                                &exec_result,
-                            );
-                            exec_result
-                        }
+                        Err(reason) => ExecutionResult::FailedNoRollback {
+                            error,
+                            rollback_error: Some(format!(
+                                "rollback was not included in the execution capability: {reason}"
+                            )),
+                        },
                     }
                 } else {
-                    let exec_result = ExecutionResult::FailedNoRollback {
+                    ExecutionResult::FailedNoRollback {
                         error,
                         rollback_error: None,
-                    };
-                    self.record_execution(&command, decision_quality, &authorization, &exec_result);
-                    exec_result
+                    }
+                };
+
+                self.record_execution(&command, decision_quality, &authorization, &exec_result);
+                ExecutionObservation {
+                    result: exec_result,
+                    primary: InvocationStatus::Attempted {
+                        evidence: primary_evidence,
+                    },
+                    rollback: rollback_evidence,
+                    dry_run: false,
                 }
             }
             Err(e) => {
+                let spawn_error = e.to_string();
+                let evidence = invocation_evidence(
+                    &command,
+                    started_at_ms,
+                    finished_at_ms,
+                    elapsed,
+                    ProcessDisposition::SpawnFailed {
+                        error: spawn_error.clone(),
+                    },
+                );
                 let exec_result = ExecutionResult::FailedNoRollback {
-                    error: e.to_string(),
+                    error: spawn_error,
                     rollback_error: None,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
-                exec_result
+                ExecutionObservation {
+                    result: exec_result,
+                    primary: InvocationStatus::Attempted { evidence },
+                    rollback: None,
+                    dry_run: false,
+                }
             }
         }
     }
