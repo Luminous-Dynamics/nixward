@@ -1894,6 +1894,37 @@ mod tests {
     }
 
     #[test]
+    fn success_ack_without_capped_flag_is_accepted() {
+        let ack = message(NLMSG_ERROR, 0, 7, &nlmsgerr_payload(7, 0));
+        let raw = raw_join(&[ack, done_only(7, 0, NLM_F_MULTI)]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+    }
+
+    #[test]
+    fn success_ack_missing_original_request_header_is_invalid() {
+        let ack = message(NLMSG_ERROR, NLM_F_CAPPED, 7, &encode_i32(0));
+        let raw = raw_join(&[ack, done_only(7, 0, NLM_F_MULTI)]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("missing_original_request_header")));
+    }
+
+    #[test]
+    fn every_strict_prefix_of_a_valid_acknowledged_dump_fails_closed() {
+        let complete = link_and_done("eth0");
+        for cut in 0..complete.len() {
+            let prefix = complete[..cut].to_vec();
+            let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&prefix, 7, 0)]));
+            assert_ne!(
+                receipt.receipt.decision,
+                Decision::CompleteForDeclaredScope,
+                "strict prefix of length {cut} must not qualify"
+            );
+        }
+    }
+
+    #[test]
     fn negative_terminal_status_is_incomplete() {
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&done(7, -5, NLM_F_MULTI), 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
