@@ -822,6 +822,11 @@ impl NixOSExecutor {
         self
     }
 
+    /// Whether execution calls are simulations that do not launch processes.
+    pub(crate) fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
     /// Override persistent replay storage (primarily for tests or a deliberately
     /// relocated state directory). Signed authority is never accepted without
     /// one-shot replay consumption on a real execution path.
