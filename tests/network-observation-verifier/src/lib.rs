@@ -1481,7 +1481,17 @@ mod tests {
         parts.iter().flat_map(|part| part.iter().copied()).collect()
     }
 
+    fn dump_request(sequence: u32) -> Vec<u8> {
+        message(
+            RTM_GETLINK,
+            NLM_F_REQUEST | NLM_F_DUMP,
+            sequence,
+            &[0; IFINFOMSG_LEN],
+        )
+    }
+
     fn attempt(raw: &[u8], sequence: u32, retry_index: u32) -> SourceAttempt {
+        let request = dump_request(sequence);
         let mut attempt = SourceAttempt {
             target_id: "lab-router-a".to_owned(),
             boot_id: "boot-fixture-001".to_owned(),
@@ -1489,6 +1499,8 @@ mod tests {
             request_sequence: sequence,
             byte_order: "little".to_owned(),
             retry_index,
+            raw_request_hex: request.iter().map(|byte| format!("{byte:02x}")).collect(),
+            raw_request_blake3: hash_raw_request(&request),
             started_monotonic_ns: 100,
             ended_monotonic_ns: 200,
             raw_artifact_hex: raw.iter().map(|byte| format!("{byte:02x}")).collect(),
