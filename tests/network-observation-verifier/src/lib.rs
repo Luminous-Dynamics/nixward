@@ -542,6 +542,10 @@ fn verify_envelope(
         .iter()
         .copied()
         .collect();
+    if critical_ids.iter().any(|attribute_id| *attribute_id > NLA_TYPE_MASK) {
+        reasons.push("critical_attribute_id_outside_nla_type_range".to_owned());
+        fatal_invalid = true;
+    }
     // The baseline profile treats parent/master/link-kind data as decision-critical
     // topology semantics. Envelopes may add stricter IDs but cannot omit this floor.
     let mandatory_critical_ids = BTreeSet::from([
@@ -634,6 +638,7 @@ fn verify_envelope(
             .enumerate()
         {
             let mut attempt_metadata_invalid = false;
+            let mut attempt_metadata_incomplete = false;
             if attempt.retry_index != position as u32 {
                 source_reasons.push("retry_indices_not_contiguous_from_zero".to_owned());
                 fatal_invalid = true;
@@ -652,15 +657,17 @@ fn verify_envelope(
                 fatal_invalid = true;
                 attempt_metadata_invalid = true;
             }
-            if attempt.ended_monotonic_ns < attempt.started_monotonic_ns
-                || attempt
-                    .ended_monotonic_ns
-                    .saturating_sub(attempt.started_monotonic_ns)
-                    > envelope.policy.max_source_window_ns
-            {
-                source_reasons.push("invalid_or_excessive_source_time_window".to_owned());
+            if attempt.ended_monotonic_ns < attempt.started_monotonic_ns {
+                source_reasons.push("source_time_window_end_precedes_start".to_owned());
                 fatal_invalid = true;
                 attempt_metadata_invalid = true;
+            } else if attempt
+                .ended_monotonic_ns
+                .saturating_sub(attempt.started_monotonic_ns)
+                > envelope.policy.max_source_window_ns
+            {
+                source_reasons.push("source_time_window_exceeds_policy_deadline".to_owned());
+                attempt_metadata_incomplete = true;
             }
             if attempt.raw_request_hex.len()
                 > envelope.policy.max_total_raw_bytes.saturating_mul(2)
@@ -721,6 +728,15 @@ fn verify_envelope(
             if attempt_metadata_invalid {
                 attempt_evaluations.push(AttemptEvaluation {
                     status: AttemptStatus::Invalid("attempt_metadata_invalid".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
+            }
+            if attempt_metadata_incomplete {
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Incomplete("source_time_window_exceeds_policy_deadline".to_owned()),
                     links: Vec::new(),
                     identical_duplicates: 0,
                     canonical_digest: None,
@@ -1910,6 +1926,36 @@ mod tests {
         envelope.source_families.clear();
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn source_window_deadline_overrun_is_incomplete_not_invalid() {
+        let mut item = attempt(&done(7, 0, NLM_F_MULTI), 7, 0);
+        item.started_monotonic_ns = 100;
+        item.ended_monotonic_ns = 10_101;
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert_eq!(receipt.receipt.integrity, Integrity::Valid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("deadline")));
+    }
+
+    #[test]
+    fn reversed_source_window_is_invalid() {
+        let mut item = attempt(&done(7, 0, NLM_F_MULTI), 7, 0);
+        item.started_monotonic_ns = 300;
+        item.ended_monotonic_ns = 200;
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert_eq!(receipt.receipt.integrity, Integrity::Invalid);
+    }
+
+    #[test]
+    fn out_of_range_critical_attribute_id_is_invalid() {
+        let mut envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        envelope.policy.decision_critical_link_attribute_ids.push(u16::MAX);
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("outside_nla_type_range")));
     }
 
     #[test]
