@@ -13,6 +13,7 @@
       "additionalProperties": false,
       "required": [
         "verifier_id",
+        "target_identity_bound_externally",
         "verifier_version",
         "rustc_version",
         "cargo_version",
@@ -41,6 +42,7 @@
       ],
       "properties": {
         "verifier_id": { "const": "nixward.network-observation-verifier" },
+        "target_identity_bound_externally": { "type": "boolean" },
         "verifier_version": { "type": "string", "minLength": 1 },
         "rustc_version": { "type": "string", "minLength": 1 },
         "cargo_version": { "type": "string", "minLength": 1 },
