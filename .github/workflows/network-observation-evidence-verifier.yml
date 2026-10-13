@@ -1,0 +1,114 @@
+name: Network observation evidence verifier
+
+on:
+  pull_request:
+    branches:
+      - "research/sovereign-network-os-architecture-2026-10-12"
+    paths:
+      - "docs/NETWORK_OBSERVATION_ENVELOPE_V1.schema.json"
+      - "docs/NETWORK_OBSERVATION_VERIFIER_RECEIPT_V1.schema.json"
+      - "tests/network-observation-verifier/**"
+      - ".github/workflows/network-observation-evidence-verifier.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-observation-evidence-verifier-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verifier:
+    name: M1a verifier (Rust \${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.96.0", "1.99.0"]
+    steps:
+      - name: Checkout exact triggering revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: \${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - name: Install exact Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: \${{ matrix.toolchain }}
+          components: rustfmt
+
+      - name: Record exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          cargo --version
+          git rev-parse HEAD
+          printf 'NIXWARD_GIT_COMMIT=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Validate schema JSON syntax
+        run: |
+          python3 -m json.tool docs/NETWORK_OBSERVATION_ENVELOPE_V1.schema.json > /dev/null
+          python3 -m json.tool docs/NETWORK_OBSERVATION_VERIFIER_RECEIPT_V1.schema.json > /dev/null
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path tests/network-observation-verifier/Cargo.toml -- --check
+
+      - name: Run locked verifier tests
+        run: cargo test --locked --manifest-path tests/network-observation-verifier/Cargo.toml --all-targets --verbose
+
+      - name: Emit and verify a deterministic synthetic evidence receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --quiet --manifest-path tests/network-observation-verifier/Cargo.toml --bin emit_synthetic_evidence > /tmp/envelope-a.json
+          cargo run --locked --quiet --manifest-path tests/network-observation-verifier/Cargo.toml --bin emit_synthetic_evidence > /tmp/envelope-b.json
+          cmp /tmp/envelope-a.json /tmp/envelope-b.json
+          cargo run --locked --quiet --manifest-path tests/network-observation-verifier/Cargo.toml --bin nixward-network-observation-verifier -- /tmp/envelope-a.json > /tmp/receipt-a.json
+          cargo run --locked --quiet --manifest-path tests/network-observation-verifier/Cargo.toml --bin nixward-network-observation-verifier -- /tmp/envelope-a.json > /tmp/receipt-b.json
+          cmp /tmp/receipt-a.json /tmp/receipt-b.json
+          mkdir -p artifacts
+          cp /tmp/receipt-a.json artifacts/m1a-synthetic-empty-link-receipt.json
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          envelope = json.loads(Path("/tmp/envelope-a.json").read_text(encoding="utf-8"))
+          receipt = json.loads(Path("/tmp/receipt-a.json").read_text(encoding="utf-8"))
+          body = receipt["receipt"]
+          assert envelope["collection_id"] == "M1A-SYNTHETIC-EMPTY-LINK-DUMP"
+          assert envelope["collector"]["collector_id"] == "synthetic-fixture-generator-not-a-live-collector"
+          assert body["decision"] == "CompleteForDeclaredScope", body["decision"]
+          assert body["integrity"] == "Valid"
+          assert body["coverage"] == "Complete"
+          assert body["temporal_coherence"] == "BoundedSingleSourceWindow"
+          assert body["freshness"] == "Valid"
+          assert body["ownership"] == "Unknown"
+          assert body["global_atomic_snapshot_claimed"] is False
+          assert body["production_mutation_enabled"] is False
+          assert body["accepted_source_count"] == 1
+          assert body["source_results"][0]["observed_object_count"] == 0
+          assert body["verifier_source_revision"] == os.environ["NIXWARD_GIT_COMMIT"]
+          for key in ("envelope_raw_blake3", "policy_digest_blake3",
+                      "verifier_source_digest_blake3", "receipt_blake3"):
+              value = body.get(key, receipt.get(key))
+              assert isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value), (key, value)
+          print("PASS: deterministic synthetic empty-dump receipt; no live collector or mutation")
+          print("LIMIT: validates the M1a single-family profile, not source authenticity or a live namespace")
+          PY
+
+      - name: Upload synthetic verifier receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: network-observation-m1a-receipt-\${{ matrix.toolchain }}
+          path: artifacts/m1a-synthetic-empty-link-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
