@@ -808,17 +808,46 @@ pub enum InvocationStatus {
     Attempted { evidence: CommandInvocationEvidence },
 }
 
-/// Additive execution evidence API. `result` preserves the legacy UX contract;
-/// process and rollback claims must be derived from these explicit observations,
-/// never inferred from `ExecutionResult` alone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionObservation {
-    pub result: ExecutionResult,
+/// Schema identifier for the output-free execution evidence envelope.
+pub const EXECUTION_OBSERVATION_SCHEMA: &str = "luminous-nixward-execution-observation";
+pub const EXECUTION_OBSERVATION_VERSION: u16 = 1;
+
+/// Safe-to-serialize execution evidence. It deliberately excludes raw stdout and
+/// stderr, which remain available only through the in-process `ExecutionObservation`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionEvidenceEnvelope {
+    pub schema: String,
+    pub version: u16,
     pub primary: InvocationStatus,
     /// Present only when a rollback command was actually attempted. This records
     /// its process disposition, not proof that the machine's prior state returned.
     pub rollback: Option<CommandInvocationEvidence>,
     pub dry_run: bool,
+}
+
+/// Additive in-process execution API. `result` preserves the legacy UX contract;
+/// process and rollback claims must be derived from these explicit observations,
+/// never inferred from `ExecutionResult` alone. This type is intentionally not
+/// serializable because the result may contain raw command output.
+#[derive(Debug, Clone)]
+pub struct ExecutionObservation {
+    pub result: ExecutionResult,
+    pub primary: InvocationStatus,
+    pub rollback: Option<CommandInvocationEvidence>,
+    pub dry_run: bool,
+}
+
+impl ExecutionObservation {
+    /// Construct the versioned wire-safe evidence projection without stdout/stderr.
+    pub fn evidence_envelope(&self) -> ExecutionEvidenceEnvelope {
+        ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            primary: self.primary.clone(),
+            rollback: self.rollback.clone(),
+            dry_run: self.dry_run,
+        }
+    }
 }
 
 fn unix_epoch_millis() -> Option<u64> {
@@ -1574,6 +1603,30 @@ mod tests {
             process_disposition(&signaled),
             ProcessDisposition::TerminatedWithoutExitCode { signal: Some(9) }
         );
+    }
+
+    #[test]
+    fn test_evidence_envelope_excludes_raw_command_output() {
+        let observation = ExecutionObservation {
+            result: ExecutionResult::Success {
+                stdout: "sensitive-stdout-fixture".to_string(),
+                stderr: "sensitive-stderr-fixture".to_string(),
+                execution_time_ms: 5,
+            },
+            primary: InvocationStatus::NotStarted {
+                reason: InvocationNotStartedReason::DryRun,
+            },
+            rollback: None,
+            dry_run: true,
+        };
+        let envelope = observation.evidence_envelope();
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["schema"], EXECUTION_OBSERVATION_SCHEMA);
+        assert_eq!(value["version"], EXECUTION_OBSERVATION_VERSION);
+        assert_eq!(value["primary"]["NotStarted"]["reason"], "DryRun");
+        assert!(!serialized.contains("sensitive-stdout-fixture"));
+        assert!(!serialized.contains("sensitive-stderr-fixture"));
     }
 
     #[test]
