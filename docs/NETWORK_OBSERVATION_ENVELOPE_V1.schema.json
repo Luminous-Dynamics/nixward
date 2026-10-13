@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luminousdynamics.org/schemas/network-observation-envelope-v1.json",
+  "title": "Nixward Network Observation Evidence Envelope v1",
+  "description": "Strict byte-bound offline evidence input for the M1a rtnetlink link-dump verifier. Shape validation is not proof of completeness or origin authenticity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_id",
+    "schema_version",
+    "collection_id",
+    "target",
+    "scope",
+    "collector",
+    "policy",
+    "captured_at_unix_ms",
+    "verification_time_unix_ms",
+    "source_families"
+  ],
+  "properties": {
+    "schema_id": {
+      "const": "https://luminousdynamics.org/schemas/network-observation-envelope-v1.json"
+    },
+    "schema_version": { "const": 1 },
+    "collection_id": { "type": "string", "minLength": 1 },
+    "target": { "$ref": "#/$defs/target" },
+    "scope": { "$ref": "#/$defs/scope" },
+    "collector": { "$ref": "#/$defs/collector" },
+    "policy": { "$ref": "#/$defs/policy" },
+    "captured_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "verification_time_unix_ms": { "type": "integer", "minimum": 0 },
+    "source_families": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceFamily" }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_id", "boot_id", "network_namespace_inode"],
+      "properties": {
+        "target_id": { "type": "string", "minLength": 1 },
+        "boot_id": { "type": "string", "minLength": 1 },
+        "network_namespace_inode": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_families", "resource_kinds"],
+      "properties": {
+        "required_families": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "resource_kinds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collector_id", "build_digest_blake3", "source_revision"],
+      "properties": {
+        "collector_id": { "type": "string", "minLength": 1 },
+        "build_digest_blake3": { "$ref": "#/$defs/digest" },
+        "source_revision": { "type": "string", "minLength": 1 }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "policy_version",
+        "max_age_ms",
+        "max_source_window_ns",
+        "max_total_raw_bytes",
+        "max_messages_per_attempt",
+        "max_objects_per_attempt",
+        "max_retries",
+        "decision_critical_link_attribute_ids"
+      ],
+      "properties": {
+        "policy_id": { "type": "string", "minLength": 1 },
+        "policy_version": { "type": "string", "minLength": 1 },
+        "max_age_ms": { "type": "integer", "minimum": 1 },
+        "max_source_window_ns": { "type": "integer", "minimum": 1 },
+        "max_total_raw_bytes": { "type": "integer", "minimum": 1 },
+        "max_messages_per_attempt": { "type": "integer", "minimum": 1 },
+        "max_objects_per_attempt": { "type": "integer", "minimum": 1 },
+        "max_retries": { "type": "integer", "minimum": 0 },
+        "decision_critical_link_attribute_ids": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 16383 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "sourceFamily": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "attempts"],
+      "properties": {
+        "family": { "type": "string", "minLength": 1 },
+        "attempts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sourceAttempt" }
+        }
+      }
+    },
+    "sourceAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "boot_id",
+        "network_namespace_inode",
+        "request_sequence",
+        "byte_order",
+        "retry_index",
+        "started_monotonic_ns",
+        "ended_monotonic_ns",
+        "raw_artifact_hex",
+        "raw_artifact_blake3",
+        "canonical_semantic_blake3",
+        "enobufs_observed",
+        "msg_trunc_observed",
+        "dropped_message_count"
+      ],
+      "properties": {
+        "target_id": { "type": "string", "minLength": 1 },
+        "boot_id": { "type": "string", "minLength": 1 },
+        "network_namespace_inode": { "type": "integer", "minimum": 1 },
+        "request_sequence": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "byte_order": { "enum": ["little", "big"] },
+        "retry_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "started_monotonic_ns": { "type": "integer", "minimum": 0 },
+        "ended_monotonic_ns": { "type": "integer", "minimum": 0 },
+        "raw_artifact_hex": { "type": "string", "pattern": "^(?:[0-9a-f]{2})*$" },
+        "raw_artifact_blake3": { "$ref": "#/$defs/digest" },
+        "canonical_semantic_blake3": {
+          "oneOf": [
+            { "$ref": "#/$defs/digest" },
+            { "type": "null" }
+          ]
+        },
+        "enobufs_observed": { "type": "boolean" },
+        "msg_trunc_observed": { "type": "boolean" },
+        "dropped_message_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
