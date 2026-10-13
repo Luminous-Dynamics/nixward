@@ -23,7 +23,8 @@ use std::os::fd::AsRawFd;
 #[cfg(all(feature = "native", target_os = "linux"))]
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{info, warn};
 
@@ -191,18 +192,67 @@ impl NixwardTransactionInterlock {
 
     #[cfg(unix)]
     fn acquire() -> Result<Self, String> {
-        Self::acquire_at(Path::new(Self::PATH))
+        Self::acquire_at_with_expected_parent_uid(Path::new(Self::PATH), Some(0))
     }
 
     #[cfg(unix)]
     fn acquire_at(path: &Path) -> Result<Self, String> {
+        Self::acquire_at_with_expected_parent_uid(path, None)
+    }
+
+    #[cfg(unix)]
+    fn acquire_at_with_expected_parent_uid(
+        path: &Path,
+        expected_parent_uid: Option<u32>,
+    ) -> Result<Self, String> {
+        // Production uses Some(0): /run and its transaction lock must be
+        // root-owned. None is reserved for isolated temporary-directory tests.
+        // The lock pathname is deliberately persistent: unlinking/replacing it
+        // while a holder is active could split participants across different
+        // inodes and create two independently-held "exclusive" locks.
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+            format!(
+                "failed to inspect Nixward transaction lock directory {}: {error}",
+                parent.display()
+            )
+        })?;
+        if !parent_metadata.file_type().is_dir() {
+            return Err(format!(
+                "Nixward transaction lock parent {} is not a real directory",
+                parent.display()
+            ));
+        }
+        // The production parent is /run (root-owned, not writable by group or
+        // other). For the private test seam, a caller-owned, non-writable
+        // temporary directory is accepted under the same rule.
+        if let Some(expected_uid) = expected_parent_uid {
+            if parent_metadata.uid() != expected_uid {
+                return Err(format!(
+                    "Nixward transaction lock directory {} has owner uid {}, expected {}",
+                    parent.display(),
+                    parent_metadata.uid(),
+                    expected_uid
+                ));
+            }
+        }
+        if parent_metadata.mode() & 0o022 != 0 {
+            return Err(format!(
+                "Nixward transaction lock directory {} is group/world-writable",
+                parent.display()
+            ));
+        }
+
         let mut options = OpenOptions::new();
         options
             .read(true)
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW);
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
         let file = options.open(path).map_err(|error| {
             format!("failed to open Nixward transaction lock {}: {error}", path.display())
         })?;
@@ -215,6 +265,45 @@ impl NixwardTransactionInterlock {
                 path.display()
             ));
         }
+        if metadata.uid() != parent_metadata.uid() {
+            return Err(format!(
+                "Nixward transaction lock {} owner does not match trusted directory {}",
+                path.display(),
+                parent.display()
+            ));
+        }
+        if !Self::lock_mode_is_valid(metadata.mode()) {
+            return Err(format!(
+                "Nixward transaction lock {} must have exact mode 0600 with no special permission bits",
+                path.display()
+            ));
+        }
+        if metadata.nlink() != 1 {
+            return Err(format!(
+                "Nixward transaction lock {} must have exactly one hard link",
+                path.display()
+            ));
+        }
+
+        // Compare the descriptor we will lock with the pathname's current
+        // target. O_NOFOLLOW protects the final component, and this identity
+        // check fails closed if the path changed during open/validation.
+        let path_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            format!(
+                "failed to re-check Nixward transaction lock path {}: {error}",
+                path.display()
+            )
+        })?;
+        if !path_metadata.file_type().is_file()
+            || path_metadata.dev() != metadata.dev()
+            || path_metadata.ino() != metadata.ino()
+        {
+            return Err(format!(
+                "Nixward transaction lock {} changed identity while opening",
+                path.display()
+            ));
+        }
+
         if let Err(error) = nix::fcntl::flock(
             file.as_raw_fd(),
             nix::fcntl::FlockArg::LockExclusiveNonblock,
@@ -231,6 +320,13 @@ impl NixwardTransactionInterlock {
             ));
         }
         Ok(Self { file })
+    }
+
+    #[cfg(unix)]
+    fn lock_mode_is_valid(mode: u32) -> bool {
+        // Require exactly owner read/write. Masking only group/other bits would
+        // accidentally permit setuid, setgid, or sticky mode bits.
+        mode & 0o7777 == 0o600
     }
 
     #[cfg(not(unix))]
@@ -822,7 +918,7 @@ impl ExecutionAuthorization {
         self.authority_subject_blake3.as_deref()
     }
 
-    fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for_recovery(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("recovery authorization is bound to a different command".into());
         }
@@ -861,7 +957,7 @@ impl ExecutionAuthorization {
         Ok(())
     }
 
-    fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
+    pub(super) fn validate_for(&self, command: &NixOSCommand) -> Result<(), String> {
         if self.command_digest != command.command_digest() {
             return Err("authorization is bound to a different command".into());
         }
@@ -1272,13 +1368,7 @@ impl NixOSExecutor {
     }
 
     fn activation_argv_digest(executable: &str, args: &[String]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"NIXWARD_ACTIVATION_ARGV_V2\0");
-        for argument in std::iter::once(executable).chain(args.iter().map(String::as_str)) {
-            hasher.update(&(argument.len() as u64).to_le_bytes());
-            hasher.update(argument.as_bytes());
-        }
-        hasher.finalize().to_hex().to_string()
+        super::config_transaction::activation_argv_digest(executable, args)
     }
 
     fn canonical_store_executable_lexical(path: &str) -> bool {
@@ -1478,6 +1568,9 @@ impl NixOSExecutor {
         purpose: super::config_transaction::ActivationWorkerPurpose,
         executable: &str,
         args: &[String],
+        payload_executable: &str,
+        payload_args: &[String],
+        release_challenge_digest: &str,
     ) -> Result<(super::config_transaction::ActivationWorkerIdentity, OwnedFd), String> {
         let boot_before = Self::current_boot_id()?;
         let start_before = Self::proc_start_time_ticks(pid)?
@@ -1531,6 +1624,10 @@ impl NixOSExecutor {
             executable: executable.to_string(),
             process_image,
             argv_digest,
+            payload_executable: payload_executable.to_string(),
+            payload_args: payload_args.to_vec(),
+            release_challenge_digest: release_challenge_digest.to_string(),
+            payload_argv_digest: Self::activation_argv_digest(payload_executable, payload_args),
             environment_digest: Self::activation_worker_environment_digest(),
         };
         identity.validate_identity()?;
@@ -1573,31 +1670,146 @@ impl NixOSExecutor {
         Err("activation worker recovery requires Linux pidfd support".into())
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn trusted_worker_gate_executable() -> Result<String, String> {
+        let current = std::env::current_exe()
+            .map_err(|error| format!("failed to resolve current Nixward executable: {error}"))?
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize current Nixward executable: {error}"))?;
+        Self::validate_store_backed_executable(&current, "current Nixward executable")?;
+        let parent = current
+            .parent()
+            .ok_or_else(|| "current Nixward executable has no parent directory".to_string())?;
+        let entry = parent.join("nixward-worker-gate");
+        let metadata = std::fs::symlink_metadata(&entry)
+            .map_err(|error| format!("trusted Nixward worker gate is unavailable: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("trusted Nixward worker gate must be a regular sibling executable".into());
+        }
+        let gate = entry
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize Nixward worker gate: {error}"))?;
+        Self::validate_store_backed_executable(&gate, "Nixward worker gate")?;
+        let current_object = current
+            .strip_prefix("/nix/store/")
+            .ok_or_else(|| "current Nixward executable is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "current Nixward executable has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        let gate_object = gate
+            .strip_prefix("/nix/store/")
+            .map_err(|_| "Nixward worker gate is outside the Nix store".to_string())?
+            .components()
+            .next()
+            .ok_or_else(|| "Nixward worker gate has no store object".to_string())?
+            .as_os_str()
+            .to_os_string();
+        if current_object != gate_object {
+            return Err("Nixward worker gate is not in the exact current executable store object".into());
+        }
+        gate.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| "Nixward worker gate path is not valid UTF-8".into())
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_token() -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+        // Zeroizing wipes the token when this function's caller returns, errors,
+        // or its async future is cancelled—unlike a success-path-only fill(0).
+        let mut token = zeroize::Zeroizing::new([0u8; 32]);
+        let mut random = File::open("/dev/urandom")
+            .map_err(|error| format!("failed to open kernel random source: {error}"))?;
+        std::io::Read::read_exact(&mut random, &mut *token)
+            .map_err(|error| format!("failed to obtain worker-gate release token: {error}"))?;
+        Ok(token)
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    fn worker_gate_release_digest(token: &[u8; 32]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-worker-gate-release-v1\0");
+        hasher.update(token);
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn validate_system_profile_before_worker_release(
+        expected_profile: &str,
+        observed_profile: Result<String, String>,
+    ) -> Result<(), String> {
+        let observed_profile = observed_profile.map_err(|error| {
+            format!(
+                "could not re-observe system profile before releasing transaction worker: {error}"
+            )
+        })?;
+        if observed_profile != expected_profile {
+            return Err(format!(
+                concat!(
+                    "system-profile drift before worker release: expected exact profile {}, observed {}; ",
+                    "transaction worker payload remains unreleased"
+                ),
+                expected_profile,
+                observed_profile,
+            ));
+        }
+        Ok(())
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
         transaction: &mut super::config_transaction::ConfigTransaction,
         journal_path: &Path,
         purpose: super::config_transaction::ActivationWorkerPurpose,
+        expected_system_profile: &str,
     ) -> Result<std::process::Output, String> {
         #[cfg(not(all(feature = "native", target_os = "linux")))]
         {
-            let _ = (executable, args, transaction, journal_path, purpose);
+            let _ = (executable, args, transaction, journal_path, purpose, expected_system_profile);
             return Err("transaction worker execution requires Linux pidfd support".into());
         }
+
         #[cfg(all(feature = "native", target_os = "linux"))]
         {
             let transaction_id = transaction.transaction_id().to_string();
-            let mut child = Command::new(executable);
-            child.env_clear();
+            let gate_executable = Self::trusted_worker_gate_executable()?;
+            let release_token = Self::worker_gate_release_token()?;
+            let release_digest = Self::worker_gate_release_digest(&*release_token);
+            let mut gate_args = vec![
+                "--nixward-worker-gate-v1".to_string(),
+                executable.to_string(),
+                release_digest,
+            ];
+            gate_args.extend(args.iter().cloned());
+
+            let mut command = Command::new(&gate_executable);
+            command.env_clear();
             for &(name, value) in Self::activation_worker_environment() {
-                child.env(name, value);
+                command.env(name, value);
             }
-            child.args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-            let mut child = child.spawn()
-                .map_err(|error| format!("failed to spawn transaction worker {executable}: {error}"))?;
-            let pid = child.id().ok_or_else(|| "transaction worker has no process id".to_string())?;
-            let (identity, pidfd) = match Self::capture_worker_identity(pid, &transaction_id, purpose, executable, args) {
+            command
+                .args(&gate_args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = command
+                .spawn()
+                .map_err(|error| format!("failed to spawn inert transaction worker gate: {error}"))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| "transaction worker gate has no process id".to_string())?;
+            let (identity, pidfd) = match Self::capture_worker_identity(
+                pid,
+                &transaction_id,
+                purpose,
+                &gate_executable,
+                &gate_args,
+                executable,
+                args,
+                &release_digest,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     let _ = child.start_kill();
@@ -1615,17 +1827,59 @@ impl NixOSExecutor {
                 let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
                 let _ = child.start_kill();
                 let _ = child.wait().await;
-                return Err(format!("worker identity could not be persisted; worker was killed best-effort: {error}"));
+                return Err(format!(
+                    "worker gate receipt could not be persisted; payload was not released: {error}"
+                ));
             }
-            let output = child.wait_with_output().await
-                .map_err(|error| format!("failed waiting for transaction worker {executable}: {error}"))?;
+
+            // The payload remains blocked until its pidfd, exact gate argv,
+            // payload digest, and transaction binding are durable. Re-observe
+            // the selected profile after that durable receipt and immediately
+            // before release, so an intervening writer fails closed.
+            if let Err(error) = Self::validate_system_profile_before_worker_release(
+                expected_system_profile,
+                GenerationManager::current_system_profile_closure(),
+            ) {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!(
+                    "transaction worker profile guard failed; payload was not released: {error}"
+                ));
+            }
+
+            let Some(mut gate_stdin) = child.stdin.take() else {
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err("worker gate stdin channel is unavailable; payload was not released".into());
+            };
+            if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
+                drop(gate_stdin);
+                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(format!(
+                    "worker gate release token could not be delivered; payload was not intentionally released: {error}"
+                ));
+            }
+            drop(gate_stdin);
+            // The release token is no longer needed once EOF has been sent.
+            // Zeroize it before waiting for a potentially long-running activation.
+            drop(release_token);
+
+            let output = child
+                .wait_with_output()
+                .await
+                .map_err(|error| format!("failed waiting for gated transaction worker {executable}: {error}"))?;
             if !Self::pidfd_exited(&pidfd)? {
                 return Err("transaction worker wait completed without pidfd exit evidence".into());
             }
             Ok(output)
         }
     }
-    async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
+
+        async fn run_bound_command(command: &NixOSCommand) -> Result<std::process::Output, String> {
         let (declared_cmd, args) = command.to_command();
         let executable = Self::trusted_bound_executable(command)?;
         Command::new(&executable)
@@ -1738,12 +1992,16 @@ impl NixOSExecutor {
 
     async fn set_exact_system_profile_with_worker(
         profile_store_path: &str,
+        expected_current_profile: &str,
         transaction: &mut super::config_transaction::ConfigTransaction,
         journal_path: &Path,
         purpose: super::config_transaction::ActivationWorkerPurpose,
     ) -> Result<super::config_transaction::ProfileTransitionDisposition, String> {
         if !super::execution_intent::is_valid_nix_store_path(profile_store_path) {
             return Err("system profile target is not a canonical Nix store path".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(expected_current_profile) {
+            return Err("expected current system profile is not a canonical Nix store path".into());
         }
         let nix_env = Self::trusted_system_executable("nix-env")?;
         let args = vec![
@@ -1758,6 +2016,7 @@ impl NixOSExecutor {
             transaction,
             journal_path,
             purpose,
+            expected_current_profile,
         )
         .await?;
         let process_exit_status = output.status.code();
@@ -2150,52 +2409,212 @@ impl NixOSExecutor {
             .with_extension("json"))
     }
 
-    fn validate_transaction_for_exact_activation(
-        transaction: &super::config_transaction::ConfigTransaction,
-        transaction_id: &str,
-        command: &NixOSCommand,
-        authorization: &ExecutionAuthorization,
+    /// Reject new managed mutations while any other journal records a profile
+    /// transition, activation, or recovery whose terminal disposition is not
+    /// durable. The interlock alone is insufficient after its owner crashes:
+    /// the kernel releases flock when that owner exits, even if a worker
+    /// survives. The worker receipt is persisted before release, so the next
+    /// owner must reconcile the journal before it may start another mutation.
+    fn ensure_no_unresolved_peer_transactions(current_transaction_id: &str) -> Result<(), String> {
+        Self::ensure_no_unresolved_peer_transactions_at(
+            Path::new(Self::TRANSACTION_JOURNAL_ROOT),
+            Some(current_transaction_id),
+            Some(0),
+        )
+    }
+
+    fn phase_requires_reconciliation(
+        phase: super::config_transaction::ConfigTransactionPhase,
+    ) -> bool {
+        use super::config_transaction::ConfigTransactionPhase as Phase;
+        matches!(
+            phase,
+            Phase::ProfileTransitionStarted
+                | Phase::ProfileCommitted
+                | Phase::IndeterminateProfileTransition
+                | Phase::ActivationStarted
+                | Phase::IndeterminateActivation
+                | Phase::RecoveryObservation
+                | Phase::RecoveryRequired
+                | Phase::RecoveryMutationStarted
+        )
+    }
+
+    /// Test seam for an isolated transaction-journal directory. Production
+    /// always uses the root-owned directory above. Unknown/malformed journals
+    /// fail closed because their worker liveness and mutation phase cannot be
+    /// established safely.
+    fn ensure_no_unresolved_peer_transactions_at(
+        root: &Path,
+        current_transaction_id: Option<&str>,
+        expected_root_uid: Option<u32>,
     ) -> Result<(), String> {
-        if transaction.transaction_id() != transaction_id {
-            return Err("loaded transaction id does not match the requested transaction".into());
+        let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+            format!("failed to inspect transaction journal directory {}: {error}", root.display())
+        })?;
+        if !root_metadata.file_type().is_dir() {
+            return Err(format!(
+                "transaction journal root {} is not a real directory",
+                root.display()
+            ));
         }
-        let authorization_plan = authorization
-            .change_plan_digest()
-            .ok_or_else(|| "exact activation authorization has no change-plan binding".to_string())?;
-        if transaction.plan_digest()? != authorization_plan {
-            return Err("loaded transaction plan digest does not match execution authorization".into());
-        }
-        let NixOSCommand::ActivateSystemClosure {
-            store_path,
-            profile_store_path: Some(profile_store_path),
-            ..
-        } = command
-        else {
-            return Err("transaction journal binding requires exact system closure activation".into());
-        };
-        let receipt = transaction
-            .candidate_build()
-            .ok_or_else(|| "loaded transaction has no candidate-build receipt".to_string())?;
-        receipt.verify_retention()?;
-        if receipt.candidate_store_path != *store_path {
-            return Err("transaction candidate does not match activation closure".into());
-        }
-        if receipt.candidate_store_path != *profile_store_path {
-            return Err("transaction candidate does not match selected system profile".into());
-        }
-        let expected_installable = authorization
-            .realization_installable()
-            .ok_or_else(|| "exact activation authorization has no installable binding".to_string())?;
-        if receipt.installable != expected_installable {
-            return Err("transaction candidate installable does not match authorization".into());
-        }
-        let expected_realization_plan_digest = authorization
-            .realization_plan_digest()
-            .map(|digest| digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>());
-        if expected_realization_plan_digest.as_deref()
-            != Some(receipt.realization_plan_digest.as_str())
+        #[cfg(unix)]
         {
-            return Err("transaction realization-plan identity does not match authorization".into());
+            if let Some(expected_uid) = expected_root_uid {
+                if !root.is_absolute() {
+                    return Err("production transaction journal root must be an absolute path".into());
+                }
+                // Validate every path component with lstat semantics. Checking
+                // only the final directory would trust a replaceable/symlinked
+                // ancestor such as /var/lib/nixward.
+                let mut cursor = PathBuf::from("/");
+                for component in root.components() {
+                    match component {
+                        std::path::Component::RootDir => continue,
+                        std::path::Component::Normal(name) => cursor.push(name),
+                        _ => {
+                            return Err(format!(
+                                "transaction journal root has a noncanonical path component: {}",
+                                root.display()
+                            ));
+                        }
+                    }
+                    let metadata = std::fs::symlink_metadata(&cursor).map_err(|error| {
+                        format!(
+                            "failed to inspect trusted transaction journal path component {}: {error}",
+                            cursor.display()
+                        )
+                    })?;
+                    if !metadata.file_type().is_dir() {
+                        return Err(format!(
+                            "trusted transaction journal path component {} is not a real directory",
+                            cursor.display()
+                        ));
+                    }
+                    if metadata.uid() != expected_uid {
+                        return Err(format!(
+                            "trusted transaction journal path component {} has owner uid {}, expected {}",
+                            cursor.display(), metadata.uid(), expected_uid
+                        ));
+                    }
+                    if metadata.mode() & 0o022 != 0 {
+                        return Err(format!(
+                            "trusted transaction journal path component {} is group/world-writable",
+                            cursor.display()
+                        ));
+                    }
+                }
+            } else if root_metadata.mode() & 0o022 != 0 {
+                return Err(format!(
+                    "transaction journal root {} is group/world-writable",
+                    root.display()
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        if expected_root_uid.is_some() {
+            return Err("root-owned transaction journal validation requires Unix".into());
+        }
+
+        let entries = std::fs::read_dir(root).map_err(|error| {
+            format!("failed to enumerate transaction journals in {}: {error}", root.display())
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!("failed to enumerate a transaction journal entry: {error}")
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                format!("failed to inspect transaction journal {}: {error}", path.display())
+            })?;
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "transaction journal {} is not a regular non-symlink file",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                if let Some(expected_uid) = expected_root_uid {
+                    if metadata.uid() != expected_uid {
+                        return Err(format!(
+                            "transaction journal {} has owner uid {}, expected {}",
+                            path.display(),
+                            metadata.uid(),
+                            expected_uid
+                        ));
+                    }
+                }
+                if metadata.mode() & 0o022 != 0 {
+                    return Err(format!(
+                        "transaction journal {} is group/world-writable",
+                        path.display()
+                    ));
+                }
+                if metadata.mode() & 0o7000 != 0 {
+                    return Err(format!(
+                        "transaction journal {} has forbidden special permission bits",
+                        path.display()
+                    ));
+                }
+                if metadata.mode() & 0o055 != 0 {
+                    return Err(format!(
+                        "transaction journal {} grants group/other read or execute access",
+                        path.display()
+                    ));
+                }
+                if metadata.nlink() != 1 {
+                    return Err(format!(
+                        "transaction journal {} must have exactly one hard link",
+                        path.display()
+                    ));
+                }
+            }
+            let journal_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "transaction journal has a non-UTF-8 identity: {}",
+                        path.display()
+                    )
+                })?;
+            if journal_id.len() != 64
+                || !journal_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "transaction journal filename has a noncanonical identity: {}",
+                    path.display()
+                ));
+            }
+
+            let transaction = super::config_transaction::ConfigTransaction::load(&path)
+                .map_err(|error| format!(
+                    "cannot establish safe disposition for transaction journal {}: {error}",
+                    path.display()
+                ))?;
+            if transaction.transaction_id() != journal_id {
+                return Err(format!(
+                    "transaction journal identity does not match its filename: {}",
+                    path.display()
+                ));
+            }
+            if current_transaction_id == Some(journal_id) {
+                continue;
+            }
+
+            let phase = transaction.phase();
+            if Self::phase_requires_reconciliation(phase) {
+                return Err(format!(
+                    "unresolved peer transaction {journal_id} remains in phase {phase:?}; reconcile it before starting another system mutation"
+                ));
+            }
         }
         Ok(())
     }
@@ -2204,9 +2623,112 @@ impl NixOSExecutor {
         transaction: &super::config_transaction::ConfigTransaction,
         path: &Path,
     ) -> Result<(), String> {
-        transaction
-            .persist_atomic(path)
-            .map_err(|error| format!("durable transaction journal update failed: {error}"))
+        Self::persist_transaction_with_hook(transaction, path, |_| Ok(()))
+    }
+
+    fn persist_transaction_with_hook<F>(
+        transaction: &super::config_transaction::ConfigTransaction,
+        path: &Path,
+        boundary_hook: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(super::config_transaction::JournalPersistBoundary) -> Result<(), String>,
+    {
+        match transaction.persist_atomic_classified_with_hook(path, boundary_hook) {
+            Ok(()) => Ok(()),
+            Err(super::config_transaction::JournalPersistFailure::BeforePublication(error)) => {
+                Err(format!("durable transaction journal update failed before publication: {error}"))
+            }
+            Err(super::config_transaction::JournalPersistFailure::AfterPublication(error)) => {
+                Err(Self::post_publication_persist_error(transaction, path, &error))
+            }
+        }
+    }
+
+    /// Explain and verify an error that occurred after the journal rename.
+    ///
+    /// A readable journal matching the intended state establishes current
+    /// visibility only. The failed directory sync still leaves durability
+    /// uncertain, so this call must stop and a later recovery attempt must make
+    /// fresh runtime/profile observations before any further mutation.
+    fn post_publication_persist_error(
+        transaction: &super::config_transaction::ConfigTransaction,
+        path: &Path,
+        persistence_error: &str,
+    ) -> String {
+        let observed = match super::config_transaction::ConfigTransaction::load(path) {
+            Ok(value) => value,
+            Err(read_error) => {
+                return format!(
+                    "journal rename was reported as published, but read-back failed ({read_error}); \
+                     publication and current journal state require reconciliation; no further mutation \
+                     is permitted until a later recovery attempt validates the journal and freshly \
+                     observes runtime/profile state. Original persistence error: {persistence_error}"
+                );
+            }
+        };
+
+        let expected_value = match serde_json::to_value(transaction) {
+            Ok(value) => value,
+            Err(encode_error) => {
+                return format!(
+                    concat!(
+                        "journal rename was reported as published, but intended-state comparison failed ({}); ",
+                        "observed transaction {} phase {:?}; fail closed and require fresh runtime/profile ",
+                        "observations before any further mutation. Original persistence error: {}"
+                    ),
+                    encode_error,
+                    observed.transaction_id(),
+                    observed.phase(),
+                    persistence_error,
+                );
+            }
+        };
+        let observed_value = match serde_json::to_value(&observed) {
+            Ok(value) => value,
+            Err(encode_error) => {
+                return format!(
+                    concat!(
+                        "journal rename was reported as published, but read-back comparison failed ({}); ",
+                        "observed transaction {} phase {:?}; fail closed and require fresh runtime/profile ",
+                        "observations before any further mutation. Original persistence error: {}"
+                    ),
+                    encode_error,
+                    observed.transaction_id(),
+                    observed.phase(),
+                    persistence_error,
+                );
+            }
+        };
+
+        if expected_value == observed_value {
+            format!(
+                concat!(
+                    "journal rename was published and read-back confirms transaction {} phase {:?} is ",
+                    "currently visible, but directory durability remains indeterminate. This call ",
+                    "authorizes no subsequent mutation; a later recovery attempt must freshly observe ",
+                    "runtime and system-profile state before deciding what is safe. Original persistence ",
+                    "error: {}"
+                ),
+                observed.transaction_id(),
+                observed.phase(),
+                persistence_error,
+            )
+        } else {
+            format!(
+                concat!(
+                    "journal rename was reported as published, but read-back does not match the intended ",
+                    "transaction {} phase {:?}; observed transaction {} phase {:?}. State is ambiguous: ",
+                    "fail closed and require journal reconciliation plus fresh runtime/profile observations ",
+                    "before any further mutation. Original persistence error: {}"
+                ),
+                transaction.transaction_id(),
+                transaction.phase(),
+                observed.transaction_id(),
+                observed.phase(),
+                persistence_error,
+            )
+        }
     }
 
     fn cleanup_terminal_retention(
@@ -2249,88 +2771,59 @@ impl NixOSExecutor {
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
         let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot issue recovery authority or mutate the journal".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction recovery is restricted to exact system closure activation".into(),
                 safety_level: safety,
             };
         }
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-        if let Err(reason) = authorization.validate_for_recovery(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
-        }
-
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let _transaction_interlock = match NixwardTransactionInterlock::acquire() {
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
             Ok(lock) => lock,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: safety,
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(value) => value,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("transaction recovery requires a valid durable journal: {reason}"),
-                        safety_level: safety,
-                    };
-                }
-            };
-
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
-        ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: safety,
-            };
+        if let Err(reason) = Self::ensure_no_unresolved_peer_transactions(&transaction_id) {
+            return ExecutionResult::Blocked { reason, safety_level: safety };
         }
-        if !matches!(
-            transaction.phase(),
-            super::config_transaction::ConfigTransactionPhase::ProfileTransitionStarted
-                | super::config_transaction::ConfigTransactionPhase::ProfileCommitted
-                | super::config_transaction::ConfigTransactionPhase::ActivationStarted
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateProfileTransition
-                | super::config_transaction::ConfigTransactionPhase::IndeterminateActivation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryObservation
-                | super::config_transaction::ConfigTransactionPhase::RecoveryRequired
-                | super::config_transaction::ConfigTransactionPhase::RecoveryMutationStarted
+        let capability = match super::config_transaction::JournalOwnedRecoveryCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction phase {:?} is not an explicit recovery phase",
-                    transaction.phase()
-                ),
-                safety_level: safety,
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.recover_journaled_transaction(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
+    }
 
+    async fn recover_journaled_transaction(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedRecoveryCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         let phase = transaction.phase();
         let workers = transaction.activation_worker_identities();
         let has_purpose = |purpose| workers.iter().any(|worker| worker.purpose == purpose);
@@ -2602,6 +3095,7 @@ impl NixOSExecutor {
         // immutable activation artifact.
         match Self::set_exact_system_profile_with_worker(
             prior_profile,
+            &observed_profile,
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::RecoveryProfileTransition,
@@ -2650,6 +3144,7 @@ impl NixOSExecutor {
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::RecoveryActivation,
+            prior_profile,
         ).await;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
 
@@ -2718,81 +3213,60 @@ impl NixOSExecutor {
         transaction_id: impl AsRef<str>,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        let safety = command.safety_level();
+        if self.dry_run {
+            return ExecutionResult::Blocked {
+                reason: "dry-run mode cannot issue activation authority or mutate the journal".into(),
+                safety_level: safety,
+            };
+        }
         if !matches!(command, NixOSCommand::ActivateSystemClosure { .. }) {
             return ExecutionResult::Blocked {
                 reason: "transaction-aware execution is restricted to exact system closure activation".into(),
-                safety_level: command.safety_level(),
+                safety_level: safety,
             };
         }
-        let transaction_id = transaction_id.as_ref();
-        let journal_path = match Self::transaction_journal_path(transaction_id) {
+        let transaction_id = transaction_id.as_ref().to_string();
+        let journal_path = match Self::transaction_journal_path(&transaction_id) {
             Ok(path) => path,
-            Err(reason) => {
-                return ExecutionResult::Blocked {
-                    reason,
-                    safety_level: command.safety_level(),
-                };
-            }
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-        if let Err(reason) = authorization.validate_for(&command) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
-
-        let _transaction_interlock = if !self.dry_run {
-            match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => Some(lock),
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason,
-                        safety_level: command.safety_level(),
-                    };
-                }
-            }
-        } else {
-            None
+        let transaction_interlock = match NixwardTransactionInterlock::acquire() {
+            Ok(lock) => lock,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
         };
-
-        let mut transaction =
-            match super::config_transaction::ConfigTransaction::load(&journal_path) {
-                Ok(transaction) => transaction,
-                Err(reason) => {
-                    return ExecutionResult::Blocked {
-                        reason: format!("exact activation requires a valid durable transaction journal: {reason}"),
-                        safety_level: command.safety_level(),
-                    };
-                }
-            };
-        if let Err(reason) = Self::validate_transaction_for_exact_activation(
-            &transaction,
-            transaction_id,
-            &command,
-            &authorization,
+        if let Err(reason) = Self::ensure_no_unresolved_peer_transactions(&transaction_id) {
+            return ExecutionResult::Blocked { reason, safety_level: safety };
+        }
+        let capability = match super::config_transaction::JournalOwnedActivationCapability::issue(
+            &journal_path, transaction_id, command, authorization
         ) {
-            return ExecutionResult::Blocked {
-                reason,
-                safety_level: command.safety_level(),
-            };
-        }
+            Ok(value) => value,
+            Err(reason) => return ExecutionResult::Blocked { reason, safety_level: safety },
+        };
+        self.execute_journaled_activation(
+            capability,
+            decision_quality,
+            transaction_interlock,
+        )
+        .await
+    }
 
-        if transaction.phase() != super::config_transaction::ConfigTransactionPhase::SourceCommitted {
-            return ExecutionResult::Blocked {
-                reason: format!(
-                    "transaction journal is at {:?}; exact activation requires SourceCommitted or an explicit recovery operation",
-                    transaction.phase()
-                ),
-                safety_level: command.safety_level(),
-            };
-        }
-
+    async fn execute_journaled_activation(
+        &mut self,
+        capability: super::config_transaction::JournalOwnedActivationCapability,
+        decision_quality: Option<f32>,
+        _transaction_interlock: NixwardTransactionInterlock,
+    ) -> ExecutionResult {
+        let (
+            journal_path,
+            transaction_id_owned,
+            command,
+            authorization,
+            mut transaction,
+        ) = capability.into_parts();
+        let transaction_id = transaction_id_owned.as_str();
+        let safety = command.safety_level();
         // Journal loads deliberately lose historical Rooted authority. Re-establish
         // significance only if the current machine still proves the exact authorized
         // predecessor runtime/profile, not merely because the journal said so.
@@ -2879,6 +3353,18 @@ impl NixOSExecutor {
             };
         }
 
+        let expected_pre_transition_profile = match authorization.recovery_command.as_ref() {
+            Some(NixOSCommand::ActivateSystemClosure {
+                profile_store_path: Some(value),
+                ..
+            }) => value.clone(),
+            _ => {
+                return ExecutionResult::Blocked {
+                    reason: "exact activation has no bound prior system-profile precondition".into(),
+                    safety_level: safety,
+                };
+            }
+        };
         let profile_store_path = match &command {
             NixOSCommand::ActivateSystemClosure {
                 profile_store_path: Some(value),
@@ -2888,6 +3374,7 @@ impl NixOSExecutor {
         };
         match Self::set_exact_system_profile_with_worker(
             &profile_store_path,
+            &expected_pre_transition_profile,
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::ProfileTransition,
@@ -2954,6 +3441,7 @@ impl NixOSExecutor {
             &mut transaction,
             &journal_path,
             super::config_transaction::ActivationWorkerPurpose::Activation,
+            &profile_store_path,
         ).await;
         let elapsed = start.elapsed().as_millis() as u64;
         let status = result.as_ref().ok().and_then(|output| output.status.code());
@@ -3079,7 +3567,7 @@ impl NixOSExecutor {
             && matches!(command, NixOSCommand::ActivateSystemClosure { .. })
         {
             match NixwardTransactionInterlock::acquire() {
-                Ok(lock) => Some(lock),
+                Ok(lock) => Some(lock)
                 Err(reason) => {
                     let blocked = ExecutionResult::Blocked {
                         reason,
@@ -3374,6 +3862,319 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_writer_between_profile_guard_and_nix_env_set_is_a_reproducible_non_cas_counterexample() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::mpsc;
+
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let outsider = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external";
+        let candidate = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-candidate";
+        let selected_profile = Arc::new(Mutex::new(prior.to_string()));
+        let actor_profile = Arc::clone(&selected_profile);
+        let (guard_passed_tx, guard_passed_rx) = mpsc::channel();
+        let (continue_mutation_tx, continue_mutation_rx) = mpsc::channel();
+
+        // Actor A executes the same exact-state policy used by the production
+        // pre-release guard. The channel is the deterministic barrier between
+        // that observation and the simulated non-CAS profile-set operation.
+        let actor_a = std::thread::spawn(move || {
+            let observed = actor_profile.lock().expect("profile mutex").clone();
+            NixOSExecutor::validate_system_profile_before_worker_release(
+                prior,
+                Ok(observed.clone()),
+            )
+            .expect("the initial exact prior profile satisfies the guard");
+            guard_passed_tx.send(observed).expect("publish guard checkpoint");
+            continue_mutation_rx.recv().expect("wait at mutation barrier");
+
+            // Models nix-env --set candidate: it does not accept the caller's
+            // expected-old profile as a compare-and-set argument.
+            *actor_profile.lock().expect("profile mutex") = candidate.to_string();
+            let post_state = actor_profile.lock().expect("profile mutex").clone();
+            let disposition =
+                super::super::config_transaction::classify_profile_transition_post_state(
+                    Some(0),
+                    Some(post_state.as_str()),
+                    candidate,
+                );
+            (post_state, disposition)
+        });
+
+        assert_eq!(
+            guard_passed_rx.recv().expect("actor A reaches pre-release guard"),
+            prior
+        );
+        // Actor C is not cooperating with the Nixward transaction interlock.
+        *selected_profile.lock().expect("profile mutex") = outsider.to_string();
+        assert_eq!(
+            selected_profile.lock().expect("profile mutex").as_str(),
+            outsider,
+            "prove that external state changed after the guard but before mutation"
+        );
+        continue_mutation_tx.send(()).expect("release mutation barrier");
+
+        let (post_state, disposition) = actor_a.join().expect("actor A completed");
+        assert_eq!(post_state, candidate);
+        assert!(
+            matches!(
+                disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Committed { .. }
+            ),
+            "this passing assertion documents the counterexample: a final candidate match cannot prove there was no external writer"
+        );
+        // This is deliberately not a safety/pass oracle. It proves that the
+        // pre-release guard plus a matching post-read does not constitute CAS.
+        assert_ne!(outsider, candidate);
+    }
+
+    #[test]
+    fn external_writer_after_child_exit_produces_indeterminate_readback_and_blocks_activation() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::mpsc;
+
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let outsider = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external";
+        let candidate = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-candidate";
+        let selected_profile = Arc::new(Mutex::new(prior.to_string()));
+        let child_profile = Arc::clone(&selected_profile);
+        let (child_exited_tx, child_exited_rx) = mpsc::channel();
+        let (continue_readback_tx, continue_readback_rx) = mpsc::channel();
+
+        let parent = std::thread::spawn(move || {
+            // Child's profile mutation returns before the parent performs its
+            // read-back. Test channels make the intervening actor deterministic.
+            *child_profile.lock().expect("profile mutex") = candidate.to_string();
+            child_exited_tx.send(()).expect("publish child-exit checkpoint");
+            continue_readback_rx.recv().expect("wait at read-back barrier");
+            let observed = child_profile.lock().expect("profile mutex").clone();
+            let disposition =
+                super::super::config_transaction::classify_profile_transition_post_state(
+                    Some(0),
+                    Some(observed.as_str()),
+                    candidate,
+                );
+            let activation_started = matches!(
+                &disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Committed { .. }
+            );
+            (observed, disposition, activation_started)
+        });
+
+        child_exited_rx.recv().expect("child must exit before external write");
+        *selected_profile.lock().expect("profile mutex") = outsider.to_string();
+        continue_readback_tx.send(()).expect("release read-back barrier");
+
+        let (observed, disposition, activation_started) =
+            parent.join().expect("parent completed read-back");
+        assert_eq!(observed, outsider);
+        assert!(
+            matches!(
+                disposition,
+                super::super::config_transaction::ProfileTransitionDisposition::Indeterminate { .. }
+            ),
+            "a divergent post-child read-back must be indeterminate"
+        );
+        assert!(!activation_started, "activation must not start from divergent read-back");
+        assert_ne!(prior, outsider);
+        assert_ne!(candidate, outsider);
+    }
+
+    #[test]
+    fn recovery_rejects_foreign_runtime_profile_pair_before_mutation_callback() {
+        let prior = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        let candidate = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate";
+        let foreign_runtime = "/nix/store/cccccccccccccccccccccccccccccccc-nixos-system-external";
+        let foreign_profile = "/nix/store/dddddddddddddddddddddddddddddddd-nixos-system-external-profile";
+        let mut recovery_mutation_callback_count = 0usize;
+
+        let decision = NixOSExecutor::validate_exact_recovery_observation(
+            foreign_runtime,
+            foreign_profile,
+            candidate,
+            candidate,
+            prior,
+            prior,
+            SystemActivation::Switch,
+        );
+        if decision.is_ok() {
+            // Models the only branch allowed to invoke the subsequent
+            // privileged recovery callback after the production admission check.
+            recovery_mutation_callback_count += 1;
+        }
+
+        assert!(decision.is_err(), "a foreign runtime/profile pair is outside the recovery allow-set");
+        assert_eq!(
+            recovery_mutation_callback_count, 0,
+            "recovery must not overwrite foreign state"
+        );
+    }
+
+    #[test]
+    fn worker_release_profile_guard_requires_exact_prestate_and_fails_closed() {
+        let expected = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior";
+        assert!(NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Ok(expected.to_string()),
+        )
+        .is_ok());
+
+        let drift = NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Ok("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-external".into()),
+        )
+        .expect_err("an external profile change must prevent worker release");
+        assert!(drift.contains("system-profile drift before worker release"));
+        assert!(drift.contains(expected));
+        assert!(drift.contains("nixos-system-external"));
+        assert!(drift.contains("payload remains unreleased"));
+
+        let unavailable = NixOSExecutor::validate_system_profile_before_worker_release(
+            expected,
+            Err("injected observation failure".into()),
+        )
+        .expect_err("failed profile observation must prevent worker release");
+        assert!(unavailable.contains("could not re-observe system profile"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_publication_journal_error_remains_classified_before_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        committed.persist_atomic(&path).unwrap();
+        let committed_bytes = std::fs::read(&path).unwrap();
+        let mut pending = committed.clone();
+        pending.advance(super::super::config_transaction::ConfigTransactionPhase::InputFrozen).unwrap();
+
+        let message = NixOSExecutor::persist_transaction_with_hook(
+            &pending,
+            &path,
+            |boundary| {
+                if boundary == super::super::config_transaction::JournalPersistBoundary::CandidateCreate {
+                    Err("injected failure before create".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("pre-publication fault must return an error");
+
+        assert!(message.contains("before publication"));
+        assert!(!message.contains("rename already published"));
+        assert_eq!(std::fs::read(&path).unwrap(), committed_bytes);
+        assert_eq!(
+            super::super::config_transaction::ConfigTransaction::load(&path).unwrap().phase(),
+            super::super::config_transaction::ConfigTransactionPhase::Prepared
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_publication_journal_error_reads_back_state_and_requires_fresh_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let transaction = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        let message = NixOSExecutor::persist_transaction_with_hook(
+            &transaction,
+            &path,
+            |boundary| {
+                if boundary == super::super::config_transaction::JournalPersistBoundary::DirectorySync {
+                    Err("injected persistence failure at DirectorySync".into())
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("injected directory-sync failure must be reported after rename");
+        assert!(message.contains("read-back confirms transaction"));
+        assert!(message.contains("directory durability remains indeterminate"));
+        assert!(message.contains("freshly observe runtime and system-profile state"));
+        assert!(message.contains("no subsequent mutation"));
+    }
+
+    #[test]
+    fn post_publication_journal_error_fails_closed_on_readback_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let intended = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+        );
+        let other = super::super::config_transaction::ConfigTransaction::new(
+            [4; 32],
+            [5; 32],
+            [6; 32],
+        );
+        other.persist_atomic(&path).unwrap();
+
+        let message = NixOSExecutor::post_publication_persist_error(
+            &intended,
+            &path,
+            "journal rename already published; parent-directory durability is indeterminate: injected",
+        );
+        assert!(message.contains("read-back does not match the intended"));
+        assert!(message.contains("State is ambiguous"));
+        assert!(message.contains("fail closed"));
+    }
+
+    #[tokio::test]
+    async fn transactional_activation_and_recovery_fail_closed_in_dry_run() {
+        let mut executor = NixOSExecutor::new().with_dry_run(true);
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into(),
+            profile_store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate".into()),
+            action: SystemActivation::Switch,
+        };
+        let unrelated_read_only = NixOSCommand::Search {
+            query: "dry-run guard regression".into(),
+            json: false,
+        };
+        let authorization = ExecutionAuthorization::automatic_read_only(&unrelated_read_only).unwrap();
+
+        let activation = executor
+            .execute_authorized_with_transaction(
+                command.clone(),
+                authorization.clone(),
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                activation,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
+            "dry-run activation must reject before journal validation or mutation"
+        );
+
+        let recovery = executor
+            .recover_authorized_transaction(
+                command,
+                authorization,
+                "not-a-transaction-id",
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                recovery,
+                ExecutionResult::Blocked { ref reason, .. } if reason.contains("dry-run")
+            ),
+            "dry-run recovery must reject before journal validation or mutation"
+        );
+    }
+
+    #[test]
     fn environment_digest_is_order_independent_but_value_sensitive() {
         let a = [("HOME", "/root"), ("PATH", "/run/current-system/sw/bin")];
         let b = [("PATH", "/run/current-system/sw/bin"), ("HOME", "/root")];
@@ -3395,7 +4196,6 @@ mod tests {
         );
     }
 
-    #[test]
     #[test]
     fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
         let dir = tempfile::tempdir().unwrap();
@@ -4450,19 +5250,801 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn nixward_transaction_interlock_is_exclusive_and_releases() {
+    fn nixward_transaction_interlock_rejects_special_lock_mode_bits() {
+        assert!(NixwardTransactionInterlock::lock_mode_is_valid(0o600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o640));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o4600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o2600));
+        assert!(!NixwardTransactionInterlock::lock_mode_is_valid(0o1600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_unexpected_parent_owner() {
+        use std::os::unix::fs::MetadataExt;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nixward.lock");
+        let actual_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary directory")
+            .uid();
+        let unexpected_uid = actual_uid ^ 1;
 
-        let first = NixwardTransactionInterlock::acquire_at(&path).expect("first lock");
-        let second = NixwardTransactionInterlock::acquire_at(&path);
-        assert!(second
-            .expect_err("second exclusive lock must fail closed")
-            .contains("already held"));
+        let error = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(unexpected_uid),
+        )
+        .expect_err("parent ownership must match the explicitly trusted uid");
+        assert!(error.contains("expected"));
+        assert!(error.contains(&unexpected_uid.to_string()));
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_symlink_lock_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        let link = dir.path().join("nixward.lock");
+        std::fs::write(&target, b"").expect("create target");
+        symlink(&target, &link).expect("create symlink");
+
+        let error = NixwardTransactionInterlock::acquire_at(&link)
+            .expect_err("the lock must not follow a symlink");
+        assert!(error.contains("failed to open Nixward transaction lock"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_writable_parent_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777))
+            .expect("make directory deliberately unsafe");
+        let path = dir.path().join("nixward.lock");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("a group/world-writable parent can permit lock replacement");
+        assert!(error.contains("group/world-writable"));
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore secure temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_group_or_other_access_on_lock_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        std::fs::write(&path, b"").expect("create lock file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("make lock file deliberately unsafe");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("group-readable lock files must be rejected");
+        assert!(error.contains("owner-readable/writable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_rejects_multiple_hard_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let alias = dir.path().join("alias.lock");
+        std::fs::write(&path, b"").expect("create lock file");
+        std::fs::hard_link(&path, &alias).expect("create hard-link alias");
+
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("a multiply-linked lock inode must be rejected");
+        assert!(error.contains("exactly one hard link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_keeps_lock_path_and_inode_stable_after_release() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let parent_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary parent")
+            .uid();
+        let first = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("first acquisition with an explicit trusted parent uid");
+        let first_metadata = std::fs::symlink_metadata(&path).expect("lock path exists");
+        assert_eq!(first_metadata.nlink(), 1);
         drop(first);
+
+        let after_release = std::fs::symlink_metadata(&path)
+            .expect("release must not unlink the stable coordinator path");
+        assert_eq!(after_release.dev(), first_metadata.dev());
+        assert_eq!(after_release.ino(), first_metadata.ino());
+
+        let second = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("same stable inode can be reacquired with the same trusted parent uid");
+        let second_metadata = std::fs::symlink_metadata(&path).expect("lock path persists");
+        assert_eq!(second_metadata.dev(), first_metadata.dev());
+        assert_eq!(second_metadata.ino(), first_metadata.ino());
+        drop(second);
+    }
+
+    #[cfg(unix)]
+    fn write_test_transaction_journal(root: &Path, phase: &str) -> String {
+        let source_dir = tempfile::tempdir().expect("source tempdir");
+        std::fs::write(
+            source_dir.path().join("configuration.nix"),
+            "{ config = {}; }\n",
+        )
+        .expect("write immutable source fixture");
+        let source = super::super::config_transaction::FrozenConfigSource::capture(
+            source_dir.path(),
+            "configuration.nix",
+        )
+        .expect("capture frozen source");
+        let mut source_digest = [0u8; 32];
+        for (index, chunk) in source.root_digest.as_bytes().chunks_exact(2).enumerate() {
+            source_digest[index] = u8::from_str_radix(
+                std::str::from_utf8(chunk).expect("hex digest is ASCII"),
+                16,
+            )
+            .expect("source digest is canonical hex");
+        }
+        let nonce = if phase == "input_frozen" { [3; 32] } else { [2; 32] };
+        let mut transaction = super::super::config_transaction::ConfigTransaction::new(
+            [1; 32],
+            nonce,
+            source_digest,
+        );
+        transaction
+            .advance(super::super::config_transaction::ConfigTransactionPhase::InputFrozen)
+            .expect("advance test journal to input-frozen");
+        transaction
+            .bind_frozen_source(&source)
+            .expect("bind exact frozen source");
+        let transaction_id = transaction.transaction_id().to_string();
+        let mut value = serde_json::to_value(&transaction).expect("serialize test journal");
+        value["phase"] = serde_json::Value::String(phase.to_string());
+        let journal_path = root.join(format!("{transaction_id}.json"));
+        std::fs::write(
+            &journal_path,
+            serde_json::to_vec(&value).expect("encode test journal"),
+        )
+        .expect("persist test journal");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make fixture journal owner-only");
+        transaction_id
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    struct NixwardTestProcessGroupGuard {
+        pgid: nix::libc::pid_t,
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    impl Drop for NixwardTestProcessGroupGuard {
+        fn drop(&mut self) {
+            // The supervisor may have been killed while its worker survives.
+            // Kill the isolated test process group on every exit path so a failed
+            // assertion cannot leave the subprocess behind.
+            unsafe {
+                let _ = nix::libc::kill(-self.pgid, nix::libc::SIGKILL);
+            }
+        }
+    }
+
+    /// Isolated test-binary entrypoint for a process that models an activation
+    /// child. It parks indefinitely after announcing readiness to its supervisor.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn nixward_interlock_activation_worker_process_child() {
+        if std::env::var_os("NIXWARD_TEST_ACTIVATION_WORKER_CHILD").is_none() {
+            return;
+        }
+        use std::io::Write;
+
+        println!("NIXWARD_ACTIVATION_WORKER_READY");
+        std::io::stdout()
+            .flush()
+            .expect("flush activation worker readiness");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// Isolated test-binary entrypoint for the lease owner. It acquires the real
+    /// interlock, starts an independent worker process, and remains alive until
+    /// the parent test kills it without running Rust destructors.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn nixward_interlock_supervisor_process_child() {
+        let Ok(lock_path) = std::env::var("NIXWARD_TEST_SUPERVISOR_LOCK_PATH") else {
+            return;
+        };
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::fd::AsRawFd;
+        use std::process::{Command, Stdio};
+
+        let _interlock = NixwardTransactionInterlock::acquire_at(Path::new(&lock_path))
+            .expect("child supervisor acquires real Nixward interlock");
+        let executable = std::env::current_exe().expect("resolve current test binary");
+        let mut worker = Command::new(executable)
+            .arg("nixward_interlock_activation_worker_process_child")
+            .arg("--nocapture")
+            .env("NIXWARD_TEST_ACTIVATION_WORKER_CHILD", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn independent activation worker process");
+        let worker_pid = worker.id();
+        let child_stdout = worker
+            .stdout
+            .take()
+            .expect("activation worker stdout is piped");
+        let mut reader = BufReader::new(child_stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.buffer().is_empty() {
+                let mut pollfd = nix::libc::pollfd {
+                    fd: reader.get_ref().as_raw_fd(),
+                    events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+                assert!(ready > 0, "activation worker did not signal readiness");
+            }
+            let count = reader
+                .read_line(&mut line)
+                .expect("read activation worker readiness");
+            assert!(count > 0, "activation worker exited before readiness");
+            if line.contains("NIXWARD_ACTIVATION_WORKER_READY") {
+                break;
+            }
+        }
+        println!("NIXWARD_SUPERVISOR_WORKER_PID={worker_pid}");
+        std::io::stdout()
+            .flush()
+            .expect("flush supervisor readiness");
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[test]
+    fn unresolved_journal_blocks_new_mutation_after_supervisor_process_dies() {
+        use std::io::{BufRead, BufReader};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let lock_path = dir.path().join("nixward.lock");
+        let executable = std::env::current_exe().expect("resolve current test binary");
+
+        let mut owner_command = Command::new(executable);
+        owner_command
+            .arg("nixward_interlock_supervisor_process_child")
+            .arg("--nocapture")
+            .env("NIXWARD_TEST_SUPERVISOR_LOCK_PATH", &lock_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        owner_command.process_group(0);
+        let mut supervisor = owner_command
+            .spawn()
+            .expect("spawn isolated interlock-owning supervisor");
+        let _process_group_guard = NixwardTestProcessGroupGuard {
+            pgid: supervisor.id() as nix::libc::pid_t,
+        };
+        let stdout = supervisor
+            .stdout
+            .take()
+            .expect("supervisor stdout is piped");
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        let worker_pid = loop {
+            line.clear();
+            if reader.buffer().is_empty() {
+                let mut pollfd = nix::libc::pollfd {
+                    fd: reader.get_ref().as_raw_fd(),
+                    events: nix::libc::POLLIN | nix::libc::POLLHUP,
+                    revents: 0,
+                };
+                let ready = unsafe { nix::libc::poll(&mut pollfd, 1, 15_000) };
+                assert!(ready > 0, "supervisor did not expose worker identity");
+            }
+            let count = reader
+                .read_line(&mut line)
+                .expect("read supervisor readiness");
+            assert!(count > 0, "supervisor exited before exposing worker identity");
+            if let Some(offset) = line.find("NIXWARD_SUPERVISOR_WORKER_PID=") {
+                let suffix = &line[offset + "NIXWARD_SUPERVISOR_WORKER_PID=".len()..];
+                let value = suffix
+                    .split_whitespace()
+                    .next()
+                    .expect("supervisor output contains worker PID");
+                break value
+                    .parse::<u32>()
+                    .expect("supervisor worker PID is decimal");
+            }
+        };
+
+        let start_before = NixOSExecutor::proc_start_time_ticks(worker_pid)
+            .expect("read worker start identity")
+            .expect("worker must still exist");
+        let worker_pidfd = NixOSExecutor::open_pidfd(worker_pid)
+            .expect("open pidfd for the activation worker");
+        assert_eq!(
+            NixOSExecutor::proc_start_time_ticks(worker_pid)
+                .expect("re-read worker start identity"),
+            Some(start_before),
+            "worker PID identity must remain stable across pidfd acquisition"
+        );
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll worker pidfd"),
+            "activation worker must be live before supervisor termination"
+        );
+
+        // SIGKILL the lock owner: no Drop runs, so the kernel releases its flock
+        // while the separately-running activation worker remains alive.
+        supervisor.kill().expect("kill interlock-owning supervisor");
+        let _ = supervisor.wait().expect("reap supervisor child");
+
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll surviving worker"),
+            "activation worker must outlive the supervisor process"
+        );
+        let _next_owner = NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("kernel released the dead supervisor's interlock");
+
+        let admission = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        );
+        let error = admission.expect_err(
+            "unresolved ActivationStarted journal must block mutation despite free flock",
+        );
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("ActivationStarted"));
+        assert!(
+            !NixOSExecutor::pidfd_exited(&worker_pidfd).expect("poll worker after admission"),
+            "admission check must block while the activation worker is still alive"
+        );
+
+        NixOSExecutor::signal_pidfd(&worker_pidfd, nix::libc::SIGKILL)
+            .expect("terminate the isolated activation worker");
+        let mut worker_pollfd = nix::libc::pollfd {
+            fd: worker_pidfd.as_raw_fd(),
+            events: nix::libc::POLLIN | nix::libc::POLLHUP,
+            revents: 0,
+        };
+        let exited = unsafe { nix::libc::poll(&mut worker_pollfd, 1, 5_000) };
+        assert!(exited > 0, "activation worker termination must be observable");
+        assert!(
+            NixOSExecutor::pidfd_exited(&worker_pidfd).expect("confirm worker exit"),
+            "worker pidfd must report terminal process state after cleanup"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_peer_journal_blocks_new_transaction_after_interlock_reacquisition() {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let lock_path = dir.path().join("nixward.lock");
+        let current_id = "f".repeat(64);
+        let (worker_started_tx, worker_started_rx) = mpsc::channel();
+        let (allow_worker_exit_tx, allow_worker_exit_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_started_tx.send(()).expect("signal simulated activation is live");
+            allow_worker_exit_rx.recv().expect("hold worker until admission check completes");
+        });
+        worker_started_rx.recv().expect("worker must be live before owner loss");
+
+        // Model the supervisor losing its lease while the journaled activation
+        // worker is still live. A later actor can acquire flock, but the journal
+        // admission check must stop it before any second mutation is started.
+        drop(NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("first coordinator owner acquires interlock"));
+        let _next_owner = NixwardTransactionInterlock::acquire_at(&lock_path)
+            .expect("kernel lock is available after prior owner exits");
+        let result = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            Some(&current_id),
+            None,
+        );
+
+        allow_worker_exit_tx.send(()).expect("allow simulated activation to exit");
+        worker.join().expect("simulated activation worker exits cleanly");
+        let error = result.expect_err("unresolved activation journal must block next mutation");
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("ActivationStarted"));
+        assert!(error.contains("reconcile it"));
+
+        let no_current_id_error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("non-journaled activation must also block on the unresolved peer");
+        assert!(no_current_id_error.contains(&peer_id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_journal_scan_skips_current_transaction_and_allows_pre_mutation_peers() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let current_id = write_test_transaction_journal(dir.path(), "activation_started");
+        let _pre_mutation_peer = write_test_transaction_journal(dir.path(), "input_frozen");
+
+        NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            Some(&current_id),
+            None,
+        )
+        .expect("the current transaction is exempt and pre-mutation peers are safe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_group_or_world_writable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "b".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("make journal deliberately unsafe");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("a writable journal must block transaction admission");
+        assert!(error.contains("group/world-writable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_multiple_hard_links() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "c".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        let alias = dir.path().join("alias.json");
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("make fixture owner-only");
+        std::fs::hard_link(&path, &alias).expect("create hard link");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("a journal with a second hard link must not be trusted");
+        assert!(error.contains("exactly one hard link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_symlink_is_rejected_before_loading() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "d".repeat(64);
+        let target = dir.path().join("target.json");
+        let link = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&target, b"not-json").expect("write symlink target");
+        symlink(&target, &link).expect("create journal symlink");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal scanner must reject symlink entries before parsing");
+        assert!(error.contains("not a regular non-symlink file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_filename_must_match_embedded_transaction_id() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let transaction_id = write_test_transaction_journal(dir.path(), "input_frozen");
+        let original = dir.path().join(format!("{transaction_id}.json"));
+        let renamed_id = if transaction_id.starts_with('a') {
+            format!("b{}", &transaction_id[1..])
+        } else {
+            format!("a{}", &transaction_id[1..])
+        };
+        std::fs::rename(&original, dir.path().join(format!("{renamed_id}.json")))
+            .expect("rename journal under a mismatching identity");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal filename must bind to its embedded transaction identity");
+        assert!(error.contains("does not match its filename"));
+    }
+
+    #[test]
+    fn reconciliation_phase_classification_is_exhaustive_for_transaction_lifecycle() {
+        use super::super::config_transaction::ConfigTransactionPhase as Phase;
+
+        for phase in [
+            Phase::ProfileTransitionStarted,
+            Phase::ProfileCommitted,
+            Phase::IndeterminateProfileTransition,
+            Phase::ActivationStarted,
+            Phase::IndeterminateActivation,
+            Phase::RecoveryObservation,
+            Phase::RecoveryRequired,
+            Phase::RecoveryMutationStarted,
+        ] {
+            assert!(
+                NixOSExecutor::phase_requires_reconciliation(phase),
+                "{phase:?} must require reconciliation"
+            );
+        }
+        for phase in [
+            Phase::Prepared,
+            Phase::InputFrozen,
+            Phase::CandidateBuilt,
+            Phase::SourceCommitted,
+            Phase::FailedBeforeActivation,
+            Phase::Activated,
+            Phase::BootSelected,
+            Phase::Recovered,
+        ] {
+            assert!(
+                !NixOSExecutor::phase_requires_reconciliation(phase),
+                "{phase:?} is not a nonterminal mutation phase"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_group_read_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "e".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("make journal group-readable");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("private journals must not grant group/other read access");
+        assert!(error.contains("group/other read or execute access"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn peer_journal_rejects_special_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "f".repeat(64);
+        let path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&path, b"not-json").expect("write fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o4600))
+            .expect("set a deliberately unsafe special bit");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("journal scanner must reject special mode bits");
+        assert!(error.contains("forbidden special permission bits"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_root_symlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("fixture root");
+        let target = dir.path().join("target");
+        let link = dir.path().join("root-link");
+        std::fs::create_dir(&target).expect("create real target directory");
+        symlink(&target, &link).expect("create root symlink");
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            &link,
+            None,
+            None,
+        )
+        .expect_err("journal root symlink must be rejected");
+        assert!(error.contains("not a real directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_peer_journal_blocks_new_transaction_fail_closed() {
+        let dir = tempfile::tempdir().expect("journal root");
+        let peer_id = "a".repeat(64);
+        let malformed_path = dir.path().join(format!("{peer_id}.json"));
+        std::fs::write(&malformed_path, b"not-json").expect("write malformed journal");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&malformed_path, std::fs::Permissions::from_mode(0o600))
+                .expect("make malformed fixture owner-only");
+        }
+
+        let error = NixOSExecutor::ensure_no_unresolved_peer_transactions_at(
+            dir.path(),
+            None,
+            None,
+        )
+        .expect_err("unparseable peer journal prevents proving no outstanding mutation");
+
+        assert!(error.contains(&peer_id));
+        assert!(error.contains("cannot establish safe disposition"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_holds_profile_transition_through_activation_and_readback() {
+        use std::sync::{Arc, Mutex, mpsc};
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct State {
+            selected_profile: &'static str,
+            running_closure: &'static str,
+            activation_order: Vec<&'static str>,
+            generation_links: Vec<&'static str>,
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let parent_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary parent")
+            .uid();
+        let state = Arc::new(Mutex::new(State {
+            selected_profile: "prior",
+            running_closure: "prior",
+            activation_order: Vec::new(),
+            generation_links: vec!["prior"],
+        }));
+
+        // Actor A owns the coordinator before profile publication and retains
+        // it through activation and read-back.
+        let a_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("A acquires coordinator before pre-state/publication");
+        {
+            let mut current = state.lock().expect("state mutex");
+            assert_eq!(current.selected_profile, "prior");
+            assert_eq!(current.running_closure, "prior");
+            current.selected_profile = "A";
+            current.generation_links.push("A");
+        }
+
+        let (b_attempted_tx, b_attempted_rx) = mpsc::channel();
+        let (b_rejected_tx, b_rejected_rx) = mpsc::channel();
+        let (allow_b_retry_tx, allow_b_retry_rx) = mpsc::channel();
+        let (b_finished_tx, b_finished_rx) = mpsc::channel();
+        let b_path = path.clone();
+        let b_state = Arc::clone(&state);
+
+        let actor_b = std::thread::spawn(move || {
+            // B signals its request, then fails closed rather than publishing
+            // while A holds the real cross-process-style file lock.
+            b_attempted_tx.send(()).expect("signal B request");
+            let error = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+                &b_path,
+                Some(parent_uid),
+            )
+            .expect_err("B must not enter A's publication-to-readback interval");
+            assert!(error.contains("already held"));
+            b_rejected_tx.send(()).expect("signal B was rejected");
+
+            allow_b_retry_rx.recv().expect("wait for A's readback and release");
+            let _b_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+                &b_path,
+                Some(parent_uid),
+            )
+            .expect("B retries after A releases the coordinator");
+            let snapshot = {
+                let mut current = b_state.lock().expect("state mutex");
+                // This re-observation is after acquiring the coordinator:
+                // B must not rely on the stale 'prior' state from before A.
+                assert_eq!(current.selected_profile, "A");
+                assert_eq!(current.running_closure, "A");
+                current.selected_profile = "B";
+                current.generation_links.push("B");
+                current.running_closure = "B";
+                current.activation_order.push("B");
+                (
+                    current.selected_profile,
+                    current.running_closure,
+                    current.activation_order.clone(),
+                    current.generation_links.clone(),
+                )
+            };
+            b_finished_tx.send(snapshot).expect("return B post-state");
+        });
+
+        b_attempted_rx.recv().expect("B has requested a transition");
+        b_rejected_rx.recv().expect("B was excluded by A's lease");
+        {
+            let mut current = state.lock().expect("state mutex");
+            // B's rejected attempt cannot mutate selected profile or runtime.
+            assert_eq!(current.selected_profile, "A");
+            assert_eq!(current.running_closure, "prior");
+            assert!(current.activation_order.is_empty());
+            current.running_closure = "A";
+            current.activation_order.push("A");
+            // A's readback oracle is the A/A pair before lease release.
+            assert_eq!(current.selected_profile, "A");
+            assert_eq!(current.running_closure, "A");
+        }
+
+        drop(a_lock);
+        allow_b_retry_tx.send(()).expect("allow B only after A readback");
+        let b_snapshot = b_finished_rx.recv().expect("B must complete after A");
+        assert_eq!(b_snapshot.0, "B");
+        assert_eq!(b_snapshot.1, "B");
+        assert_eq!(b_snapshot.2, vec!["A", "B"]);
+        assert_eq!(b_snapshot.3, vec!["prior", "A", "B"]);
+        actor_b.join().expect("B thread completes without panic");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let holder_path = path.clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let holder = std::thread::spawn(move || {
+            let lock = NixwardTransactionInterlock::acquire_at(&holder_path)
+                .expect("actor A acquires the transaction interlock");
+            held_tx.send(()).expect("notify lock acquisition");
+            release_rx.recv().expect("wait for deterministic release barrier");
+            drop(lock);
+        });
+
+        held_rx.recv().expect("actor A must hold the interlock before actor B runs");
+        let error = NixwardTransactionInterlock::acquire_at(&path)
+            .expect_err("actor B must fail before its protected mutation boundary");
+        assert!(error.contains("already held"));
+
+        release_tx.send(()).expect("release actor A");
+        holder.join().expect("actor A exits after dropping the lock");
         NixwardTransactionInterlock::acquire_at(&path)
-            .expect("lock must be reusable after release");
+            .expect("actor B can acquire after actor A releases");
     }
 
 }

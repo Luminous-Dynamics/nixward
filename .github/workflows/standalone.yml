@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   bootstrap-lockfile:
-    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.ref != 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09' }}
     runs-on: ubuntu-latest
     concurrency:
       group: standalone-bootstrap-${{ github.ref }}
@@ -71,6 +71,8 @@ jobs:
 
       - name: Persist generated lockfile
         if: steps.lockfile.outputs.needed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
@@ -235,6 +237,9 @@ jobs:
       - name: Run library tests
         run: cargo test --locked --lib
 
+      - name: Run worker-gate protocol tests
+        run: cargo test --locked --bin nixward-worker-gate
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -279,6 +284,173 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+
+  draft-lockfile-artifact:
+    name: Draft candidate lockfile artifact (not qualification)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      cargo_lock_sha256: ${{ steps.lockfile_digest.outputs.cargo_lock_sha256 }}
+      artifact_digest: ${{ steps.upload_lockfile.outputs.artifact-digest }}
+    steps:
+      - name: Check out exact draft commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Bind lockfile generation to exact branch tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin "$GITHUB_REF_NAME"
+          test "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Prepare exact-run Cargo.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f Cargo.lock ]; then
+            cargo metadata --locked --format-version=1 >/dev/null
+            echo "Using Cargo.lock from the exact draft commit"
+          else
+            cargo generate-lockfile
+            cargo metadata --locked --format-version=1 >/dev/null
+            echo "Generated Cargo.lock for this exact draft commit"
+          fi
+          test -f Cargo.lock
+
+      - name: Hash exact-run Cargo.lock
+        id: lockfile_digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "cargo_lock_sha256=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "Draft Cargo.lock SHA-256: $(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_STEP_SUMMARY"
+          echo "This lockfile is a same-run draft artifact, not a qualification receipt." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload same-run draft lockfile
+        id: upload_lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nixward-draft-cargo-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+
+  draft-candidate-check:
+    name: Draft hardening candidate checks (not qualification)
+    needs:
+      - draft-lockfile-artifact
+    # Consume only the lockfile produced for this exact commit and workflow run.
+    # This job deliberately emits no qualification receipt or attestation.
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09' && needs.draft-lockfile-artifact.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact draft commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Bind tests to the current draft branch tip
+        id: subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git fetch --no-tags origin "$GITHUB_REF_NAME"
+          tested_commit="$(git rev-parse HEAD)"
+          branch_tip="$(git rev-parse FETCH_HEAD)"
+          test "$tested_commit" = "$GITHUB_SHA"
+          test "$branch_tip" = "$GITHUB_SHA"
+          echo "tested_commit=$tested_commit" >> "$GITHUB_OUTPUT"
+          echo "Draft candidate source tested: $tested_commit" >> "$GITHUB_STEP_SUMMARY"
+          echo "This is candidate CI only; it does not issue a qualification receipt." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download exact-run draft lockfile
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: nixward-draft-cargo-lock-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .
+
+      - name: Verify exact-run lockfile digest
+        env:
+          EXPECTED_CARGO_LOCK_SHA256: ${{ needs.draft-lockfile-artifact.outputs.cargo_lock_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock
+          actual="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          test "$actual" = "$EXPECTED_CARGO_LOCK_SHA256"
+          echo "Consumed exact-run Cargo.lock SHA-256: $actual" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+          cargo --version
+
+      - name: Verify workflow authority boundary
+        run: python3 scripts/verify-workflow-boundary.py
+
+      - name: Verify immutable action pins
+        run: python3 scripts/verify-action-pins.py
+
+      - name: Verify standalone filesystem boundary
+        run: python3 scripts/verify-standalone-boundary.py
+
+      - name: Check default feature set
+        run: cargo check --locked --all-targets
+
+      - name: Check full native feature set
+        run: cargo check --locked --all-targets --features full
+
+      - name: Run library tests
+        run: cargo test --locked --lib
+
+      - name: Run worker-gate protocol tests
+        run: cargo test --locked --bin nixward-worker-gate
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Stage exact-run lockfile for Git-backed flake source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add --intent-to-add -f Cargo.lock
+          git ls-files --error-unmatch Cargo.lock >/dev/null
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # main as of 2026-09-09
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+
+      - name: Check locked flake
+        run: nix flake check --no-update-lock-file --no-write-lock-file
+
+      - name: Build CLI, TUI, and daemon packages
+        run: nix build .#nixward .#nixward-tui .#nixward-daemon --no-update-lock-file --no-write-lock-file
   nix:
     name: Nix packaging
     needs:

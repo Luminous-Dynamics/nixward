@@ -169,11 +169,16 @@ Only the already-authorized exact command/patch/capability may execute.
 For an exact NixOS system closure activation, Nixward first takes its
 cross-process transaction interlock before the final pre-state validation. The
 authorized profile target is then set and verified, after which the exact
-closure's `switch-to-configuration` action is invoked. Nixward does not hold
-the Nix profile lock across the child activation: `nix-env --set` owns its
-profile lock for its own mutation, while `switch-to-configuration` uses its
-own activation lock. This keeps the interlocks composable rather than creating
-self-deadlock. The executor must not reinterpret the approved request,
+closure's `switch-to-configuration` action is invoked. Nixward's cross-process transaction interlock is distinct from Nix's
+operation-specific profile and activation locks. **Do not assume
+`nix-env --set` owns the profile lock:** upstream Nix 2.34.8's `opSet` path
+calls `createGeneration` and `switchLink` without acquiring
+`lockProfile`/`optimisticLockProfile`
+([source](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801)).
+`switch-to-configuration` has a separate activation boundary; it does not
+retroactively serialize the profile write. These boundaries must remain
+separate in the model until a supported conditional profile transition is
+implemented. The executor must not reinterpret the approved request,
 substitute an ambient generation selector, or silently redirect the profile
 target.
 
@@ -375,16 +380,31 @@ verify the observed post-recovery running closure
 Recovery evidence records the exact closure targeted for recovery and the exact
 post-recovery closure observed by Nixward.
 
-The exact system-profile transition is now part of the privileged activation
-primitive. The Nixward transaction interlock remains held across the exact
-profile transition, the immutable `switch-to-configuration` action, and
-post-state verification/recovery. The underlying Nix profile mutation and the
-closure activation retain their own Nix-managed locks; Nixward does not hold
-the profile lock across the child activation. This prevents concurrent Nixward
-transactions from interleaving while preserving Nix's native activation
-serialization. It does not authorize or claim to prevent arbitrary direct
-filesystem mutation that bypasses Nix's locking protocol, nor does it remove
-the unsupported external-writer compare-and-set gap documented in Issue #9.
+The exact system-profile transition is part of the privileged activation
+primitive, and the Nixward transaction interlock remains held across profile
+transition, immutable `switch-to-configuration` execution, and
+post-state verification/recovery. This serializes Nixward-owned transactions;
+it does not, by itself, serialize every external writer.
+
+**Do not assume that `nix-env --set` supplies a native profile lock.**
+Both the older upstream Nix `2.28.5` source
+([audit](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765))
+and the Nix `2.34.8` source selected by this branch's locked nixpkgs baseline
+([audit](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801))
+show `opSet` calling `createGeneration` followed by `switchLink` without
+calling `lockProfile` or `optimisticLockProfile` in that path. Other profile
+operations such as `switchGeneration` explicitly call `lockProfile`. Locking
+must therefore be audited per operation and per deployed Nix version. Nixward
+must record each target's exact Nix version/build and matching source before
+relying on any native writer-lock claim; the Nix 2.34.8 finding still does not
+prove every target runs the same build.
+
+The worker launcher still performs a fresh exact profile observation
+immediately before releasing the gated worker. That check is not atomic with
+the later profile mutation or payload execution. It cannot exclude an
+unmodified `nix-env --set` implementation with no shared lock, nor an unrelated
+privileged writer that races after the observation or bypasses Nixward's lock.
+The external-writer compare-and-set gap documented in Issue #9 remains open.
 
 Bootloader-specific next-boot selection remains a separate evidence boundary
 tracked in Issue #8 and must not be silently folded into the runtime or profile
@@ -517,7 +537,7 @@ Recovery reacquires a pidfd for each recorded worker and checks boot identity an
 
 The invocation digest covers the executable and each length-framed argument, including boundaries. The process environment is cleared and rebuilt from a fixed allow-list (`HOME`, locale, `NIX_USER_CONF_FILES`, `PATH`, terminal/color, and XDG config). The environment digest is stored with the worker receipt so the exact launch policy is auditable. NixOS's generated activation script establishes its own PATH from declared system dependencies; the worker PATH is only the launcher environment, not a substitute for that build-time dependency closure.
 
-The transaction journal schema is now `luminous-nixward-config-transaction-v6`. Worker receipts without the required environment digest and observed process image are intentionally invalid; the executor will not silently promote an older incomplete receipt to current worker authority.
+The transaction journal schema is now `luminous-nixward-config-transaction-v7`. Worker receipts without the required environment digest and observed process image are intentionally invalid; the executor will not silently promote an older incomplete receipt to current worker authority.
 
 Qualification is still contingent on a completed hosted run for the exact synchronized hardening/validation head. Pidfd semantics are grounded in Linux `pidfd_open(2)` (stable task handle and pollable exit indication) and the current Rust/Tokio process APIs; the implementation uses the Linux syscall path because Rust's standard-library pidfd wrapper remains experimental.
 
@@ -536,3 +556,351 @@ The accepted exports include the current Nixpkgs `SYSTEMD` setting in addition t
 The unit fixture covers the current direct-exec wrapper plus rejection of wrong `OUT`/`TOPLEVEL` binding, mutable helper paths, pre-exec payloads, command substitution, forbidden environment exports, shell `-c` indirection, and argument drift.
 
 Qualification remains evidence-gated: this source review is not a compiler result. Exact-head hosted validation must run the real test matrix before the branch can be classified as qualified.
+
+## Journal-owned activation capability (2026-10-09)
+
+The public activation and recovery entry points treat command, signed
+authorization, and transaction ID as inputs to journal admission, not as a
+standalone execution capability. A shared journal validator binds the
+transaction identity and plan digest to the retained candidate receipt, exact
+installable selector, realization-plan digest, selected profile, and permitted
+phase before an ephemeral capability can be issued. The mutation routines
+accept only their corresponding non-cloneable, non-serializable capability
+while the transaction interlock remains held. Primary activation and recovery
+use different capability types so recovery admission cannot be relabelled as
+new activation.
+
+Dry-run mode now rejects both privileged entry points before journal loading,
+transition, or worker spawn. Dry-run is a non-mutating preview, not a
+transactional activation success.
+
+This is a source-level architectural change, not a qualification receipt. The
+hardening and validation PR heads must remain exactly synchronized, and the
+exact head still requires completed hosted compiler/test evidence before a
+qualified status can be claimed.
+
+## Transaction journal persistence boundary (2026-10-10)
+
+On Unix, `ConfigTransaction::persist_atomic` writes a same-directory candidate
+through a descriptor opened relative to the canonical parent directory. The
+candidate is created with exclusive/no-follow flags and mode `0600`, completely
+written, file-synchronized, closed, atomically renamed over the journal target,
+and followed by parent-directory synchronization. Descriptor-relative operations
+reduce path substitution risk; the rename is the publication point, while the
+directory sync is the durability boundary for that name.
+
+These are distinct failure states:
+
+- **Before rename:** an ordinary candidate-create/write/file-sync/close/rename
+  failure should leave the previously committed journal target in place. The
+  existing regression test proves one specific case: an occupied PID-derived
+  temporary filename makes exclusive creation fail without changing the prior
+  journal bytes or phase.
+- **After rename, before confirmed directory sync:** the new journal may already
+  be visible even though `persist_atomic` returns an error. That error must not
+  be interpreted as proof that the previous bytes remain authoritative; the
+  replacement is published, but crash durability of the directory entry is
+  uncertain. The persistence API classifies failures as typed
+  `JournalPersistFailure::BeforePublication` or
+  `JournalPersistFailure::AfterPublication`; the executor branches on the enum
+  rather than parsing a diagnostic substring. It reloads the journal with schema
+  validation and compares the full serialized state against the intended
+  transaction. Matching read-back proves current visibility only. A mismatch or
+  read-back failure is reported as ambiguous and fails closed. The current call
+  authorizes no further mutation; a later recovery attempt must freshly observe
+  runtime and selected-profile state before choosing any recovery action. The
+  synchronous error handler does not itself perform those live runtime/profile
+  observations.
+- **After successful directory sync:** the implementation has completed the
+  intended file-data and directory-entry synchronization sequence. This is not,
+  by itself, evidence that the whole activation transaction succeeded.
+
+The Unix-test-only hook and checkpoint tests now cover six named control-flow
+boundaries: before candidate creation, after a deterministic first-half write,
+before candidate fsync, at the close boundary, before rename, and after rename
+but before parent-directory fsync. The executor tests exercise typed
+`BeforePublication` and `AfterPublication` outcomes, the actual injected
+directory-sync-boundary error, a validating journal read-back comparison, and
+read-back mismatch. A separate subprocess test exits without Rust cleanup at
+the partial-write boundary and after rename/before parent-directory fsync, then
+reopens the journal through the validating loader. It expects the previous
+journal before rename and the new journal to be visible after rename, and cleans
+up an abandoned candidate left by the partial-write child. These tests have not
+yet been compiled or executed. The subprocess test models process termination
+only: it does not discard the kernel page cache, simulate power loss, or prove
+durability across reboot. The injected close/rename/sync-boundary errors are
+application-level failpoints, not evidence that the corresponding kernel syscalls
+themselves returned errors; the close path still closes the real descriptor for
+cleanup, and the rename failpoint stops before calling rename. Stronger fault
+models remain required for any power-loss claim. Tests must assert both the
+returned disposition and the bytes/phase actually read back; they must not assume
+that every returned error means the old journal survived.
+
+## Deterministic profile race interleavings (2026-10-11)
+
+The profile race suite now encodes the distinct outcomes with channel barriers
+rather than sleeps:
+
+- `nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions`
+  runs actor A and actor B on separate threads. B cannot acquire Nixward's
+  interlock while A holds it, and can acquire it after A explicitly releases.
+  This establishes Nixward-to-Nixward exclusion only.
+- `external_writer_between_profile_guard_and_nix_env_set_is_a_reproducible_non_cas_counterexample`
+  pauses actor A after the production exact-profile precondition helper accepts
+  the prior state, lets an unrelated actor change the profile, and only then
+  allows the simulated non-CAS profile-set operation to target the candidate.
+  The resulting read-back can equal the candidate and the current classifier
+  can say `Committed`. That assertion is deliberately a counterexample oracle,
+  not a claim of safety: the final state does not establish that no external
+  writer intervened. It makes the remaining issue executable and reviewable.
+- `external_writer_after_child_exit_produces_indeterminate_readback_and_blocks_activation`
+  lets the simulated child finish, places an unrelated profile write at a
+  channel barrier before read-back, and requires the production classifier to
+  return `Indeterminate` and the modeled activation callback to remain
+  uninvoked.
+- `recovery_rejects_foreign_runtime_profile_pair_before_mutation_callback`
+  uses the production recovery allow-set validator and requires zero subsequent
+  recovery-mutation callback invocations for a foreign runtime/profile pair.
+
+The interleaving tests use in-memory state to control the scheduling boundary;
+they do not invoke the live system profile, `nix-env`, or the activation
+artifact, and they are not a kernel-level concurrency or privilege-isolation
+proof. They intentionally distinguish cases the current implementation can
+detect from the pre-check-to-write case it cannot detect without a shared
+conditional-update or mutation-broker boundary.
+
+The [Nix profile manual](https://nix.dev/manual/nix/2.35/package-management/profiles.html)
+describes the final profile symlink switch as atomic on Unix. Atomic
+replacement prevents a partially written link from being observed; by itself
+it does not compare the previous target with a caller-supplied expected value.
+The [`nix-env --set` reference](https://nix.dev/manual/nix/2.28/command-ref/nix-env/set)
+documents setting a profile to a specified derivation, not a caller-supplied
+expected-old-value conditional operation. These references support keeping the
+CAS gap explicit; they do not rule out other platform-specific designs that
+would need their own review and tests.
+
+The Rust tests above are authored, but have not been compiled or executed in
+this environment. Static review cannot be represented as a passing test.
+Keep Issue #9 open until the harness is run and the pre-check-to-write gap is
+either closed for the stated threat model or explicitly accepted as a residual.
+
+## Version-pinned Nix profile-mutation source audit (2026-10-11)
+
+The Nixward flake lock pins nixpkgs to
+[`0bb7ec54c8483066ec9d7720e780a5caa71f8612`](https://github.com/NixOS/nixpkgs/tree/0bb7ec54c8483066ec9d7720e780a5caa71f8612).
+At that exact nixpkgs revision, `nixVersions.latest` and `nixVersions.stable`
+both resolve to Nix 2.34.8
+([package version and aliases](https://github.com/NixOS/nixpkgs/blob/0bb7ec54c8483066ec9d7720e780a5caa71f8612/pkgs/tools/package-management/nix/default.nix#L174-L212)).
+That is the locked flake packaging baseline—not a promise that every deployed
+NixOS target uses the same host-side `nix.package`.
+
+At upstream Nix tag `2.34.8`, the legacy command source is now
+`src/nix/nix-env/nix-env.cc`. `opSet` at lines 758–801 realizes the requested
+derivation and then calls `createGeneration` followed by `switchLink`; the
+function body contains no `lockProfile` or `optimisticLockProfile` call:
+[version-pinned source](https://github.com/NixOS/nix/blob/2.34.8/src/nix/nix-env/nix-env.cc#L758-L801).
+The implementation of `createGeneration` does not acquire a profile lock
+([profile creation](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L64-L119)).
+By contrast, `switchGeneration` acquires `PathLocks` and calls `lockProfile`,
+while `switchLink` itself replaces the symlink
+([profile operations](https://github.com/NixOS/nix/blob/2.34.8/src/libstore/profiles.cc#L247-L296)).
+Therefore a lock in one profile operation cannot be assumed to protect
+`nix-env --set`. The earlier Nix 2.28.5 source audit found the same
+generation-then-link sequence in `opSet`
+([Nix 2.28.5 source](https://github.com/NixOS/nix/blob/2.28.5/src/nix-env/nix-env.cc#L723-L765)).
+
+The finding is not confined to Nix 2.34.8. A check of the Nix 2.35.2 tag
+([source](https://github.com/NixOS/nix/blob/2.35.2/src/nix/nix-env/nix-env.cc#L758-L800))
+and upstream development commit
+[`979a87c97bef7b96cd4ec4b142188089851e47ad`](https://github.com/NixOS/nix/blob/979a87c97bef7b96cd4ec4b142188089851e47ad/src/nix/nix-env/nix-env.cc#L759-L801)
+found the same generation-then-link path in `opSet`, without a profile lock.
+That development revision is pinned by a current upstream nixpkgs snapshot
+[`a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3`](https://github.com/NixOS/nixpkgs/blob/a8211bffc562fa5950a5ad6ecbc7939ebbcaf5b3/pkgs/tools/package-management/nix/default.nix#L196-L234)
+as `2.36pre20261010_979a87c9`.
+These are additional version-pinned source checks—not proof about every
+downstream build or the host's actual package.
+
+The native fix must be implemented in the operation that commits the profile:
+build first; acquire the lock in the mutating Nix process; compare the resolved
+current target with an exact expected-old value while locked; on mismatch,
+refuse before generation mutation; on match, preserve Nix's generation and
+permanent-root logic and perform the link switch before releasing the same
+lock. Each supported writer must be audited for participation in that shared
+boundary. A wrapper lock around an unmodified `nix-env --set` is not enough,
+and writing the link directly from Rust would risk bypassing Nix's profile
+semantics.
+
+This finding is source-bounded. Capture the actual Nix executable version and
+package/source identity on each supported deployment before claiming all target
+systems share the result. The design and deterministic in-memory counterexample
+tests remain unqualified; no native CAS, upstream patch, or live profile
+concurrency test is claimed. Keep Issue #9 open until the native conditional
+transition is implemented and the acceptance matrix runs against an isolated
+temporary profile with the exact packaged Nix.
+
+A conditional profile-set primitive alone is not enough to claim that a
+system deployment is one transaction. In the inspected nixpkgs snapshot,
+`nixos-rebuild-ng` performs profile selection via
+[`nix-env -p … --set …`](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/ni/nixos-rebuild-ng/src/nixos_rebuild/nix.py#L687-L755)
+and launches activation separately. The activation binary has a distinct
+`/run/nixos/switch-to-configuration.lock`
+([source](https://github.com/NixOS/nixpkgs/blob/13542c24f0060ce88fc074e78b1a7cbbad630b18/pkgs/by-name/sw/switch-to-configuration-ng/src/main.rs#L1809-L1821));
+that lock does not serialize profile mutation. If the native set releases the
+profile lock before activation, another writer can change the selected profile
+between A's successful set and A's activation. A final pre-release observation
+only narrows that interval.
+
+For the end-to-end guarantee in Issue #9, the preferred proposal now
+separates two lock scopes: a stable coordinator lease held by one privileged
+transaction supervisor across expected-old observation, profile publication,
+exact activation, profile/runtime read-back and durable disposition; and the
+native Nix profile lock held only while the Nix-native conditional update
+compares the expected-old closure and publishes the candidate. All supported
+writers/frontends must acquire the coordinator first and use the native
+mutation path second, including `nixos-rebuild-ng`, supported legacy rebuild,
+self-deploy, auto-upgrade and configured third-party deployment services.
+
+The distinction follows a fresh source inspection of Nix 2.35.2
+[`pathlocks.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/unix/pathlocks.cc)
+and [`profiles.cc`](https://github.com/NixOS/nix/blob/2.35.2/src/libstore/profiles.cc):
+native profile locking uses `<profile>.lock`, `O_CLOEXEC`, an exclusive
+`flock`, stale-inode detection/retry, and deletion-on-unlock behavior. It is
+not safe to assume that the native lock file can simply be retained as a
+cross-activation lease or passed to a second unmodified Nix process. The
+coordinator therefore needs a separate stable file whose pathname/inode is
+not unlinked during an active service lifetime. The lock order is
+**coordinator → native profile lock**; no path may invert it.
+
+The transaction supervisor must also outlive client disconnects and must not
+release its coordinator while the activation it authorized can still run.
+Service shutdown/crash must either reliably terminate and confirm the
+activation before releasing the lease or be shown to preserve lease ownership
+through that activation's terminal result. After failure following profile
+publication, disposition is indeterminate until activation termination and
+fresh profile/runtime evidence permit recovery. These are design requirements,
+not implemented behavior.
+
+The follow-on
+[`NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md`](NIX_2_34_8_CONDITIONAL_PROFILE_SET_DESIGN.md)
+now specifies this two-lock proposal, frontend participation, crash/lifetime
+contract and forced A/B test oracles. This remains design only: no Nix patch,
+coordinator service, frontend migration or test execution is claimed. Newer
+`nix profile` paths and other host-side writers still require their own source
+audit, and direct root bypass remains outside the managed-writer guarantee.
+
+## Parent-gated worker launch (2026-10-09)
+
+Privileged profile-transition, activation, and recovery workers now use the
+immutable `nixward-worker-gate` sibling installed with the Nixward executable.
+The executor starts only this inert gate. It captures the gate's PID, boot ID,
+start-time ticks, pidfd, exact gate argv digest, payload executable and exact
+argument vector/digest, release-challenge digest, and fixed environment digest,
+binds the receipt to the transaction, and fsyncs
+the journal before it sends a one-time random release token.
+
+The gate accepts exactly one 32-byte token whose domain-separated BLAKE3 digest
+matches the challenge in its argv, followed by EOF. Partial frames, wrong
+tokens, trailing bytes, malformed args, non-store targets, and noncanonical
+payload paths fail closed. On success it invokes the exact payload with direct
+`exec`, not a shell or PATH lookup. The same process retains its PID/start-time
+identity across `exec`; if the parent exits before release, the pipe closes and
+the gate exits without running the privileged payload.
+
+This closes the pre-receipt execution window for workers routed through the
+gate, subject to the gate binary and package co-installation being exact.
+After the worker identity has been persisted, the parent now observes the
+selected system profile again immediately before token release and compares it
+with the caller-supplied exact precondition. Primary profile transition requires
+the authorization-bound prior profile; primary activation requires the
+candidate profile to remain selected; recovery profile transition requires the
+exact profile observed at recovery admission; recovery activation requires the
+exact bound predecessor profile. Observation failure or drift kills the inert
+gate and returns without delivering the token. The durable gate receipt stays
+in the journal so a later recovery can account for the terminated worker.
+
+This is a last-moment drift guard, not a compare-and-set and not an OS-level
+exclusion guarantee. An external writer can still race between the final
+observation and token delivery or the profile-mutation operation. Issue #9
+remains open until the system has a supported conditional profile update or a
+single privileged mutation broker that excludes unrelated writers. The guard
+does not itself prove successful activation: the worker receipt still has to
+be durable, the pidfd identity must remain consistent, and runtime/profile
+post-state observation and terminal journal persistence remain required.
+
+The launch-gate protocol has unit tests for exact release token, digest
+canonicality, truncation, and trailing bytes. A profile-precondition unit test
+now checks the exact-match, drift, and observation-error outcomes used by the
+pre-release guard. These tests and the full compiler/test matrix must complete
+on the exact subject before it may be qualified; no passing execution result is
+claimed for this source-only pass.
+
+
+## Transaction coordinator lock-file hardening (2026-10-12)
+
+The current Nixward-peer interlock in `src/action/executor.rs` remains a
+machine-wide `/run/nixward-system-transaction.lock`. Acquisition now validates
+that the parent is a real directory not writable by group/other (and that
+production `/run` has UID 0), opens the lock with `O_NOFOLLOW | O_CLOEXEC`,
+verifies parent/file owner agreement,
+requires owner-only read/write permissions and a single hard link, and checks
+that the file descriptor and current path resolve to the same device/inode.
+The guard does not unlink the lock path on release. Eight new Unix regression tests cover unexpected parent-owner rejection, symlink
+lock paths, writable parents, unsafe lock-file modes including special-bit rejection, multiple hard links, and
+stable path/inode across reacquisition, and a forced A/B profile-publication-
+to-activation/read-back interleaving; the existing two-thread exclusion test
+remains separate.
+
+These changes harden the *Nixward interlock file*, not the full system writer
+boundary. The tests have not been compiled or executed, and the machine-wide
+lock does not force unmodified `nixos-rebuild`, self-deploy, auto-upgrade or
+third-party tools to participate. The Nix-native expected-old conditional
+profile update and the supervised whole-deployment coordinator integration
+remain unimplemented; direct privileged/root bypass remains out of scope.
+
+
+## Admission guard for unresolved peer journals (2026-10-12)
+
+The journaled activation and recovery entry points perform an additional
+admission check after acquiring the existing Nixward interlock. The journaled
+flow exempts its own transaction ID so recovery can proceed. The separate
+non-journaled execute_authorized entry point already rejects real exact-system
+activation before mutation in favor of the durable ConfigTransaction boundary;
+it does not rely on this scanner. The scanner itself supports an optional current
+transaction ID and blocks unresolved journals when no exemption is supplied.
+It enumerates the trusted journal directory, securely loads each *.json journal,
+binds filename to embedded transaction ID, and refuses a new journaled mutation
+if a different transaction remains in ProfileTransitionStarted,
+ProfileCommitted, IndeterminateProfileTransition, ActivationStarted,
+IndeterminateActivation, RecoveryObservation, RecoveryRequired, or
+RecoveryMutationStarted.
+
+Malformed, unreadable, noncanonical, symlinked, or identity-mismatched JSON
+journal entries fail closed instead of being ignored. Production validates every
+component of the absolute journal-root path with no-follow metadata checks; each
+must be a real root-owned directory that is not group/world-writable. Journal
+files must be root-owned, single-linked, free of special permission bits, and
+private from group/other read or execute access; these metadata checks run before
+parsing. The current transaction
+is exempt so a legitimate recovery can reconcile itself; pre-mutation journals
+do not block system activation.
+
+This closes one Nixward-peer admission gap after loss of the old process's
+flock: even if the kernel makes the interlock available while an activation
+worker could still be alive, a subsequent Nixward exact activation must
+reconcile the nonterminal journal before starting another mutation. It is a
+conservative journal gate, not a crash-proof lease keeper. It does not itself
+terminate or supervise a surviving process, protect non-participating profile
+writers, or provide Nix-native expected-old CAS. A systemd stop/restart and
+production-service crash test remain required, along with the long-lived shared
+coordinator. The new subprocess regression is authored but has not been run.
+
+Twelve source-level regression oracles cover blocking an ActivationStarted peer
+after interlock reacquisition, exempting the current transaction while allowing
+a pre-mutation peer, rejecting writable, group-readable, special-bit, and
+multiply-linked journal files, rejecting symlinked journal roots/entries and
+filename-mismatched records, failing closed on malformed JSON, exhaustively
+classifying lifecycle phases, and blocking a new mutation after the lock-owning
+supervisor process is killed while an actual worker subprocess remains alive.
+Two test-binary entry points support the subprocess case; they are harness
+helpers rather than separate regression oracles. They have not been compiled
+or executed. No qualification result is claimed.

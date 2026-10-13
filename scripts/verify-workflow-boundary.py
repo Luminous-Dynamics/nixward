@@ -97,7 +97,80 @@ else:
     ):
         errors.append("bootstrap-lockfile job must have contents: write")
 
-    write_permission_sites = re.findall(
+    if bootstrap:
+        bootstrap_body = bootstrap.group(0)
+        persist_step = re.search(
+            r"(?ms)^      - name: Persist generated lockfile.*?(?=^      - name:|^  [A-Za-z_][\w-]*:|\Z)",
+            bootstrap_body,
+        )
+        if not persist_step or "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}" not in persist_step.group(0):
+            errors.append("lockfile bootstrap must map GITHUB_TOKEN into the persistence step")
+        if text.count("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}") != 1:
+            errors.append("workflow must map the bootstrap write token exactly once")
+
+    draft_lockfile = re.search(
+        r"(?ms)^  draft-lockfile-artifact:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
+        text,
+    )
+    if not draft_lockfile:
+        errors.append("missing draft exact-run lockfile artifact job")
+    else:
+        body = draft_lockfile.group(0)
+        expected = [
+            "github.ref == 'refs/heads/hardening/journal-owned-activation-capability-2026-10-09'",
+            "ref: ${{ github.sha }}",
+            "cargo generate-lockfile",
+            "cargo metadata --locked --format-version=1",
+            "steps.lockfile_digest.outputs.cargo_lock_sha256",
+            "name: nixward-draft-cargo-lock-${{ github.run_id }}-${{ github.run_attempt }}",
+            "uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "contents: read",
+        ]
+        for marker in expected:
+            if marker not in body:
+                errors.append(f"draft lockfile artifact job missing required marker: {marker}")
+        if "contents: write" in body:
+            errors.append("draft lockfile artifact job must not have repository write authority")
+
+    draft_candidate = re.search(
+        r"(?ms)^  draft-candidate-check:.*?(?=^  [A-Za-z_][\w-]*:|\Z)",
+        text,
+    )
+    if not draft_candidate:
+        errors.append("missing draft candidate checks job")
+    else:
+        body = draft_candidate.group(0)
+        expected = [
+            "- draft-lockfile-artifact",
+            "needs.draft-lockfile-artifact.result == 'success'",
+            "test \"$branch_tip\" = \"$GITHUB_SHA\"",
+            "uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+            "needs.draft-lockfile-artifact.outputs.cargo_lock_sha256",
+            "EXPECTED_CARGO_LOCK_SHA256",
+            "test \"$actual\" = \"$EXPECTED_CARGO_LOCK_SHA256\"",
+            "cargo test --locked --bin nixward-worker-gate",
+            "git add --intent-to-add -f Cargo.lock",
+            "git ls-files --error-unmatch Cargo.lock",
+            "Draft hardening candidate checks (not qualification)",
+            "it does not issue a qualification receipt",
+        ]
+        for marker in expected:
+            if marker not in body:
+                errors.append(f"draft candidate job missing required marker: {marker}")
+        # The lockfile is created in the ephemeral CI workspace from the exact-run
+        # artifact. Intent-to-add makes it visible to Git-backed Nix flake sources;
+        # it does not commit or push the generated file to the branch.
+        if "Require committed lockfile" in body:
+            errors.append("draft candidate must not require Cargo.lock to be committed")
+
+        if "git add --intent-to-add -f Cargo.lock" not in body:
+            errors.append("draft candidate must expose its exact-run lockfile to Git-backed flake evaluation")
+        if "git ls-files --error-unmatch Cargo.lock" not in body:
+            errors.append("draft candidate must verify Git visibility of the exact-run lockfile")
+        if "git commit" in body or "git push" in body:
+            errors.append("draft candidate must not commit or push the generated lockfile")
+
+        write_permission_sites = re.findall(
         r"^      contents: write\s*$",
         text,
         flags=re.M,

@@ -58,6 +58,7 @@
             cargoBuildFlags = [
               "-p" "nixward"
               "--bin" binName
+              "--bin" "nixward-worker-gate"
               "--features" features
             ];
 
@@ -66,6 +67,7 @@
             installPhase = ''
               mkdir -p $out/bin
               cp target/release/${binName} $out/bin/
+              cp target/release/nixward-worker-gate $out/bin/
             '';
 
             meta = with pkgs.lib; {
