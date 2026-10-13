@@ -811,6 +811,7 @@ pub enum InvocationStatus {
 /// Schema identifier for the output-free execution evidence envelope.
 pub const EXECUTION_OBSERVATION_SCHEMA: &str = "luminous-nixward-execution-observation";
 pub const EXECUTION_OBSERVATION_VERSION: u16 = 1;
+const MAX_SAFE_WIRE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Safe-to-serialize execution evidence. It deliberately excludes raw stdout and
 /// stderr, which remain available only through the in-process `ExecutionObservation`.
@@ -878,6 +879,17 @@ impl ExecutionEvidenceEnvelope {
         let validate_evidence = |label: &str, evidence: &CommandInvocationEvidence| {
             if !is_lower_hex_digest(&evidence.command_digest_blake3) {
                 return Err(format!("{label} command digest is invalid"));
+            }
+            if evidence.elapsed_ms > MAX_SAFE_WIRE_INTEGER {
+                return Err(format!("{label} elapsed time exceeds interoperable integer range"));
+            }
+            for (field, timestamp) in [
+                ("start", evidence.started_at_ms),
+                ("finish", evidence.finished_at_ms),
+            ] {
+                if timestamp.is_some_and(|value| value > MAX_SAFE_WIRE_INTEGER) {
+                    return Err(format!("{label} {field} timestamp exceeds interoperable integer range"));
+                }
             }
             if let (Some(start), Some(finish)) =
                 (evidence.started_at_ms, evidence.finished_at_ms)
@@ -1783,6 +1795,27 @@ mod tests {
         assert!(envelope.validate_wire().unwrap_err().contains(
             "primary evidence command digest differs from requested command"
         ));
+    }
+
+    #[test]
+    fn test_evidence_envelope_rejects_unsafe_integer_timestamps() {
+        let envelope = ExecutionEvidenceEnvelope {
+            schema: EXECUTION_OBSERVATION_SCHEMA.to_string(),
+            version: EXECUTION_OBSERVATION_VERSION,
+            command_digest_blake3: "a".repeat(64),
+            primary: InvocationStatus::Attempted {
+                evidence: CommandInvocationEvidence {
+                    command_digest_blake3: "a".repeat(64),
+                    started_at_ms: Some(10),
+                    finished_at_ms: Some(MAX_SAFE_WIRE_INTEGER + 1),
+                    elapsed_ms: 1,
+                    disposition: ProcessDisposition::Exited { code: 0 },
+                },
+            },
+            rollback: None,
+            dry_run: false,
+        };
+        assert!(envelope.validate_wire().unwrap_err().contains("interoperable integer range"));
     }
 
     #[test]
