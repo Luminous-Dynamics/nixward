@@ -17,6 +17,7 @@ The legacy `ExecutionResult` is optimized for callers and CLI presentation. It d
 ## Consumer rules
 
 1. Do not infer an invocation from `ExecutionResult::Success`. Dry-run remains a legacy `Success`, but its observation says `NotStarted { reason: DryRun }`.
+   The envelope's `dry_run` flag describes the reason for not launching, not merely the executor configuration: if policy or authorization rejects first, the flag remains false even when dry-run mode was configured.
 2. Do not infer a process exit code from `RolledBack`, `FailedNoRollback`, `Blocked`, or `PendingConfirmation`.
 3. A spawn failure is not process exit status 1 or 127. Preserve `SpawnFailed` as a distinct disposition.
 4. Missing wall-clock timestamps are `None`, serialized as JSON `null`. Never replace them with epoch zero or derive absolute time from elapsed duration.
