@@ -38,27 +38,8 @@ const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
 const NLM_F_DUMP_FILTERED: u16 = 0x0020;
 const NLM_F_DUMP_INTR: u16 = 0x0010;
 const IFLA_ADDRESS: u16 = 1;
-const IFLA_BROADCAST: u16 = 2;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
-const IFLA_LINK: u16 = 5;
-const IFLA_QDISC: u16 = 6;
-const IFLA_MASTER: u16 = 10;
-const IFLA_TXQLEN: u16 = 13;
-const IFLA_OPERSTATE: u16 = 16;
-const IFLA_LINKMODE: u16 = 17;
-const IFLA_LINKINFO: u16 = 18;
-const IFLA_NET_NS_PID: u16 = 19;
-const IFLA_GROUP: u16 = 27;
-const IFLA_NET_NS_FD: u16 = 28;
-const IFLA_PROMISCUITY: u16 = 30;
-const IFLA_CARRIER: u16 = 33;
-const IFLA_PHYS_PORT_ID: u16 = 34;
-const IFLA_CARRIER_CHANGES: u16 = 35;
-const IFLA_PHYS_SWITCH_ID: u16 = 36;
-const IFLA_LINK_NETNSID: u16 = 37;
-const IFLA_PHYS_PORT_NAME: u16 = 38;
-const IFLA_PROTO_DOWN: u16 = 39;
 const NLM_F_ATOMIC: u16 = 0x0400;
 const NLM_F_ACK_TLVS: u16 = 0x0200;
 const NLA_TYPE_MASK: u16 = 0x3fff;
@@ -562,31 +543,13 @@ fn verify_envelope(
         reasons.push("critical_attribute_id_outside_nla_type_range".to_owned());
         fatal_invalid = true;
     }
-    // The baseline profile treats parent/master/link-kind data as decision-critical
-    // topology semantics. Envelopes may add stricter IDs but cannot omit this floor.
+    // The basic semantic projection understands only address bytes, interface name,
+    // and MTU. A trusted caller may add decision-critical attributes; if the projection
+    // cannot interpret one, the result is Unsupported rather than a false completeness claim.
     let mandatory_critical_ids = BTreeSet::from([
         IFLA_ADDRESS,
-        IFLA_BROADCAST,
         IFLA_IFNAME,
         IFLA_MTU,
-        IFLA_LINK,
-        IFLA_QDISC,
-        IFLA_MASTER,
-        IFLA_TXQLEN,
-        IFLA_OPERSTATE,
-        IFLA_LINKMODE,
-        IFLA_LINKINFO,
-        IFLA_NET_NS_PID,
-        IFLA_GROUP,
-        IFLA_NET_NS_FD,
-        IFLA_PROMISCUITY,
-        IFLA_CARRIER,
-        IFLA_PHYS_PORT_ID,
-        IFLA_CARRIER_CHANGES,
-        IFLA_PHYS_SWITCH_ID,
-        IFLA_LINK_NETNSID,
-        IFLA_PHYS_PORT_NAME,
-        IFLA_PROTO_DOWN,
     ]);
     if critical_ids.len() != envelope.policy.decision_critical_link_attribute_ids.len()
         || !mandatory_critical_ids.is_subset(&critical_ids)
@@ -1409,11 +1372,24 @@ fn parse_link_message(
     if payload.len() < IFINFOMSG_LEN {
         return Err(AttemptStatus::Invalid("short_ifinfomsg_payload".to_owned()));
     }
+    // RTM_GETLINK dump response profile: AF_UNSPEC, zero padding, and ifi_change=0.
+    // The kernel passes change=0 through rtnl_fill_ifinfo for dump rows.
+    if payload[0] != 0 || payload[1] != 0 {
+        return Err(AttemptStatus::Invalid(
+            "unexpected_ifinfomsg_family_or_padding".to_owned(),
+        ));
+    }
     let link_type = read_u16(&payload[2..4], byte_order);
     let ifindex = read_i32(&payload[4..8], byte_order);
     let flags = read_u32(&payload[8..12], byte_order);
+    let change = read_u32(&payload[12..16], byte_order);
     if ifindex <= 0 {
         return Err(AttemptStatus::Invalid("nonpositive_interface_index".to_owned()));
+    }
+    if change != 0 {
+        return Err(AttemptStatus::Invalid(
+            "unexpected_nonzero_ifinfomsg_change_in_dump_row".to_owned(),
+        ));
     }
     let mut ifname: Option<String> = None;
     let mut mtu: Option<u32> = None;
@@ -1569,7 +1545,7 @@ mod tests {
         payload.extend_from_slice(&encode_u16(1)); // ARPHRD_ETHER for the fixture only.
         payload.extend_from_slice(&encode_i32(index));
         payload.extend_from_slice(&encode_u32(0x1 | 0x40)); // IFF_UP | IFF_RUNNING
-        payload.extend_from_slice(&encode_u32(u32::MAX)); // change mask
+        payload.extend_from_slice(&encode_u32(0)); // rtnl_fill_ifinfo(dump row) passes change=0
         let mut name_value = name.as_bytes().to_vec();
         name_value.push(0);
         push_attr(&mut payload, IFLA_IFNAME, &name_value);
@@ -1977,6 +1953,27 @@ mod tests {
     }
 
     #[test]
+    fn nonzero_ifinfomsg_change_mask_is_invalid_for_dump_rows() {
+        let mut raw = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
+        // Netlink header is 16 bytes; change is bytes 12..16 of ifinfomsg.
+        raw[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+        let combined = raw_join(&[raw, done(7, 0, NLM_F_MULTI)]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&combined, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("ifinfomsg_change")));
+    }
+
+    #[test]
+    fn nonzero_ifinfomsg_padding_is_invalid() {
+        let mut raw = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
+        raw[17] = 1; // __ifi_pad
+        let combined = raw_join(&[raw, done(7, 0, NLM_F_MULTI)]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&combined, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("family_or_padding")));
+    }
+
+    #[test]
     fn source_window_deadline_overrun_is_incomplete_not_invalid() {
         let mut item = attempt(&done(7, 0, NLM_F_MULTI), 7, 0);
         item.started_monotonic_ns = 100;
@@ -2154,13 +2151,8 @@ mod tests {
     fn omitted_mandatory_semantic_attribute_from_policy_is_rejected() {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
-        envelope.policy.decision_critical_link_attribute_ids = vec![
-            IFLA_ADDRESS,
-            IFLA_IFNAME,
-            IFLA_MTU,
-            IFLA_MASTER,
-            IFLA_LINKINFO,
-        ];
+        envelope.policy.decision_critical_link_attribute_ids =
+            vec![IFLA_IFNAME, IFLA_MTU];
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
         assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("mandatory_semantic_fields")));
