@@ -116,7 +116,7 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["ifindex", "ifname", "link_type", "flags", "mtu"],
+                  "required": ["ifindex", "ifname", "link_type", "flags", "mtu", "address_hex"],
                   "properties": {
                     "ifindex": { "type": "integer", "minimum": 1 },
                     "ifname": { "type": "string", "minLength": 1 },
@@ -125,6 +125,12 @@
                     "mtu": {
                       "oneOf": [
                         { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+                        { "type": "null" }
+                      ]
+                    },
+                    "address_hex": {
+                      "oneOf": [
+                        { "type": "string", "pattern": "^(?:[0-9a-f]{2})*$" },
                         { "type": "null" }
                       ]
                     }
