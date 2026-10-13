@@ -183,11 +183,14 @@ the caller supplies the release manifest and a trusted release public key obtain
 from an independently provisioned trust root. Verification checks the signature,
 the strict release-manifest wire schemas (unknown fields fail closed), the
 declared release tree's exact file set and artifact bytes/sizes/executable modes,
-rejects unlisted files and symbolic links anywhere in the tree, checks that no
-component of a manifest-listed artifact path is a symbolic link, verifies the
-current process's Linux /proc/self/exe bytes against the manifest-listed
-executable, and checks that a manifest-listed resolver source file matches the
-source digest in the resolution receipt. The resulting opaque in-memory runtime binding is committed
+rejects unlisted files and symbolic links anywhere in the tree, rejects files
+with external/shared hard links, checks that no component of a manifest-listed
+artifact path is a symbolic link, verifies the current process's Linux
+/proc/self/exe bytes against the manifest-listed executable, and checks that a
+manifest-listed resolver source file matches the source digest in the resolution
+receipt. The offline signer also refuses to sign an artifact with more than one
+hard link: a file in a read-only release directory can still be modified through
+another hard-link name outside that directory. The resulting opaque in-memory runtime binding is committed
 through AiProposalRuntimeVerifiedValidationEvidence into the existing transaction
 validation digest before the transaction may advance.
 
