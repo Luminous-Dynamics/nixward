@@ -126,10 +126,9 @@
                     "link_type": { "type": "integer", "minimum": 0, "maximum": 65535 },
                     "flags": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
                     "mtu": {
-                      "oneOf": [
-                        { "type": "integer", "minimum": 0, "maximum": 4294967295 },
-                        { "type": "null" }
-                      ]
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
                     },
                     "address_hex": {
                       "oneOf": [
