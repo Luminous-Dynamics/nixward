@@ -17,8 +17,10 @@ pub enum StepStatus {
     Running,
     Completed,
     Failed(String),
-    /// A rollback command exited successfully; target restoration is not yet proven.
+    /// A rollback command exited successfully outside dry-run mode; restoration is unverified.
     RollbackProcessSucceeded,
+    /// A rollback command was simulated without launching a process.
+    RollbackSimulated,
     /// The final state is uncertain after a rollback limitation or failed attempt.
     Indeterminate,
     RolledBack,
@@ -55,10 +57,13 @@ pub struct PlanExecutionResult {
     pub success: bool,
     /// Number of steps completed before failure (if any).
     pub completed_count: usize,
-    /// Number of rollback commands attempted.
+    /// Number of rollback command evaluations, including blocked attempts.
     pub rollback_attempted_count: usize,
-    /// Number of rollback commands that exited successfully. This does not prove restoration.
+    /// Number of rollback commands that exited successfully outside dry-run mode.
+    /// This does not prove target restoration.
     pub rolled_back_count: usize,
+    /// Number of rollback commands simulated in dry-run mode.
+    pub rollback_simulated_count: usize,
     /// Rollback failures or unverified restoration limits: (step_index, error_description).
     pub rollback_failures: Vec<(usize, String)>,
 }
@@ -181,7 +186,7 @@ impl PlanExecutor {
                 self.steps[i].status = StepStatus::Failed(format!("{result:?}"));
                 results.push((self.steps[i].clone(), Some(result)));
 
-                let (rollback_attempted, rolled_back, rollback_failures) = self
+                let (rollback_attempted, rolled_back, rollback_simulated, rollback_failures) = self
                     .rollback_completed(executor, &mut results, i)
                     .await;
 
@@ -197,6 +202,7 @@ impl PlanExecutor {
                     completed_count: completed,
                     rollback_attempted_count: rollback_attempted,
                     rolled_back_count: rolled_back,
+                    rollback_simulated_count: rollback_simulated,
                     rollback_failures,
                 };
             } else {
@@ -212,6 +218,7 @@ impl PlanExecutor {
             completed_count: completed,
             rollback_attempted_count: 0,
             rolled_back_count: 0,
+            rollback_simulated_count: 0,
             rollback_failures: Vec::new(),
         }
     }
@@ -225,9 +232,11 @@ impl PlanExecutor {
         executor: &mut NixOSExecutor,
         results: &mut Vec<(PlanStep, Option<ExecutionResult>)>,
         before_index: usize,
-    ) -> (usize, usize, Vec<(usize, String)>) {
+    ) -> (usize, usize, usize, Vec<(usize, String)>) {
         let mut attempted = 0;
         let mut process_succeeded = 0;
+        let mut simulated = 0;
+        let dry_run = executor.is_dry_run();
         let mut failures = Vec::new();
 
         // Successful steps need not be a contiguous prefix: optional failures may
@@ -275,6 +284,13 @@ impl PlanExecutor {
             };
 
             match &rb_result {
+                ExecutionResult::Success { .. } if dry_run => {
+                    simulated += 1;
+                    self.steps[i].status = StepStatus::RollbackSimulated;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::RollbackSimulated;
+                    }
+                }
                 ExecutionResult::Success { .. } => {
                     process_succeeded += 1;
                     // Do not call this Restored/RolledBack: fresh state observation
@@ -301,7 +317,7 @@ impl PlanExecutor {
             }
         }
 
-        (attempted, process_succeeded, failures)
+        (attempted, process_succeeded, simulated, failures)
     }
 }
 
@@ -495,14 +511,12 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.completed_count, 1, "Only step 0 should complete");
         assert_eq!(result.rollback_attempted_count, 1);
-        assert_eq!(
-            result.rolled_back_count, 1,
-            "One rollback process should exit successfully in dry-run mode"
-        );
+        assert_eq!(result.rolled_back_count, 0, "dry-run launched no rollback process");
+        assert_eq!(result.rollback_simulated_count, 1);
         assert_eq!(
             result.steps[0].0.status,
-            StepStatus::RollbackProcessSucceeded,
-            "Successful rollback process is not a proof of restored target state"
+            StepStatus::RollbackSimulated,
+            "Dry-run is simulation, not a rollback process"
         );
         assert_eq!(result.steps.len(), 3);
 
@@ -638,10 +652,11 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.completed_count, 1);
         assert_eq!(result.rollback_attempted_count, 1);
-        assert_eq!(result.rolled_back_count, 1);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 1);
         assert!(result.rollback_failures.is_empty());
         assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
-        assert_eq!(result.steps[1].0.status, StepStatus::RollbackProcessSucceeded);
+        assert_eq!(result.steps[1].0.status, StepStatus::RollbackSimulated);
         assert!(matches!(result.steps[2].0.status, StepStatus::Failed(_)));
     }
 
@@ -880,7 +895,8 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.completed_count, 3);
         // All 3 rollback commands exit successfully in dry-run mode
-        assert_eq!(result.rolled_back_count, 3);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 3);
     }
 
     #[tokio::test]
@@ -964,6 +980,7 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.completed_count, 2);
         // Only EnvInstall has rollback; read-only Search needs no rollback
-        assert_eq!(result.rolled_back_count, 1);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 1);
     }
 }
