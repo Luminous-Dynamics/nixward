@@ -97,6 +97,7 @@
               "observed_object_count",
               "identical_duplicate_count",
               "observed_links",
+              "raw_request_blake3",
               "raw_artifact_blake3",
               "canonical_semantic_blake3",
               "reasons"
@@ -138,6 +139,10 @@
                     }
                   }
                 }
+              },
+              "raw_request_blake3": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
               },
               "raw_artifact_blake3": {
                 "type": "array",
