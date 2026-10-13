@@ -2198,8 +2198,8 @@ mod tests {
         item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
-        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("whole_link_dump")));
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unexpected_flags")));
     }
 
     #[test]
