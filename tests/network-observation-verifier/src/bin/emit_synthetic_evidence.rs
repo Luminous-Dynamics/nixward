@@ -1,5 +1,5 @@
 use nixward_network_observation_verifier::{
-    hash_canonical_links, hash_raw_artifact, CollectorIdentity, DeclaredScope, Envelope,
+    hash_canonical_links, hash_raw_artifact, hash_raw_request, CollectorIdentity, DeclaredScope, Envelope,
     SourceAttempt, SourceFamily, TargetIdentity, VerificationPolicy, ENVELOPE_SCHEMA_ID,
     SUPPORTED_FAMILY,
 };
@@ -7,6 +7,15 @@ use std::io::{self, Write};
 
 /// Emits a synthetic fixture only. It does not read or collect live network state.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A byte-exact RTM_GETLINK dump request (sequence 7, no filter).
+    let request: [u8; 32] = [
+        32, 0, 0, 0, // nlmsg_len
+        18, 0, // RTM_GETLINK
+        1, 3, // NLM_F_REQUEST | NLM_F_DUMP
+        7, 0, 0, 0, // request sequence
+        0, 0, 0, 0, // sender port ID
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // unfiltered ifinfomsg
+    ];
     // A byte-exact little-endian NLMSG_DONE(status=0), sequence 7, for a valid empty dump.
     let raw: [u8; 20] = [
         20, 0, 0, 0, // nlmsg_len
@@ -56,6 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 request_sequence: 7,
                 byte_order: "little".to_owned(),
                 retry_index: 0,
+                raw_request_hex: request.iter().map(|byte| format!("{byte:02x}")).collect(),
+                raw_request_blake3: hash_raw_request(&request),
                 started_monotonic_ns: 100,
                 ended_monotonic_ns: 200,
                 raw_artifact_hex: raw.iter().map(|byte| format!("{byte:02x}")).collect(),
