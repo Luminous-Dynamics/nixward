@@ -57,6 +57,7 @@
         "required_families": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
           "uniqueItems": true
         },
         "resource_kinds": {
@@ -91,17 +92,22 @@
         "decision_critical_link_attribute_ids"
       ],
       "properties": {
-        "policy_id": { "type": "string", "minLength": 1 },
-        "policy_version": { "type": "string", "minLength": 1 },
-        "max_age_ms": { "type": "integer", "minimum": 1 },
-        "max_source_window_ns": { "type": "integer", "minimum": 1 },
-        "max_total_raw_bytes": { "type": "integer", "minimum": 1 },
-        "max_messages_per_attempt": { "type": "integer", "minimum": 1 },
-        "max_objects_per_attempt": { "type": "integer", "minimum": 1 },
-        "max_retries": { "type": "integer", "minimum": 0 },
+        "policy_id": { "const": "m1a-rtnetlink-links" },
+        "policy_version": { "const": "1" },
+        "max_age_ms": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "max_source_window_ns": { "type": "integer", "minimum": 1, "maximum": 10000000 },
+        "max_total_raw_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_messages_per_attempt": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_objects_per_attempt": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 2 },
         "decision_critical_link_attribute_ids": {
           "type": "array",
           "items": { "type": "integer", "minimum": 0, "maximum": 16383 },
+          "allOf": [
+            { "contains": { "const": 1 } },
+            { "contains": { "const": 3 } },
+            { "contains": { "const": 4 } }
+          ],
           "uniqueItems": true
         }
       }
