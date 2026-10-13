@@ -30,6 +30,7 @@ const NLMSG_DONE: u16 = 3;
 const RTM_NEWLINK: u16 = 16;
 const RTM_GETLINK: u16 = 18;
 const NLM_F_REQUEST: u16 = 0x0001;
+const NLM_F_ACK: u16 = 0x0004;
 const NLM_F_MULTI: u16 = 0x0002;
 const NLM_F_ROOT: u16 = 0x0100;
 const NLM_F_MATCH: u16 = 0x0200;
@@ -1942,11 +1943,12 @@ mod tests {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut item = attempt(&raw, 7, 0);
         let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
-        request[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ATOMIC).to_le_bytes());
+        request[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_DUMP | NLM_F_ACK).to_le_bytes());
         item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
-        assert_ne!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("unexpected_flags")));
     }
 
     #[test]
