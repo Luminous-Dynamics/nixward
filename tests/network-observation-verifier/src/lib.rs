@@ -1164,6 +1164,11 @@ fn parse_link_request(
     if sequence != expected_sequence || expected_sequence == 0 {
         return Err(AttemptStatus::Invalid("request_sequence_mismatch_or_zero".to_owned()));
     }
+    if read_u32(&bytes[12..16], byte_order) != 0 {
+        return Err(AttemptStatus::Invalid(
+            "request_netlink_port_id_must_be_zero".to_owned(),
+        ));
+    }
     if message_type != RTM_GETLINK {
         return Err(AttemptStatus::Incomplete(
             "request_is_not_rtm_getlink".to_owned(),
@@ -2186,6 +2191,19 @@ mod tests {
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
         assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("policy_exceeds")));
+    }
+
+    #[test]
+    fn request_netlink_port_id_must_be_zero() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut item = attempt(&raw, 7, 0);
+        let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
+        request[12..16].copy_from_slice(&1234_u32.to_le_bytes());
+        item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
+        item.raw_request_blake3 = hash_raw_request(&request);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("port_id_must_be_zero")));
     }
 
     #[test]
