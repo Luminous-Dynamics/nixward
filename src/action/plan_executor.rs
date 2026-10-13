@@ -506,7 +506,7 @@ mod tests {
         );
         assert_eq!(result.steps.len(), 3);
 
-        // Step 0: completed (then rolled back)
+        // Step 0: rollback process succeeded; target restoration was not observed
         assert!(result.steps[0].1.is_some());
         // Step 1: failed (PendingConfirmation)
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
@@ -643,6 +643,43 @@ mod tests {
         assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
         assert_eq!(result.steps[1].0.status, StepStatus::RollbackProcessSucceeded);
         assert!(matches!(result.steps[2].0.status, StepStatus::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn applied_step_without_rollback_support_is_indeterminate() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.35);
+
+        plan.add_step(
+            NixOSCommand::Search {
+                query: "vim".into(),
+                json: false,
+            },
+            "Read-only search",
+        );
+        plan.add_step(
+            NixOSCommand::CollectGarbage {
+                older_than_days: None,
+                delete_all: false,
+            },
+            "Mutation without a rollback command",
+        );
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Critical unapproved rebuild",
+        );
+        authorize_step(&mut plan, 1);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.rollback_attempted_count, 0);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.steps[0].0.status, StepStatus::Completed);
+        assert_eq!(result.steps[1].0.status, StepStatus::Indeterminate);
+        assert!(result.rollback_failures.iter().any(|(index, _)| *index == 1));
     }
 
     #[tokio::test]
@@ -842,7 +879,7 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 3);
-        // All 3 EnvInstall commands have rollback → 3 rolled back
+        // All 3 rollback commands exit successfully in dry-run mode
         assert_eq!(result.rolled_back_count, 3);
     }
 
@@ -926,7 +963,7 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 2);
-        // Only EnvInstall has rollback, Search doesn't → 1 rolled back
+        // Only EnvInstall has rollback; read-only Search needs no rollback
         assert_eq!(result.rolled_back_count, 1);
     }
 }
