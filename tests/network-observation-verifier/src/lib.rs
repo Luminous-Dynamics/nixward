@@ -149,6 +149,10 @@ pub enum Ownership {
 pub struct ReceiptBody {
     pub verifier_id: String,
     pub verifier_version: String,
+    pub rustc_version: String,
+    pub cargo_version: String,
+    pub target_os: String,
+    pub target_arch: String,
     pub verifier_source_revision: String,
     pub verifier_source_digest_blake3: String,
     pub envelope_raw_blake3: String,
@@ -637,7 +641,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                 envelope.policy.max_objects_per_attempt,
                 &critical_ids,
             );
-            let mut evaluation = match parsed {
+            let evaluation = match parsed {
                 Ok(parsed) => {
                     let digest = canonical_digest(&parsed.links);
                     if attempt
@@ -677,11 +681,14 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                         }
                     }
                 }
-                Err(AttemptStatus::Incomplete(reason)) => AttemptEvaluation {
-                    status: AttemptStatus::Incomplete(reason),
-                    links: Vec::new(),
-                    identical_duplicates: 0,
-                    canonical_digest: None,
+                Err(AttemptStatus::Incomplete(reason)) => {
+                    source_reasons.push(format!("attempt_retry_{}_incomplete:{reason}", attempt.retry_index));
+                    AttemptEvaluation {
+                        status: AttemptStatus::Incomplete(reason),
+                        links: Vec::new(),
+                        identical_duplicates: 0,
+                        canonical_digest: None,
+                    }
                 },
                 Err(AttemptStatus::Invalid(reason)) => {
                     source_reasons.push(reason.clone());
@@ -715,7 +722,8 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             attempt_evaluations.push(evaluation);
         }
 
-        if total_raw_bytes > envelope.policy.max_total_raw_bytes {
+        let total_limit_exceeded = total_raw_bytes > envelope.policy.max_total_raw_bytes;
+        if total_limit_exceeded {
             source_reasons.push("total_raw_artifact_byte_limit_exceeded".to_owned());
             every_required_source_complete = false;
         }
@@ -775,6 +783,16 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             every_required_source_complete = false;
         }
 
+        if total_limit_exceeded && source_status == "complete" {
+            source_reasons.push("total_raw_artifact_byte_limit_exceeded".to_owned());
+            source_status = "incomplete".to_owned();
+            accepted_retry_index = None;
+            final_links.clear();
+            final_duplicate_count = 0;
+            accepted_canonical = None;
+            accepted_source_count = accepted_source_count.saturating_sub(1);
+            every_required_source_complete = false;
+        }
         if source_status != "complete" {
             every_required_source_complete = false;
         }
@@ -849,6 +867,18 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     ReceiptBody {
         verifier_id: VERIFIER_ID.to_owned(),
         verifier_version: VERIFIER_VERSION.to_owned(),
+        rustc_version: option_env!("NIXWARD_VERIFIER_RUSTC_VERSION")
+            .unwrap_or("toolchain-version-unavailable")
+            .to_owned(),
+        cargo_version: option_env!("NIXWARD_VERIFIER_CARGO_VERSION")
+            .unwrap_or("toolchain-version-unavailable")
+            .to_owned(),
+        target_os: option_env!("NIXWARD_VERIFIER_TARGET_OS")
+            .unwrap_or("target-os-unavailable")
+            .to_owned(),
+        target_arch: option_env!("NIXWARD_VERIFIER_TARGET_ARCH")
+            .unwrap_or("target-arch-unavailable")
+            .to_owned(),
         verifier_source_revision,
         verifier_source_digest_blake3,
         envelope_raw_blake3: envelope_digest,
@@ -875,6 +905,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             "Ownership is Unknown: a link dump does not establish the configuration/runtime writer.".to_owned(),
             "No signature or protected local provenance is established by this receipt.".to_owned(),
             "The verifier source digest identifies the pinned source/schema bundle used at build time; it is not a measured executable binary hash.".to_owned(),
+            "The rustc/Cargo versions and target triple are recorded build metadata; they do not attest to the integrity of the build host.".to_owned(),
         ],
         global_atomic_snapshot_claimed: false,
         production_mutation_enabled: false,
