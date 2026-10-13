@@ -1215,7 +1215,9 @@ fn parse_link_dump(
     let mut message_count = 0usize;
     let mut object_count = 0usize;
     let mut terminal_seen = false;
-    let mut links: BTreeMap<i32, Link> = BTreeMap::new();
+    // Duplicate identity comparison must include the exact frame, not only the
+    // reduced semantic projection: two rows can differ in currently unmodeled attrs.
+    let mut links: BTreeMap<i32, (Link, Vec<u8>)> = BTreeMap::new();
     let mut identical_duplicates = 0usize;
     let mut interrupted = false;
 
@@ -1323,17 +1325,21 @@ fn parse_link_dump(
                 }
                 let payload = &bytes[payload_start..payload_end];
                 let link = parse_link_message(payload, byte_order, critical_ids)?;
+                let aligned_len = align4(message_len);
+                let raw_frame = bytes[offset..offset + aligned_len].to_vec();
                 match links.get(&link.ifindex) {
-                    Some(previous) if previous == &link => {
+                    Some((previous, previous_frame))
+                        if previous == &link && previous_frame == &raw_frame =>
+                    {
                         identical_duplicates += 1;
                     }
                     Some(_) => {
                         return Err(AttemptStatus::Invalid(
-                            "conflicting_duplicate_link_identity".to_owned(),
+                            "conflicting_duplicate_link_identity_or_raw_attributes".to_owned(),
                         ));
                     }
                     None => {
-                        links.insert(link.ifindex, link);
+                        links.insert(link.ifindex, (link, raw_frame));
                     }
                 }
             }
@@ -1359,7 +1365,7 @@ fn parse_link_dump(
         ));
     }
     Ok(ParsedDump {
-        links: links.into_values().collect(),
+        links: links.into_values().map(|(link, _)| link).collect(),
         identical_duplicates,
     })
 }
@@ -1937,6 +1943,31 @@ mod tests {
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
         assert_eq!(receipt.receipt.source_results[0].observed_object_count, 1);
         assert_eq!(receipt.receipt.source_results[0].identical_duplicate_count, 1);
+    }
+
+    #[test]
+    fn same_basic_projection_with_different_unmodeled_attribute_is_invalid_duplicate() {
+        fn link_with_qdisc(qdisc: &[u8]) -> Vec<u8> {
+            let mut payload = vec![0, 0];
+            payload.extend_from_slice(&encode_u16(1));
+            payload.extend_from_slice(&encode_i32(2));
+            payload.extend_from_slice(&encode_u32(0x41));
+            payload.extend_from_slice(&encode_u32(0));
+            let mut name = b"eth0".to_vec();
+            name.push(0);
+            push_attr(&mut payload, IFLA_IFNAME, &name);
+            push_attr(&mut payload, IFLA_MTU, &encode_u32(1500));
+            push_attr(&mut payload, 6, qdisc); // IFLA_QDISC is raw-bound, not projected.
+            message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload)
+        }
+        let raw = raw_join(&[
+            link_with_qdisc(b"noqueue\0"),
+            link_with_qdisc(b"fq_codel\0"),
+            done(7, 0, NLM_F_MULTI),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Invalid);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("raw_attributes")));
     }
 
     #[test]
