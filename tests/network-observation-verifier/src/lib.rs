@@ -38,11 +38,27 @@ const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
 const NLM_F_DUMP_FILTERED: u16 = 0x0020;
 const NLM_F_DUMP_INTR: u16 = 0x0010;
 const IFLA_ADDRESS: u16 = 1;
+const IFLA_BROADCAST: u16 = 2;
 const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
 const IFLA_LINK: u16 = 5;
+const IFLA_QDISC: u16 = 6;
 const IFLA_MASTER: u16 = 10;
+const IFLA_TXQLEN: u16 = 13;
+const IFLA_OPERSTATE: u16 = 16;
+const IFLA_LINKMODE: u16 = 17;
 const IFLA_LINKINFO: u16 = 18;
+const IFLA_NET_NS_PID: u16 = 19;
+const IFLA_GROUP: u16 = 27;
+const IFLA_NET_NS_FD: u16 = 28;
+const IFLA_PROMISCUITY: u16 = 30;
+const IFLA_CARRIER: u16 = 33;
+const IFLA_PHYS_PORT_ID: u16 = 34;
+const IFLA_CARRIER_CHANGES: u16 = 35;
+const IFLA_PHYS_SWITCH_ID: u16 = 36;
+const IFLA_LINK_NETNSID: u16 = 37;
+const IFLA_PHYS_PORT_NAME: u16 = 38;
+const IFLA_PROTO_DOWN: u16 = 39;
 const NLM_F_ATOMIC: u16 = 0x0400;
 const NLM_F_ACK_TLVS: u16 = 0x0200;
 const NLA_TYPE_MASK: u16 = 0x3fff;
@@ -550,11 +566,27 @@ fn verify_envelope(
     // topology semantics. Envelopes may add stricter IDs but cannot omit this floor.
     let mandatory_critical_ids = BTreeSet::from([
         IFLA_ADDRESS,
+        IFLA_BROADCAST,
         IFLA_IFNAME,
         IFLA_MTU,
         IFLA_LINK,
+        IFLA_QDISC,
         IFLA_MASTER,
+        IFLA_TXQLEN,
+        IFLA_OPERSTATE,
+        IFLA_LINKMODE,
         IFLA_LINKINFO,
+        IFLA_NET_NS_PID,
+        IFLA_GROUP,
+        IFLA_NET_NS_FD,
+        IFLA_PROMISCUITY,
+        IFLA_CARRIER,
+        IFLA_PHYS_PORT_ID,
+        IFLA_CARRIER_CHANGES,
+        IFLA_PHYS_SWITCH_ID,
+        IFLA_LINK_NETNSID,
+        IFLA_PHYS_PORT_NAME,
+        IFLA_PROTO_DOWN,
     ]);
     if critical_ids.len() != envelope.policy.decision_critical_link_attribute_ids.len()
         || !mandatory_critical_ids.is_subset(&critical_ids)
@@ -1624,11 +1656,27 @@ mod tests {
                 max_retries: 2,
                 decision_critical_link_attribute_ids: vec![
                     IFLA_ADDRESS,
+                    IFLA_BROADCAST,
                     IFLA_IFNAME,
                     IFLA_MTU,
                     IFLA_LINK,
+                    IFLA_QDISC,
                     IFLA_MASTER,
+                    IFLA_TXQLEN,
+                    IFLA_OPERSTATE,
+                    IFLA_LINKMODE,
                     IFLA_LINKINFO,
+                    IFLA_NET_NS_PID,
+                    IFLA_GROUP,
+                    IFLA_NET_NS_FD,
+                    IFLA_PROMISCUITY,
+                    IFLA_CARRIER,
+                    IFLA_PHYS_PORT_ID,
+                    IFLA_CARRIER_CHANGES,
+                    IFLA_PHYS_SWITCH_ID,
+                    IFLA_LINK_NETNSID,
+                    IFLA_PHYS_PORT_NAME,
+                    IFLA_PROTO_DOWN,
                     999,
                 ],
             },
