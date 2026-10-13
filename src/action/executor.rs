@@ -1508,6 +1508,24 @@ mod tests {
         assert!(observation.rollback.is_none());
     }
 
+    #[test]
+    fn test_observation_does_not_invent_epoch_zero_when_clock_is_missing() {
+        let evidence = CommandInvocationEvidence {
+            command_digest_blake3: "a".repeat(64),
+            started_at_ms: None,
+            finished_at_ms: None,
+            elapsed_ms: 5,
+            disposition: ProcessDisposition::SpawnFailed {
+                error: "fixture spawn error".to_string(),
+            },
+        };
+        let value = serde_json::to_value(evidence).unwrap();
+        assert!(value["started_at_ms"].is_null());
+        assert!(value["finished_at_ms"].is_null());
+        assert_eq!(value["elapsed_ms"], 5);
+        assert_eq!(value["disposition"]["SpawnFailed"]["error"], "fixture spawn error");
+    }
+
     #[tokio::test]
     async fn test_observed_authorization_mismatch_never_starts_process() {
         let approved = NixOSCommand::Search {
