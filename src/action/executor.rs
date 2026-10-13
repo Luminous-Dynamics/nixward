@@ -1198,7 +1198,7 @@ impl NixOSExecutor {
                 let exec_result = ExecutionResult::Success {
                     stdout: String::from_utf8_lossy(&output.stdout).to_string(),
                     stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    execution_time_ms: elapsed,
+                    execution_time_ms: attempt.elapsed_ms,
                 };
                 self.record_execution(&command, decision_quality, &authorization, &exec_result);
                 ExecutionObservation {
@@ -1265,7 +1265,7 @@ impl NixOSExecutor {
                                                 error,
                                                 rollback_error: Some(
                                                     String::from_utf8_lossy(&rb_output.stderr)
-                                                .to_string(),
+                                                        .to_string(),
                                                 ),
                                             }
                                         }
