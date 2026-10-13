@@ -10,9 +10,15 @@ The legacy `ExecutionResult` is optimized for callers and CLI presentation. It d
 
 - The envelope binds the requested command's BLAKE3 digest even when it never launches, so dry-run/rejected observations cannot be detached from their intended command. `ExecutionObservation` itself is intentionally not serializable because its embedded result may contain raw stdout/stderr.
 - `InvocationStatus::NotStarted` records why a command did not launch: dry-run, forbidden host policy, rejected authorization, incomplete replay evidence, rejected replay, or unavailable clock needed for replay protection.
-- `InvocationStatus::Attempted` includes the command's BLAKE3 digest, caller-observed wall-clock timestamps bracketing `Command::output()` when available, monotonic elapsed time, and a process disposition. These timestamps are not an independent measurement of the kernel's exact process birth/exit times.
+- `InvocationStatus::Attempted` includes the **requested-command** BLAKE3 digest, caller-observed wall-clock timestamps bracketing `Command::output()` when available, monotonic elapsed time, and a process disposition. These timestamps are not an independent measurement of the kernel's exact process birth/exit times.
 - `ProcessDisposition::Exited` retains the actual exit code. `TerminatedWithoutExitCode` records the signal when the platform exposes one. `SpawnFailed` preserves the spawn error instead of inventing an exit code.
 - An optional rollback observation retains the rollback command digest, timing, and process disposition. It does not prove that the old machine state was restored.
+
+## Identity boundary: request digest is not launch identity
+
+`NixOSCommand::command_digest()` hashes the serialized `NixOSCommand` request. It binds the requested command variant and its fields; it is **not** a digest of the resolved executable, native argv bytes, environment, or a kernel process identity. In this legacy execution path, `Command::new()` can receive a bare executable name (for example, `nix` or `nixos-rebuild`) whose executable is resolved by the process environment's `PATH`. Therefore, the request digest and observed exit disposition must not be presented as proof of which executable image actually ran or as a signed/attested execution receipt.
+
+For privileged journal-owned system activation, use the separate worker-gate transaction path rather than inferring launch identity from this envelope. That path's worker receipt is designed to bind the gate and payload executable/argv, environment digest, transaction identity, boot ID, PID/start-time identity, and release challenge before payload release. It remains a distinct integration path: this API does not acquire that identity merely because it emits an execution-observation envelope. A future native-invocation evidence version would need to capture and validate the absolute executable and exact argv/environment identity at the launch boundary, plus process identity where supported.
 
 ## Consumer rules
 
