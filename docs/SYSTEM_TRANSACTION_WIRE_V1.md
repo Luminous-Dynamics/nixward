@@ -21,7 +21,11 @@ content locations.
 planned -> validated -> authorized -> snapshotted -> applied -> verified -> promoted
 
 Failure may terminate at failed, followed by bounded recovered when a valid
-recovery binding exists. Promotion is forbidden when boot-health evidence is false.
+recovery binding exists. Every promotion requires a verification receipt and is
+forbidden when boot-health evidence is false. A boot-generation-changing transaction
+also requires explicit positive boot-health evidence before promotion; a non-boot
+transaction may omit boot-health observation while still requiring post-state
+verification evidence.
 
 ## Identity
 
@@ -49,8 +53,9 @@ snapshotted -> applied -> verified -> promoted.
 A consumer must reject unsupported schema/version, plan or target mismatches,
 validation after authorization, snapshot without authorization plus validation,
 application without authorization/validation/snapshot, command-digest mismatches,
-verification before successful application, promotion before verification, unhealthy
-promotion, and recovery without snapshot/recovery evidence.
+verification before successful application, promotion before verification, promotion
+without a verification receipt, unhealthy promotion, boot-changing promotion without
+positive boot-health evidence, and recovery without snapshot/recovery evidence.
 
 A transaction is terminal only in promoted, recovered, or failed.
 
