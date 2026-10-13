@@ -49,7 +49,7 @@ pub struct Envelope {
     pub source_families: Vec<SourceFamily>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetIdentity {
     pub target_id: String,
