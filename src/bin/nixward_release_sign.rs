@@ -583,11 +583,13 @@ fn main() {
         eprintln!("manifest validation failed: {e}");
         std::process::exit(2)
     }));
+    // Capture public metadata before dropping the secret-bearing key object.
+    let signer_public_key_hex = hex(signing.verifying_key().as_bytes());
     drop(signing);
     let signed = SignedReleaseManifest {
         kind: RELEASE_SIGNATURE_KIND.into(),
         algorithm: "ed25519".into(),
-        signer_public_key_hex: hex(signing.verifying_key().as_bytes()),
+        signer_public_key_hex,
         signature_hex: hex(&signature.to_bytes()),
         manifest,
     };
