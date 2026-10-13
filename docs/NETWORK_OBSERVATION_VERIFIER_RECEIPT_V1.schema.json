@@ -14,6 +14,10 @@
       "required": [
         "verifier_id",
         "verifier_version",
+        "rustc_version",
+        "cargo_version",
+        "target_os",
+        "target_arch",
         "verifier_source_revision",
         "verifier_source_digest_blake3",
         "envelope_raw_blake3",
@@ -38,6 +42,10 @@
       "properties": {
         "verifier_id": { "const": "nixward.network-observation-verifier" },
         "verifier_version": { "type": "string", "minLength": 1 },
+        "rustc_version": { "type": "string", "minLength": 1 },
+        "cargo_version": { "type": "string", "minLength": 1 },
+        "target_os": { "type": "string", "minLength": 1 },
+        "target_arch": { "type": "string", "minLength": 1 },
         "verifier_source_revision": { "type": "string", "minLength": 1 },
         "verifier_source_digest_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "envelope_raw_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
