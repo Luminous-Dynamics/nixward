@@ -221,7 +221,7 @@ impl PlanExecutor {
                     ));
                     continue;
                 }
-                let rb_result = match self.steps[i].command.rollback_command() {
+                let rb_result = match self.steps[i]
                     .authorization
                     .as_ref()
                     .and_then(|auth| auth.for_rollback(&rollback_cmd).ok())
