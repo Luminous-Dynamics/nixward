@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request: [u8; 32] = [
         32, 0, 0, 0, // nlmsg_len
         18, 0, // RTM_GETLINK
-        1, 3, // NLM_F_REQUEST | NLM_F_DUMP
+        5, 3, // NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP
         7, 0, 0, 0, // request sequence
         0, 0, 0, 0, // sender port ID
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // unfiltered ifinfomsg
