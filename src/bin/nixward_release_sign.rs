@@ -103,6 +103,8 @@ fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), St
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
     let mut entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot enumerate {}: {e}", dir.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -125,6 +127,12 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), S
         if !meta.is_file() {
             return Err(format!(
                 "release tree contains unsupported non-file {}",
+                path.display()
+            ));
+        }
+        if meta.nlink() != 1 {
+            return Err(format!(
+                "release artifact {} has external or shared hard links; refusing to sign",
                 path.display()
             ));
         }
@@ -354,6 +362,20 @@ mod tests {
 
         std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read_seed(&seed).is_ok());
+    }
+
+    #[test]
+    fn walk_rejects_release_artifact_hard_linked_outside_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let outside = temp.path().join("outside.bin");
+        let artifact = release_root.join("artifact.bin");
+        std::fs::write(&outside, b"external alias must not be signed").unwrap();
+        std::fs::hard_link(&outside, &artifact).unwrap();
+
+        let error = walk(&release_root, &release_root, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("external or shared hard links"));
     }
 
     #[test]
