@@ -107,6 +107,14 @@ The v1 wire schema should remain a compatibility boundary, not become a second a
 
 **Required correction:** Use one formulation everywhere: *cognition proposes and explains; deterministic policy decides; explicit authority permits; the executor applies; independent observation verifies; a bounded recovery mechanism reconciles.* “Fail-open” must be scoped to optional availability/boot behavior, never to privileged mutation.
 
+### NWD-011 — Default-branch promotion controls are not demonstrated (P0)
+
+**Evidence:** The GitHub branch resource snapshot for `main` reported `protected: false` and `protection.enabled: false` on 2026-10-13. The connected integration received HTTP 403 when requesting the classic branch-protection endpoint, so the effective configuration should also be checked by a repository owner. A prior public ruleset query returned no rulesets. This is evidence that enforceable promotion controls are not visible in the current API surface; the review does not claim it changed repository settings.
+
+**Risk:** If the effective branch has no enforceable protection, an unqualified commit can reach `main` without the exact-head Rust/Nix qualification, signed provenance, review, or independent verifier gates. Even with a protection rule, skipped/cancelled/stale check runs must not satisfy the required gate.
+
+**Required correction:** Resolve [governance issue #5](https://github.com/Luminous-Dynamics/nixward/issues/5) by having a repository owner verify and configure a ruleset/classic protection policy: require pull requests and the intended review policy; require successful current-head qualification and provenance predicates; prevent bypass by routine actors; and test the policy with a deliberately skipped or stale check. Store an auditable snapshot of the effective policy alongside release qualification evidence.
+
 ## Target architecture
 
 ```text
