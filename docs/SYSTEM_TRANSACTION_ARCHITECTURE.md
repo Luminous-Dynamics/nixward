@@ -347,8 +347,6 @@ windows, policy-overlong TTLs, and zero nonces. This protects against a valid
 but not-yet-effective plan becoming executable before its declared issuance
 time.
 
-
-
 ## Execution evidence follow-up
 
 See [Execution Observation Evidence](EXECUTION-OBSERVATION-EVIDENCE.md) for the additive process-observation API. It is not yet a SystemTransaction v1 mapping or VM qualification.
