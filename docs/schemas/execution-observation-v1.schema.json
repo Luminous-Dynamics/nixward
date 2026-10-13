@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nixward.luminousdynamics.org/schemas/execution-observation-v1.schema.json",
   "title": "Nixward Execution Evidence Envelope v1",
-  "description": "Output-free caller-process observation. It is not signed evidence and does not attest target state. Cross-field invariants are checked by ExecutionEvidenceEnvelope::validate_wire().",
+  "description": "Output-free, requested-command-bound caller-side process observation. The top-level command_digest_blake3 hashes the serialized NixOSCommand request; it is not a digest of the resolved executable, native argv, environment or kernel process identity, is not signed attestation, and does not attest target state. Cross-field invariants are checked by ExecutionEvidenceEnvelope::validate_wire().",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,7 +22,8 @@
     },
     "command_digest_blake3": {
       "type": "string",
-      "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "description": "BLAKE3 digest of the serialized requested NixOSCommand. Binds intent, including when the command was not started; does not prove the resolved executable image or native argv."
     },
     "primary": {
       "$ref": "#/$defs/invocationStatus"
@@ -139,7 +140,8 @@
       "properties": {
         "command_digest_blake3": {
           "type": "string",
-          "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "description": "BLAKE3 digest of the serialized NixOSCommand associated with this observation (the requested command for primary evidence, or the rollback command for rollback evidence); not resolved executable/argv identity."
         },
         "started_at_ms": {
           "type": [
