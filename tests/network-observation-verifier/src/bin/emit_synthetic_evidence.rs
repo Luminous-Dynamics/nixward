@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_messages_per_attempt: 8,
             max_objects_per_attempt: 8,
             max_retries: 1,
-            decision_critical_link_attribute_ids: vec![1, 3, 4, 5, 10, 18],
+            decision_critical_link_attribute_ids: vec![1, 2, 3, 4, 5, 6, 10, 13, 16, 17, 18, 19, 27, 28, 30, 33, 34, 35, 36, 37, 38, 39],
         },
         captured_at_unix_ms: 1_000_000,
         verification_time_unix_ms: 1_000_500,
