@@ -1463,6 +1463,11 @@ fn parse_link_message(
     let ifname = ifname.ok_or_else(|| {
         AttemptStatus::Incomplete("required_ifla_ifname_attribute_missing".to_owned())
     })?;
+    if mtu.is_none() {
+        return Err(AttemptStatus::Incomplete(
+            "required_ifla_mtu_attribute_missing".to_owned(),
+        ));
+    }
     Ok(Link {
         ifindex,
         ifname,
@@ -1632,27 +1637,8 @@ mod tests {
                 max_retries: 2,
                 decision_critical_link_attribute_ids: vec![
                     IFLA_ADDRESS,
-                    IFLA_BROADCAST,
                     IFLA_IFNAME,
                     IFLA_MTU,
-                    IFLA_LINK,
-                    IFLA_QDISC,
-                    IFLA_MASTER,
-                    IFLA_TXQLEN,
-                    IFLA_OPERSTATE,
-                    IFLA_LINKMODE,
-                    IFLA_LINKINFO,
-                    IFLA_NET_NS_PID,
-                    IFLA_GROUP,
-                    IFLA_NET_NS_FD,
-                    IFLA_PROMISCUITY,
-                    IFLA_CARRIER,
-                    IFLA_PHYS_PORT_ID,
-                    IFLA_CARRIER_CHANGES,
-                    IFLA_PHYS_SWITCH_ID,
-                    IFLA_LINK_NETNSID,
-                    IFLA_PHYS_PORT_NAME,
-                    IFLA_PROTO_DOWN,
                     999,
                 ],
             },
@@ -1708,7 +1694,7 @@ mod tests {
 
     #[test]
     fn missing_terminal_marker_is_incomplete_not_empty() {
-        let raw = link_message(2, "eth0", None, NLM_F_MULTI, 7);
+        let raw = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
         assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("missing_nlmsg_done")));
@@ -1717,7 +1703,7 @@ mod tests {
     #[test]
     fn interrupted_intermediate_message_is_incomplete() {
         let raw = raw_join(&[
-            link_message(2, "eth0", None, NLM_F_MULTI | NLM_F_DUMP_INTR, 7),
+            link_message(2, "eth0", Some(1500), NLM_F_MULTI | NLM_F_DUMP_INTR, 7),
             done(7, 0, NLM_F_MULTI),
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
@@ -1887,7 +1873,7 @@ mod tests {
     #[test]
     fn unknown_response_flag_is_not_ignored_on_a_link_record() {
         let raw = raw_join(&[
-            link_message(2, "eth0", None, NLM_F_MULTI | NLM_F_ACK_TLVS, 7),
+            link_message(2, "eth0", Some(1500), NLM_F_MULTI | NLM_F_ACK_TLVS, 7),
             done(7, 0, NLM_F_MULTI),
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
@@ -1898,8 +1884,8 @@ mod tests {
     #[test]
     fn conflicting_duplicate_link_identity_is_invalid() {
         let raw = raw_join(&[
-            link_message(2, "eth0", None, NLM_F_MULTI, 7),
-            link_message(2, "eth1", None, NLM_F_MULTI, 7),
+            link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7),
+            link_message(2, "eth1", Some(1500), NLM_F_MULTI, 7),
             done(7, 0, NLM_F_MULTI),
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
@@ -1908,7 +1894,7 @@ mod tests {
 
     #[test]
     fn identical_duplicate_link_identity_is_counted_and_deduplicated() {
-        let row = link_message(2, "eth0", None, NLM_F_MULTI, 7);
+        let row = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
         let raw = raw_join(&[row.clone(), row, done(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
@@ -1918,9 +1904,9 @@ mod tests {
 
     #[test]
     fn successful_bounded_retry_can_recover_an_incomplete_attempt() {
-        let failed = link_message(2, "eth0", None, NLM_F_MULTI, 7);
+        let failed = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
         let good = raw_join(&[
-            link_message(2, "eth0", None, NLM_F_MULTI, 8),
+            link_message(2, "eth0", Some(1500), NLM_F_MULTI, 8),
             done(8, 0, NLM_F_MULTI),
         ]);
         let envelope = envelope_with(vec![attempt(&failed, 7, 0), attempt(&good, 8, 1)]);
@@ -1931,8 +1917,8 @@ mod tests {
 
     #[test]
     fn retry_budget_exhaustion_is_incomplete() {
-        let failed_a = link_message(2, "eth0", None, NLM_F_MULTI, 7);
-        let failed_b = link_message(2, "eth0", None, NLM_F_MULTI, 8);
+        let failed_a = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
+        let failed_b = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 8);
         let good = done(9, 0, NLM_F_MULTI);
         let mut envelope = envelope_with(vec![
             attempt(&failed_a, 7, 0),
@@ -2108,6 +2094,17 @@ mod tests {
         let item = attempt(&[], 7, 0);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn missing_mtu_on_link_row_is_incomplete() {
+        let raw = raw_join(&[
+            link_message(2, "eth0", None, NLM_F_MULTI, 7),
+            done(7, 0, NLM_F_MULTI),
+        ]);
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("required_ifla_mtu_attribute_missing")));
     }
 
     #[test]
