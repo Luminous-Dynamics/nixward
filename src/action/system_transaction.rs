@@ -302,13 +302,12 @@ impl SystemTransaction {
         if !matches!(self.phase, TransactionPhase::Verified) {
             return Err("promotion requires verified post-state evidence".into());
         }
-        if self
+        let boot_healthy = self
             .verification
             .as_ref()
-            .and_then(|receipt| receipt.boot_healthy)
-            .is_some_and(|healthy| !healthy)
-        {
-            return Err("unhealthy boot cannot be promoted".into());
+            .and_then(|receipt| receipt.boot_healthy);
+        if boot_healthy != Some(true) {
+            return Err("promotion requires explicit healthy boot evidence".into());
         }
         self.phase = TransactionPhase::Promoted;
         self.outcome = Some(OutcomeReceipt {
@@ -603,5 +602,34 @@ mod tests {
         tx.record_verification(&plan, [6; 32], [8; 32], Some(false))
             .unwrap();
         assert!(tx.promote(&plan).is_err());
+    }
+
+    #[test]
+    fn unknown_boot_health_cannot_be_promoted() {
+        let plan = plan();
+        let auth = authorization(&plan);
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &auth).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        tx.record_verification(&plan, [6; 32], [8; 32], None)
+            .unwrap();
+
+        assert!(tx.promote(&plan).is_err());
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.outcome.is_none());
+    }
+
+    #[test]
+    fn missing_verification_receipt_cannot_be_promoted() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.phase = TransactionPhase::Verified;
+
+        assert!(tx.promote(&plan).is_err());
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.outcome.is_none());
     }
 }
