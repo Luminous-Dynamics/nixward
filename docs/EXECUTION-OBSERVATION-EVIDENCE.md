@@ -4,10 +4,11 @@
 
 ## Why this exists
 
-The legacy `ExecutionResult` is optimized for callers and CLI presentation. It deliberately does not encode enough process-level detail to establish application evidence by itself. The additive `NixOSExecutor::execute_authorized_observed()` returns the same result together with an explicit `ExecutionObservation`.
+The legacy `ExecutionResult` is optimized for callers and CLI presentation. It deliberately does not encode enough process-level detail to establish application evidence by itself. The additive `NixOSExecutor::execute_authorized_observed()` returns the same result together with an explicit `ExecutionObservation`. Use `evidence_envelope()` to obtain the versioned output-free projection defined by [execution-observation-v1.schema.json](schemas/execution-observation-v1.schema.json).
 
 ## Evidence types
 
+- The envelope binds the requested command's BLAKE3 digest even when it never launches, so dry-run/rejected observations cannot be detached from their intended command. `ExecutionObservation` itself is intentionally not serializable because its embedded result may contain raw stdout/stderr.
 - `InvocationStatus::NotStarted` records why a command did not launch: dry-run, forbidden host policy, rejected authorization, incomplete replay evidence, rejected replay, or unavailable clock needed for replay protection.
 - `InvocationStatus::Attempted` includes the command's BLAKE3 digest, caller-observed wall-clock timestamps bracketing `Command::output()` when available, monotonic elapsed time, and a process disposition. These timestamps are not an independent measurement of the kernel's exact process birth/exit times.
 - `ProcessDisposition::Exited` retains the actual exit code. `TerminatedWithoutExitCode` records the signal when the platform exposes one. `SpawnFailed` preserves the spawn error instead of inventing an exit code.
