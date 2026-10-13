@@ -4,7 +4,7 @@
 
 ## Why this exists
 
-The legacy `ExecutionResult` is optimized for callers and CLI presentation. It deliberately does not encode enough process-level detail to establish application evidence by itself. The additive `NixOSExecutor::execute_authorized_observed()` returns the same result together with an explicit `ExecutionObservation`. Use `evidence_envelope()` to obtain the versioned output-free projection defined by [execution-observation-v1.schema.json](schemas/execution-observation-v1.schema.json).
+The legacy `ExecutionResult` is optimized for callers and CLI presentation. It deliberately does not encode enough process-level detail to establish application evidence by itself. The additive `NixOSExecutor::execute_authorized_observed()` returns the same result together with an explicit `ExecutionObservation`. Use `evidence_envelope()` to obtain the versioned output-free projection defined by [execution-observation-v1.schema.json](schemas/execution-observation-v1.schema.json). Three fixtures cover dry-run, spawn failure, and a nonzero exit: [dry-run](fixtures/execution-observation-dry-run-v1.json), [spawn failure](fixtures/execution-observation-spawn-failure-v1.json), and [nonzero exit](fixtures/execution-observation-nonzero-exit-v1.json).
 
 ## Evidence types
 
