@@ -1813,7 +1813,7 @@ mod tests {
         payload.extend_from_slice(&encode_u16(1));
         payload.extend_from_slice(&encode_i32(2));
         payload.extend_from_slice(&encode_u32(1));
-        payload.extend_from_slice(&encode_u32(u32::MAX));
+        payload.extend_from_slice(&encode_u32(0)); // ifi_change=0 in dump rows
         let mut name = b"eth0".to_vec();
         name.push(0);
         push_attr(&mut payload, IFLA_IFNAME, &name);
@@ -1832,10 +1832,11 @@ mod tests {
         payload.extend_from_slice(&encode_u16(1));
         payload.extend_from_slice(&encode_i32(2));
         payload.extend_from_slice(&encode_u32(1));
-        payload.extend_from_slice(&encode_u32(u32::MAX));
+        payload.extend_from_slice(&encode_u32(0)); // ifi_change=0 in dump rows
         let mut name = b"eth0".to_vec();
         name.push(0);
         push_attr(&mut payload, IFLA_IFNAME, &name);
+        push_attr(&mut payload, IFLA_MTU, &encode_u32(1500));
         push_attr(&mut payload, 777, &[8, 7, 6, 5]);
         let raw = raw_join(&[
             message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
@@ -1846,12 +1847,48 @@ mod tests {
     }
 
     #[test]
+    fn common_unmodeled_kernel_attributes_remain_raw_bound_without_claiming_semantics() {
+        fn evidence_for_qdisc(qdisc: &[u8]) -> ReceiptEnvelope {
+            let mut payload = vec![0, 0];
+            payload.extend_from_slice(&encode_u16(1));
+            payload.extend_from_slice(&encode_i32(2));
+            payload.extend_from_slice(&encode_u32(0x41));
+            payload.extend_from_slice(&encode_u32(0));
+            let mut name = b"eth0".to_vec();
+            name.push(0);
+            push_attr(&mut payload, IFLA_IFNAME, &name);
+            push_attr(&mut payload, IFLA_MTU, &encode_u32(1500));
+            push_attr(&mut payload, 6, qdisc); // IFLA_QDISC; not in the basic semantic projection.
+            push_attr(&mut payload, 13, &encode_u32(1000)); // IFLA_TXQLEN.
+            let raw = raw_join(&[
+                message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
+                done(7, 0, NLM_F_MULTI),
+            ]);
+            verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]))
+        }
+
+        let noqueue = evidence_for_qdisc(b"noqueue\0");
+        let fq_codel = evidence_for_qdisc(b"fq_codel\0");
+        assert_eq!(noqueue.receipt.decision, Decision::CompleteForDeclaredScope);
+        assert_eq!(fq_codel.receipt.decision, Decision::CompleteForDeclaredScope);
+        assert_ne!(
+            noqueue.receipt.source_results[0].raw_artifact_blake3,
+            fq_codel.receipt.source_results[0].raw_artifact_blake3
+        );
+        assert_eq!(
+            noqueue.receipt.source_results[0].canonical_semantic_blake3,
+            fq_codel.receipt.source_results[0].canonical_semantic_blake3
+        );
+        assert!(noqueue.receipt.limitations.iter().any(|limit| limit.contains("not semantically")));
+    }
+
+    #[test]
     fn interpreted_attribute_type_flags_are_rejected() {
         let mut payload = vec![0, 0];
         payload.extend_from_slice(&encode_u16(1));
         payload.extend_from_slice(&encode_i32(2));
         payload.extend_from_slice(&encode_u32(0x41));
-        payload.extend_from_slice(&encode_u32(u32::MAX));
+        payload.extend_from_slice(&encode_u32(0)); // ifi_change=0 in dump rows
         let mut name = b"eth0".to_vec();
         name.push(0);
         push_attr(&mut payload, IFLA_IFNAME, &name);
@@ -2181,10 +2218,11 @@ mod tests {
         payload.extend_from_slice(&encode_u16(1));
         payload.extend_from_slice(&encode_i32(2));
         payload.extend_from_slice(&encode_u32(1));
-        payload.extend_from_slice(&encode_u32(u32::MAX));
+        payload.extend_from_slice(&encode_u32(0)); // ifi_change=0 in dump rows
         let mut name = b"eth0".to_vec();
         name.push(0);
         push_attr(&mut payload, IFLA_IFNAME, &name);
+        push_attr(&mut payload, IFLA_MTU, &encode_u32(1500));
         push_attr(&mut payload, IFLA_ADDRESS, &[0, 1, 2, 3, 4, 5]);
         let raw = raw_join(&[
             message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
