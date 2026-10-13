@@ -871,6 +871,37 @@ fn invocation_evidence(
     }
 }
 
+struct ProcessAttempt {
+    started_at_ms: Option<u64>,
+    finished_at_ms: Option<u64>,
+    elapsed_ms: u64,
+    result: Result<std::process::Output, String>,
+}
+
+/// Run one exact argv vector and capture the caller-observed attempt interval.
+/// Timestamps bracket Command::output(); they are not an independently measured
+/// kernel process-start event. Spawn errors remain distinct from exit statuses.
+async fn run_process_attempt(binary: &str, args: &[String]) -> ProcessAttempt {
+    let started_at_ms = unix_epoch_millis();
+    let start = std::time::Instant::now();
+    let result = Command::new(binary)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|error| error.to_string());
+    let elapsed_ms = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let finished_at_ms = unix_epoch_millis();
+
+    ProcessAttempt {
+        started_at_ms,
+        finished_at_ms,
+        elapsed_ms,
+        result,
+    }
+}
+
 /// NixOS-aware command executor.
 ///
 /// Φ/confidence remains available as decision telemetry, but privileged
@@ -1154,24 +1185,14 @@ impl NixOSExecutor {
             }
         }
 
-        let started_at_ms = unix_epoch_millis();
-        let start = std::time::Instant::now();
-        let result = Command::new(&cmd)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await;
-        let elapsed = start.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let finished_at_ms = unix_epoch_millis();
-
-        match result {
+        let attempt = run_process_attempt(&cmd, &args).await;
+        match attempt.result {
             Ok(output) if output.status.success() => {
                 let evidence = invocation_evidence(
                     &command,
-                    started_at_ms,
-                    finished_at_ms,
-                    elapsed,
+                    attempt.started_at_ms,
+                    attempt.finished_at_ms,
+                    attempt.elapsed_ms,
                     process_disposition(&output.status),
                 );
                 let exec_result = ExecutionResult::Success {
@@ -1191,9 +1212,9 @@ impl NixOSExecutor {
                 let error = String::from_utf8_lossy(&output.stderr).to_string();
                 let primary_evidence = invocation_evidence(
                     &command,
-                    started_at_ms,
-                    finished_at_ms,
-                    elapsed,
+                    attempt.started_at_ms,
+                    attempt.finished_at_ms,
+                    attempt.elapsed_ms,
                     process_disposition(&output.status),
                 );
                 warn!(error = %error, "Command failed, attempting authorized rollback");
@@ -1220,29 +1241,15 @@ impl NixOSExecutor {
                                 }
                             } else {
                                 let (rb_cmd, rb_args) = rollback_cmd.to_command();
-                                let rb_started_at_ms = unix_epoch_millis();
-                                let rb_start = std::time::Instant::now();
-                                let rb_result = Command::new(&rb_cmd)
-                                    .args(&rb_args)
-                                    .stdout(Stdio::piped())
-                                    .stderr(Stdio::piped())
-                                    .output()
-                                    .await;
-                                let rb_elapsed = rb_start
-                                    .elapsed()
-                                    .as_millis()
-                                    .min(u64::MAX as u128)
-                                    as u64;
-                                let rb_finished_at_ms = unix_epoch_millis();
-
-                                match rb_result {
+                                let rb_attempt = run_process_attempt(&rb_cmd, &rb_args).await;
+                                match rb_attempt.result {
                                     Ok(rb_output) => {
                                         let disposition = process_disposition(&rb_output.status);
                                         rollback_evidence = Some(invocation_evidence(
                                             &rollback_cmd,
-                                            rb_started_at_ms,
-                                            rb_finished_at_ms,
-                                            rb_elapsed,
+                                            rb_attempt.started_at_ms,
+                                            rb_attempt.finished_at_ms,
+                                            rb_attempt.elapsed_ms,
                                             disposition,
                                         ));
                                         if rb_output.status.success() {
@@ -1266,9 +1273,9 @@ impl NixOSExecutor {
                                     Err(e) => {
                                         rollback_evidence = Some(invocation_evidence(
                                             &rollback_cmd,
-                                            rb_started_at_ms,
-                                            rb_finished_at_ms,
-                                            rb_elapsed,
+                                            rb_attempt.started_at_ms,
+                                            rb_attempt.finished_at_ms,
+                                            rb_attempt.elapsed_ms,
                                             ProcessDisposition::SpawnFailed {
                                                 error: e.to_string(),
                                             },
@@ -1305,13 +1312,12 @@ impl NixOSExecutor {
                     dry_run: false,
                 }
             }
-            Err(e) => {
-                let spawn_error = e.to_string();
+            Err(spawn_error) => {
                 let evidence = invocation_evidence(
                     &command,
-                    started_at_ms,
-                    finished_at_ms,
-                    elapsed,
+                    attempt.started_at_ms,
+                    attempt.finished_at_ms,
+                    attempt.elapsed_ms,
                     ProcessDisposition::SpawnFailed {
                         error: spawn_error.clone(),
                     },
@@ -1514,6 +1520,42 @@ mod tests {
             }
         );
         assert!(observation.rollback.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_process_attempt_preserves_spawn_failure_without_fake_exit_code() {
+        let missing = format!(
+            "/tmp/nixward-test-command-that-does-not-exist-{}",
+            std::process::id()
+        );
+        let attempt = run_process_attempt(&missing, &[]).await;
+        let error = attempt.result.unwrap_err();
+        assert!(!error.is_empty());
+        let command = NixOSCommand::Search {
+            query: "fixture".to_string(),
+            json: false,
+        };
+        let evidence = invocation_evidence(
+            &command,
+            attempt.started_at_ms,
+            attempt.finished_at_ms,
+            attempt.elapsed_ms,
+            ProcessDisposition::SpawnFailed { error },
+        );
+        assert!(matches!(evidence.disposition, ProcessDisposition::SpawnFailed { .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_process_attempt_preserves_actual_nonzero_exit_code() {
+        let args = vec!["-c".to_string(), "exit 23".to_string()];
+        let attempt = run_process_attempt("/bin/sh", &args).await;
+        let output = attempt.result.expect("test shell should start");
+        assert_eq!(
+            process_disposition(&output.status),
+            ProcessDisposition::Exited { code: 23 }
+        );
     }
 
     #[cfg(unix)]
