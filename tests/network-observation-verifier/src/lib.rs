@@ -12,6 +12,8 @@ const HASH_RAW_DOMAIN: &[u8] = b"nixward.network-observation.raw-artifact.v1";
 const HASH_SEMANTIC_DOMAIN: &[u8] = b"nixward.network-observation.link-semantics.v1";
 const HASH_ENVELOPE_DOMAIN: &[u8] = b"nixward.network-observation.envelope.v1";
 const HASH_RECEIPT_DOMAIN: &[u8] = b"nixward.network-observation.receipt.v1";
+const HASH_POLICY_DOMAIN: &[u8] = b"nixward.network-observation.policy.v1";
+const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const NLMSG_HDR_LEN: usize = 16;
 const IFINFOMSG_LEN: usize = 16;
 const NLMSG_ERROR: u16 = 2;
@@ -147,7 +149,10 @@ pub enum Ownership {
 pub struct ReceiptBody {
     pub verifier_id: String,
     pub verifier_version: String,
+    pub verifier_source_revision: String,
+    pub verifier_source_digest_blake3: String,
     pub envelope_raw_blake3: String,
+    pub policy_digest_blake3: String,
     pub target: TargetIdentity,
     pub scope: DeclaredScope,
     pub policy_id: String,
@@ -246,7 +251,6 @@ struct AttemptEvaluation {
     status: AttemptStatus,
     links: Vec<Link>,
     identical_duplicates: usize,
-    raw_digest: String,
     canonical_digest: Option<String>,
 }
 
@@ -350,6 +354,9 @@ fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 pub fn verify_bytes(input: &[u8]) -> Result<ReceiptEnvelope, String> {
+    if input.len() > MAX_ENVELOPE_BYTES {
+        return Err(format!("envelope exceeds hard input limit of {MAX_ENVELOPE_BYTES} bytes"));
+    }
     let envelope: Envelope = serde_json::from_slice(input)
         .map_err(|error| format!("invalid or nonconforming envelope JSON: {error}"))?;
     let envelope_digest = hash_domain(HASH_ENVELOPE_DOMAIN, input);
@@ -380,6 +387,14 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     let scope = envelope.scope.clone();
     let policy_id = envelope.policy.policy_id.clone();
     let policy_version = envelope.policy.policy_version.clone();
+    let policy_bytes = serde_json::to_vec(&envelope.policy).expect("typed policy serializes");
+    let policy_digest_blake3 = hash_domain(HASH_POLICY_DOMAIN, &policy_bytes);
+    let verifier_source_revision = option_env!("NIXWARD_VERIFIER_SOURCE_REVISION")
+        .unwrap_or("unbound-build")
+        .to_owned();
+    let verifier_source_digest_blake3 = option_env!("NIXWARD_VERIFIER_SOURCE_DIGEST")
+        .unwrap_or("build-source-digest-unavailable")
+        .to_owned();
 
     if envelope.schema_id != ENVELOPE_SCHEMA_ID || envelope.schema_version != 1 {
         reasons.push("unsupported_or_mismatched_envelope_schema".to_owned());
@@ -507,13 +522,16 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
         let mut attempt_evaluations = Vec::new();
         let mut sequences = BTreeSet::new();
         for (position, attempt) in source.attempts.iter().enumerate() {
+            let mut attempt_metadata_invalid = false;
             if attempt.retry_index != position as u32 {
                 source_reasons.push("retry_indices_not_contiguous_from_zero".to_owned());
                 fatal_invalid = true;
+                attempt_metadata_invalid = true;
             }
             if attempt.request_sequence == 0 || !sequences.insert(attempt.request_sequence) {
                 source_reasons.push("zero_or_duplicate_request_sequence".to_owned());
                 fatal_invalid = true;
+                attempt_metadata_invalid = true;
             }
             if attempt.target_id != target.target_id
                 || attempt.boot_id != target.boot_id
@@ -521,6 +539,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             {
                 source_reasons.push("source_target_boot_or_namespace_mismatch".to_owned());
                 fatal_invalid = true;
+                attempt_metadata_invalid = true;
             }
             if attempt.ended_monotonic_ns < attempt.started_monotonic_ns
                 || attempt
@@ -530,6 +549,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             {
                 source_reasons.push("invalid_or_excessive_source_time_window".to_owned());
                 fatal_invalid = true;
+                attempt_metadata_invalid = true;
             }
             let raw = match decode_hex(&attempt.raw_artifact_hex) {
                 Ok(bytes) => bytes,
@@ -560,7 +580,35 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                     status: AttemptStatus::Invalid("raw_artifact_digest_mismatch".to_owned()),
                     links: Vec::new(),
                     identical_duplicates: 0,
-                    raw_digest,
+                    canonical_digest: None,
+                });
+                continue;
+            }
+            if attempt_metadata_invalid {
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Invalid("attempt_metadata_invalid".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
+            }
+            if raw.is_empty() || raw.len() > envelope.policy.max_total_raw_bytes {
+                source_reasons.push("empty_or_oversized_raw_artifact".to_owned());
+                every_required_source_complete = false;
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Incomplete("empty_or_oversized_raw_artifact".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
+            }
+            if source.family != SUPPORTED_FAMILY {
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Unsupported("source_family_not_implemented_by_m1a_verifier".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
                     canonical_digest: None,
                 });
                 continue;
@@ -572,7 +620,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                     status: AttemptStatus::Unsupported("unsupported_byte_order_marker".to_owned()),
                     links: Vec::new(),
                     identical_duplicates: 0,
-                    raw_digest,
                     canonical_digest: None,
                 });
                 continue;
@@ -595,8 +642,8 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                     let digest = canonical_digest(&parsed.links);
                     if attempt
                         .canonical_semantic_blake3
-                        .as_ref()
-                        .is_none_or(|expected| !is_lower_hex_digest(expected) || *expected != digest)
+                        .as_deref()
+                        .is_none_or(|expected| !is_lower_hex_digest(expected) || expected != digest.as_str())
                     {
                         source_reasons.push("canonical_semantic_digest_mismatch_or_missing".to_owned());
                         fatal_invalid = true;
@@ -606,7 +653,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                             ),
                             links: parsed.links,
                             identical_duplicates: parsed.identical_duplicates,
-                            raw_digest,
                             canonical_digest: Some(digest),
                         }
                     } else if attempt.enobufs_observed
@@ -620,7 +666,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                             ),
                             links: parsed.links,
                             identical_duplicates: parsed.identical_duplicates,
-                            raw_digest,
                             canonical_digest: Some(digest),
                         }
                     } else {
@@ -628,7 +673,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                             status: AttemptStatus::Complete,
                             links: parsed.links,
                             identical_duplicates: parsed.identical_duplicates,
-                            raw_digest,
                             canonical_digest: Some(digest),
                         }
                     }
@@ -637,7 +681,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                     status: AttemptStatus::Incomplete(reason),
                     links: Vec::new(),
                     identical_duplicates: 0,
-                    raw_digest,
                     canonical_digest: None,
                 },
                 Err(AttemptStatus::Invalid(reason)) => {
@@ -647,7 +690,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                         status: AttemptStatus::Invalid(reason),
                         links: Vec::new(),
                         identical_duplicates: 0,
-                        raw_digest,
                         canonical_digest: None,
                     }
                 }
@@ -658,17 +700,16 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                         status: AttemptStatus::Unsupported(reason),
                         links: Vec::new(),
                         identical_duplicates: 0,
-                        raw_digest,
                         canonical_digest: None,
                     }
                 }
                 Err(AttemptStatus::Complete) => unreachable!("parser never returns Complete as an error"),
             };
             // A retry may recover an incomplete attempt; it cannot erase invalid evidence.
-            if matches!(evaluation.status, AttemptStatus::Invalid(_)) {
+            if matches!(&evaluation.status, AttemptStatus::Invalid(_)) {
                 fatal_invalid = true;
             }
-            if matches!(evaluation.status, AttemptStatus::Unsupported(_)) {
+            if matches!(&evaluation.status, AttemptStatus::Unsupported(_)) {
                 unsupported = true;
             }
             attempt_evaluations.push(evaluation);
@@ -678,10 +719,10 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             source_reasons.push("total_raw_artifact_byte_limit_exceeded".to_owned());
             every_required_source_complete = false;
         }
-        if attempt_evaluations.iter().any(|result| matches!(result.status, AttemptStatus::Invalid(_))) {
+        if attempt_evaluations.iter().any(|result| matches!(&result.status, AttemptStatus::Invalid(_))) {
             source_status = "invalid".to_owned();
             every_required_source_complete = false;
-        } else if attempt_evaluations.iter().any(|result| matches!(result.status, AttemptStatus::Unsupported(_))) {
+        } else if attempt_evaluations.iter().any(|result| matches!(&result.status, AttemptStatus::Unsupported(_))) {
             source_status = "unsupported".to_owned();
             every_required_source_complete = false;
         } else if let Some(last) = attempt_evaluations.last() {
@@ -696,7 +737,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
                         every_required_source_complete = false;
                     } else if attempt_evaluations[..attempt_evaluations.len() - 1]
                         .iter()
-                        .any(|result| matches!(result.status, AttemptStatus::Complete))
+                        .any(|result| matches!(&result.status, AttemptStatus::Complete))
                     {
                         source_reasons.push("unnecessary_attempt_after_completed_dump".to_owned());
                         source_status = "invalid".to_owned();
@@ -808,7 +849,10 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
     ReceiptBody {
         verifier_id: VERIFIER_ID.to_owned(),
         verifier_version: VERIFIER_VERSION.to_owned(),
+        verifier_source_revision,
+        verifier_source_digest_blake3,
         envelope_raw_blake3: envelope_digest,
+        policy_digest_blake3,
         target,
         scope,
         policy_id,
@@ -830,6 +874,7 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             "Temporal result is a bounded single-source observation window, not a global atomic network snapshot.".to_owned(),
             "Ownership is Unknown: a link dump does not establish the configuration/runtime writer.".to_owned(),
             "No signature or protected local provenance is established by this receipt.".to_owned(),
+            "The verifier source digest identifies the pinned source/schema bundle used at build time; it is not a measured executable binary hash.".to_owned(),
         ],
         global_atomic_snapshot_claimed: false,
         production_mutation_enabled: false,
@@ -1028,6 +1073,11 @@ fn parse_link_message(
             IFLA_ADDRESS => {
                 // Address bytes remain bound by the exact raw-artifact digest. This M1a
                 // semantic profile does not interpret address families or validate them.
+                if critical_ids.contains(&IFLA_ADDRESS) {
+                    return Err(AttemptStatus::Unsupported(
+                        "decision_critical_address_attribute_not_semantically_supported".to_owned(),
+                    ));
+                }
             }
             other => {
                 if critical_ids.contains(&other) {
