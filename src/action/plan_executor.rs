@@ -238,7 +238,11 @@ impl PlanExecutor {
             }
 
             let Some(rollback_cmd) = self.steps[i].command.rollback_command() else {
-                let message = "no rollback command exists; target state is indeterminate".to_string();
+                // Read-only steps did not mutate target state, so no rollback is needed.
+                if self.steps[i].command.safety_level() == SafetyLevel::ReadOnly {
+                    continue;
+                }
+                let message = "no rollback command exists for an applied step; target state is indeterminate".to_string();
                 self.steps[i].status = StepStatus::Indeterminate;
                 if let Some((step, _)) = results.get_mut(i) {
                     step.status = StepStatus::Indeterminate;
