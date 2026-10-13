@@ -10,5 +10,8 @@ blake3 = "=1.8.5"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 
+[build-dependencies]
+blake3 = "=1.8.5"
+
 [lints.rust]
 unsafe_code = "forbid"
