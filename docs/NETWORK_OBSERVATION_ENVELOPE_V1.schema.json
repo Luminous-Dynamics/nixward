@@ -106,7 +106,10 @@
           "allOf": [
             { "contains": { "const": 1 } },
             { "contains": { "const": 3 } },
-            { "contains": { "const": 4 } }
+            { "contains": { "const": 4 } },
+            { "contains": { "const": 5 } },
+            { "contains": { "const": 10 } },
+            { "contains": { "const": 18 } }
           ],
           "uniqueItems": true
         }
