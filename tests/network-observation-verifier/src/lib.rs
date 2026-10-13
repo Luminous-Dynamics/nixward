@@ -14,6 +14,14 @@ const HASH_ENVELOPE_DOMAIN: &[u8] = b"nixward.network-observation.envelope.v1";
 const HASH_RECEIPT_DOMAIN: &[u8] = b"nixward.network-observation.receipt.v1";
 const HASH_POLICY_DOMAIN: &[u8] = b"nixward.network-observation.policy.v1";
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
+const POLICY_ID: &str = "m1a-rtnetlink-links";
+const POLICY_VERSION: &str = "1";
+const POLICY_MAX_AGE_MS: u64 = 60_000;
+const POLICY_MAX_SOURCE_WINDOW_NS: u64 = 10_000_000;
+const POLICY_MAX_RAW_BYTES: usize = 65_536;
+const POLICY_MAX_MESSAGES: usize = 128;
+const POLICY_MAX_OBJECTS: usize = 64;
+const POLICY_MAX_RETRIES: u32 = 2;
 const NLMSG_HDR_LEN: usize = 16;
 const IFINFOMSG_LEN: usize = 16;
 const NLMSG_ERROR: u16 = 2;
@@ -198,6 +206,7 @@ pub struct LinkSummary {
     pub link_type: u16,
     pub flags: u32,
     pub mtu: Option<u32>,
+    pub address_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +247,7 @@ struct Link {
     link_type: u16,
     flags: u32,
     mtu: Option<u32>,
+    address_hex: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +287,7 @@ pub fn hash_canonical_links(links: &[LinkSummary]) -> String {
                 link_type: link.link_type,
                 flags: link.flags,
                 mtu: link.mtu,
+                address_hex: link.address_hex.clone(),
             },
         );
     }
@@ -310,6 +321,14 @@ fn encode_link(output: &mut Vec<u8>, link: &Link) {
         Some(mtu) => {
             output.push(1);
             output.extend_from_slice(&mtu.to_le_bytes());
+        }
+        None => output.push(0),
+    }
+    match &link.address_hex {
+        Some(address) => {
+            output.push(1);
+            output.extend_from_slice(&(address.len() as u32).to_le_bytes());
+            output.extend_from_slice(address.as_bytes());
         }
         None => output.push(0),
     }
@@ -426,6 +445,20 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
         reasons.push("invalid_zero_valued_verification_bound".to_owned());
         fatal_invalid = true;
     }
+    if policy_id != POLICY_ID || policy_version != POLICY_VERSION {
+        reasons.push("verification_policy_id_or_version_not_pinned_by_verifier".to_owned());
+        unsupported = true;
+    }
+    let policy_ceiling_exceeded = envelope.policy.max_age_ms > POLICY_MAX_AGE_MS
+        || envelope.policy.max_source_window_ns > POLICY_MAX_SOURCE_WINDOW_NS
+        || envelope.policy.max_total_raw_bytes > POLICY_MAX_RAW_BYTES
+        || envelope.policy.max_messages_per_attempt > POLICY_MAX_MESSAGES
+        || envelope.policy.max_objects_per_attempt > POLICY_MAX_OBJECTS
+        || envelope.policy.max_retries > POLICY_MAX_RETRIES;
+    if policy_ceiling_exceeded {
+        reasons.push("supplied_policy_exceeds_verifier_pinned_safety_ceiling".to_owned());
+        fatal_invalid = true;
+    }
     let mut required_families = BTreeSet::new();
     for family in &scope.required_families {
         if family.trim().is_empty() || !required_families.insert(family.clone()) {
@@ -450,11 +483,11 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
         .iter()
         .copied()
         .collect();
+    let mandatory_critical_ids = BTreeSet::from([IFLA_IFNAME, IFLA_MTU, IFLA_ADDRESS]);
     if critical_ids.len() != envelope.policy.decision_critical_link_attribute_ids.len()
-        || critical_ids.contains(&IFLA_IFNAME)
-        || critical_ids.contains(&IFLA_MTU)
+        || !mandatory_critical_ids.is_subset(&critical_ids)
     {
-        reasons.push("contradictory_or_duplicate_critical_attribute_policy".to_owned());
+        reasons.push("critical_attribute_policy_omits_mandatory_semantic_fields_or_duplicates_ids".to_owned());
         fatal_invalid = true;
     }
     if envelope.verification_time_unix_ms < envelope.captured_at_unix_ms {
@@ -955,6 +988,9 @@ fn parse_link_dump(
         if flags & NLM_F_DUMP_INTR != 0 {
             interrupted = true;
         }
+        if flags & NLM_F_MULTI == 0 {
+            return Err(AttemptStatus::Invalid("multipart_dump_message_missing_nlm_f_multi".to_owned()));
+        }
         let payload_start = offset + NLMSG_HDR_LEN;
         let payload_end = offset + message_len;
         match message_type {
@@ -1050,6 +1086,7 @@ fn parse_link_message(
     }
     let mut ifname: Option<String> = None;
     let mut mtu: Option<u32> = None;
+    let mut address_hex: Option<String> = None;
     let mut seen_attributes = BTreeSet::new();
     let attributes = &payload[IFINFOMSG_LEN..];
     let mut offset = 0usize;
@@ -1093,13 +1130,9 @@ fn parse_link_message(
                 mtu = Some(read_u32(value, byte_order));
             }
             IFLA_ADDRESS => {
-                // Address bytes remain bound by the exact raw-artifact digest. This M1a
-                // semantic profile does not interpret address families or validate them.
-                if critical_ids.contains(&IFLA_ADDRESS) {
-                    return Err(AttemptStatus::Unsupported(
-                        "decision_critical_address_attribute_not_semantically_supported".to_owned(),
-                    ));
-                }
+                // Link-layer addresses are preserved as bytes encoded in canonical lowercase hex.
+                // This does not infer a particular address format or length.
+                address_hex = Some(value.iter().map(|byte| format!("{byte:02x}")).collect());
             }
             other => {
                 if critical_ids.contains(&other) {
@@ -1122,6 +1155,7 @@ fn parse_link_message(
         link_type,
         flags,
         mtu,
+        address_hex,
     })
 }
 
@@ -1270,7 +1304,7 @@ mod tests {
                 max_messages_per_attempt: 128,
                 max_objects_per_attempt: 64,
                 max_retries: 2,
-                decision_critical_link_attribute_ids: vec![5, 999],
+                decision_critical_link_attribute_ids: vec![IFLA_IFNAME, IFLA_MTU, IFLA_ADDRESS, 999],
             },
             captured_at_unix_ms: 1_000_000,
             verification_time_unix_ms: 1_000_500,
@@ -1316,6 +1350,7 @@ mod tests {
                 link_type: 1,
                 flags: 0x41,
                 mtu: Some(1500),
+                address_hex: None,
             }
         );
     }
@@ -1621,7 +1656,6 @@ mod tests {
             done(7, 0, NLM_F_MULTI),
         ]);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
-        envelope.policy.decision_critical_link_attribute_ids.push(IFLA_ADDRESS);
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
     }
