@@ -23,6 +23,13 @@ The legacy `ExecutionResult` is optimized for callers and CLI presentation. It d
 5. A consumer mapping to `SystemTransaction::ApplicationReceipt` must require real exit-code evidence and present, ordered timestamps. SystemTransaction v1 cannot faithfully encode spawn failure, signal termination, dry-run, or rollback details as currently shaped. Do not coerce these into its `exit_status` field; define a versioned receipt update or a separate failure observation first.
 6. A rollback command's exit code indicates only its process outcome. Verified recovery requires a fresh read-only observation of the target's post-recovery state.
 
+
+## Cancellation and indeterminate execution
+
+This API does not provide durable supervision or cancellation-proof journaling. The current helper awaits Tokio `Command::output()`; Tokio's process API documents that a spawned child normally continues if its handle/future is dropped unless `kill_on_drop` is enabled ([Tokio process cancellation caveat](https://docs.rs/tokio/latest/tokio/process/struct.Command.html)). This means a caller may lose the returned observation after launch while the child continues executing.
+
+Do not interpret a dropped/cancelled future or missing receipt as `NotStarted`, `Failed`, or evidence that no mutation occurred. Treat the outcome as **indeterminate**, keep it in a durable journal-owned supervisor, and perform read-only reconciliation against actual target state before retrying. This helper deliberately does not enable `kill_on_drop(true)`: killing a rebuild/activation at an arbitrary point also does not prove rollback or restore the prior state. A cancellation-safe worker/journal protocol must make this policy explicit and be qualified separately.
+
 ## Compatibility and limits
 
 The existing `execute_authorized()` API remains compatible and returns only `ExecutionResult`; callers that need execution evidence must opt into `execute_authorized_observed()`. The current CLI has not yet been switched to consume the new API. This is not an end-to-end transaction adapter, not a VM qualification, and not proof of restored host state.
