@@ -404,8 +404,9 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -448,8 +449,9 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -484,8 +486,9 @@ mod tests {
 
         // Step 0: install is explicitly authorized and should succeed
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -520,7 +523,7 @@ mod tests {
         );
         assert_eq!(result.steps.len(), 3);
 
-        // Step 0: rollback process succeeded; target restoration was not observed
+        // Step 0: rollback was simulated; no target mutation or restoration was observed
         assert!(result.steps[0].1.is_some());
         // Step 1: failed (PendingConfirmation)
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
@@ -633,8 +636,9 @@ mod tests {
             "Optional unapproved rebuild",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -862,20 +866,23 @@ mod tests {
 
         // 3 steps succeed, then step 3 fails critically
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["a".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install a",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["b".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install b",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["c".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install c",
         );
@@ -894,20 +901,21 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 3);
-        // All 3 rollback commands exit successfully in dry-run mode
+        // All 3 rollback commands are simulated; none launches a process
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.rollback_simulated_count, 3);
     }
 
     #[tokio::test]
-    async fn test_rollback_failures_tracked() {
+    async fn test_dry_run_rollback_simulation_has_no_failures() {
         let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
         let mut plan = PlanExecutor::new(0.35);
 
         // Step 0: install (succeeds)
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -961,8 +969,9 @@ mod tests {
         );
         // Install has rollback
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install (has rollback)",
         );
