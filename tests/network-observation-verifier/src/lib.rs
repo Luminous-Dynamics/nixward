@@ -9,6 +9,7 @@ pub const ENVELOPE_SCHEMA_ID: &str =
     "https://luminousdynamics.org/schemas/network-observation-envelope-v1.json";
 pub const SUPPORTED_FAMILY: &str = "linux.rtnetlink.links.v1";
 const HASH_RAW_DOMAIN: &[u8] = b"nixward.network-observation.raw-artifact.v1";
+const HASH_REQUEST_DOMAIN: &[u8] = b"nixward.network-observation.raw-request.v1";
 const HASH_SEMANTIC_DOMAIN: &[u8] = b"nixward.network-observation.link-semantics.v1";
 const HASH_ENVELOPE_DOMAIN: &[u8] = b"nixward.network-observation.envelope.v1";
 const HASH_RECEIPT_DOMAIN: &[u8] = b"nixward.network-observation.receipt.v1";
@@ -27,7 +28,13 @@ const IFINFOMSG_LEN: usize = 16;
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 const RTM_NEWLINK: u16 = 16;
+const RTM_GETLINK: u16 = 18;
+const NLM_F_REQUEST: u16 = 0x0001;
 const NLM_F_MULTI: u16 = 0x0002;
+const NLM_F_ROOT: u16 = 0x0100;
+const NLM_F_MATCH: u16 = 0x0200;
+const NLM_F_DUMP: u16 = NLM_F_ROOT | NLM_F_MATCH;
+const NLM_F_DUMP_FILTERED: u16 = 0x0020;
 const NLM_F_DUMP_INTR: u16 = 0x0010;
 const IFLA_ADDRESS: u16 = 1;
 const IFLA_IFNAME: u16 = 3;
@@ -102,6 +109,8 @@ pub struct SourceAttempt {
     pub request_sequence: u32,
     pub byte_order: String,
     pub retry_index: u32,
+    pub raw_request_hex: String,
+    pub raw_request_blake3: String,
     pub started_monotonic_ns: u64,
     pub ended_monotonic_ns: u64,
     pub raw_artifact_hex: String,
@@ -194,6 +203,7 @@ pub struct SourceReceipt {
     pub observed_object_count: usize,
     pub identical_duplicate_count: usize,
     pub observed_links: Vec<LinkSummary>,
+    pub raw_request_blake3: Vec<String>,
     pub raw_artifact_blake3: Vec<String>,
     pub canonical_semantic_blake3: Option<String>,
     pub reasons: Vec<String>,
@@ -271,6 +281,10 @@ struct AttemptEvaluation {
 
 pub fn hash_raw_artifact(bytes: &[u8]) -> String {
     hash_domain(HASH_RAW_DOMAIN, bytes)
+}
+
+pub fn hash_raw_request(bytes: &[u8]) -> String {
+    hash_domain(HASH_REQUEST_DOMAIN, bytes)
 }
 
 pub fn hash_canonical_links(links: &[LinkSummary]) -> String {
@@ -562,6 +576,7 @@ fn verify_envelope(
         let mut final_links = Vec::new();
         let mut final_duplicate_count = 0usize;
         let mut accepted_canonical = None;
+        let mut raw_request_digests = Vec::new();
         let mut raw_digests = Vec::new();
 
         if !seen_families.insert(source.family.clone()) {
@@ -627,6 +642,22 @@ fn verify_envelope(
                 source_reasons.push("invalid_or_excessive_source_time_window".to_owned());
                 fatal_invalid = true;
                 attempt_metadata_invalid = true;
+            }
+            if attempt.raw_request_hex.len()
+                > envelope.policy.max_total_raw_bytes.saturating_mul(2)
+            {
+                source_reasons.push("raw_request_hex_exceeds_policy_byte_bound".to_owned());
+                total_raw_bytes = total_raw_bytes.saturating_add(
+                    envelope.policy.max_total_raw_bytes.saturating_add(1),
+                );
+                every_required_source_complete = false;
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Incomplete("raw_request_hex_exceeds_policy_byte_bound".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
             }
             if attempt.raw_artifact_hex.len()
                 > envelope.policy.max_total_raw_bytes.saturating_mul(2)
@@ -697,6 +728,47 @@ fn verify_envelope(
                 });
                 continue;
             }
+            let raw_request = match decode_hex(&attempt.raw_request_hex) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    source_reasons.push(format!("request_artifact:{reason}"));
+                    fatal_invalid = true;
+                    attempt_evaluations.push(AttemptEvaluation {
+                        status: AttemptStatus::Invalid("request_artifact_malformed".to_owned()),
+                        links: Vec::new(),
+                        identical_duplicates: 0,
+                        canonical_digest: None,
+                    });
+                    continue;
+                }
+            };
+            total_raw_bytes = total_raw_bytes.saturating_add(raw_request.len());
+            let request_digest = hash_raw_request(&raw_request);
+            raw_request_digests.push(request_digest.clone());
+            if raw_request.is_empty() || raw_request.len() > envelope.policy.max_total_raw_bytes {
+                source_reasons.push("empty_or_oversized_raw_request".to_owned());
+                every_required_source_complete = false;
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Incomplete("empty_or_oversized_raw_request".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
+            }
+            if !is_lower_hex_digest(&attempt.raw_request_blake3)
+                || attempt.raw_request_blake3 != request_digest
+            {
+                source_reasons.push("raw_request_digest_mismatch".to_owned());
+                fatal_invalid = true;
+                attempt_evaluations.push(AttemptEvaluation {
+                    status: AttemptStatus::Invalid("raw_request_digest_mismatch".to_owned()),
+                    links: Vec::new(),
+                    identical_duplicates: 0,
+                    canonical_digest: None,
+                });
+                continue;
+            }
             if attempt.byte_order != "little" && attempt.byte_order != "big" {
                 source_reasons.push("unsupported_byte_order_marker".to_owned());
                 unsupported = true;
@@ -713,6 +785,46 @@ fn verify_envelope(
             } else {
                 ByteOrder::Big
             };
+            match parse_link_request(
+                &raw_request,
+                attempt.request_sequence,
+                byte_order,
+            ) {
+                Ok(()) => {}
+                Err(AttemptStatus::Invalid(reason)) => {
+                    source_reasons.push(reason.clone());
+                    fatal_invalid = true;
+                    attempt_evaluations.push(AttemptEvaluation {
+                        status: AttemptStatus::Invalid(reason),
+                        links: Vec::new(),
+                        identical_duplicates: 0,
+                        canonical_digest: None,
+                    });
+                    continue;
+                }
+                Err(AttemptStatus::Unsupported(reason)) => {
+                    source_reasons.push(reason.clone());
+                    unsupported = true;
+                    attempt_evaluations.push(AttemptEvaluation {
+                        status: AttemptStatus::Unsupported(reason),
+                        links: Vec::new(),
+                        identical_duplicates: 0,
+                        canonical_digest: None,
+                    });
+                    continue;
+                }
+                Err(AttemptStatus::Incomplete(reason)) => {
+                    source_reasons.push(reason.clone());
+                    attempt_evaluations.push(AttemptEvaluation {
+                        status: AttemptStatus::Incomplete(reason),
+                        links: Vec::new(),
+                        identical_duplicates: 0,
+                        canonical_digest: None,
+                    });
+                    continue;
+                }
+                Err(AttemptStatus::Complete) => unreachable!("request parser never returns Complete as an error"),
+            }
             let parsed = parse_link_dump(
                 &raw,
                 attempt.request_sequence,
@@ -884,6 +996,7 @@ fn verify_envelope(
             observed_object_count: final_links.len(),
             identical_duplicate_count: final_duplicate_count,
             observed_links: final_links.iter().map(LinkSummary::from).collect(),
+            raw_request_blake3: raw_request_digests,
             raw_artifact_blake3: raw_digests,
             canonical_semantic_blake3: accepted_canonical,
             reasons: source_reasons,
