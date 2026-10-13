@@ -162,12 +162,17 @@ impl PlanExecutor {
             self.steps[i].status = StepStatus::Running;
 
             let command = self.steps[i].command.clone();
+            let authorization = self.steps[i].authorization.clone();
             let result = if self.steps[i].verify {
                 ExecutionResult::Blocked {
                     reason: "step requested postcondition verification, but no typed observer is configured; refusing to launch the command".into(),
                     safety_level: command.safety_level(),
                 }
-            } else if let Some(authorization) = self.steps[i].authorization.clone() {
+            } else if self.dry_run {
+                executor
+                    .execute_simulated(command, authorization, self.decision_quality)
+                    .await
+            } else if let Some(authorization) = authorization {
                 executor
                     .execute_authorized(command, authorization, Some(self.decision_quality))
                     .await
@@ -236,7 +241,7 @@ impl PlanExecutor {
         let mut attempted = 0;
         let mut process_succeeded = 0;
         let mut simulated = 0;
-        let dry_run = executor.is_dry_run();
+        let dry_run = self.dry_run || executor.is_dry_run();
         let mut failures = Vec::new();
 
         // Successful steps need not be a contiguous prefix: optional failures may
@@ -266,6 +271,15 @@ impl PlanExecutor {
                 .as_ref()
                 .and_then(|auth| auth.for_rollback(&rollback_cmd).ok());
             let rb_result = match authorization {
+                Some(rollback_authorization) if self.dry_run => {
+                    executor
+                        .execute_simulated(
+                            rollback_cmd.clone(),
+                            Some(rollback_authorization),
+                            self.decision_quality,
+                        )
+                        .await
+                }
                 Some(rollback_authorization) => {
                     executor
                         .execute_authorized(
@@ -416,6 +430,31 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.completed_count, 2);
         assert_eq!(result.rolled_back_count, 0);
+    }
+
+    #[tokio::test]
+    async fn plan_dry_run_forces_simulation_on_live_configured_executor() {
+        // The executor is intentionally configured for live execution. The
+        // plan's dry-run request must still prevent process launch.
+        let mut nix_executor = NixOSExecutor::new();
+        let mut plan = PlanExecutor::new(0.5).with_dry_run(true);
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Simulated rebuild",
+        );
+        authorize_step(&mut plan, 0);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(result.success);
+        assert_eq!(result.completed_count, 1);
+        assert!(matches!(
+            &result.steps[0].1,
+            Some(ExecutionResult::Success { stdout, .. }) if stdout.starts_with("[DRY-RUN]")
+        ));
+        assert!(!nix_executor.is_dry_run(), "temporary simulation mode must be restored");
     }
 
     #[tokio::test]
