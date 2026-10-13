@@ -566,15 +566,6 @@ fn verify_envelope(envelope: &Envelope, envelope_digest: String) -> ReceiptBody 
             total_raw_bytes = total_raw_bytes.saturating_add(raw.len());
             let raw_digest = hash_raw_artifact(&raw);
             raw_digests.push(raw_digest.clone());
-            if raw.is_empty() || raw.len() > envelope.policy.max_total_raw_bytes {
-                source_reasons.push("empty_or_oversized_raw_artifact".to_owned());
-                if raw.is_empty() {
-                    // An empty receive is not a valid empty inventory.
-                    every_required_source_complete = false;
-                } else {
-                    every_required_source_complete = false;
-                }
-            }
             if !is_lower_hex_digest(&attempt.raw_artifact_blake3)
                 || attempt.raw_artifact_blake3 != raw_digest
             {
@@ -1594,5 +1585,66 @@ mod tests {
         let item = attempt(&[], 7, 0);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn message_limit_blocks_a_dump_even_when_terminal_marker_is_present() {
+        let raw = link_and_done("eth0");
+        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        envelope.policy.max_messages_per_attempt = 1;
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn byte_limit_blocks_oversized_raw_artifact() {
+        let raw = done(7, 0, NLM_F_MULTI);
+        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        envelope.policy.max_total_raw_bytes = raw.len() - 1;
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Incomplete);
+    }
+
+    #[test]
+    fn decision_critical_address_attribute_is_unsupported_in_this_projection() {
+        let mut payload = vec![0, 0];
+        payload.extend_from_slice(&encode_u16(1));
+        payload.extend_from_slice(&encode_i32(2));
+        payload.extend_from_slice(&encode_u32(1));
+        payload.extend_from_slice(&encode_u32(u32::MAX));
+        let mut name = b"eth0".to_vec();
+        name.push(0);
+        push_attr(&mut payload, IFLA_IFNAME, &name);
+        push_attr(&mut payload, IFLA_ADDRESS, &[0, 1, 2, 3, 4, 5]);
+        let raw = raw_join(&[
+            message(RTM_NEWLINK, NLM_F_MULTI, 7, &payload),
+            done(7, 0, NLM_F_MULTI),
+        ]);
+        let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
+        envelope.policy.decision_critical_link_attribute_ids.push(IFLA_ADDRESS);
+        let receipt = verify_envelope_for_test(&envelope);
+        assert_eq!(receipt.receipt.decision, Decision::Unsupported);
+    }
+
+    #[test]
+    fn serialized_receipt_is_byte_deterministic_for_the_same_exact_input() {
+        let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        let input = serde_json::to_vec(&envelope).expect("fixture serializes");
+        let first = verify_bytes(&input).expect("verifies");
+        let second = verify_bytes(&input).expect("verifies");
+        assert_eq!(first.serialize_checked().expect("receipt serializes"), second.serialize_checked().expect("receipt serializes"));
+        assert_eq!(first.receipt.policy_digest_blake3, second.receipt.policy_digest_blake3);
+        assert_eq!(first.receipt.verifier_source_digest_blake3.len(), 64);
+    }
+
+    #[test]
+    fn envelope_digest_binds_exact_json_bytes_not_only_parsed_fields() {
+        let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
+        let compact = serde_json::to_vec(&envelope).expect("fixture serializes");
+        let pretty = serde_json::to_vec_pretty(&envelope).expect("fixture pretty-serializes");
+        let compact_receipt = verify_bytes(&compact).expect("compact JSON verifies");
+        let pretty_receipt = verify_bytes(&pretty).expect("pretty JSON verifies");
+        assert_ne!(compact_receipt.receipt.envelope_raw_blake3, pretty_receipt.receipt.envelope_raw_blake3);
+        assert_ne!(compact_receipt.receipt_blake3, pretty_receipt.receipt_blake3);
     }
 }
