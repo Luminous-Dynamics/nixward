@@ -63,6 +63,8 @@
         "resource_kinds": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "contains": { "const": "links" },
           "uniqueItems": true
         }
       }
