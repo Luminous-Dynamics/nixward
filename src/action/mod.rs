@@ -8,10 +8,16 @@
 //! the exact machine/config/command intent; execution capabilities remain
 //! exact-command scoped and rollback-bound.
 
+pub mod secure_boot_signature;
+pub mod secure_boot;
+pub mod uki_evidence;
+pub mod boot_selection;
+
 pub mod authority_approval;
 pub mod authority_replay;
 pub mod change_covenant;
 pub mod config_writer;
+pub mod config_transaction;
 pub mod execution_intent;
 pub mod executor;
 pub mod flake_ops;
@@ -36,6 +42,16 @@ pub use change_covenant::{
     RollbackBinding,
 };
 pub use config_writer::{ConfigPatch, ConfigWriter, WriteResult};
+pub use config_transaction::{
+    ActivationDisposition, CandidateBuildReceipt, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
+    ProfileTransitionDisposition, RecoveryObservation, SourceEntryKind, SourceManifestEntry,
+    SourceRealizationLease, SourceRealizationLeaseState, classify_activation_post_state,
+};
+#[cfg(feature = "native")]
+pub use config_transaction::NixSourceRealizer;
+#[cfg(feature = "native")]
+pub use config_transaction::NixCandidateBuilder;
+
 pub use execution_intent::{VerifiedExecutionBundle, verify_nixward_execution_bundle};
 pub use executor::{
     ChannelOperation, ExecutionRecord, ExecutionResult, FlakeOperation, HostExecutionPolicy,

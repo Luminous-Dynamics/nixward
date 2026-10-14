@@ -1016,6 +1016,7 @@ impl DaemonState {
                 if let Some(best_action) = non_cooldown_action.or_else(|| plan.actions.first()) {
                     if self.active_healing {
                         use nixward::action::change_covenant::{ChangeAuthorization, ChangePlan};
+                        use nixward::action::config_transaction::ConfigTransactionPhase;
                         use nixward::action::config_writer::{ConfigPatch, ConfigWriter};
                         use nixward::action::executor::{
                             ExecutionAuthorization, ExecutionResult, NixOSCommand, NixOSExecutor,
@@ -1326,17 +1327,30 @@ impl DaemonState {
                                                     }
                                                 }
                                             } else if let Some(patch) = config_patch.as_ref() {
-                                                if let Err(e) = writer.restore_patch_original_authorized(
+                                                // A blocked/unapproved command is known not to have
+                                                // launched, so source restoration is still pre-activation.
+                                                // Any launched/failed command is conservatively treated
+                                                // as activation-started: process failure alone cannot
+                                                // prove that system activation never began.
+                                                let rollback_phase = match &result {
+                                                    ExecutionResult::Blocked { .. }
+                                                    | ExecutionResult::PendingConfirmation { .. } => {
+                                                        ConfigTransactionPhase::SourceCommitted
+                                                    }
+                                                    _ => ConfigTransactionPhase::ActivationStarted,
+                                                };
+                                                if let Err(e) = writer.restore_patch_original_pre_activation_authorized(
                                                     patch,
                                                     &change_plan,
                                                     &change_authorization,
+                                                    rollback_phase,
                                                 ) {
                                                     eprintln!(
-                                                        "nixward-daemon: CRITICAL: command failed and exact config pre-state could not be restored ({e})."
+                                                        "nixward-daemon: CRITICAL: command failed or entered an indeterminate phase; exact config pre-state restoration was not performed ({e})."
                                                     );
                                                 } else {
                                                     eprintln!(
-                                                        "nixward-daemon: restored covenant-bound configuration pre-state after failed command."
+                                                        "nixward-daemon: restored covenant-bound configuration pre-state before activation."
                                                     );
                                                 }
                                             }
