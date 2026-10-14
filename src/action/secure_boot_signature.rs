@@ -630,7 +630,9 @@ pub(crate) fn read_regular_file_no_follow_stable(
         expected.dev() == actual.st_dev
             && expected.ino() == actual.st_ino
             && expected.len() == actual.st_size.max(0) as u64
-            && expected.mode() == (actual.st_mode & 0o7777)
+            // MetadataExt::mode includes S_IFREG; fstat mode is deliberately
+            // masked to permission/special bits for this identity comparison.
+            && (expected.mode() & 0o7777) == (actual.st_mode & 0o7777)
     }
 
     fn stat_stable(
