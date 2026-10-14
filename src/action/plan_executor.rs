@@ -16,7 +16,15 @@ pub enum StepStatus {
     Pending,
     Running,
     Completed,
+    /// The command was simulated successfully; no process was launched or state changed.
+    Simulated,
     Failed(String),
+    /// A rollback command exited successfully outside dry-run mode; restoration is unverified.
+    RollbackProcessSucceeded,
+    /// A rollback command was simulated without launching a process.
+    RollbackSimulated,
+    /// The final state is uncertain after a rollback limitation or failed attempt.
+    Indeterminate,
     RolledBack,
     Skipped,
 }
@@ -32,7 +40,11 @@ pub struct PlanStep {
     pub status: StepStatus,
     /// Whether this step is critical (failure triggers rollback of all prior steps).
     pub critical: bool,
-    /// Whether to verify state after execution (e.g., service started, package installed).
+    /// Request postcondition verification after execution.
+    ///
+    /// Until a typed postcondition observer is configured, setting this to true
+    /// fails closed before launching the command. A successful process exit is
+    /// not a substitute for checking the resulting target state.
     pub verify: bool,
     /// Exact-command authorization for modifying steps. Read-only steps need none.
     pub authorization: Option<ExecutionAuthorization>,
@@ -43,13 +55,21 @@ pub struct PlanStep {
 pub struct PlanExecutionResult {
     /// Per-step results.
     pub steps: Vec<(PlanStep, Option<ExecutionResult>)>,
-    /// Whether all steps completed successfully.
+    /// Whether the plan completed under its configured execution mode without critical failure.
+    /// In dry-run mode, success describes the simulation only; no host mutation is implied.
     pub success: bool,
-    /// Number of steps completed before failure (if any).
+    /// Number of steps completed through real command execution before failure.
     pub completed_count: usize,
-    /// Number of steps rolled back (if any).
+    /// Number of successful step simulations that launched no process.
+    pub simulated_count: usize,
+    /// Number of rollback command evaluations, including blocked attempts.
+    pub rollback_attempted_count: usize,
+    /// Number of rollback commands that exited successfully outside dry-run mode.
+    /// This does not prove target restoration.
     pub rolled_back_count: usize,
-    /// Rollback failures: (step_index, error_description).
+    /// Number of rollback commands simulated in dry-run mode.
+    pub rollback_simulated_count: usize,
+    /// Rollback failures or unverified restoration limits: (step_index, error_description).
     pub rollback_failures: Vec<(usize, String)>,
 }
 
@@ -142,12 +162,24 @@ impl PlanExecutor {
     pub async fn execute(&mut self, executor: &mut NixOSExecutor) -> PlanExecutionResult {
         let mut results: Vec<(PlanStep, Option<ExecutionResult>)> = Vec::new();
         let mut completed = 0;
+        let mut simulated = 0;
 
         for i in 0..self.steps.len() {
             self.steps[i].status = StepStatus::Running;
 
             let command = self.steps[i].command.clone();
-            let result = if let Some(authorization) = self.steps[i].authorization.clone() {
+            let authorization = self.steps[i].authorization.clone();
+            let dry_run = self.dry_run || executor.is_dry_run();
+            let result = if self.steps[i].verify {
+                ExecutionResult::Blocked {
+                    reason: "step requested postcondition verification, but no typed observer is configured; refusing to launch the command".into(),
+                    safety_level: command.safety_level(),
+                }
+            } else if self.dry_run {
+                executor
+                    .execute_simulated(command, authorization, self.decision_quality)
+                    .await
+            } else if let Some(authorization) = authorization {
                 executor
                     .execute_authorized(command, authorization, Some(self.decision_quality))
                     .await
@@ -157,7 +189,11 @@ impl PlanExecutor {
 
             let success = matches!(&result, ExecutionResult::Success { .. });
 
-            if success {
+            if success && dry_run {
+                self.steps[i].status = StepStatus::Simulated;
+                simulated += 1;
+                results.push((self.steps[i].clone(), Some(result)));
+            } else if success {
                 self.steps[i].status = StepStatus::Completed;
                 completed += 1;
                 results.push((self.steps[i].clone(), Some(result)));
@@ -166,8 +202,8 @@ impl PlanExecutor {
                 self.steps[i].status = StepStatus::Failed(format!("{result:?}"));
                 results.push((self.steps[i].clone(), Some(result)));
 
-                let (rolled_back, rollback_failures) = self
-                    .rollback_completed(executor, &mut results, completed)
+                let (rollback_attempted, rolled_back, rollback_simulated, rollback_failures) = self
+                    .rollback_completed(executor, &mut results, i)
                     .await;
 
                 // Mark remaining steps as skipped
@@ -180,7 +216,10 @@ impl PlanExecutor {
                     steps: results,
                     success: false,
                     completed_count: completed,
+                    simulated_count: simulated,
+                    rollback_attempted_count: rollback_attempted,
                     rolled_back_count: rolled_back,
+                    rollback_simulated_count: rollback_simulated,
                     rollback_failures,
                 };
             } else {
@@ -194,63 +233,123 @@ impl PlanExecutor {
             steps: results,
             success: true,
             completed_count: completed,
+            simulated_count: simulated,
+            rollback_attempted_count: 0,
             rolled_back_count: 0,
+            rollback_simulated_count: 0,
             rollback_failures: Vec::new(),
         }
     }
 
-    /// Roll back completed steps in reverse order.
+    /// Attempt rollback for prior steps that actually completed, in reverse order.
     ///
-    /// Returns `(rolled_back_count, rollback_failures)`.
+    /// Returns `(attempted_count, process_success_count, failures)`. A successful
+    /// rollback process does not prove that target state was restored.
     async fn rollback_completed(
-        &self,
+        &mut self,
         executor: &mut NixOSExecutor,
-        _results: &mut Vec<(PlanStep, Option<ExecutionResult>)>,
-        completed: usize,
-    ) -> (usize, Vec<(usize, String)>) {
-        let mut rolled_back = 0;
+        results: &mut Vec<(PlanStep, Option<ExecutionResult>)>,
+        before_index: usize,
+    ) -> (usize, usize, usize, Vec<(usize, String)>) {
+        let mut attempted = 0;
+        let mut process_succeeded = 0;
+        let mut simulated = 0;
+        let dry_run = self.dry_run || executor.is_dry_run();
         let mut failures = Vec::new();
 
-        for i in (0..completed).rev() {
-            if let Some(rollback_cmd) = self.steps[i].command.rollback_command() {
-                let rb_result = match self.steps[i]
-                    .authorization
-                    .as_ref()
-                    .and_then(|auth| auth.for_rollback(&rollback_cmd).ok())
+        // Successful steps need not be a contiguous prefix: optional failures may
+        // precede successful mutations. Select by actual status, not a count.
+        for i in (0..before_index).rev() {
+            let step_status = self.steps[i].status.clone();
+            if step_status != StepStatus::Completed
+                && !(dry_run && step_status == StepStatus::Simulated)
+            {
+                continue;
+            }
+
+            let Some(rollback_cmd) = self.steps[i].command.rollback_command() else {
+                // Read-only steps and simulated mutations did not change target state.
+                if self.steps[i].command.safety_level() == SafetyLevel::ReadOnly
+                    || (dry_run && step_status == StepStatus::Simulated)
                 {
-                    Some(rollback_authorization) => {
-                        executor
-                            .execute_authorized(
-                                rollback_cmd,
-                                rollback_authorization,
-                                Some(self.decision_quality),
-                            )
-                            .await
+                    continue;
+                }
+                let message = "no rollback command exists for an applied step; target state is indeterminate".to_string();
+                self.steps[i].status = StepStatus::Indeterminate;
+                if let Some((step, _)) = results.get_mut(i) {
+                    step.status = StepStatus::Indeterminate;
+                }
+                failures.push((i, message));
+                continue;
+            };
+
+            attempted += 1;
+            let authorization = self.steps[i]
+                .authorization
+                .as_ref()
+                .and_then(|auth| auth.for_rollback(&rollback_cmd).ok());
+            let rb_result = match authorization {
+                Some(rollback_authorization) if self.dry_run => {
+                    executor
+                        .execute_simulated(
+                            rollback_cmd.clone(),
+                            Some(rollback_authorization),
+                            self.decision_quality,
+                        )
+                        .await
+                }
+                Some(rollback_authorization) => {
+                    executor
+                        .execute_authorized(
+                            rollback_cmd.clone(),
+                            rollback_authorization,
+                            Some(self.decision_quality),
+                        )
+                        .await
+                }
+                None => ExecutionResult::Blocked {
+                    reason:
+                        "rollback command was not covered by the original execution capability"
+                            .into(),
+                    safety_level: rollback_cmd.safety_level(),
+                },
+            };
+
+            match &rb_result {
+                ExecutionResult::Success { .. } if dry_run => {
+                    simulated += 1;
+                    self.steps[i].status = StepStatus::RollbackSimulated;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::RollbackSimulated;
                     }
-                    None => ExecutionResult::Blocked {
-                        reason:
-                            "rollback command was not covered by the original execution capability"
-                                .into(),
-                        safety_level: rollback_cmd.safety_level(),
-                    },
-                };
-                match &rb_result {
-                    ExecutionResult::Success { .. } => {
-                        rolled_back += 1;
+                }
+                ExecutionResult::Success { .. } => {
+                    process_succeeded += 1;
+                    // Do not call this Restored/RolledBack: fresh state observation
+                    // is needed to establish that the intended prior state returned.
+                    self.steps[i].status = StepStatus::RollbackProcessSucceeded;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::RollbackProcessSucceeded;
                     }
-                    ExecutionResult::FailedNoRollback { error, .. } => {
-                        rolled_back += 1; // attempted
-                        failures.push((i, format!("rollback failed: {error}")));
+                }
+                ExecutionResult::FailedNoRollback { error, .. } => {
+                    self.steps[i].status = StepStatus::Indeterminate;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::Indeterminate;
                     }
-                    other => {
-                        rolled_back += 1;
-                        failures.push((i, format!("rollback unexpected result: {other:?}")));
+                    failures.push((i, format!("rollback failed; target state is indeterminate: {error}")));
+                }
+                other => {
+                    self.steps[i].status = StepStatus::Indeterminate;
+                    if let Some((step, _)) = results.get_mut(i) {
+                        step.status = StepStatus::Indeterminate;
                     }
+                    failures.push((i, format!("rollback did not complete; target state is indeterminate: {other:?}")));
                 }
             }
         }
 
-        (rolled_back, failures)
+        (attempted, process_succeeded, simulated, failures)
     }
 }
 
@@ -337,8 +436,9 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -346,8 +446,37 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
-        assert_eq!(result.completed_count, 2);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 2);
+        assert!(result.steps.iter().all(|(step, _)| step.status == StepStatus::Simulated));
         assert_eq!(result.rolled_back_count, 0);
+    }
+
+    #[tokio::test]
+    async fn plan_dry_run_forces_simulation_on_live_configured_executor() {
+        // The executor is intentionally configured for live execution. The
+        // plan's dry-run request must still prevent process launch.
+        let mut nix_executor = NixOSExecutor::new();
+        let mut plan = PlanExecutor::new(0.5).with_dry_run(true);
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Simulated rebuild",
+        );
+        authorize_step(&mut plan, 0);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
+        assert!(matches!(
+            &result.steps[0].1,
+            Some(ExecutionResult::Success { stdout, .. }) if stdout.starts_with("[DRY-RUN]")
+        ));
+        assert!(!nix_executor.is_dry_run(), "temporary simulation mode must be restored");
     }
 
     #[tokio::test]
@@ -381,8 +510,9 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -399,13 +529,14 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
-        assert_eq!(result.completed_count, 3);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 3);
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.steps.len(), 3);
 
         // Verify all steps have results
         for (step, exec_result) in &result.steps {
-            assert_eq!(step.status, StepStatus::Completed);
+            assert_eq!(step.status, StepStatus::Simulated);
             assert!(exec_result.is_some());
         }
     }
@@ -417,8 +548,9 @@ mod tests {
 
         // Step 0: install is explicitly authorized and should succeed
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -442,14 +574,19 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 1, "Only step 0 should complete");
+        assert_eq!(result.completed_count, 0, "Dry-run launched no forward process");
+        assert_eq!(result.simulated_count, 1, "Step 0 only simulated");
+        assert_eq!(result.rollback_attempted_count, 1);
+        assert_eq!(result.rolled_back_count, 0, "dry-run launched no rollback process");
+        assert_eq!(result.rollback_simulated_count, 1);
         assert_eq!(
-            result.rolled_back_count, 1,
-            "Step 0 (EnvInstall) should be rolled back"
+            result.steps[0].0.status,
+            StepStatus::RollbackSimulated,
+            "Dry-run is simulation, not a rollback process"
         );
         assert_eq!(result.steps.len(), 3);
 
-        // Step 0: completed (then rolled back)
+        // Step 0: rollback was simulated; no target mutation or restoration was observed
         assert!(result.steps[0].1.is_some());
         // Step 1: failed (PendingConfirmation)
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
@@ -493,12 +630,15 @@ mod tests {
             result.success,
             "Plan should succeed despite non-critical failure"
         );
-        assert_eq!(result.completed_count, 2, "Steps 0 and 2 succeed");
+        assert_eq!(result.completed_count, 0, "No process launches in dry-run mode");
+        assert_eq!(result.simulated_count, 2, "Steps 0 and 2 simulate successfully");
         assert_eq!(result.rolled_back_count, 0, "No rollback for non-critical");
         assert_eq!(result.steps.len(), 3);
 
-        // Step 1 failed but non-critical
+        // Step 1 failed but non-critical.
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
+        assert_eq!(result.steps[2].0.status, StepStatus::Simulated);
         assert!(!result.steps[1].0.critical);
     }
 
@@ -511,6 +651,7 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
         assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 0);
         assert_eq!(result.rolled_back_count, 0);
         assert!(result.steps.is_empty());
     }
@@ -541,10 +682,114 @@ mod tests {
         assert!(!result.success);
         assert_eq!(
             result.completed_count, 0,
-            "Nothing completed before failure"
+            "No process completed before failure"
         );
+        assert_eq!(result.simulated_count, 0);
         assert_eq!(result.rolled_back_count, 0, "Nothing to roll back");
         assert_eq!(result.steps[1].0.status, StepStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn optional_failure_does_not_skip_later_successful_step_rollback() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.35);
+
+        // Step 0 fails and is non-critical; its position must not be mistaken
+        // for the count of successful steps during rollback.
+        plan.add_optional_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Optional unapproved rebuild",
+        );
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Install vim",
+        );
+        // Step 2 fails critically, triggering rollback of step 1.
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Critical unapproved rebuild",
+        );
+        authorize_step(&mut plan, 1);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.rollback_attempted_count, 1);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 1);
+        assert!(result.rollback_failures.is_empty());
+        assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
+        assert_eq!(result.steps[1].0.status, StepStatus::RollbackSimulated);
+        assert!(matches!(result.steps[2].0.status, StepStatus::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn simulated_step_without_rollback_support_does_not_claim_host_mutation() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.35);
+
+        plan.add_step(
+            NixOSCommand::Search {
+                query: "vim".into(),
+                json: false,
+            },
+            "Read-only search",
+        );
+        plan.add_step(
+            NixOSCommand::CollectGarbage {
+                older_than_days: None,
+                delete_all: false,
+            },
+            "Mutation without a rollback command",
+        );
+        plan.add_step(
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
+            },
+            "Critical unapproved rebuild",
+        );
+        authorize_step(&mut plan, 1);
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.rollback_attempted_count, 0);
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.simulated_count, 2);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
+        assert_eq!(result.steps[1].0.status, StepStatus::Simulated);
+        assert!(result.rollback_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn requested_verification_fails_closed_before_command_launch() {
+        let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
+        let mut plan = PlanExecutor::new(0.8);
+        let step = plan.add_step(
+            NixOSCommand::Search {
+                query: "vim".into(),
+                json: false,
+            },
+            "Search with requested postcondition verification",
+        );
+        step.verify = true;
+
+        let result = plan.execute(&mut nix_executor).await;
+        assert!(!result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.steps.len(), 1);
+        assert!(matches!(result.steps[0].0.status, StepStatus::Failed(_)));
+        assert!(matches!(result.steps[0].1, Some(ExecutionResult::Blocked { .. })));
     }
 
     #[test]
@@ -691,20 +936,23 @@ mod tests {
 
         // 3 steps succeed, then step 3 fails critically
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["a".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install a",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["b".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install b",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["c".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install c",
         );
@@ -722,20 +970,23 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 3);
-        // All 3 EnvInstall commands have rollback → 3 rolled back
-        assert_eq!(result.rolled_back_count, 3);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 3);
+        // All 3 rollback commands are simulated; none launches a process
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 3);
     }
 
     #[tokio::test]
-    async fn test_rollback_failures_tracked() {
+    async fn test_dry_run_rollback_simulation_has_no_failures() {
         let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
         let mut plan = PlanExecutor::new(0.35);
 
         // Step 0: install (succeeds)
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install vim",
         );
@@ -751,7 +1002,11 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        // In dry-run mode, rollback "succeeds" — so rollback_failures should be empty
+        // The forward step and its hypothetical rollback are simulations only.
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.rollback_simulated_count, 1);
+        // Rollback simulation should not produce failures.
         assert!(
             result.rollback_failures.is_empty(),
             "Dry-run rollbacks should not produce failures"
@@ -771,6 +1026,9 @@ mod tests {
         );
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
         assert!(result.rollback_failures.is_empty());
     }
 
@@ -789,8 +1047,9 @@ mod tests {
         );
         // Install has rollback
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
+            NixOSCommand::RebuildSwitch {
+                flake: None,
+                extra_args: vec![],
             },
             "Install (has rollback)",
         );
@@ -806,8 +1065,10 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 2);
-        // Only EnvInstall has rollback, Search doesn't → 1 rolled back
-        assert_eq!(result.rolled_back_count, 1);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 2);
+        // Only EnvInstall has rollback; read-only Search needs no rollback
+        assert_eq!(result.rolled_back_count, 0);
+        assert_eq!(result.rollback_simulated_count, 1);
     }
 }

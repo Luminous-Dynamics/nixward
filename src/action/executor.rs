@@ -822,6 +822,62 @@ impl NixOSExecutor {
         self
     }
 
+    /// Whether execution calls are simulations that do not launch processes.
+    pub(crate) fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Validate and simulate a plan step without launching a process, even if
+    /// this executor was otherwise configured for live execution. This uses a
+    /// per-call override and never mutates persistent executor state, so dropping
+    /// this future cannot leave later calls accidentally in dry-run mode.
+    pub(crate) async fn execute_simulated(
+        &mut self,
+        command: NixOSCommand,
+        authorization: Option<ExecutionAuthorization>,
+        decision_quality: f32,
+    ) -> ExecutionResult {
+        let safety = command.safety_level();
+        if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
+            return ExecutionResult::Blocked {
+                reason,
+                safety_level: safety,
+            };
+        }
+
+        if let Some(authorization) = authorization {
+            return self
+                .execute_authorized_with_mode(
+                    command,
+                    authorization,
+                    Some(decision_quality),
+                    true,
+                )
+                .await;
+        }
+
+        if safety != SafetyLevel::ReadOnly {
+            let recommended_quality = self.thresholds.threshold_for(safety.to_action_type());
+            let confidence = PhiAwareScoring::confidence_level(decision_quality);
+            return ExecutionResult::PendingConfirmation {
+                command,
+                decision_quality,
+                recommended_quality,
+                confidence: confidence.recommendation().to_string(),
+            };
+        }
+
+        let authorization = ExecutionAuthorization::automatic_read_only(&command)
+            .expect("ReadOnly safety classification must admit automatic authorization");
+        self.execute_authorized_with_mode(
+            command,
+            authorization,
+            Some(decision_quality),
+            true,
+        )
+        .await
+    }
+
     /// Override persistent replay storage (primarily for tests or a deliberately
     /// relocated state directory). Signed authority is never accepted without
     /// one-shot replay consumption on a real execution path.
@@ -904,6 +960,17 @@ impl NixOSExecutor {
         authorization: ExecutionAuthorization,
         decision_quality: Option<f32>,
     ) -> ExecutionResult {
+        self.execute_authorized_with_mode(command, authorization, decision_quality, false)
+            .await
+    }
+
+    async fn execute_authorized_with_mode(
+        &mut self,
+        command: NixOSCommand,
+        authorization: ExecutionAuthorization,
+        decision_quality: Option<f32>,
+        force_dry_run: bool,
+    ) -> ExecutionResult {
         let safety = command.safety_level();
         if let HostExecutionPolicy::Forbidden { reason } = command.host_execution_policy() {
             return ExecutionResult::Blocked {
@@ -928,7 +995,7 @@ impl NixOSExecutor {
             "Executing authorized NixOS command"
         );
 
-        if self.dry_run {
+        if self.dry_run || force_dry_run {
             return ExecutionResult::Success {
                 stdout: format!("[DRY-RUN] Would execute: {} {}", cmd, args.join(" ")),
                 stderr: String::new(),
