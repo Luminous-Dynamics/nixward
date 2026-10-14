@@ -3411,7 +3411,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn observed_invocation_accepts_only_constrained_nix_wrapper_exec() {
         let dir = tempfile::tempdir().unwrap();
         let system_root = dir.path().join("system");
@@ -4338,7 +4337,7 @@ mod tests {
             let policy = command.host_execution_policy();
             assert!(!policy.is_allowed(), "ambient rebuild unexpectedly admitted");
             let reason = policy.reason().unwrap();
-            assert!(reason.contains("exact realized"));
+            assert!(reason.contains("exact system closure"));
             assert!(reason.contains("ActivateSystemClosure"));
         }
     }
