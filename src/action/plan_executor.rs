@@ -16,6 +16,8 @@ pub enum StepStatus {
     Pending,
     Running,
     Completed,
+    /// The command was simulated successfully; no process was launched or state changed.
+    Simulated,
     Failed(String),
     /// A rollback command exited successfully outside dry-run mode; restoration is unverified.
     RollbackProcessSucceeded,
@@ -53,10 +55,13 @@ pub struct PlanStep {
 pub struct PlanExecutionResult {
     /// Per-step results.
     pub steps: Vec<(PlanStep, Option<ExecutionResult>)>,
-    /// Whether all steps completed successfully.
+    /// Whether the plan completed under its configured execution mode without critical failure.
+    /// In dry-run mode, success describes the simulation only; no host mutation is implied.
     pub success: bool,
-    /// Number of steps completed before failure (if any).
+    /// Number of steps completed through real command execution before failure.
     pub completed_count: usize,
+    /// Number of successful step simulations that launched no process.
+    pub simulated_count: usize,
     /// Number of rollback command evaluations, including blocked attempts.
     pub rollback_attempted_count: usize,
     /// Number of rollback commands that exited successfully outside dry-run mode.
@@ -157,12 +162,14 @@ impl PlanExecutor {
     pub async fn execute(&mut self, executor: &mut NixOSExecutor) -> PlanExecutionResult {
         let mut results: Vec<(PlanStep, Option<ExecutionResult>)> = Vec::new();
         let mut completed = 0;
+        let mut simulated = 0;
 
         for i in 0..self.steps.len() {
             self.steps[i].status = StepStatus::Running;
 
             let command = self.steps[i].command.clone();
             let authorization = self.steps[i].authorization.clone();
+            let dry_run = self.dry_run || executor.is_dry_run();
             let result = if self.steps[i].verify {
                 ExecutionResult::Blocked {
                     reason: "step requested postcondition verification, but no typed observer is configured; refusing to launch the command".into(),
@@ -182,7 +189,11 @@ impl PlanExecutor {
 
             let success = matches!(&result, ExecutionResult::Success { .. });
 
-            if success {
+            if success && dry_run {
+                self.steps[i].status = StepStatus::Simulated;
+                simulated += 1;
+                results.push((self.steps[i].clone(), Some(result)));
+            } else if success {
                 self.steps[i].status = StepStatus::Completed;
                 completed += 1;
                 results.push((self.steps[i].clone(), Some(result)));
@@ -205,6 +216,7 @@ impl PlanExecutor {
                     steps: results,
                     success: false,
                     completed_count: completed,
+                    simulated_count: simulated,
                     rollback_attempted_count: rollback_attempted,
                     rolled_back_count: rolled_back,
                     rollback_simulated_count: rollback_simulated,
@@ -221,6 +233,7 @@ impl PlanExecutor {
             steps: results,
             success: true,
             completed_count: completed,
+            simulated_count: simulated,
             rollback_attempted_count: 0,
             rolled_back_count: 0,
             rollback_simulated_count: 0,
@@ -247,13 +260,18 @@ impl PlanExecutor {
         // Successful steps need not be a contiguous prefix: optional failures may
         // precede successful mutations. Select by actual status, not a count.
         for i in (0..before_index).rev() {
-            if self.steps[i].status != StepStatus::Completed {
+            let step_status = self.steps[i].status.clone();
+            if step_status != StepStatus::Completed
+                && !(dry_run && step_status == StepStatus::Simulated)
+            {
                 continue;
             }
 
             let Some(rollback_cmd) = self.steps[i].command.rollback_command() else {
-                // Read-only steps did not mutate target state, so no rollback is needed.
-                if self.steps[i].command.safety_level() == SafetyLevel::ReadOnly {
+                // Read-only steps and simulated mutations did not change target state.
+                if self.steps[i].command.safety_level() == SafetyLevel::ReadOnly
+                    || (dry_run && step_status == StepStatus::Simulated)
+                {
                     continue;
                 }
                 let message = "no rollback command exists for an applied step; target state is indeterminate".to_string();
@@ -428,7 +446,9 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
-        assert_eq!(result.completed_count, 2);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 2);
+        assert!(result.steps.iter().all(|(step, _)| step.status == StepStatus::Simulated));
         assert_eq!(result.rolled_back_count, 0);
     }
 
@@ -449,7 +469,9 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
-        assert_eq!(result.completed_count, 1);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
         assert!(matches!(
             &result.steps[0].1,
             Some(ExecutionResult::Success { stdout, .. }) if stdout.starts_with("[DRY-RUN]")
@@ -507,13 +529,14 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
-        assert_eq!(result.completed_count, 3);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 3);
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.steps.len(), 3);
 
         // Verify all steps have results
         for (step, exec_result) in &result.steps {
-            assert_eq!(step.status, StepStatus::Completed);
+            assert_eq!(step.status, StepStatus::Simulated);
             assert!(exec_result.is_some());
         }
     }
@@ -551,7 +574,8 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 1, "Only step 0 should complete");
+        assert_eq!(result.completed_count, 0, "Dry-run launched no forward process");
+        assert_eq!(result.simulated_count, 1, "Step 0 only simulated");
         assert_eq!(result.rollback_attempted_count, 1);
         assert_eq!(result.rolled_back_count, 0, "dry-run launched no rollback process");
         assert_eq!(result.rollback_simulated_count, 1);
@@ -606,12 +630,15 @@ mod tests {
             result.success,
             "Plan should succeed despite non-critical failure"
         );
-        assert_eq!(result.completed_count, 2, "Steps 0 and 2 succeed");
+        assert_eq!(result.completed_count, 0, "No process launches in dry-run mode");
+        assert_eq!(result.simulated_count, 2, "Steps 0 and 2 simulate successfully");
         assert_eq!(result.rolled_back_count, 0, "No rollback for non-critical");
         assert_eq!(result.steps.len(), 3);
 
-        // Step 1 failed but non-critical
+        // Step 1 failed but non-critical.
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
+        assert_eq!(result.steps[2].0.status, StepStatus::Simulated);
         assert!(!result.steps[1].0.critical);
     }
 
@@ -624,6 +651,7 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
         assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 0);
         assert_eq!(result.rolled_back_count, 0);
         assert!(result.steps.is_empty());
     }
@@ -654,8 +682,9 @@ mod tests {
         assert!(!result.success);
         assert_eq!(
             result.completed_count, 0,
-            "Nothing completed before failure"
+            "No process completed before failure"
         );
+        assert_eq!(result.simulated_count, 0);
         assert_eq!(result.rolled_back_count, 0, "Nothing to roll back");
         assert_eq!(result.steps[1].0.status, StepStatus::Skipped);
     }
@@ -693,7 +722,8 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 1);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
         assert_eq!(result.rollback_attempted_count, 1);
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.rollback_simulated_count, 1);
@@ -704,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn applied_step_without_rollback_support_is_indeterminate() {
+    async fn simulated_step_without_rollback_support_does_not_claim_host_mutation() {
         let mut nix_executor = NixOSExecutor::new().with_dry_run(true);
         let mut plan = PlanExecutor::new(0.35);
 
@@ -735,9 +765,10 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.rollback_attempted_count, 0);
         assert_eq!(result.rolled_back_count, 0);
-        assert_eq!(result.steps[0].0.status, StepStatus::Completed);
-        assert_eq!(result.steps[1].0.status, StepStatus::Indeterminate);
-        assert!(result.rollback_failures.iter().any(|(index, _)| *index == 1));
+        assert_eq!(result.simulated_count, 2);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
+        assert_eq!(result.steps[1].0.status, StepStatus::Simulated);
+        assert!(result.rollback_failures.is_empty());
     }
 
     #[tokio::test]
@@ -939,7 +970,8 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 3);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 3);
         // All 3 rollback commands are simulated; none launches a process
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.rollback_simulated_count, 3);
@@ -970,7 +1002,11 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        // In dry-run mode, rollback "succeeds" — so rollback_failures should be empty
+        // The forward step and its hypothetical rollback are simulations only.
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.rollback_simulated_count, 1);
+        // Rollback simulation should not produce failures.
         assert!(
             result.rollback_failures.is_empty(),
             "Dry-run rollbacks should not produce failures"
@@ -990,6 +1026,9 @@ mod tests {
         );
         let result = plan.execute(&mut nix_executor).await;
         assert!(result.success);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 1);
+        assert_eq!(result.steps[0].0.status, StepStatus::Simulated);
         assert!(result.rollback_failures.is_empty());
     }
 
@@ -1026,7 +1065,8 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        assert_eq!(result.completed_count, 2);
+        assert_eq!(result.completed_count, 0);
+        assert_eq!(result.simulated_count, 2);
         // Only EnvInstall has rollback; read-only Search needs no rollback
         assert_eq!(result.rolled_back_count, 0);
         assert_eq!(result.rollback_simulated_count, 1);
