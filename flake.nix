@@ -65,7 +65,14 @@
 
             installPhase = ''
               mkdir -p $out/bin
-              cp target/release/${binName} $out/bin/
+              # Cargo's Nix build hook supplies --target, so binaries usually
+              # live under target/<triple>/release rather than target/release.
+              binary="$(find target -type f -path "*/release/${binName}" -print -quit)"
+              if [ -z "$binary" ]; then
+                echo "expected built binary ${binName} under target/**/release/" >&2
+                exit 1
+              fi
+              install -m 755 "$binary" "$out/bin/${binName}"
             '';
 
             meta = with pkgs.lib; {
