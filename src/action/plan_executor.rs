@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(result.rollback_failures.len(), 1);
         assert_eq!(result.steps.len(), 3);
 
-        // Step 0: completed (then rolled back)
+        // Step 0 completed in dry-run; its legacy rollback attempt is blocked.
         assert!(result.steps[0].1.is_some());
         // Step 1: failed (PendingConfirmation)
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
