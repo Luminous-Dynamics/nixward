@@ -159,12 +159,21 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
     hasher.update(&image[cert_dir_offset + 8..size_of_headers]);
 
     let mut sections = Vec::with_capacity(section_count);
+    let mut previous_declared_virtual_address = None;
     for index in 0..section_count {
         let section = section_table + index * 40;
         let virtual_size = read_u32(image, section + 8)? as u64;
         let virtual_address = read_u32(image, section + 12)? as u64;
         let size_of_raw = read_u32(image, section + 16)? as usize;
         let ptr_to_raw = read_u32(image, section + 20)? as usize;
+
+        // PE images require the section table to follow increasing RVA order.
+        // Do not sort malformed headers into a plausible image before hashing.
+        if previous_declared_virtual_address.is_some_and(|previous| virtual_address < previous) {
+            return Err("PE section headers are not ordered by virtual address".into());
+        }
+        previous_declared_virtual_address = Some(virtual_address);
+
         if size_of_raw == 0 {
             continue;
         }
@@ -179,7 +188,6 @@ pub fn authenticode_sha256(image: &[u8]) -> Result<[u8; 32], String> {
             .ok_or_else(|| "PE section virtual range overflows".to_string())?;
         sections.push((virtual_address, virtual_end, ptr_to_raw, size_of_raw));
     }
-    sections.sort_unstable_by_key(|(virtual_address, _, _, _)| *virtual_address);
 
     let mut previous_virtual_end = 0u64;
     let mut raw_ranges = Vec::new();
