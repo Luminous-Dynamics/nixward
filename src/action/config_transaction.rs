@@ -3979,7 +3979,7 @@ mod tests {
         assert!(!loaded.recovery_observed);
     }
     #[test]
-    fn transaction_candidate_identity_requires_immutable_store_path() {
+    fn legacy_candidate_path_is_not_authoritative_without_build_receipt() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction
             .advance(ConfigTransactionPhase::InputFrozen)
@@ -3990,10 +3990,10 @@ mod tests {
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test",
             )
             .unwrap();
-        assert_eq!(
-            transaction.candidate_store_path(),
-            Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-test")
-        );
+
+        // The compatibility field can record an old path, but the public
+        // execution-facing accessor returns only a path bound by CandidateBuildReceipt.
+        assert_eq!(transaction.candidate_store_path(), None);
     }
 
     #[test]
