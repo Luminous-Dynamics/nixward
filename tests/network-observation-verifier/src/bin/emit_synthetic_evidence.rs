@@ -1,7 +1,7 @@
 use nixward_network_observation_verifier::{
-    hash_canonical_links, hash_raw_artifact, hash_raw_request, CollectorIdentity, DeclaredScope, Envelope,
-    SourceAttempt, SourceFamily, TargetIdentity, VerificationPolicy, ENVELOPE_SCHEMA_ID,
-    SUPPORTED_FAMILY,
+    CollectorIdentity, DeclaredScope, ENVELOPE_SCHEMA_ID, Envelope, SUPPORTED_FAMILY,
+    SourceAttempt, SourceFamily, TargetIdentity, VerificationPolicy, hash_canonical_links,
+    hash_raw_artifact, hash_raw_request,
 };
 use std::io::{self, Write};
 
