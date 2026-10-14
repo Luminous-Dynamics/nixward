@@ -83,6 +83,8 @@ pub enum AuthorityError {
     ActionMismatch,
     #[error("authority audience is not trusted")]
     AudienceMismatch,
+    #[error("authority trust policy has no explicit audience")]
+    InvalidAudiencePolicy,
     #[error("authority signer is not trusted")]
     UntrustedSigner,
     #[error("authority signer is revoked")]
@@ -159,6 +161,14 @@ impl AuthorityTrustPolicy {
         {
             return Err(AuthorityError::UntrustedSigner);
         }
+        if self.allowed_audiences.is_empty()
+            || self
+                .allowed_audiences
+                .iter()
+                .any(|audience| audience.trim().is_empty())
+        {
+            return Err(AuthorityError::InvalidAudiencePolicy);
+        }
         let mut key_ids = std::collections::BTreeSet::new();
         for key in &self.keys {
             if key.key_id.trim().is_empty()
@@ -205,8 +215,12 @@ impl AuthorityChallenge {
     ) -> Result<Self, AuthorityError> {
         let subject_blake3 = subject_blake3.into();
         let holon_id = holon_id.into();
+        let audience = audience.into();
         if !valid_blake3_hex(&subject_blake3) || !valid_blake3_hex(&holon_id) {
             return Err(AuthorityError::InvalidDigest);
+        }
+        if audience.trim().is_empty() {
+            return Err(AuthorityError::InvalidAudiencePolicy);
         }
         if ttl_ms == 0 {
             return Err(AuthorityError::InvalidFreshness);
@@ -226,7 +240,7 @@ impl AuthorityChallenge {
             action,
             subject_blake3,
             holon_id,
-            audience: audience.into(),
+            audience,
             nonce_blake3: nonce.finalize().to_hex().to_string(),
             issued_at_ms,
             expires_at_ms,
@@ -501,6 +515,32 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, AuthorityError::SubjectMismatch);
+    }
+
+    #[test]
+    fn empty_policy_audience_is_rejected() {
+        let signing = SigningKey::from_bytes(&[6u8; 32]);
+        let mut trust = policy(&signing);
+        trust.allowed_audiences.clear();
+        assert!(matches!(
+            AuthorityVerifier::new(&trust),
+            Err(AuthorityError::InvalidAudiencePolicy)
+        ));
+    }
+
+    #[test]
+    fn empty_challenge_audience_is_rejected() {
+        let err = AuthorityChallenge::new(
+            AuthorityAction::Genesis,
+            "11".repeat(32),
+            "22".repeat(32),
+            "   ",
+            [5u8; 32],
+            1_000_000,
+            30_000,
+        )
+        .unwrap_err();
+        assert_eq!(err, AuthorityError::InvalidAudiencePolicy);
     }
 
     #[test]

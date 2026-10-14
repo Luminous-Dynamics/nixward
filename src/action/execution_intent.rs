@@ -21,6 +21,7 @@ pub struct VerifiedExecutionBundle {
     execution_target_identity: String,
     execution_nonce: [u8; 32],
     expected_out_path: String,
+    installable: String,
 }
 
 impl VerifiedExecutionBundle {
@@ -42,6 +43,10 @@ impl VerifiedExecutionBundle {
 
     pub fn expected_out_path(&self) -> &str {
         &self.expected_out_path
+    }
+
+    pub fn installable(&self) -> &str {
+        &self.installable
     }
 }
 
@@ -209,6 +214,18 @@ pub fn verify_nixward_execution_bundle(
     if !is_valid_nix_store_path(expected_out_path) {
         return Err("nix.expectedOutPath is not a canonical Nix store path".into());
     }
+    let installable = nix
+        .get("installable")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "nix.installable is missing".to_string())?;
+    if !installable.starts_with(".#")
+        || installable.len() <= 2
+        || installable
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("nix.installable is not an exact .# selector".into());
+    }
 
     Ok(VerifiedExecutionBundle {
         intent_digest,
@@ -216,6 +233,7 @@ pub fn verify_nixward_execution_bundle(
         execution_target_identity: target_identity.to_string(),
         execution_nonce,
         expected_out_path: expected_out_path.to_string(),
+        installable: installable.to_string(),
     })
 }
 
@@ -280,6 +298,10 @@ mod tests {
         let verified = verify_nixward_execution_bundle(&intent, &plan).unwrap();
         assert_eq!(verified.execution_target_identity(), "machine-a");
         assert!(verified.expected_out_path().starts_with("/nix/store/"));
+        assert_eq!(
+            verified.installable(),
+            ".#nixosConfigurations.test.config.system.build.toplevel"
+        );
     }
 
     #[test]

@@ -773,7 +773,10 @@ mod tests {
         let plugin = NixOsPlugin;
         let actions = plugin.suggest_actions("I want to install firefox");
         assert!(!actions.is_empty());
-        assert!(actions.iter().any(|a| a.contains("nix-env")));
+        assert!(actions
+            .iter()
+            .any(|a| a.contains("declarative Nix/Home Manager modules")));
+        assert!(actions.iter().all(|a| !a.contains("nix-env")));
     }
 
     #[test]
