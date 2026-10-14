@@ -817,7 +817,7 @@ pub fn parse_grub_config_entries(text: &str) -> Result<BTreeMap<String, BlsEntry
     for raw_line in text.lines() {
         let line = raw_line.trim();
         if current.is_none() && line.starts_with("submenu ") {
-            let title = parse_grub_menuentry_title(line.strip_prefix("submenu ").unwrap_or(line))?;
+            let title = parse_grub_menuentry_title(line)?;
             submenu_stack.push(title);
             continue;
         }
@@ -935,7 +935,11 @@ fn grub_brace_counts(line: &str) -> (usize, usize) {
 }
 
 fn parse_grub_menuentry_title(line: &str) -> Result<String, String> {
-    let rest = line.strip_prefix("menuentry ").unwrap_or("").trim_start();
+    let rest = line
+        .strip_prefix("menuentry ")
+        .or_else(|| line.strip_prefix("submenu "))
+        .unwrap_or("")
+        .trim_start();
     if !rest.starts_with('"') {
         return Err("GRUB menuentry title is not a quoted string".into());
     }
@@ -1243,7 +1247,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             "old.conf".into(),
             entry(
                 "old.conf",
-                "linux /EFI/nixos/old-linux-6.11.efi\noptions init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old/init quiet\n",
+                "linux /EFI/nixos/old-linux-6.11.efi\noptions init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old/init quiet\n",
             ),
         );
 
@@ -1290,8 +1294,8 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         let uki = super::super::uki_evidence::UkiSystemClosureEvidence {
             image_path: "candidate.efi".into(),
             image_blake3: [7; 32],
-            cmdline: "init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init".into(),
-            system_closure: Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate".into()),
+            cmdline: "init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate/init".into(),
+            system_closure: Some("/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate".into()),
         };
         let evidence = build_uki_selection_evidence(
             "candidate.efi",
@@ -1302,7 +1306,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
             BootCountState::NotTracked,
         )
         .expect("UKI evidence");
-        assert_eq!(evidence.candidate_closure.as_deref(), Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"));
+        assert_eq!(evidence.candidate_closure.as_deref(), Some("/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate"));
         assert_eq!(evidence.selected_image_path.as_deref(), Some("/boot/EFI/Linux/candidate.efi"));
         assert_eq!(evidence.selected_image_blake3, Some([7; 32]));
     }
@@ -1348,7 +1352,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     fn parses_nixos_grub_menuentry_and_exact_init_closure() {
         let entries = parse_grub_config_entries(
             r#"menuentry "NixOS - Configuration 42" --class nixos {
- linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init quiet
+ linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate/init quiet
  initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd
 }
 "#,
@@ -1359,14 +1363,14 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(entry.title.as_deref(), Some("NixOS - Configuration 42"));
         assert_eq!(
             super::exact_store_path_from_entry(entry).as_deref(),
-            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"),
+            Some("/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate"),
         );
     }
 
     #[test]
     fn nested_grub_block_does_not_end_menuentry_early() {
         let entries = parse_grub_config_entries(
-            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+            "menuentry \"Nested\" {\n if [ x = y ]; then\n  echo hello\n fi\n linux /boot/kernel init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate/init\n}\n",
         )
         .expect("nested shell block should parse");
         assert!(entries.contains_key("Nested"));
@@ -1377,7 +1381,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
         assert_eq!(grub_brace_counts("menuentry \"X\" {"), (1, 0));
         assert_eq!(grub_brace_counts("  echo '{' }"), (0, 1));
         let entries = parse_grub_config_entries(
-            "menuentry \"Safe\" {\n echo \"}\"\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-safe/init\n}\n",
+            "menuentry \"Safe\" {\n echo \"}\"\n linux /boot/kernel init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-safe/init\n}\n",
         )
         .expect("quoted brace fixture");
         assert!(entries.contains_key("Safe"));
@@ -1385,7 +1389,7 @@ options init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/
     #[test]
     fn duplicate_grub_titles_in_distinct_submenus_are_not_ambiguous_by_path() {
         let entries = parse_grub_config_entries(
-            "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
+            "submenu \"A\" {\n menuentry \"Same\" {\n  linux /boot/a init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-a/init\n }\n}\nsubmenu \"B\" {\n menuentry \"Same\" {\n  linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n }\n}\n",
         )
         .expect("nested GRUB fixture parses");
         assert!(entries.contains_key("A > Same"));
@@ -1446,7 +1450,7 @@ fi"#),
     #[test]
     fn selected_non_nixos_grub_entry_is_unbound() {
         let entries = parse_grub_config_entries(
-            "menuentry \"Windows\" {\n chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\nmenuentry \"NixOS\" {\n linux /boot/kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init\n}\n",
+            "menuentry \"Windows\" {\n chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\nmenuentry \"NixOS\" {\n linux /boot/kernel init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate/init\n}\n",
         )
         .expect("mixed GRUB config parses");
         let environment = BTreeMap::from([(
@@ -1465,7 +1469,7 @@ fi"#),
     #[test]
     fn duplicate_grub_titles_fail_closed() {
         let result = parse_grub_config_entries(
-            "menuentry \"same\" {\n linux /boot/a init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-a/init\n}\nmenuentry \"same\" {\n linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n}\n",
+            "menuentry \"same\" {\n linux /boot/a init=/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-a/init\n}\nmenuentry \"same\" {\n linux /boot/b init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-b/init\n}\n",
         );
         assert!(result.is_err());
     }
@@ -1487,7 +1491,7 @@ fi"#),
             evidence_digest: None,
         };
         let expected =
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate";
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-candidate";
         let mismatch = require_candidate_binding(&evidence, expected)
             .expect_err("foreign candidate binding must not qualify");
         assert!(mismatch.reason.contains("not the authorized candidate"));
