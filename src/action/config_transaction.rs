@@ -3834,6 +3834,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_existing_candidate_name_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        committed.persist_atomic(&path).unwrap();
+        let old_bytes = std::fs::read(&path).unwrap();
+
+        // Model a stale candidate left by a prior process with the same PID.
+        // O_EXCL must refuse to replace it, and must leave the journal's old
+        // committed bytes authoritative.
+        let temp_name = format!(".transaction.json.tmp-{}", std::process::id());
+        let blocker = dir.path().join(temp_name);
+        let blocker_bytes = b"unowned candidate sentinel";
+        std::fs::write(&blocker, blocker_bytes).unwrap();
+
+        let replacement = ConfigTransaction::new([4; 32], [5; 32], [6; 32]);
+        let error = replacement
+            .persist_atomic(&path)
+            .expect_err("an existing transaction candidate must not be overwritten");
+        assert!(error.contains("failed to create descriptor-bound transaction journal candidate"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), old_bytes);
+        assert_eq!(
+            ConfigTransaction::load(&path).unwrap().transaction_id(),
+            committed.transaction_id()
+        );
+        assert_eq!(std::fs::read(&blocker).unwrap(), blocker_bytes);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn transaction_journal_round_trips_atomically() {
         let dir = tempfile::tempdir().unwrap();
