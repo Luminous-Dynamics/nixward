@@ -415,7 +415,9 @@ fn verify_bytes_inner(
     expected_target: Option<&TargetIdentity>,
 ) -> Result<ReceiptEnvelope, String> {
     if input.len() > MAX_ENVELOPE_BYTES {
-        return Err(format!("envelope exceeds hard input limit of {MAX_ENVELOPE_BYTES} bytes"));
+        return Err(format!(
+            "envelope exceeds hard input limit of {MAX_ENVELOPE_BYTES} bytes"
+        ));
     }
     let envelope: Envelope = serde_json::from_slice(input)
         .map_err(|error| format!("invalid or nonconforming envelope JSON: {error}"))?;
@@ -447,7 +449,9 @@ fn verify_envelope(
     let mut unsupported = false;
     let mut every_required_source_complete = true;
 
-    let target = expected_target.cloned().unwrap_or_else(|| envelope.target.clone());
+    let target = expected_target
+        .cloned()
+        .unwrap_or_else(|| envelope.target.clone());
     let mut target_binding_valid = expected_target.is_some();
     let scope = envelope.scope.clone();
     let policy_id = envelope.policy.policy_id.clone();
@@ -467,7 +471,9 @@ fn verify_envelope(
     }
     match expected_target {
         Some(expected) if *expected != envelope.target => {
-            reasons.push("envelope_target_identity_does_not_match_external_expected_target".to_owned());
+            reasons.push(
+                "envelope_target_identity_does_not_match_external_expected_target".to_owned(),
+            );
             fatal_invalid = true;
             target_binding_valid = false;
         }
@@ -541,22 +547,24 @@ fn verify_envelope(
         .iter()
         .copied()
         .collect();
-    if critical_ids.iter().any(|attribute_id| *attribute_id > NLA_TYPE_MASK) {
+    if critical_ids
+        .iter()
+        .any(|attribute_id| *attribute_id > NLA_TYPE_MASK)
+    {
         reasons.push("critical_attribute_id_outside_nla_type_range".to_owned());
         fatal_invalid = true;
     }
     // The basic semantic projection understands only address bytes, interface name,
     // and MTU. A trusted caller may add decision-critical attributes; if the projection
     // cannot interpret one, the result is Unsupported rather than a false completeness claim.
-    let mandatory_critical_ids = BTreeSet::from([
-        IFLA_ADDRESS,
-        IFLA_IFNAME,
-        IFLA_MTU,
-    ]);
+    let mandatory_critical_ids = BTreeSet::from([IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU]);
     if critical_ids.len() != envelope.policy.decision_critical_link_attribute_ids.len()
         || !mandatory_critical_ids.is_subset(&critical_ids)
     {
-        reasons.push("critical_attribute_policy_omits_mandatory_semantic_fields_or_duplicates_ids".to_owned());
+        reasons.push(
+            "critical_attribute_policy_omits_mandatory_semantic_fields_or_duplicates_ids"
+                .to_owned(),
+        );
         fatal_invalid = true;
     }
     if envelope.verification_time_unix_ms < envelope.captured_at_unix_ms {
@@ -666,16 +674,16 @@ fn verify_envelope(
                 source_reasons.push("source_time_window_exceeds_policy_deadline".to_owned());
                 attempt_metadata_incomplete = true;
             }
-            if attempt.raw_request_hex.len()
-                > envelope.policy.max_total_raw_bytes.saturating_mul(2)
+            if attempt.raw_request_hex.len() > envelope.policy.max_total_raw_bytes.saturating_mul(2)
             {
                 source_reasons.push("raw_request_hex_exceeds_policy_byte_bound".to_owned());
-                total_raw_bytes = total_raw_bytes.saturating_add(
-                    envelope.policy.max_total_raw_bytes.saturating_add(1),
-                );
+                total_raw_bytes = total_raw_bytes
+                    .saturating_add(envelope.policy.max_total_raw_bytes.saturating_add(1));
                 every_required_source_complete = false;
                 attempt_evaluations.push(AttemptEvaluation {
-                    status: AttemptStatus::Incomplete("raw_request_hex_exceeds_policy_byte_bound".to_owned()),
+                    status: AttemptStatus::Incomplete(
+                        "raw_request_hex_exceeds_policy_byte_bound".to_owned(),
+                    ),
                     links: Vec::new(),
                     identical_duplicates: 0,
                     canonical_digest: None,
@@ -686,12 +694,13 @@ fn verify_envelope(
                 > envelope.policy.max_total_raw_bytes.saturating_mul(2)
             {
                 source_reasons.push("raw_artifact_hex_exceeds_policy_byte_bound".to_owned());
-                total_raw_bytes = total_raw_bytes.saturating_add(
-                    envelope.policy.max_total_raw_bytes.saturating_add(1),
-                );
+                total_raw_bytes = total_raw_bytes
+                    .saturating_add(envelope.policy.max_total_raw_bytes.saturating_add(1));
                 every_required_source_complete = false;
                 attempt_evaluations.push(AttemptEvaluation {
-                    status: AttemptStatus::Incomplete("raw_artifact_hex_exceeds_policy_byte_bound".to_owned()),
+                    status: AttemptStatus::Incomplete(
+                        "raw_artifact_hex_exceeds_policy_byte_bound".to_owned(),
+                    ),
                     links: Vec::new(),
                     identical_duplicates: 0,
                     canonical_digest: None,
@@ -733,7 +742,9 @@ fn verify_envelope(
             }
             if attempt_metadata_incomplete {
                 attempt_evaluations.push(AttemptEvaluation {
-                    status: AttemptStatus::Incomplete("source_time_window_exceeds_policy_deadline".to_owned()),
+                    status: AttemptStatus::Incomplete(
+                        "source_time_window_exceeds_policy_deadline".to_owned(),
+                    ),
                     links: Vec::new(),
                     identical_duplicates: 0,
                     canonical_digest: None,
@@ -753,7 +764,9 @@ fn verify_envelope(
             }
             if source.family != SUPPORTED_FAMILY {
                 attempt_evaluations.push(AttemptEvaluation {
-                    status: AttemptStatus::Unsupported("source_family_not_implemented_by_m1a_verifier".to_owned()),
+                    status: AttemptStatus::Unsupported(
+                        "source_family_not_implemented_by_m1a_verifier".to_owned(),
+                    ),
                     links: Vec::new(),
                     identical_duplicates: 0,
                     canonical_digest: None,
@@ -817,11 +830,7 @@ fn verify_envelope(
             } else {
                 ByteOrder::Big
             };
-            match parse_link_request(
-                &raw_request,
-                attempt.request_sequence,
-                byte_order,
-            ) {
+            match parse_link_request(&raw_request, attempt.request_sequence, byte_order) {
                 Ok(()) => {}
                 Err(AttemptStatus::Invalid(reason)) => {
                     source_reasons.push(reason.clone());
@@ -855,7 +864,9 @@ fn verify_envelope(
                     });
                     continue;
                 }
-                Err(AttemptStatus::Complete) => unreachable!("request parser never returns Complete as an error"),
+                Err(AttemptStatus::Complete) => {
+                    unreachable!("request parser never returns Complete as an error")
+                }
             }
             let parsed = parse_link_dump(
                 &raw,
@@ -871,9 +882,12 @@ fn verify_envelope(
                     if attempt
                         .canonical_semantic_blake3
                         .as_deref()
-                        .is_none_or(|expected| !is_lower_hex_digest(expected) || expected != digest.as_str())
+                        .is_none_or(|expected| {
+                            !is_lower_hex_digest(expected) || expected != digest.as_str()
+                        })
                     {
-                        source_reasons.push("canonical_semantic_digest_mismatch_or_missing".to_owned());
+                        source_reasons
+                            .push("canonical_semantic_digest_mismatch_or_missing".to_owned());
                         fatal_invalid = true;
                         AttemptEvaluation {
                             status: AttemptStatus::Invalid(
@@ -906,14 +920,17 @@ fn verify_envelope(
                     }
                 }
                 Err(AttemptStatus::Incomplete(reason)) => {
-                    source_reasons.push(format!("attempt_retry_{}_incomplete:{reason}", attempt.retry_index));
+                    source_reasons.push(format!(
+                        "attempt_retry_{}_incomplete:{reason}",
+                        attempt.retry_index
+                    ));
                     AttemptEvaluation {
                         status: AttemptStatus::Incomplete(reason),
                         links: Vec::new(),
                         identical_duplicates: 0,
                         canonical_digest: None,
                     }
-                },
+                }
                 Err(AttemptStatus::Invalid(reason)) => {
                     source_reasons.push(reason.clone());
                     fatal_invalid = true;
@@ -934,7 +951,9 @@ fn verify_envelope(
                         canonical_digest: None,
                     }
                 }
-                Err(AttemptStatus::Complete) => unreachable!("parser never returns Complete as an error"),
+                Err(AttemptStatus::Complete) => {
+                    unreachable!("parser never returns Complete as an error")
+                }
             };
             // A retry may recover an incomplete attempt; it cannot erase invalid evidence.
             if matches!(&evaluation.status, AttemptStatus::Invalid(_)) {
@@ -951,10 +970,16 @@ fn verify_envelope(
             source_reasons.push("total_raw_artifact_byte_limit_exceeded".to_owned());
             every_required_source_complete = false;
         }
-        if attempt_evaluations.iter().any(|result| matches!(&result.status, AttemptStatus::Invalid(_))) {
+        if attempt_evaluations
+            .iter()
+            .any(|result| matches!(&result.status, AttemptStatus::Invalid(_)))
+        {
             source_status = "invalid".to_owned();
             every_required_source_complete = false;
-        } else if attempt_evaluations.iter().any(|result| matches!(&result.status, AttemptStatus::Unsupported(_))) {
+        } else if attempt_evaluations
+            .iter()
+            .any(|result| matches!(&result.status, AttemptStatus::Unsupported(_)))
+        {
             source_status = "unsupported".to_owned();
             every_required_source_complete = false;
         } else if let Some(last) = attempt_evaluations.last() {
@@ -977,7 +1002,8 @@ fn verify_envelope(
                         every_required_source_complete = false;
                     } else {
                         source_status = "complete".to_owned();
-                        accepted_retry_index = source.attempts.last().map(|attempt| attempt.retry_index);
+                        accepted_retry_index =
+                            source.attempts.last().map(|attempt| attempt.retry_index);
                         final_links = last.links.clone();
                         final_duplicate_count = last.identical_duplicates;
                         accepted_canonical = last.canonical_digest.clone();
@@ -1047,17 +1073,27 @@ fn verify_envelope(
         || !required_families.contains(SUPPORTED_FAMILY)
         || source_results.len() != 1
     {
-        reasons.push("m1a_requires_one_supported_link_source; cross-source coherence is not proven".to_owned());
+        reasons.push(
+            "m1a_requires_one_supported_link_source; cross-source coherence is not proven"
+                .to_owned(),
+        );
         every_required_source_complete = false;
-        if required_families.iter().any(|family| family != SUPPORTED_FAMILY) {
+        if required_families
+            .iter()
+            .any(|family| family != SUPPORTED_FAMILY)
+        {
             unsupported = true;
         }
         temporal_coherence = TemporalCoherence::NotEstablished;
     }
-    if envelope.source_families.iter().any(|source| {
-        source.family == SUPPORTED_FAMILY && source.attempts.len() > 1
-    }) {
-        reasons.push("bounded_retry_history_present; only the final complete attempt is used".to_owned());
+    if envelope
+        .source_families
+        .iter()
+        .any(|source| source.family == SUPPORTED_FAMILY && source.attempts.len() > 1)
+    {
+        reasons.push(
+            "bounded_retry_history_present; only the final complete attempt is used".to_owned(),
+        );
     }
 
     if fatal_invalid {
@@ -1144,10 +1180,14 @@ fn parse_link_request(
     byte_order: ByteOrder,
 ) -> Result<(), AttemptStatus> {
     if bytes.is_empty() {
-        return Err(AttemptStatus::Incomplete("empty_request_artifact".to_owned()));
+        return Err(AttemptStatus::Incomplete(
+            "empty_request_artifact".to_owned(),
+        ));
     }
     if bytes.len() < NLMSG_HDR_LEN {
-        return Err(AttemptStatus::Invalid("request_shorter_than_netlink_header".to_owned()));
+        return Err(AttemptStatus::Invalid(
+            "request_shorter_than_netlink_header".to_owned(),
+        ));
     }
 
     let message_len = read_u32(&bytes[..4], byte_order) as usize;
@@ -1163,7 +1203,9 @@ fn parse_link_request(
         ));
     }
     if sequence != expected_sequence || expected_sequence == 0 {
-        return Err(AttemptStatus::Invalid("request_sequence_mismatch_or_zero".to_owned()));
+        return Err(AttemptStatus::Invalid(
+            "request_sequence_mismatch_or_zero".to_owned(),
+        ));
     }
     if read_u32(&bytes[12..16], byte_order) != 0 {
         return Err(AttemptStatus::Invalid(
@@ -1279,7 +1321,9 @@ fn parse_link_dump(
     critical_ids: &BTreeSet<u16>,
 ) -> Result<ParsedDump, AttemptStatus> {
     if bytes.is_empty() {
-        return Err(AttemptStatus::Incomplete("empty_receive_without_terminal_signal".to_owned()));
+        return Err(AttemptStatus::Incomplete(
+            "empty_receive_without_terminal_signal".to_owned(),
+        ));
     }
     if expected_sequence == 0 {
         return Err(AttemptStatus::Invalid("zero_request_sequence".to_owned()));
@@ -1297,38 +1341,54 @@ fn parse_link_dump(
 
     while offset < bytes.len() {
         if bytes.len().saturating_sub(offset) < NLMSG_HDR_LEN {
-            return Err(AttemptStatus::Invalid("trailing_partial_netlink_header".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "trailing_partial_netlink_header".to_owned(),
+            ));
         }
         message_count += 1;
         if message_count > max_messages {
-            return Err(AttemptStatus::Incomplete("message_count_limit_exceeded".to_owned()));
+            return Err(AttemptStatus::Incomplete(
+                "message_count_limit_exceeded".to_owned(),
+            ));
         }
         let message_len = read_u32(&bytes[offset..offset + 4], byte_order) as usize;
         let message_type = read_u16(&bytes[offset + 4..offset + 6], byte_order);
         let flags = read_u16(&bytes[offset + 6..offset + 8], byte_order);
         let sequence = read_u32(&bytes[offset + 8..offset + 12], byte_order);
         if message_len < NLMSG_HDR_LEN {
-            return Err(AttemptStatus::Invalid("netlink_message_length_below_header_size".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "netlink_message_length_below_header_size".to_owned(),
+            ));
         }
         if message_len > bytes.len().saturating_sub(offset) {
-            return Err(AttemptStatus::Invalid("netlink_message_length_exceeds_artifact".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "netlink_message_length_exceeds_artifact".to_owned(),
+            ));
         }
         if align4(message_len) > bytes.len().saturating_sub(offset) {
-            return Err(AttemptStatus::Invalid("netlink_message_alignment_exceeds_artifact".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "netlink_message_alignment_exceeds_artifact".to_owned(),
+            ));
         }
         // An ACK can be delivered after NLMSG_DONE. No more dump rows or a second
         // terminal signal may follow NLMSG_DONE; only the matching request ACK is allowed.
         if terminal_seen && message_type != NLMSG_ERROR {
-            return Err(AttemptStatus::Invalid("message_bytes_after_terminal_signal".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "message_bytes_after_terminal_signal".to_owned(),
+            ));
         }
         if sequence != expected_sequence {
-            return Err(AttemptStatus::Invalid("unexpected_netlink_request_sequence".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "unexpected_netlink_request_sequence".to_owned(),
+            ));
         }
         if flags & NLM_F_DUMP_INTR != 0 {
             interrupted = true;
         }
         if flags & NLM_F_DUMP_FILTERED != 0 {
-            return Err(AttemptStatus::Incomplete("kernel_reports_filtered_dump".to_owned()));
+            return Err(AttemptStatus::Incomplete(
+                "kernel_reports_filtered_dump".to_owned(),
+            ));
         }
         let allowed_flags = match message_type {
             RTM_NEWLINK => NLM_F_MULTI | NLM_F_DUMP_INTR,
@@ -1347,7 +1407,9 @@ fn parse_link_dump(
         match message_type {
             NLMSG_DONE => {
                 if flags & NLM_F_MULTI == 0 {
-                    return Err(AttemptStatus::Invalid("terminal_signal_missing_nlm_f_multi".to_owned()));
+                    return Err(AttemptStatus::Invalid(
+                        "terminal_signal_missing_nlm_f_multi".to_owned(),
+                    ));
                 }
                 let payload = &bytes[payload_start..payload_end];
                 if payload.len() < 4 {
@@ -1382,20 +1444,28 @@ fn parse_link_dump(
                 let payload = &bytes[payload_start..payload_end];
                 validate_nlmsg_error_ack(payload, flags, expected_sequence, byte_order)?;
                 if success_ack_seen {
-                    return Err(AttemptStatus::Invalid("duplicate_success_ack_for_request".to_owned()));
+                    return Err(AttemptStatus::Invalid(
+                        "duplicate_success_ack_for_request".to_owned(),
+                    ));
                 }
                 success_ack_seen = true;
             }
             RTM_NEWLINK => {
                 if flags & NLM_F_MULTI == 0 {
-                    return Err(AttemptStatus::Invalid("link_message_missing_nlm_f_multi".to_owned()));
+                    return Err(AttemptStatus::Invalid(
+                        "link_message_missing_nlm_f_multi".to_owned(),
+                    ));
                 }
                 if terminal_seen {
-                    return Err(AttemptStatus::Invalid("link_object_after_terminal_signal".to_owned()));
+                    return Err(AttemptStatus::Invalid(
+                        "link_object_after_terminal_signal".to_owned(),
+                    ));
                 }
                 object_count += 1;
                 if object_count > max_objects {
-                    return Err(AttemptStatus::Incomplete("object_count_limit_exceeded".to_owned()));
+                    return Err(AttemptStatus::Incomplete(
+                        "object_count_limit_exceeded".to_owned(),
+                    ));
                 }
                 let payload = &bytes[payload_start..payload_end];
                 let link = parse_link_message(payload, byte_order, critical_ids)?;
@@ -1427,16 +1497,25 @@ fn parse_link_dump(
     }
 
     if interrupted {
-        return Err(AttemptStatus::Incomplete("nlm_f_dump_intr_observed".to_owned()));
+        return Err(AttemptStatus::Incomplete(
+            "nlm_f_dump_intr_observed".to_owned(),
+        ));
     }
     if !terminal_seen {
-        return Err(AttemptStatus::Incomplete("missing_nlmsg_done_terminal_signal".to_owned()));
+        return Err(AttemptStatus::Incomplete(
+            "missing_nlmsg_done_terminal_signal".to_owned(),
+        ));
     }
     if !success_ack_seen {
-        return Err(AttemptStatus::Incomplete("missing_success_ack_for_acknowledged_dump".to_owned()));
+        return Err(AttemptStatus::Incomplete(
+            "missing_success_ack_for_acknowledged_dump".to_owned(),
+        ));
     }
     let mut by_name = BTreeSet::new();
-    if links.values().any(|link| !by_name.insert(link.ifname.clone())) {
+    if links
+        .values()
+        .any(|link| !by_name.insert(link.ifname.clone()))
+    {
         return Err(AttemptStatus::Invalid(
             "duplicate_interface_name_with_distinct_ifindex".to_owned(),
         ));
@@ -1467,7 +1546,9 @@ fn parse_link_message(
     let flags = read_u32(&payload[8..12], byte_order);
     let change = read_u32(&payload[12..16], byte_order);
     if ifindex <= 0 {
-        return Err(AttemptStatus::Invalid("nonpositive_interface_index".to_owned()));
+        return Err(AttemptStatus::Invalid(
+            "nonpositive_interface_index".to_owned(),
+        ));
     }
     if change != 0 {
         return Err(AttemptStatus::Invalid(
@@ -1488,17 +1569,25 @@ fn parse_link_message(
         let raw_type = read_u16(&attributes[offset + 2..offset + 4], byte_order);
         let attr_type = raw_type & NLA_TYPE_MASK;
         if attr_len < 4 {
-            return Err(AttemptStatus::Invalid("rtattr_length_below_header_size".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "rtattr_length_below_header_size".to_owned(),
+            ));
         }
         if attr_len > attributes.len() - offset {
-            return Err(AttemptStatus::Invalid("rtattr_length_exceeds_ifinfomsg".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "rtattr_length_exceeds_ifinfomsg".to_owned(),
+            ));
         }
         let aligned_len = align4(attr_len);
         if aligned_len > attributes.len() - offset {
-            return Err(AttemptStatus::Invalid("rtattr_alignment_exceeds_ifinfomsg".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "rtattr_alignment_exceeds_ifinfomsg".to_owned(),
+            ));
         }
         if !seen_attributes.insert(attr_type) {
-            return Err(AttemptStatus::Invalid("duplicate_link_attribute".to_owned()));
+            return Err(AttemptStatus::Invalid(
+                "duplicate_link_attribute".to_owned(),
+            ));
         }
         // The three attributes interpreted by this profile are scalar/string/binary
         // fields, never nested or network-byte-order-marked attributes.
@@ -1510,8 +1599,13 @@ fn parse_link_message(
         let value = &attributes[offset + 4..offset + attr_len];
         match attr_type {
             IFLA_IFNAME => {
-                if value.is_empty() || value.last() != Some(&0) || value[..value.len() - 1].contains(&0) {
-                    return Err(AttemptStatus::Invalid("ifla_ifname_not_single_nul_terminated".to_owned()));
+                if value.is_empty()
+                    || value.last() != Some(&0)
+                    || value[..value.len() - 1].contains(&0)
+                {
+                    return Err(AttemptStatus::Invalid(
+                        "ifla_ifname_not_single_nul_terminated".to_owned(),
+                    ));
                 }
                 let text = std::str::from_utf8(&value[..value.len() - 1])
                     .map_err(|_| AttemptStatus::Invalid("ifla_ifname_not_utf8".to_owned()))?;
@@ -1651,7 +1745,13 @@ mod tests {
         raw_join(&[success_ack(sequence), done_only(sequence, status, flags)])
     }
 
-    fn link_message(index: i32, name: &str, mtu: Option<u32>, flags: u16, sequence: u32) -> Vec<u8> {
+    fn link_message(
+        index: i32,
+        name: &str,
+        mtu: Option<u32>,
+        flags: u16,
+        sequence: u32,
+    ) -> Vec<u8> {
         let mut payload = vec![0, 0];
         payload.extend_from_slice(&encode_u16(1)); // ARPHRD_ETHER for the fixture only.
         payload.extend_from_slice(&encode_i32(index));
@@ -1707,7 +1807,14 @@ mod tests {
             msg_trunc_observed: false,
             dropped_message_count: 0,
         };
-        if let Ok(parsed) = parse_link_dump(raw, sequence, ByteOrder::Little, 128, 128, &BTreeSet::from([5, 999])) {
+        if let Ok(parsed) = parse_link_dump(
+            raw,
+            sequence,
+            ByteOrder::Little,
+            128,
+            128,
+            &BTreeSet::from([5, 999]),
+        ) {
             attempt.canonical_semantic_blake3 = Some(canonical_digest(&parsed.links));
         }
         attempt
@@ -1804,7 +1911,13 @@ mod tests {
         let raw = link_message(2, "eth0", Some(1500), NLM_F_MULTI, 7);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("missing_nlmsg_done")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("missing_nlmsg_done"))
+        );
     }
 
     #[test]
@@ -1815,7 +1928,12 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("nlm_f_dump_intr")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("nlm_f_dump_intr"))
+        );
     }
 
     #[test]
@@ -1827,15 +1945,15 @@ mod tests {
 
     #[test]
     fn error_message_cannot_establish_completeness() {
-        let error = message(
-            NLMSG_ERROR,
-            NLM_F_CAPPED,
-            7,
-            &nlmsgerr_payload(7, -105),
-        );
+        let error = message(NLMSG_ERROR, NLM_F_CAPPED, 7, &nlmsgerr_payload(7, -105));
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&error, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("nlmsg_error_received:-105")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("nlmsg_error_received:-105"))
+        );
     }
 
     #[test]
@@ -1843,7 +1961,12 @@ mod tests {
         let raw = done_only(7, 0, NLM_F_MULTI);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("missing_success_ack")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("missing_success_ack"))
+        );
     }
 
     #[test]
@@ -1852,27 +1975,30 @@ mod tests {
         raw[28..32].copy_from_slice(&encode_u32(8));
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("original_request_header_mismatch")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("original_request_header_mismatch"))
+        );
     }
 
     #[test]
     fn duplicate_success_ack_is_invalid() {
-        let raw = raw_join(&[
-            success_ack(7),
-            success_ack(7),
-            done_only(7, 0, NLM_F_MULTI),
-        ]);
+        let raw = raw_join(&[success_ack(7), success_ack(7), done_only(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("duplicate_success_ack")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("duplicate_success_ack"))
+        );
     }
 
     #[test]
     fn success_ack_after_terminal_is_accepted_when_it_matches_request() {
-        let raw = raw_join(&[
-            done_only(7, 0, NLM_F_MULTI),
-            success_ack(7),
-        ]);
+        let raw = raw_join(&[done_only(7, 0, NLM_F_MULTI), success_ack(7)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
     }
@@ -1881,16 +2007,16 @@ mod tests {
     fn success_ack_extended_tlvs_are_explicitly_unsupported() {
         let mut payload = nlmsgerr_payload(7, 0);
         payload.extend_from_slice(&[4, 0, 1, 0]);
-        let ack = message(
-            NLMSG_ERROR,
-            NLM_F_CAPPED | NLM_F_ACK_TLVS,
-            7,
-            &payload,
-        );
+        let ack = message(NLMSG_ERROR, NLM_F_CAPPED | NLM_F_ACK_TLVS, 7, &payload);
         let raw = raw_join(&[ack, done_only(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("success_ack_extended_tlvs")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("success_ack_extended_tlvs"))
+        );
     }
 
     #[test]
@@ -1907,7 +2033,12 @@ mod tests {
         let raw = raw_join(&[ack, done_only(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("missing_original_request_header")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("missing_original_request_header"))
+        );
     }
 
     #[test]
@@ -1926,16 +2057,30 @@ mod tests {
 
     #[test]
     fn negative_terminal_status_is_incomplete() {
-        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&done(7, -5, NLM_F_MULTI), 7, 0)]));
+        let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(
+            &done(7, -5, NLM_F_MULTI),
+            7,
+            0,
+        )]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
     }
 
     #[test]
     fn unflagged_trailing_terminal_payload_is_invalid() {
-        let raw = message(NLMSG_DONE, NLM_F_MULTI, 7, &[0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd]);
+        let raw = message(
+            NLMSG_DONE,
+            NLM_F_MULTI,
+            7,
+            &[0, 0, 0, 0, 0xaa, 0xbb, 0xcc, 0xdd],
+        );
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unflagged_trailing_bytes")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unflagged_trailing_bytes"))
+        );
     }
 
     #[test]
@@ -1948,7 +2093,12 @@ mod tests {
         );
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("extended_ack_tlvs")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("extended_ack_tlvs"))
+        );
     }
 
     #[test]
@@ -2069,7 +2219,10 @@ mod tests {
         let noqueue = evidence_for_qdisc(b"noqueue\0");
         let fq_codel = evidence_for_qdisc(b"fq_codel\0");
         assert_eq!(noqueue.receipt.decision, Decision::CompleteForDeclaredScope);
-        assert_eq!(fq_codel.receipt.decision, Decision::CompleteForDeclaredScope);
+        assert_eq!(
+            fq_codel.receipt.decision,
+            Decision::CompleteForDeclaredScope
+        );
         assert_ne!(
             noqueue.receipt.source_results[0].raw_artifact_blake3,
             fq_codel.receipt.source_results[0].raw_artifact_blake3
@@ -2078,7 +2231,13 @@ mod tests {
             noqueue.receipt.source_results[0].canonical_semantic_blake3,
             fq_codel.receipt.source_results[0].canonical_semantic_blake3
         );
-        assert!(noqueue.receipt.limitations.iter().any(|limit| limit.contains("not semantically")));
+        assert!(
+            noqueue
+                .receipt
+                .limitations
+                .iter()
+                .any(|limit| limit.contains("not semantically"))
+        );
     }
 
     #[test]
@@ -2103,7 +2262,12 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("type_flags")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("type_flags"))
+        );
     }
 
     #[test]
@@ -2114,7 +2278,12 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unrecognized_netlink_response_flags")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unrecognized_netlink_response_flags"))
+        );
     }
 
     #[test]
@@ -2135,7 +2304,10 @@ mod tests {
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
         assert_eq!(receipt.receipt.source_results[0].observed_object_count, 1);
-        assert_eq!(receipt.receipt.source_results[0].identical_duplicate_count, 1);
+        assert_eq!(
+            receipt.receipt.source_results[0].identical_duplicate_count,
+            1
+        );
     }
 
     #[test]
@@ -2160,7 +2332,12 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("raw_attributes")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("raw_attributes"))
+        );
     }
 
     #[test]
@@ -2173,7 +2350,10 @@ mod tests {
         let envelope = envelope_with(vec![attempt(&failed, 7, 0), attempt(&good, 8, 1)]);
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
-        assert_eq!(receipt.receipt.source_results[0].accepted_retry_index, Some(1));
+        assert_eq!(
+            receipt.receipt.source_results[0].accepted_retry_index,
+            Some(1)
+        );
     }
 
     #[test]
@@ -2207,7 +2387,12 @@ mod tests {
         let combined = raw_join(&[raw, done(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&combined, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("ifinfomsg_change")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("ifinfomsg_change"))
+        );
     }
 
     #[test]
@@ -2217,7 +2402,12 @@ mod tests {
         let combined = raw_join(&[raw, done(7, 0, NLM_F_MULTI)]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&combined, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("family_or_padding")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("family_or_padding"))
+        );
     }
 
     #[test]
@@ -2228,7 +2418,12 @@ mod tests {
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
         assert_eq!(receipt.receipt.integrity, Integrity::Valid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("deadline")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("deadline"))
+        );
     }
 
     #[test]
@@ -2244,10 +2439,19 @@ mod tests {
     #[test]
     fn out_of_range_critical_attribute_id_is_invalid() {
         let mut envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
-        envelope.policy.decision_critical_link_attribute_ids.push(u16::MAX);
+        envelope
+            .policy
+            .decision_critical_link_attribute_ids
+            .push(u16::MAX);
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("outside_nla_type_range")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("outside_nla_type_range"))
+        );
     }
 
     #[test]
@@ -2275,7 +2479,13 @@ mod tests {
         envelope.scope.resource_kinds.clear();
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("resource_kind_missing")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("resource_kind_missing"))
+        );
     }
 
     #[test]
@@ -2290,10 +2500,16 @@ mod tests {
     #[test]
     fn more_than_one_required_family_never_claims_cross_source_coherence() {
         let mut envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
-        envelope.scope.required_families.push("gnmi.openconfig.interfaces.v1".to_owned());
+        envelope
+            .scope
+            .required_families
+            .push("gnmi.openconfig.interfaces.v1".to_owned());
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert_eq!(receipt.receipt.temporal_coherence, TemporalCoherence::NotEstablished);
+        assert_eq!(
+            receipt.receipt.temporal_coherence,
+            TemporalCoherence::NotEstablished
+        );
     }
 
     #[test]
@@ -2310,7 +2526,12 @@ mod tests {
         let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
         let mut receipt = verify_envelope_for_test(&envelope);
         receipt.receipt.decision = Decision::Incomplete;
-        assert!(receipt.serialize_checked().unwrap_err().contains("digest does not match"));
+        assert!(
+            receipt
+                .serialize_checked()
+                .unwrap_err()
+                .contains("digest does not match")
+        );
     }
 
     #[test]
@@ -2347,7 +2568,13 @@ mod tests {
         expected.network_namespace_inode += 1;
         let receipt = verify_bytes_for_target(&input, &expected).expect("well-formed envelope");
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("external_expected_target")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("external_expected_target"))
+        );
     }
 
     #[test]
@@ -2365,7 +2592,12 @@ mod tests {
         ]);
         let receipt = verify_envelope_for_test(&envelope_with(vec![attempt(&raw, 7, 0)]));
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("required_ifla_mtu_attribute_missing")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("required_ifla_mtu_attribute_missing"))
+        );
     }
 
     #[test]
@@ -2375,7 +2607,13 @@ mod tests {
         envelope.policy.max_age_ms = POLICY_MAX_AGE_MS + 1;
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("policy_exceeds")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("policy_exceeds"))
+        );
     }
 
     #[test]
@@ -2388,7 +2626,12 @@ mod tests {
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("port_id_must_be_zero")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("port_id_must_be_zero"))
+        );
     }
 
     #[test]
@@ -2402,7 +2645,12 @@ mod tests {
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unexpected_flags")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unexpected_flags"))
+        );
     }
 
     #[test]
@@ -2416,7 +2664,12 @@ mod tests {
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("atomic_dump_request")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("atomic_dump_request"))
+        );
     }
 
     #[test]
@@ -2424,25 +2677,34 @@ mod tests {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut item = attempt(&raw, 7, 0);
         let mut request = decode_hex(&item.raw_request_hex).expect("request hex is valid");
-        request[6..8].copy_from_slice(
-            &(NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP | NLM_F_ECHO).to_le_bytes(),
-        );
+        request[6..8]
+            .copy_from_slice(&(NLM_F_REQUEST | NLM_F_ACK | NLM_F_DUMP | NLM_F_ECHO).to_le_bytes());
         item.raw_request_hex = request.iter().map(|byte| format!("{byte:02x}")).collect();
         item.raw_request_blake3 = hash_raw_request(&request);
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
         assert_eq!(receipt.receipt.decision, Decision::Unsupported);
-        assert!(receipt.receipt.source_results[0].reasons.iter().any(|reason| reason.contains("unexpected_flags")));
+        assert!(
+            receipt.receipt.source_results[0]
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unexpected_flags"))
+        );
     }
 
     #[test]
     fn omitted_mandatory_semantic_attribute_from_policy_is_rejected() {
         let raw = done(7, 0, NLM_F_MULTI);
         let mut envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
-        envelope.policy.decision_critical_link_attribute_ids =
-            vec![IFLA_IFNAME, IFLA_MTU];
+        envelope.policy.decision_critical_link_attribute_ids = vec![IFLA_IFNAME, IFLA_MTU];
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Invalid);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("mandatory_semantic_fields")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("mandatory_semantic_fields"))
+        );
     }
 
     #[test]
@@ -2462,7 +2724,13 @@ mod tests {
         envelope.policy.max_total_raw_bytes = request.len() + raw.len() - 1;
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::Incomplete);
-        assert!(receipt.receipt.reasons.iter().any(|reason| reason.contains("total_raw_artifact_byte_limit_exceeded")));
+        assert!(
+            receipt
+                .receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("total_raw_artifact_byte_limit_exceeded"))
+        );
     }
 
     #[test]
@@ -2484,7 +2752,12 @@ mod tests {
         let envelope = envelope_with(vec![attempt(&raw, 7, 0)]);
         let receipt = verify_envelope_for_test(&envelope);
         assert_eq!(receipt.receipt.decision, Decision::CompleteForDeclaredScope);
-        assert_eq!(receipt.receipt.source_results[0].observed_links[0].address_hex.as_deref(), Some("000102030405"));
+        assert_eq!(
+            receipt.receipt.source_results[0].observed_links[0]
+                .address_hex
+                .as_deref(),
+            Some("000102030405")
+        );
     }
 
     #[test]
@@ -2493,8 +2766,14 @@ mod tests {
         let input = serde_json::to_vec(&envelope).expect("fixture serializes");
         let first = verify_bytes(&input).expect("verifies");
         let second = verify_bytes(&input).expect("verifies");
-        assert_eq!(first.serialize_checked().expect("receipt serializes"), second.serialize_checked().expect("receipt serializes"));
-        assert_eq!(first.receipt.policy_digest_blake3, second.receipt.policy_digest_blake3);
+        assert_eq!(
+            first.serialize_checked().expect("receipt serializes"),
+            second.serialize_checked().expect("receipt serializes")
+        );
+        assert_eq!(
+            first.receipt.policy_digest_blake3,
+            second.receipt.policy_digest_blake3
+        );
         assert_eq!(first.receipt.verifier_source_digest_blake3.len(), 64);
     }
 
@@ -2503,9 +2782,17 @@ mod tests {
         let envelope = envelope_with(vec![attempt(&done(7, 0, NLM_F_MULTI), 7, 0)]);
         let compact = serde_json::to_vec(&envelope).expect("fixture serializes");
         let pretty = serde_json::to_vec_pretty(&envelope).expect("fixture pretty-serializes");
-        let compact_receipt = verify_bytes_for_target(&compact, &envelope.target).expect("compact JSON verifies");
-        let pretty_receipt = verify_bytes_for_target(&pretty, &envelope.target).expect("pretty JSON verifies");
-        assert_ne!(compact_receipt.receipt.envelope_raw_blake3, pretty_receipt.receipt.envelope_raw_blake3);
-        assert_ne!(compact_receipt.receipt_blake3, pretty_receipt.receipt_blake3);
+        let compact_receipt =
+            verify_bytes_for_target(&compact, &envelope.target).expect("compact JSON verifies");
+        let pretty_receipt =
+            verify_bytes_for_target(&pretty, &envelope.target).expect("pretty JSON verifies");
+        assert_ne!(
+            compact_receipt.receipt.envelope_raw_blake3,
+            pretty_receipt.receipt.envelope_raw_blake3
+        );
+        assert_ne!(
+            compact_receipt.receipt_blake3,
+            pretty_receipt.receipt_blake3
+        );
     }
 }
