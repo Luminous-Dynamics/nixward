@@ -3423,7 +3423,7 @@ mod tests {
         let interpreter = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash/bin/bash";
         let target = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
         let install_bootloader = "/nix/store/dddddddddddddddddddddddddddddddd-no-bootloader/bin/install";
-        let pre_switch_check = "/nix/store/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-pre-switch-check/bin/check";
+        let pre_switch_check = "/nix/store/abcdffabcdffabcdffabcdffabcdffab-pre-switch-check/bin/check";
         let systemd = "/nix/store/ffffffffffffffffffffffffffffffff-systemd";
         let valid_wrapper = format!(
             "#!{interpreter}\nexport OUT='{root}'\nexport TOPLEVEL='{root}'\nexport DISTRO_ID='nixos'\nexport INSTALL_BOOTLOADER='{install_bootloader}'\nexport PRE_SWITCH_CHECK='{pre_switch_check}'\nexport SYSTEMD='{systemd}'\nexec -a \"$0\" {target} \"$@\"\n"
