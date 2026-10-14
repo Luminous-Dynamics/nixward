@@ -1126,6 +1126,10 @@ mod tests {
         builder.set_version(2).expect("version");
         builder.set_subject_name(&name).expect("subject");
         builder.set_issuer_name(&name).expect("issuer");
+        let not_before = openssl::asn1::Asn1Time::days_from_now(0).expect("not before");
+        let not_after = openssl::asn1::Asn1Time::days_from_now(365).expect("not after");
+        builder.set_not_before(&not_before).expect("not before");
+        builder.set_not_after(&not_after).expect("not after");
         builder.set_pubkey(&key).expect("public key");
 
         let serial = openssl::asn1::Asn1Integer::from_bn(
