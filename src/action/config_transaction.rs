@@ -723,7 +723,9 @@ impl FrozenConfigSource {
         let observed = nix::sys::stat::fstat(dir.as_raw_fd())
             .map_err(|error| format!("failed to inspect opened config source root: {error}"))?;
 
-        let expected_mode = expected.mode();
+        // MetadataExt::mode() includes S_IFDIR/S_IFREG type bits; compare
+        // permission/special bits only, matching the mask used for fstat.
+        let expected_mode = expected.mode() & 0o7777;
         if expected.dev() != observed.st_dev
             || expected.ino() != observed.st_ino
             || expected_mode != (observed.st_mode & 0o7777) as u32
