@@ -1427,7 +1427,7 @@ impl SourceRealizationLease {
 
             let created = match nix::unistd::symlinkat(
                 target.as_c_str(),
-                namespace_dir.as_raw_fd(),
+                Some(namespace_dir.as_raw_fd()),
                 name.as_c_str(),
             ) {
                 Ok(()) => true,
@@ -1605,7 +1605,7 @@ fn establish_candidate_gc_root(store_path: &str, gc_root_path: &str) -> Result<(
     let target = CString::new(store_path).map_err(|_| "candidate store path contains NUL".to_string())?;
     let created = match nix::unistd::symlinkat(
         target.as_c_str(),
-        namespace_dir.as_raw_fd(),
+        Some(namespace_dir.as_raw_fd()),
         name.as_c_str(),
     ) {
         Ok(()) => true,
@@ -2778,6 +2778,9 @@ impl ConfigTransaction {
                 {
                     return Err("transaction journal has recovery worker identity outside recovery phases".into());
                 }
+                // Every forbidden purpose/phase pairing has already returned an error.
+                // Reaching this arm means the purpose is valid for the observed phase.
+                _ => {}
             }
         }
         if let Some(receipt) = transaction.candidate_build.as_ref() {
