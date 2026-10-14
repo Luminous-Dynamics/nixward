@@ -1,0 +1,61 @@
+name: Journal publication fault injection
+
+on:
+  pull_request:
+    branches:
+      - "hardening/full-stack-qualification-2026-10-08"
+    paths:
+      - "src/action/config_transaction.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/journal-publication-fault-injection.yml"
+  push:
+    branches:
+      - "hardening/journal-publication-fault-injection-2026-10-14"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: journal-publication-fault-injection-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fault-injection-tests:
+    name: Journal publication fault-injection tests (Rust 1.96.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact triggering revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: false
+          lfs: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.96.0"
+
+      - name: Record exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version --verbose
+          cargo --version
+          git rev-parse HEAD
+
+      # The full workspace currently has pre-existing rustfmt drift in unrelated
+      # modules. This focused regression workflow uses whitespace validation and
+      # runs only the journal publication test subset; the full formatting gate
+      # remains in the full-stack qualification workflow.
+      - name: Check patch whitespace
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: git diff --check "${BASE_REF}...HEAD"
+
+      - name: Run journal publication fault-injection regressions
+        run: cargo test --locked --lib transaction_journal_ -- --nocapture

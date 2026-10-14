@@ -2037,6 +2037,17 @@ pub struct ConfigTransaction {
     recovery_observed: bool,
 }
 
+/// Internal persistence checkpoints for precise journal publication fault injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalPersistStage {
+    CandidateCreate,
+    CandidateWrite,
+    CandidateSync,
+    CandidateClose,
+    CandidateRename,
+    DirectorySync,
+}
+
 impl ConfigTransaction {
     pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v6";
     pub const VERSION: u16 = 6;
@@ -2569,6 +2580,19 @@ impl ConfigTransaction {
     }
 
     pub fn persist_atomic(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        self.persist_atomic_with_hook(path, |_| Ok(()))
+    }
+
+    /// Private persistence seam. Production callers cannot choose fault points;
+    /// tests provide an in-memory hook without environment variables or global state.
+    fn persist_atomic_with_hook<F>(
+        &self,
+        path: impl AsRef<Path>,
+        mut inject_failure: F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(JournalPersistStage) -> Result<(), String>,
+    {
         let path = path.as_ref();
         let parent = path
             .parent()
@@ -2618,6 +2642,7 @@ impl ConfigTransaction {
             let temp_name_c = CString::new(temp_name.as_bytes())
                 .map_err(|_| "transaction journal temporary filename contains an embedded NUL".to_string())?;
 
+            inject_failure(JournalPersistStage::CandidateCreate)?;
             let temp_fd = openat(
                 parent_fd,
                 temp_name_c.as_c_str(),
@@ -2635,6 +2660,7 @@ impl ConfigTransaction {
             })?;
 
             let write_result = (|| -> Result<(), String> {
+                inject_failure(JournalPersistStage::CandidateWrite)?;
                 let mut written = 0usize;
                 while written < encoded.len() {
                     match write(temp_fd, &encoded[written..]) {
@@ -2653,6 +2679,9 @@ impl ConfigTransaction {
                         }
                     }
                 }
+                inject_failure(JournalPersistStage::CandidateSync).map_err(|error| {
+                    format!("failed to sync descriptor-bound transaction journal candidate: {error}")
+                })?;
                 fsync(temp_fd).map_err(|error| {
                     format!(
                         "failed to sync descriptor-bound transaction journal candidate: {error}"
@@ -2673,7 +2702,17 @@ impl ConfigTransaction {
                     "failed to close descriptor-bound transaction journal candidate: {error}"
                 )
             })?;
+            if let Err(error) = inject_failure(JournalPersistStage::CandidateClose) {
+                let _ = unlinkat(Some(parent_fd), temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!(
+                    "failed to close descriptor-bound transaction journal candidate: {error}"
+                ));
+            }
 
+            if let Err(error) = inject_failure(JournalPersistStage::CandidateRename) {
+                let _ = unlinkat(Some(parent_fd), temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                return Err(format!("failed to commit descriptor-bound transaction journal: {error}"));
+            }
             if let Err(error) = renameat(
                 Some(parent_fd),
                 temp_name_c.as_c_str(),
@@ -2686,9 +2725,14 @@ impl ConfigTransaction {
                 ));
             }
 
+            if let Err(error) = inject_failure(JournalPersistStage::DirectorySync) {
+                return Err(format!(
+                    "transaction journal rename published the new bytes, but parent-directory durability is uncertain: {error}"
+                ));
+            }
             fsync(parent_fd).map_err(|error| {
                 format!(
-                    "failed to sync transaction journal directory after rename: {error}"
+                    "transaction journal rename published the new bytes, but parent-directory durability is uncertain: {error}"
                 )
             })?;
 
@@ -2698,6 +2742,7 @@ impl ConfigTransaction {
         #[cfg(not(unix))]
         {
             let temp_path = parent.join(&temp_name);
+            inject_failure(JournalPersistStage::CandidateCreate)?;
             let mut options = std::fs::OpenOptions::new();
             options.write(true).create_new(true);
             let mut file = options
@@ -2705,23 +2750,67 @@ impl ConfigTransaction {
                 .map_err(|error| {
                     format!("failed to create transaction journal candidate: {error}")
                 })?;
-            file.write_all(&encoded).map_err(|error| {
+            inject_failure(JournalPersistStage::CandidateWrite).map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
                 format!("failed to write transaction journal candidate: {error}")
             })?;
-            file.sync_all().map_err(|error| {
+            file.write_all(&encoded).map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("failed to write transaction journal candidate: {error}")
+            })?;
+            inject_failure(JournalPersistStage::CandidateSync).map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
                 format!("failed to sync transaction journal candidate: {error}")
+            })?;
+            file.sync_all().map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("failed to sync transaction journal candidate: {error}")
+            })?;
+            drop(file);
+            inject_failure(JournalPersistStage::CandidateClose).map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("failed to close transaction journal candidate: {error}")
+            })?;
+            inject_failure(JournalPersistStage::CandidateRename).map_err(|error| {
+                let _ = std::fs::remove_file(&temp_path);
+                format!("failed to commit transaction journal: {error}")
             })?;
             if let Err(error) = std::fs::rename(&temp_path, path) {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(format!("failed to commit transaction journal: {error}"));
             }
-            let parent_dir = std::fs::File::open(parent)
-                .map_err(|error| format!("failed to open transaction journal directory: {error}"))?;
+            let parent_dir = std::fs::File::open(parent).map_err(|error| {
+                format!(
+                    "transaction journal rename published the new bytes, but parent-directory durability is uncertain because directory open failed: {error}"
+                )
+            })?;
+            if let Err(error) = inject_failure(JournalPersistStage::DirectorySync) {
+                return Err(format!(
+                    "transaction journal rename published the new bytes, but parent-directory durability is uncertain: {error}"
+                ));
+            }
             parent_dir.sync_all().map_err(|error| {
-                format!("failed to sync transaction journal directory: {error}")
+                format!(
+                    "transaction journal rename published the new bytes, but parent-directory durability is uncertain: {error}"
+                )
             })?;
             Ok(())
         }
+    }
+
+    #[cfg(all(test, unix))]
+    fn persist_atomic_with_fault(
+        &self,
+        path: impl AsRef<Path>,
+        fault: JournalPersistStage,
+    ) -> Result<(), String> {
+        self.persist_atomic_with_hook(path, |stage| {
+            if stage == fault {
+                Err(format!("injected transaction journal failure at {stage:?}"))
+            } else {
+                Ok(())
+            }
+        })
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
@@ -3677,6 +3766,114 @@ mod tests {
         assert!(tx.advance(ConfigTransactionPhase::ActivationStarted).is_err());
         assert_eq!(tx.phase(), ConfigTransactionPhase::IndeterminateProfileTransition);
     }
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_prepublication_faults_preserve_committed_bytes() {
+        let faults = [
+            JournalPersistStage::CandidateCreate,
+            JournalPersistStage::CandidateWrite,
+            JournalPersistStage::CandidateSync,
+            JournalPersistStage::CandidateClose,
+            JournalPersistStage::CandidateRename,
+        ];
+
+        for fault in faults {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("transaction.json");
+            let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+            committed.persist_atomic(&path).unwrap();
+            let old_bytes = std::fs::read(&path).unwrap();
+
+            let replacement = ConfigTransaction::new([4; 32], [5; 32], [6; 32]);
+            let error = replacement
+                .persist_atomic_with_fault(&path, fault)
+                .expect_err("injected pre-publication fault must fail");
+            assert!(
+                error.contains("injected transaction journal failure"),
+                "{fault:?}: {error}"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                old_bytes,
+                "{fault:?} must leave the prior committed journal bytes untouched"
+            );
+            assert_eq!(
+                ConfigTransaction::load(&path).unwrap().transaction_id(),
+                committed.transaction_id(),
+                "{fault:?} must leave the previous transaction authoritative"
+            );
+            assert_eq!(
+                std::fs::read_dir(dir.path()).unwrap().count(),
+                1,
+                "{fault:?} must not leave an orphan candidate file"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_directory_sync_fault_reports_published_uncertain_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        committed.persist_atomic(&path).unwrap();
+        let old_bytes = std::fs::read(&path).unwrap();
+
+        let replacement = ConfigTransaction::new([4; 32], [5; 32], [6; 32]);
+        let error = replacement
+            .persist_atomic_with_fault(&path, JournalPersistStage::DirectorySync)
+            .expect_err("directory-sync fault must not report durable commit success");
+
+        assert!(error.contains("published"), "{error}");
+        assert!(error.contains("durability is uncertain"), "{error}");
+        assert_ne!(
+            std::fs::read(&path).unwrap(),
+            old_bytes,
+            "rename has already published the replacement before the injected directory-sync fault"
+        );
+        assert_eq!(
+            ConfigTransaction::load(&path).unwrap().transaction_id(),
+            replacement.transaction_id(),
+            "the running filesystem view sees the replacement, although crash durability is unproven"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "post-publication failure must not remove the live journal or leave a temporary candidate"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_existing_candidate_name_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction.json");
+        let committed = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        committed.persist_atomic(&path).unwrap();
+        let old_bytes = std::fs::read(&path).unwrap();
+
+        // Model a stale candidate left by a prior process with the same PID.
+        // O_EXCL must refuse to replace it, and must leave the journal's old
+        // committed bytes authoritative.
+        let temp_name = format!(".transaction.json.tmp-{}", std::process::id());
+        let blocker = dir.path().join(temp_name);
+        let blocker_bytes = b"unowned candidate sentinel";
+        std::fs::write(&blocker, blocker_bytes).unwrap();
+
+        let replacement = ConfigTransaction::new([4; 32], [5; 32], [6; 32]);
+        let error = replacement
+            .persist_atomic(&path)
+            .expect_err("an existing transaction candidate must not be overwritten");
+        assert!(error.contains("failed to create descriptor-bound transaction journal candidate"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), old_bytes);
+        assert_eq!(
+            ConfigTransaction::load(&path).unwrap().transaction_id(),
+            committed.transaction_id()
+        );
+        assert_eq!(std::fs::read(&blocker).unwrap(), blocker_bytes);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
     #[test]
     fn transaction_journal_round_trips_atomically() {
         let dir = tempfile::tempdir().unwrap();
