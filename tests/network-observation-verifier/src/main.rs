@@ -1,4 +1,4 @@
-use nixward_network_observation_verifier::{verify_bytes_for_target, TargetIdentity};
+use nixward_network_observation_verifier::{TargetIdentity, verify_bytes_for_target};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -25,16 +25,8 @@ fn run() -> Result<ExitCode, String> {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--target-id" => set_once(
-                &mut target_id,
-                args.next().ok_or_else(usage)?,
-                "target ID",
-            )?,
-            "--boot-id" => set_once(
-                &mut boot_id,
-                args.next().ok_or_else(usage)?,
-                "boot ID",
-            )?,
+            "--target-id" => set_once(&mut target_id, args.next().ok_or_else(usage)?, "target ID")?,
+            "--boot-id" => set_once(&mut boot_id, args.next().ok_or_else(usage)?, "boot ID")?,
             "--netns-inode" => {
                 if netns_inode.is_some() {
                     return Err("duplicate --netns-inode argument".to_owned());
@@ -69,7 +61,8 @@ fn run() -> Result<ExitCode, String> {
     let input = if path == "-" {
         read_bounded(io::stdin())?
     } else {
-        let file = File::open(&path).map_err(|error| format!("cannot open envelope {path}: {error}"))?;
+        let file =
+            File::open(&path).map_err(|error| format!("cannot open envelope {path}: {error}"))?;
         read_bounded(file)?
     };
 
@@ -98,16 +91,14 @@ fn read_bounded(mut reader: impl Read) -> Result<Vec<u8>, String> {
         .read_to_end(&mut input)
         .map_err(|error| format!("cannot read evidence envelope: {error}"))?;
     if input.len() as u64 > MAX_INPUT_BYTES {
-        return Err(format!("evidence envelope exceeds {MAX_INPUT_BYTES}-byte input limit"));
+        return Err(format!(
+            "evidence envelope exceeds {MAX_INPUT_BYTES}-byte input limit"
+        ));
     }
     Ok(input)
 }
 
-fn set_once(
-    slot: &mut Option<String>,
-    value: String,
-    label: &str,
-) -> Result<(), String> {
+fn set_once(slot: &mut Option<String>, value: String, label: &str) -> Result<(), String> {
     if slot.replace(value).is_some() {
         return Err(format!("duplicate argument for {label}"));
     }
