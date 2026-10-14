@@ -840,6 +840,8 @@ mod tests {
         image[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
         image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
         image[optional + 60..optional + 64].copy_from_slice(&(size_of_headers as u32).to_le_bytes());
+        // PE32+ NumberOfRvaAndSizes covers directory index 4 (certificate table).
+        image[optional + 108..optional + 112].copy_from_slice(&16u32.to_le_bytes());
         image[optional + 64..optional + 68].copy_from_slice(&0x12345678u32.to_le_bytes());
         let cert_dir = optional + 144;
         image[cert_dir..cert_dir + 4].copy_from_slice(&(cert_offset as u32).to_le_bytes());
@@ -885,6 +887,8 @@ mod tests {
         image[coff + 16..coff + 18].copy_from_slice(&(optional_size as u16).to_le_bytes());
         image[optional..optional + 2].copy_from_slice(&0x20bu16.to_le_bytes());
         image[optional + 60..optional + 64].copy_from_slice(&(size_of_headers as u32).to_le_bytes());
+        // PE32+ NumberOfRvaAndSizes covers directory index 4 (certificate table).
+        image[optional + 108..optional + 112].copy_from_slice(&16u32.to_le_bytes());
         let cert_dir = optional + 144;
         image[cert_dir..cert_dir + 4].copy_from_slice(&(cert_offset as u32).to_le_bytes());
         image[cert_dir + 4..cert_dir + 8].copy_from_slice(&(cert_padded as u32).to_le_bytes());
