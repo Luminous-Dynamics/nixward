@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luminousdynamics.org/schemas/network-observation-verifier-receipt-v1.json",
+  "title": "Nixward Network Observation Verifier Receipt v1",
+  "description": "Deterministic receipt from the offline M1a evidence verifier; this is not a signature or live-kernel attestation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["receipt", "receipt_blake3"],
+  "properties": {
+    "receipt_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verifier_id",
+        "target_identity_bound_externally",
+        "verifier_version",
+        "rustc_version",
+        "cargo_version",
+        "target_os",
+        "target_arch",
+        "verifier_source_revision",
+        "verifier_source_digest_blake3",
+        "envelope_raw_blake3",
+        "policy_digest_blake3",
+        "target",
+        "scope",
+        "policy_id",
+        "policy_version",
+        "integrity",
+        "coverage",
+        "temporal_coherence",
+        "freshness",
+        "ownership",
+        "decision",
+        "accepted_source_count",
+        "source_results",
+        "reasons",
+        "limitations",
+        "global_atomic_snapshot_claimed",
+        "production_mutation_enabled"
+      ],
+      "properties": {
+        "verifier_id": { "const": "nixward.network-observation-verifier" },
+        "target_identity_bound_externally": { "type": "boolean" },
+        "verifier_version": { "type": "string", "minLength": 1 },
+        "rustc_version": { "type": "string", "minLength": 1 },
+        "cargo_version": { "type": "string", "minLength": 1 },
+        "target_os": { "type": "string", "minLength": 1 },
+        "target_arch": { "type": "string", "minLength": 1 },
+        "verifier_source_revision": { "type": "string", "minLength": 1 },
+        "verifier_source_digest_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "envelope_raw_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_digest_blake3": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target_id", "boot_id", "network_namespace_inode"],
+          "properties": {
+            "target_id": { "type": "string" },
+            "boot_id": { "type": "string" },
+            "network_namespace_inode": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required_families", "resource_kinds"],
+          "properties": {
+            "required_families": { "type": "array", "items": { "type": "string" } },
+            "resource_kinds": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "policy_id": { "type": "string" },
+        "policy_version": { "type": "string" },
+        "integrity": { "enum": ["Valid", "Invalid"] },
+        "coverage": { "enum": ["Complete", "Incomplete", "Unsupported"] },
+        "temporal_coherence": {
+          "enum": ["BoundedSingleSourceWindow", "NotEstablished"]
+        },
+        "freshness": { "enum": ["Valid", "Expired", "Invalid"] },
+        "ownership": { "const": "Unknown" },
+        "decision": {
+          "enum": ["CompleteForDeclaredScope", "Incomplete", "Unsupported", "Invalid", "Expired"]
+        },
+        "accepted_source_count": { "type": "integer", "minimum": 0 },
+        "source_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "family",
+              "status",
+              "attempts_seen",
+              "accepted_retry_index",
+              "observed_object_count",
+              "identical_duplicate_count",
+              "observed_links",
+              "raw_request_blake3",
+              "raw_artifact_blake3",
+              "canonical_semantic_blake3",
+              "reasons"
+            ],
+            "properties": {
+              "family": { "type": "string" },
+              "status": { "enum": ["complete", "incomplete", "unsupported", "invalid"] },
+              "attempts_seen": { "type": "integer", "minimum": 0 },
+              "accepted_retry_index": {
+                "oneOf": [
+                  { "type": "integer", "minimum": 0 },
+                  { "type": "null" }
+                ]
+              },
+              "observed_object_count": { "type": "integer", "minimum": 0 },
+              "identical_duplicate_count": { "type": "integer", "minimum": 0 },
+              "observed_links": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["ifindex", "ifname", "link_type", "flags", "mtu", "address_hex"],
+                  "properties": {
+                    "ifindex": { "type": "integer", "minimum": 1 },
+                    "ifname": { "type": "string", "minLength": 1 },
+                    "link_type": { "type": "integer", "minimum": 0, "maximum": 65535 },
+                    "flags": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+                    "mtu": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 4294967295
+                    },
+                    "address_hex": {
+                      "oneOf": [
+                        { "type": "string", "pattern": "^(?:[0-9a-f]{2})*$" },
+                        { "type": "null" }
+                      ]
+                    }
+                  }
+                }
+              },
+              "raw_request_blake3": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              },
+              "raw_artifact_blake3": {
+                "type": "array",
+                "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              },
+              "canonical_semantic_blake3": {
+                "oneOf": [
+                  { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  { "type": "null" }
+                ]
+              },
+              "reasons": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "limitations": { "type": "array", "items": { "type": "string" } },
+        "global_atomic_snapshot_claimed": { "const": false },
+        "production_mutation_enabled": { "const": false }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+[package]
+name = "nixward-network-observation-verifier"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Offline, read-only verifier for a bounded rtnetlink link-dump evidence profile"
+
+[dependencies]
+blake3 = "=1.8.5"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+
+[build-dependencies]
+blake3 = "=1.8.5"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# This verifier is intentionally a standalone Cargo workspace. Without this boundary,
+# Cargo walks upward and tries to parse Nixward's non-workspace inherited dependencies.
+[workspace]
