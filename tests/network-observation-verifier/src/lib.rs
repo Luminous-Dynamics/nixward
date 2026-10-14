@@ -1514,7 +1514,7 @@ fn parse_link_dump(
     let mut by_name = BTreeSet::new();
     if links
         .values()
-        .any(|link| !by_name.insert(link.ifname.clone()))
+        .any(|link| !by_name.insert(link.0.ifname.clone()))
     {
         return Err(AttemptStatus::Invalid(
             "duplicate_interface_name_with_distinct_ifindex".to_owned(),
