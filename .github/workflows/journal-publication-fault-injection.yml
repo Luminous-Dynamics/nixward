@@ -53,7 +53,9 @@ jobs:
       # runs only the journal publication test subset; the full formatting gate
       # remains in the full-stack qualification workflow.
       - name: Check patch whitespace
-        run: git diff --check HEAD^ HEAD
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: git diff --check "${BASE_REF}...HEAD"
 
       - name: Run journal publication fault-injection regressions
         run: cargo test --locked --lib transaction_journal_ -- --nocapture
