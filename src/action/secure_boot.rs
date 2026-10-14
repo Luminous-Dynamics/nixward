@@ -1640,7 +1640,11 @@ mod tests {
         let records = parse_signature_database(&payload).expect("SHA256 signature list");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, SignatureListKind::Sha256ImageHash);
-        assert_eq!(records[0].image_authenticode_sha256, Some([1u8; 32]));
+        let expected_hash: [u8; 32] = (1u8..=32)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("32-byte hash fixture");
+        assert_eq!(records[0].image_authenticode_sha256, Some(expected_hash));
     }
 
     #[test]
