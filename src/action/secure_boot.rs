@@ -1625,7 +1625,7 @@ mod tests {
         };
         assert_eq!(
             derive_direct_trust_disposition(&evidence),
-            DirectTrustDisposition::ExactCertificateInDbx
+            DirectTrustDisposition::ForbiddenByExactCertificate
         );
     }
     #[test]
