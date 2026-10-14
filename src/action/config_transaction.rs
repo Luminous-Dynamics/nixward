@@ -840,7 +840,14 @@ impl FrozenConfigSource {
                         Mode::empty(),
                     )
                     .map_err(|error| {
-                        format!("failed to securely open source file {}: {error}", child_relative.display())
+                        if error == Errno::ELOOP {
+                            format!(
+                                "symbolic link {} is not admissible in a frozen source tree",
+                                child_relative.display()
+                            )
+                        } else {
+                            format!("failed to securely open source file {}: {error}", child_relative.display())
+                        }
                     })?;
                     let before = fstat(fd).map_err(|error| {
                         let _ = close(fd);
@@ -879,7 +886,7 @@ impl FrozenConfigSource {
                         format!("failed to close source file {} after snapshot: {error}", child_relative.display())
                     })?;
 
-                    let relative_path = child_relative.to_string_lossy().replace('\\', "/");
+                    let relative_path = manifest_relative_path(&child_relative)?;
                     let mode = (before.st_mode & 0o7777) as u32;
                     let mut hasher = blake3::Hasher::new();
                     hasher.update(ENTRY_DOMAIN);
