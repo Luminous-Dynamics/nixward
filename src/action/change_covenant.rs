@@ -1000,8 +1000,8 @@ mod tests {
         let plan = ChangePlan::command_only_with_system_recovery(
             MachineBinding::new("machine-a").unwrap(),
             command,
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             SystemActivation::Switch,
             60_000,
         )
@@ -1009,11 +1009,11 @@ mod tests {
 
         assert_eq!(
             plan.rollback().prior_system_closure(),
-            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
+            Some("/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old")
         );
         assert_eq!(
             plan.rollback().prior_system_profile_closure(),
-            Some("/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old")
+            Some("/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old")
         );
         assert_eq!(
             plan.rollback().recovery_action(),
