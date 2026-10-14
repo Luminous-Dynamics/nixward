@@ -3641,9 +3641,9 @@ mod tests {
     #[test]
     fn exact_activation_observation_accepts_bound_prior_and_rejects_drift() {
         assert!(NixOSExecutor::validate_exact_activation_observation(
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
         )
         .is_ok());
 
@@ -3651,7 +3651,7 @@ mod tests {
             NixOSExecutor::validate_exact_activation_observation(
                 "/nix/store/11111111111111111111111111111111-nixos-system-other",
                 "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new",
-                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+                "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             )
             .is_err()
         );
@@ -3661,9 +3661,9 @@ mod tests {
     fn exact_activation_observation_rejects_candidate_equal_to_prior() {
         assert!(
             NixOSExecutor::validate_exact_activation_observation(
-                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-                "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+                "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
+                "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
+                "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             )
             .is_err()
         );
@@ -3671,7 +3671,7 @@ mod tests {
 
     #[test]
     fn exact_recovery_observation_accepts_only_transaction_states() {
-        let prior = "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old";
+        let prior = "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old";
         let candidate = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-new";
 
         assert!(NixOSExecutor::validate_exact_recovery_observation(
@@ -3727,8 +3727,8 @@ mod tests {
         let plan = ChangePlan::command_only_with_system_recovery(
             super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
             command.clone(),
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             SystemActivation::Switch,
             60_000,
         )
@@ -3751,8 +3751,8 @@ mod tests {
         let plan = ChangePlan::command_only_with_system_recovery(
             super::super::change_covenant::MachineBinding::new("machine-a").unwrap(),
             command,
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
-            "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
+            "/nix/store/abcdffabcdffabcdffabcdffabcdffab-nixos-system-old",
             SystemActivation::Switch,
             60_000,
         )
