@@ -15,3 +15,7 @@ blake3 = "=1.8.5"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# This verifier is intentionally a standalone Cargo workspace. Without this boundary,
+# Cargo walks upward and tries to parse Nixward's non-workspace inherited dependencies.
+[workspace]
