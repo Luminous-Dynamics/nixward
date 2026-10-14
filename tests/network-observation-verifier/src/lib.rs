@@ -1046,6 +1046,15 @@ fn verify_envelope(
         if source_status != "complete" {
             every_required_source_complete = false;
         }
+        // Carry source-level failures into the receipt's summary reasons as well as
+        // the structured source detail. Consumers should not have to inspect only
+        // a nested array to learn why declared scope was rejected.
+        for reason in &source_reasons {
+            let summary_reason = format!("source_family_{}:{reason}", source.family);
+            if !reasons.contains(&summary_reason) {
+                reasons.push(summary_reason);
+            }
+        }
         source_results.push(SourceReceipt {
             family: source.family.clone(),
             status: source_status,
@@ -1163,6 +1172,7 @@ fn verify_envelope(
             "A byte digest establishes identity relative to the supplied bytes, not origin authenticity or truth.".to_owned(),
             "Collector-reported loss/truncation metadata can fail closed but is not independently authenticated.".to_owned(),
             "The verifier parses supplied evidence only; it opens no sockets and does not verify live kernel or namespace identity.".to_owned(),
+            "Unmodeled noncritical rtnetlink attributes remain bound by the raw-artifact digest but are not semantically interpreted by the M1a projection.".to_owned(),
             "Temporal result is a bounded single-source observation window, not a global atomic network snapshot.".to_owned(),
             "Ownership is Unknown: a link dump does not establish the configuration/runtime writer.".to_owned(),
             "No signature or protected local provenance is established by this receipt.".to_owned(),
@@ -2544,7 +2554,9 @@ mod tests {
 
     #[test]
     fn raw_artifact_digest_is_bound_to_exact_bytes_not_hex_spelling() {
-        let raw = done(7, 0, NLM_F_MULTI);
+        // The link row includes MTU bytes containing hexadecimal letters, so
+        // uppercasing changes the supplied spelling while preserving decoded bytes.
+        let raw = link_and_done("eth0");
         let mut item = attempt(&raw, 7, 0);
         item.raw_artifact_hex = item.raw_artifact_hex.to_uppercase();
         let receipt = verify_envelope_for_test(&envelope_with(vec![item]));
