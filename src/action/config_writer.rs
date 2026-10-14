@@ -1060,7 +1060,7 @@ mod tests {
             .with_config_root(dir.path())
             .with_dry_run(false)
             .with_validate(false)
-            .with_machine_binding_override("test-machine".into());
+            .with_machine_binding(MachineBinding::new("test-machine").unwrap());
         let patch = ConfigPatch {
             target: outside.path().join("other.nix"),
             original: SAMPLE_CONFIG.to_string(),
