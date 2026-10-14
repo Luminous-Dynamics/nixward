@@ -2180,7 +2180,7 @@ mod tests {
             owner: [7; 16],
             image_authenticode_sha256: None,
             certificate_der_blake3: Some(certificate_digest),
-            certificate_der: Some(der),
+            certificate_der: Some(der.clone()),
             certificate_tbs_hash: None,
             revocation_time: None,
         };
