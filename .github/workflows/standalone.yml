@@ -72,6 +72,8 @@ jobs:
       - name: Persist generated lockfile
         if: steps.lockfile.outputs.needed == 'true'
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git diff --quiet -- Cargo.lock && git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then

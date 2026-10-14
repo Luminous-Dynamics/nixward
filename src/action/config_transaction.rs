@@ -10,6 +10,7 @@
 //! realization and retention primitive.
 
 use super::executor::SystemActivation;
+use std::ffi::OsStr;
 use std::io::Write;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -301,6 +302,73 @@ fn compute_frozen_source_root_digest(
     Ok(digest_hex(hasher.finalize().as_bytes()))
 }
 
+impl FrozenConfigSource {
+    /// Validate the snapshot's self-contained identity before a transaction consumes it.
+    pub fn validate_identity(&self) -> Result<(), String> {
+        validate_manifest_relative_path(&self.entrypoint)?;
+        if self.root_digest.len() != 64
+            || !self.root_digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("frozen source root digest is not canonical lowercase hex".into());
+        }
+        decode_digest(&self.root_digest)?;
+        if self.manifest.is_empty() {
+            return Err("frozen source manifest must not be empty".into());
+        }
+        let mut previous: Option<&str> = None;
+        let mut entrypoint_found = false;
+        for entry in &self.manifest {
+            validate_manifest_relative_path(&entry.relative_path)?;
+            if let Some(previous_path) = previous {
+                if previous_path >= entry.relative_path.as_str() {
+                    return Err("frozen source manifest must be unique and sorted by relative path".into());
+                }
+            }
+            previous = Some(&entry.relative_path);
+            if entry.mode & !0o7777 != 0 {
+                return Err(format!("frozen source entry {} has invalid mode bits", entry.relative_path));
+            }
+            if matches!(entry.kind, SourceEntryKind::Directory) && entry.size != 0 {
+                return Err(format!("frozen source directory {} must have size zero", entry.relative_path));
+            }
+            if entry.digest.len() != 64
+                || !entry.digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(format!("frozen source entry {} digest is not canonical lowercase hex", entry.relative_path));
+            }
+            decode_digest(&entry.digest)?;
+            if entry.relative_path == self.entrypoint && matches!(entry.kind, SourceEntryKind::File) {
+                entrypoint_found = true;
+            }
+        }
+        if !entrypoint_found {
+            return Err("frozen source entrypoint is not a regular file in the manifest".into());
+        }
+        let expected = compute_frozen_source_root_digest(&self.entrypoint, &self.manifest)?;
+        if self.root_digest != expected {
+            return Err("frozen source root digest does not bind the supplied entrypoint and manifest".into());
+        }
+        Ok(())
+    }
+}
+
+fn validate_gc_root_path(gc_root_path: &str) -> Result<(), String> {
+    let path = Path::new(gc_root_path);
+    let namespace = Path::new("/nix/var/nix/gcroots/nixward");
+    if !path.is_absolute()
+        || path == namespace
+        || path.parent() != Some(namespace)
+        || path.file_name().is_none()
+        || path.components().any(|component| {
+            matches!(component, std::path::Component::CurDir | std::path::Component::ParentDir)
+        })
+        || path.to_str() != Some(gc_root_path)
+    {
+        return Err("GC root path must be one canonical child of /nix/var/nix/gcroots/nixward".into());
+    }
+    Ok(())
+}
+
 fn verify_gc_root_target(store_path: &str, gc_root_path: &str) -> Result<(), String> {
     validate_gc_root_path(gc_root_path)?;
     if !super::execution_intent::is_valid_nix_store_path(store_path) {
@@ -374,10 +442,12 @@ fn remove_gc_root_path(gc_root_path: &str) -> Result<(), String> {
         .ok_or_else(|| "GC root filename is not valid UTF-8".to_string())?;
     let name = CString::new(name)
         .map_err(|_| "GC root filename contains NUL".to_string())?;
-    let result = unsafe { nix::libc::unlinkat(namespace_dir.as_raw_fd(), name.as_ptr(), 0) };
-    if result != 0 {
-        return Err(format!("failed to remove GC root: {}", std::io::Error::last_os_error()));
-    }
+    nix::unistd::unlinkat(
+        Some(namespace_dir.as_raw_fd()),
+        name.as_c_str(),
+        nix::unistd::UnlinkatFlags::NoRemoveDir,
+    )
+    .map_err(|error| format!("failed to remove GC root: {error}"))?;
     namespace_dir
         .sync_all()
         .map_err(|error| format!("failed to persist GC-root removal: {error}"))?;
@@ -1265,12 +1335,12 @@ impl SourceRealizationLease {
         }
 
         let resolved = if target.is_absolute() {
-            target
+            target.clone()
         } else {
             gc_root
                 .parent()
                 .ok_or_else(|| "source GC root has no parent".to_string())?
-                .join(target)
+                .join(&target)
         };
         let resolved = resolved
             .canonicalize()
@@ -1355,19 +1425,16 @@ impl SourceRealizationLease {
             let target = CString::new(self.store_path.as_str())
                 .map_err(|_| "source store path contains NUL".to_string())?;
 
-            let result = unsafe {
-                nix::libc::symlinkat(
-                    target.as_ptr(),
-                    namespace_dir.as_raw_fd(),
-                    name.as_ptr(),
-                )
+            let created = match nix::unistd::symlinkat(
+                target.as_c_str(),
+                namespace_dir.as_raw_fd(),
+                name.as_c_str(),
+            ) {
+                Ok(()) => true,
+                Err(nix::errno::Errno::EEXIST) => false,
+                Err(error) => return Err(format!("failed to create source GC root atomically: {error}")),
             };
-            let created = result == 0;
             if !created {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(format!("failed to create source GC root atomically: {error}"));
-                }
                 // Existing roots are not accepted on creation alone; the exact
                 // target is independently re-observed below. This permits crash
                 // recovery without turning a journal record into authority.
@@ -1456,22 +1523,18 @@ impl SourceRealizationLease {
             let name = CString::new(name)
                 .map_err(|_| "source GC root filename contains NUL".to_string())?;
 
-            let result = unsafe {
-                nix::libc::unlinkat(
-                    namespace_dir.as_raw_fd(),
-                    name.as_ptr(),
-                    0,
-                )
-            };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    return Err(format!("failed to remove source GC root: {error}"));
+            match nix::unistd::unlinkat(
+                Some(namespace_dir.as_raw_fd()),
+                name.as_c_str(),
+                nix::unistd::UnlinkatFlags::NoRemoveDir,
+            ) {
+                Ok(()) => {
+                    namespace_dir
+                        .sync_all()
+                        .map_err(|error| format!("failed to persist source GC-root removal: {error}"))?;
                 }
-            } else {
-                namespace_dir
-                    .sync_all()
-                    .map_err(|error| format!("failed to persist source GC-root removal: {error}"))?;
+                Err(nix::errno::Errno::ENOENT) => {}
+                Err(error) => return Err(format!("failed to remove source GC root: {error}")),
             }
         }
 
@@ -1540,13 +1603,17 @@ fn establish_candidate_gc_root(store_path: &str, gc_root_path: &str) -> Result<(
     let name = gc_root.file_name().and_then(|v| v.to_str()).ok_or_else(|| "candidate GC root filename is invalid UTF-8".to_string())?;
     let name = CString::new(name).map_err(|_| "candidate GC root filename contains NUL".to_string())?;
     let target = CString::new(store_path).map_err(|_| "candidate store path contains NUL".to_string())?;
-    let result = unsafe { nix::libc::symlinkat(target.as_ptr(), namespace_dir.as_raw_fd(), name.as_ptr()) };
-    let created = result == 0;
+    let created = match nix::unistd::symlinkat(
+        target.as_c_str(),
+        namespace_dir.as_raw_fd(),
+        name.as_c_str(),
+    ) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EEXIST) => false,
+        Err(error) => return Err(format!("failed to create candidate GC root: {error}")),
+    };
     if !created {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(format!("failed to create candidate GC root: {error}"));
-        }
+        // Existing roots are verified against the exact store path below.
     } else if let Err(sync_error) = namespace_dir.sync_all() {
         let cleanup = cleanup_gc_root_if_target_matches(gc_root_path, store_path);
         return Err(match cleanup {
@@ -2587,12 +2654,12 @@ impl ConfigTransaction {
 
             let close_result = close(temp_fd);
             if let Err(error) = write_result {
-                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                let _ = unlinkat(Some(parent_fd), temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
                 let _ = close_result;
                 return Err(error);
             }
             close_result.map_err(|error| {
-                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                let _ = unlinkat(Some(parent_fd), temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
                 format!(
                     "failed to close descriptor-bound transaction journal candidate: {error}"
                 )
@@ -2604,7 +2671,7 @@ impl ConfigTransaction {
                 Some(parent_fd),
                 filename_c.as_c_str(),
             ) {
-                let _ = unlinkat(parent_fd, temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
+                let _ = unlinkat(Some(parent_fd), temp_name_c.as_c_str(), UnlinkatFlags::NoRemoveDir);
                 return Err(format!(
                     "failed to commit descriptor-bound transaction journal: {error}"
                 ));

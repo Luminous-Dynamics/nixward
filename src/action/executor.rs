@@ -1158,6 +1158,14 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u64::MAX as u128) as u64
+    }
+
     fn authorization_expired(authorization: &ExecutionAuthorization) -> bool {
         !authorization.automatic_read_only
             && !authorization.rollback_only
@@ -1232,21 +1240,26 @@ impl NixOSExecutor {
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
+    #[allow(unsafe_code)] // Audited Linux pidfd syscall boundary; invariants are documented at each operation.
     fn open_pidfd(pid: u32) -> Result<OwnedFd, String> {
+        // SAFETY: pidfd_open accepts a PID; success returns a new descriptor.
         let result = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid as nix::libc::pid_t, 0u32) };
         if result < 0 {
             return Err(format!("pidfd_open({pid}) failed: {}", std::io::Error::last_os_error()));
         }
+        // SAFETY: result is a non-negative new descriptor transferred to one OwnedFd.
         Ok(unsafe { OwnedFd::from_raw_fd(result as i32) })
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
+    #[allow(unsafe_code)] // Audited Linux pidfd syscall boundary; invariants are documented at each operation.
     fn pidfd_exited(pidfd: &OwnedFd) -> Result<bool, String> {
         let mut pollfd = nix::libc::pollfd {
             fd: pidfd.as_raw_fd(),
             events: nix::libc::POLLIN | nix::libc::POLLHUP,
             revents: 0,
         };
+        // SAFETY: poll receives one valid stack pollfd for the duration of the call.
         let result = unsafe { nix::libc::poll(&mut pollfd, 1, 0) };
         if result < 0 {
             return Err(format!("pidfd poll failed: {}", std::io::Error::last_os_error()));
@@ -1255,7 +1268,9 @@ impl NixOSExecutor {
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
+    #[allow(unsafe_code)] // Audited Linux pidfd syscall boundary; invariants are documented at each operation.
     fn signal_pidfd(pidfd: &OwnedFd, signal: i32) -> Result<(), String> {
+        // SAFETY: pidfd is borrowed and valid; null siginfo and flags=0 are valid for ordinary signals.
         let result = unsafe {
             nix::libc::syscall(
                 nix::libc::SYS_pidfd_send_signal,
@@ -4138,6 +4153,7 @@ mod tests {
             authority_subject_blake3: None,
             automatic_read_only: false,
             rollback_only: false,
+            realization_installable: None,
             recovery_command: None,
         };
         assert!(NixOSExecutor::authorization_expired(&authorization));

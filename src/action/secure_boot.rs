@@ -2067,7 +2067,7 @@ mod tests {
     #[cfg(feature = "native")]
     #[test]
     fn dbx_tbs_revocation_only_matches_exact_chain_member() {
-        let evidence = super::secure_boot_signature::X509ChainCertificateEvidence {
+        let evidence = crate::action::secure_boot_signature::X509ChainCertificateEvidence {
             signature_index: 0,
             certificate_index: 0,
             certificate_blake3: [9; 32],
@@ -2114,6 +2114,7 @@ mod tests {
         use openssl::rsa::Rsa;
         use openssl::x509::X509NameBuilder;
         use openssl::x509::X509Builder;
+        use openssl::x509::X509;
         use sha2::Digest;
 
         let rsa = Rsa::generate(2048).expect("test RSA key");
@@ -2159,7 +2160,7 @@ mod tests {
         let expected_serial_digest =
             *blake3::hash(parsed_for_serial_test.tbs_certificate.raw_serial()).as_bytes();
 
-        let chain = [super::secure_boot_signature::X509ChainCertificateEvidence {
+        let chain = [crate::action::secure_boot_signature::X509ChainCertificateEvidence {
             signature_index: 0,
             certificate_index: 0,
             certificate_blake3: certificate_digest,

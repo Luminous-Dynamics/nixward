@@ -275,7 +275,7 @@ impl ChangePlan {
         let recovery_command = exact_recovery.as_ref().map(
             |(store_path, profile_store_path, action)| NixOSCommand::ActivateSystemClosure {
                 store_path: store_path.clone(),
-                profile_store_path: profile_store_path.clone(),
+                profile_store_path: Some(profile_store_path.clone()),
                 action: *action,
             },
         );
@@ -454,7 +454,7 @@ impl ChangePlan {
         }
         let expected = NixOSCommand::ActivateSystemClosure {
             store_path: prior.to_string(),
-            profile_store_path: profile.to_string(),
+            profile_store_path: Some(profile.to_string()),
             action,
         };
         if self.rollback.command_digest() != Some(expected.command_digest()) {

@@ -164,6 +164,12 @@ impl ConfigWriter {
         self
     }
 
+    /// Enable or disable syntax validation before a source replacement.
+    pub fn with_validate(mut self, validate: bool) -> Self {
+        self.validate = validate;
+        self
+    }
+
     /// Enable or disable dry-run mode.
     pub fn with_dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
@@ -686,7 +692,7 @@ impl ConfigWriter {
 
             let temp_fd = openat(
                 parent_fd,
-                &temp_name,
+                temp_name.as_str(),
                 OFlag::O_RDWR
                     | OFlag::O_CREAT
                     | OFlag::O_EXCL
@@ -740,14 +746,14 @@ impl ConfigWriter {
 
             renameat(
                 Some(parent_fd),
-                &temp_name,
+                temp_name.as_str(),
                 Some(parent_fd),
                 name,
             )
             .map_err(|error| {
                 let _ = unlinkat(
                     Some(parent_fd),
-                    &temp_name,
+                    temp_name.as_str(),
                     UnlinkatFlags::NoRemoveDir,
                 );
                 std::io::Error::other(format!(
@@ -1249,7 +1255,7 @@ mod tests {
 
     fn setup_temp_config_live(
         content: &str,
-        _git_backup: bool,
+        git_backup: bool,
     ) -> Option<(tempfile::TempDir, ConfigWriter)> {
         if !nix_instantiate_available() {
             eprintln!(

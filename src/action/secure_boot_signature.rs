@@ -441,7 +441,7 @@ pub fn inspect_x509_signature_chains(
             certs.push((
                 cert,
                 *blake3::hash(&der).as_bytes(),
-                *blake3::hash(issuer).as_bytes(),
+                *blake3::hash(&issuer).as_bytes(),
                 *blake3::hash(&serial).as_bytes(),
                 sha256.finalize().into(),
                 sha384.finalize().into(),
