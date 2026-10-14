@@ -19,6 +19,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lockfile-reconciliation-preview:
+    name: Lockfile reconciliation preview (diagnostic only)
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'network/observation-evidence-verifier-issue-68' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact source revision without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Install pinned Cargo toolchain for lockfile generation
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: "1.96.0"
+      - name: Regenerate lockfile in the explicit standalone workspace
+        run: cargo generate-lockfile --manifest-path tests/network-observation-verifier/Cargo.toml
+      - name: Export regenerated lockfile for reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'GENERATED_LOCK_B64_BEGIN\n'
+          base64 -w 120 tests/network-observation-verifier/Cargo.lock
+          printf 'GENERATED_LOCK_B64_END\n'
+
   verifier:
     name: M1a verifier (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
