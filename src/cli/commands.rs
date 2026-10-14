@@ -270,11 +270,11 @@ pub enum ClosureAction {
 }
 
 impl ClosureAction {
-    pub fn to_system_activation(self) -> nixward::action::SystemActivation {
+    pub fn to_system_activation(self) -> crate::action::SystemActivation {
         match self {
-            Self::Switch => nixward::action::SystemActivation::Switch,
-            Self::Test => nixward::action::SystemActivation::Test,
-            Self::Boot => nixward::action::SystemActivation::Boot,
+            Self::Switch => crate::action::SystemActivation::Switch,
+            Self::Test => crate::action::SystemActivation::Test,
+            Self::Boot => crate::action::SystemActivation::Boot,
         }
     }
 }
