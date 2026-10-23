@@ -6021,6 +6021,84 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn coordinator_reobservation_rejects_stale_peer_expected_old_after_commit() {
+        use std::sync::Mutex;
+
+        #[derive(Debug, PartialEq, Eq)]
+        struct State {
+            selected_profile: &'static str,
+            running_closure: &'static str,
+            activation_order: Vec<&'static str>,
+            generation_links: Vec<&'static str>,
+        }
+
+        // B plans against this pre-state before A runs. It must not reuse that
+        // observation after waiting for the coordinator.
+        let stale_expected_old = "prior";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nixward.lock");
+        let parent_uid = std::fs::symlink_metadata(dir.path())
+            .expect("inspect temporary parent")
+            .uid();
+        let state = Mutex::new(State {
+            selected_profile: "prior",
+            running_closure: "prior",
+            activation_order: Vec::new(),
+            generation_links: vec!["prior"],
+        });
+
+        // A owns the real coordinator across publication, activation, and
+        // read-back, then releases it with a committed A/A state.
+        let a_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("A acquires coordinator");
+        {
+            let mut current = state.lock().expect("state mutex");
+            assert_eq!(current.selected_profile, "prior");
+            assert_eq!(current.running_closure, "prior");
+            current.selected_profile = "A";
+            current.generation_links.push("A");
+            current.running_closure = "A";
+            current.activation_order.push("A");
+            assert_eq!(current.selected_profile, current.running_closure);
+        }
+        drop(a_lock);
+
+        // B starts only after A has committed. It obtains the lock, re-reads
+        // state, and compares it against B's stale expected-old value. The
+        // stale plan must be rejected before B changes profile/runtime state.
+        let _b_lock = NixwardTransactionInterlock::acquire_at_with_expected_parent_uid(
+            &path,
+            Some(parent_uid),
+        )
+        .expect("B acquires coordinator after A completes");
+        let observed_profile = state
+            .lock()
+            .expect("state mutex")
+            .selected_profile
+            .to_owned();
+        assert_eq!(observed_profile, "A");
+        let error = NixOSExecutor::validate_system_profile_before_worker_release(
+            stale_expected_old,
+            Ok(observed_profile),
+        )
+        .expect_err("B's pre-A expected-old value must not authorize a stale profile write");
+        assert!(
+            error.contains("system-profile drift before worker release"),
+            "stale-plan rejection should identify expected-old drift, got: {error}"
+        );
+
+        let current = state.lock().expect("state mutex");
+        assert_eq!(current.selected_profile, "A");
+        assert_eq!(current.running_closure, "A");
+        assert_eq!(current.activation_order, vec!["A"]);
+        assert_eq!(current.generation_links, vec!["prior", "A"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn nixward_transaction_interlock_serializes_two_threads_without_timing_assumptions() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("nixward.lock");
