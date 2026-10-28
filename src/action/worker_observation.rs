@@ -236,7 +236,7 @@ impl WorkerObservationReceipt {
     }
 
     pub(super) fn disposition_label(&self) -> String {
-        match self.disposition {
+        match &self.disposition {
             WorkerProcessDisposition::Exited { code } => format!("exited:{code}"),
             WorkerProcessDisposition::Signaled { signal } => format!("signaled:{signal}"),
         }
