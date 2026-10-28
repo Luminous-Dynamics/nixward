@@ -824,6 +824,33 @@ mod tests {
     }
 
     #[test]
+    fn verified_transaction_can_recover_with_a_meaningful_reason() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(false))
+            .unwrap();
+
+        assert!(tx.recover(&plan, "  ").is_err());
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.recover(&plan, "post-activation health check failed")
+            .unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Recovered);
+        assert!(tx.validate_wire().is_ok());
+
+        let mut forged = tx;
+        forged.outcome.as_mut().unwrap().reason = Some("  ".into());
+        assert!(forged.validate_wire().is_err());
+    }
+
+    #[test]
     fn unhealthy_boot_cannot_be_promoted() {
         let plan = plan();
         let auth = authorization(&plan);
