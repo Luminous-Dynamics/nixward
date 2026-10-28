@@ -647,6 +647,10 @@ mod tests {
         let mut forged = SystemTransaction::planned(&plan);
         forged.phase = TransactionPhase::Promoted;
         assert!(forged.validate_wire().is_err());
+        assert!(
+            forged.promote(&plan).is_err(),
+            "a malformed public envelope must not be usable by transition methods"
+        );
 
         // Validated requires validation evidence, and Authorized requires the
         // following authorization receipt—not just an edited phase field.
