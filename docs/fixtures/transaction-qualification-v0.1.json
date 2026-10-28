@@ -342,6 +342,23 @@
         "source_test_refs": [],
         "known_gap": "No staged multi-host benchmark verifies per-host evidence, halt-on-canary-failure, and containment after a host fails."
       }
+    },
+    {
+      "id": "WIRE-01",
+      "gate": "A",
+      "category": "wire_lifecycle",
+      "scenario": "Deserialize an envelope whose public lifecycle phase contradicts the receipts supplied, then attempt to use a transition API.",
+      "expected_disposition": "reject_before_state_transition",
+      "assertions": [
+        "phase_receipt_mismatch_rejected",
+        "transition_method_revalidates_current_envelope",
+        "no_promotion_from_phase_label_alone"
+      ],
+      "coverage": {
+        "status": "no_behavioral_test",
+        "source_test_refs": [],
+        "known_gap": "The reviewed main baseline validates field shapes but has no dedicated test that a serialized phase/receipt contradiction is rejected by validate_wire and by a transition API. PR #85 proposes the fix and tests; until integrated and run against the exact head, this is still open in the benchmark baseline."
+      }
     }
   ],
   "coverage_snapshot": {
