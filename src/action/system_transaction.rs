@@ -659,6 +659,11 @@ mod tests {
         tx.phase = TransactionPhase::Authorized;
         assert!(tx.validate_wire().is_err());
 
+        // Continue with a fresh valid transaction; transition methods must
+        // refuse to advance the intentionally corrupted envelope above.
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+
         // Applied/Verified must agree with the exact process outcome and
         // the existence of verification evidence.
         tx.authorize(&plan, &authorization(&plan)).unwrap();
