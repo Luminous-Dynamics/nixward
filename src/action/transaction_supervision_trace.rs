@@ -501,4 +501,145 @@ mod tests {
         visit(&mut Vec::new(), alphabet, &mut checked);
         assert_eq!(checked, 5_040);
     }
+
+    #[test]
+    fn deterministic_trace_generation_never_accepts_success_without_causal_evidence() {
+        fn next(state: &mut u64) -> u64 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *state
+        }
+
+        fn first_position(
+            trace: &[TraceEvent],
+            expected: TraceEventKind,
+        ) -> Option<usize> {
+            trace.iter().position(|item| item.kind == expected)
+        }
+
+        // Deterministic pseudo-random generation avoids a test-only RNG dependency
+        // and makes every failing seed directly reproducible.
+        for seed in 0..20_000_u64 {
+            let mut state = seed.wrapping_add(0x4e49_5857_4152_4401);
+            let len = (next(&mut state) % 48) as usize;
+            let mut trace = Vec::with_capacity(len);
+
+            for _ in 0..len {
+                let roll = next(&mut state);
+                let kind = match roll % 12 {
+                    0 => TraceEventKind::AuthorizationVerified,
+                    1 => TraceEventKind::AttemptPreparedDurably,
+                    2 => TraceEventKind::SubmissionBarrierPersisted,
+                    3 => TraceEventKind::ManagerStartSubmitted,
+                    4 => TraceEventKind::WorkerIdentityObserved,
+                    5 => TraceEventKind::WorkerIdentityPersisted,
+                    6 => TraceEventKind::PayloadReleased,
+                    7 => TraceEventKind::PayloadExited,
+                    8 => TraceEventKind::ProcessReceiptPersisted,
+                    9 => {
+                        let observation = match next(&mut state) % 6 {
+                            0 => TargetObservation::NotAttempted,
+                            1 => TargetObservation::CandidateRuntimeAndProfileActive,
+                            2 => TargetObservation::PredecessorRuntimeAndProfileActive,
+                            3 => TargetObservation::BootCandidateProfileSelected,
+                            4 => TargetObservation::MixedOrUnknown,
+                            _ => TargetObservation::Unavailable,
+                        };
+                        TraceEventKind::TargetObserved(observation)
+                    }
+                    10 => TraceEventKind::LifecyclePostconditionValidated,
+                    _ => TraceEventKind::TerminalSuccessRecorded,
+                };
+
+                let transaction_id = if next(&mut state) % 31 == 0 {
+                    "foreign-transaction"
+                } else {
+                    TRANSACTION
+                };
+                let attempt_id = if next(&mut state) % 29 == 0 {
+                    "foreign-attempt"
+                } else {
+                    ATTEMPT
+                };
+                trace.push(TraceEvent {
+                    transaction_id: transaction_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    kind,
+                });
+            }
+
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            if result.is_safe() && result.terminal_success_recorded {
+                let auth = first_position(&trace, TraceEventKind::AuthorizationVerified)
+                    .expect("accepted success must have authorization");
+                let prepared = first_position(&trace, TraceEventKind::AttemptPreparedDurably)
+                    .expect("accepted success must have durable attempt preparation");
+                let barrier = first_position(&trace, TraceEventKind::SubmissionBarrierPersisted)
+                    .expect("accepted success must have the write-ahead barrier");
+                let submitted = first_position(&trace, TraceEventKind::ManagerStartSubmitted)
+                    .expect("accepted success must have manager submission");
+                let observed = first_position(&trace, TraceEventKind::WorkerIdentityObserved)
+                    .expect("accepted success must observe worker identity");
+                let persisted = first_position(&trace, TraceEventKind::WorkerIdentityPersisted)
+                    .expect("accepted success must persist worker identity");
+                let released = first_position(&trace, TraceEventKind::PayloadReleased)
+                    .expect("accepted success must release the payload");
+                let exited = first_position(&trace, TraceEventKind::PayloadExited)
+                    .expect("accepted success must observe payload exit");
+                let receipt = first_position(&trace, TraceEventKind::ProcessReceiptPersisted)
+                    .expect("accepted success must publish a receipt");
+                let lifecycle = trace
+                    .iter()
+                    .rposition(|item| item.kind == TraceEventKind::LifecyclePostconditionValidated)
+                    .expect("accepted success must validate the lifecycle postcondition");
+                let terminal = first_position(&trace, TraceEventKind::TerminalSuccessRecorded)
+                    .expect("accepted success must contain a terminal-success event");
+                let latest_post_receipt_target = trace
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, item)| {
+                        *index > receipt
+                            && *index < terminal
+                            && matches!(item.kind, TraceEventKind::TargetObserved(_))
+                    })
+                    .map(|(index, item)| (index, item.kind))
+                    .last()
+                    .expect("accepted success must include a post-receipt target observation");
+
+                assert!(auth < prepared, "seed {seed}: authorization ordering");
+                assert!(prepared < barrier, "seed {seed}: preparation ordering");
+                assert!(barrier < submitted, "seed {seed}: write-ahead ordering");
+                assert!(submitted < observed, "seed {seed}: manager observation ordering");
+                assert!(observed < persisted, "seed {seed}: identity durability ordering");
+                assert!(persisted < released, "seed {seed}: payload release ordering");
+                assert!(released < exited, "seed {seed}: exit ordering");
+                assert!(exited < receipt, "seed {seed}: receipt ordering");
+                assert!(
+                    receipt < latest_post_receipt_target.0,
+                    "seed {seed}: target observation must be fresh"
+                );
+                assert!(
+                    matches!(
+                        latest_post_receipt_target.1,
+                        TraceEventKind::TargetObserved(
+                            TargetObservation::CandidateRuntimeAndProfileActive
+                        )
+                    ),
+                    "seed {seed}: most recent target must be candidate-active"
+                );
+                assert!(latest_post_receipt_target.0 < lifecycle);
+                assert!(lifecycle < terminal, "seed {seed}: lifecycle before terminal");
+            } else if !trace
+                .iter()
+                .any(|item| item.kind == TraceEventKind::TerminalSuccessRecorded)
+            {
+                assert!(
+                    !result.terminal_success_recorded,
+                    "seed {seed}: terminal claim invented by validator"
+                );
+            }
+        }
+    }
+
 }
