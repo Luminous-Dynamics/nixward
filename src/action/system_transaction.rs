@@ -129,6 +129,10 @@ impl SystemTransaction {
     }
 
     fn ensure_identity(&self, plan: &ChangePlan) -> Result<(), String> {
+        // The envelope may have crossed a serialization boundary or its public
+        // fields may have been modified by a caller. Validate its internal
+        // receipt/phase relation before using it as a transition precondition.
+        self.validate_wire()?;
         if self.schema != SYSTEM_TRANSACTION_SCHEMA || self.version != SYSTEM_TRANSACTION_VERSION {
             return Err("unsupported system transaction schema".into());
         }
@@ -326,6 +330,9 @@ impl SystemTransaction {
             return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
         }
         let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err("recovery reason must not be empty".into());
+        }
         if reason.len() > MAX_REASON_BYTES {
             return Err("recovery reason exceeds wire limit".into());
         }
@@ -455,7 +462,137 @@ impl SystemTransaction {
             }
         }
 
+        self.validate_phase_receipts()?;
         Ok(())
+    }
+
+    /// Reject wire envelopes that claim a lifecycle phase unsupported by their receipts.
+    ///
+    /// Field-level digest validation is not enough: because this type is deserialized
+    /// across process/UI boundaries, callers must not be able to label a planned
+    /// transaction as promoted merely by editing the public phase field.
+    fn validate_phase_receipts(&self) -> Result<(), String> {
+        let has_validation = self.validation.is_some();
+        let has_authorization = self.authorization.is_some();
+        let has_snapshot = self.snapshot.is_some();
+        let has_application = self.application.is_some();
+        let has_verification = self.verification.is_some();
+        let has_outcome = self.outcome.is_some();
+
+        let phase_is_consistent = match self.phase {
+            TransactionPhase::Planned => {
+                !has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Validated => {
+                has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Authorized => {
+                has_validation
+                    && has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Snapshotted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Applied => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Verified => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Promoted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && has_verification
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Promoted && outcome.reason.is_none()
+                    })
+            }
+            TransactionPhase::Failed => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status != 0)
+                    && !has_verification
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Failed
+                            && outcome
+                                .reason
+                                .as_deref()
+                                .is_some_and(|reason| !reason.trim().is_empty())
+                    })
+            }
+            TransactionPhase::Recovered => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self.application.as_ref().is_some_and(|application| {
+                        if application.exit_status == 0 {
+                            has_verification
+                        } else {
+                            !has_verification
+                        }
+                    })
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Recovered
+                            && outcome
+                                .reason
+                                .as_deref()
+                                .is_some_and(|reason| !reason.trim().is_empty())
+                    })
+            }
+        };
+
+        if phase_is_consistent {
+            Ok(())
+        } else {
+            Err(format!(
+                "transaction phase {:?} is inconsistent with its lifecycle receipts",
+                self.phase
+            ))
+        }
     }
 
     pub fn digest(&self) -> Result<[u8; 32], String> {
@@ -511,6 +648,104 @@ mod tests {
             summary: "x".repeat(MAX_SUMMARY_BYTES + 1),
         });
         assert!(tx.validate_wire().is_err());
+    }
+
+    #[test]
+    fn wire_validation_rejects_impossible_phase_receipt_combinations() {
+        let plan = plan();
+
+        // A phase label alone cannot synthesize a completed transaction.
+        let mut wire = serde_json::to_value(SystemTransaction::planned(&plan)).unwrap();
+        wire["phase"] = serde_json::Value::String("promoted".into());
+        let forged: SystemTransaction = serde_json::from_value(wire).unwrap();
+        assert!(
+            forged.validate_wire().is_err(),
+            "a deserialized promoted phase must carry all required receipts"
+        );
+        assert!(
+            forged.promote(&plan).is_err(),
+            "a malformed public envelope must not be usable by transition methods"
+        );
+
+        // Validated requires validation evidence, and Authorized requires the
+        // following authorization receipt—not just an edited phase field.
+        let mut forged = SystemTransaction::planned(&plan);
+        forged.phase = TransactionPhase::Validated;
+        assert!(forged.validate_wire().is_err());
+
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.phase = TransactionPhase::Authorized;
+        assert!(tx.validate_wire().is_err());
+
+        // Continue with a fresh valid transaction; transition methods must
+        // refuse to advance the intentionally corrupted envelope above.
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+
+        // Applied/Verified must agree with the exact process outcome and
+        // the existence of verification evidence.
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+
+        let mut missing_verification = tx.clone();
+        missing_verification.phase = TransactionPhase::Verified;
+        assert!(missing_verification.validate_wire().is_err());
+
+        let mut contradictory_exit = tx.clone();
+        contradictory_exit
+            .application
+            .as_mut()
+            .expect("application was just recorded")
+            .exit_status = 17;
+        assert!(contradictory_exit.validate_wire().is_err());
+
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(true))
+            .unwrap();
+        tx.promote(&plan).unwrap();
+
+        let mut mismatched_outcome = tx.clone();
+        mismatched_outcome.outcome.as_mut().unwrap().phase = TransactionPhase::Failed;
+        assert!(mismatched_outcome.validate_wire().is_err());
+
+        let mut missing_outcome = tx;
+        missing_outcome.outcome = None;
+        assert!(missing_outcome.validate_wire().is_err());
+    }
+
+    #[test]
+    fn every_reachable_lifecycle_phase_has_a_consistent_wire_envelope() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Snapshotted);
+        assert!(tx.validate_wire().is_ok());
+
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Applied);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(true))
+            .unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.promote(&plan).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Promoted);
+        assert!(tx.validate_wire().is_ok());
     }
 
     #[test]
@@ -583,11 +818,40 @@ mod tests {
         let command = plan.command().unwrap().command_digest();
         tx.record_application(&plan, command, 10, 20, 1).unwrap();
         assert_eq!(tx.phase, TransactionPhase::Failed);
+        assert!(tx.validate_wire().is_ok());
         assert!(tx.promote(&plan).is_err());
 
         tx.recover(&plan, "restored previous generation").unwrap();
         assert_eq!(tx.phase, TransactionPhase::Recovered);
+        assert!(tx.validate_wire().is_ok());
         assert!(tx.is_terminal());
+    }
+
+    #[test]
+    fn verified_transaction_can_recover_with_a_meaningful_reason() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(false))
+            .unwrap();
+
+        assert!(tx.recover(&plan, "  ").is_err());
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.recover(&plan, "post-activation health check failed")
+            .unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Recovered);
+        assert!(tx.validate_wire().is_ok());
+
+        let mut forged = tx;
+        forged.outcome.as_mut().unwrap().reason = Some("  ".into());
+        assert!(forged.validate_wire().is_err());
     }
 
     #[test]
