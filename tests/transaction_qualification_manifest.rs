@@ -11,7 +11,23 @@ struct Manifest {
     status: String,
     required_run_binding: Vec<String>,
     hard_gates: HardGates,
+    coverage_snapshot: CoverageSnapshot,
     cases: Vec<Case>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverageSnapshot {
+    base_ref: String,
+    base_sha: String,
+    as_of: String,
+    note: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Coverage {
+    status: String,
+    source_test_refs: Vec<String>,
+    known_gap: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +47,7 @@ struct Case {
     scenario: String,
     expected_disposition: String,
     assertions: Vec<String>,
+    coverage: Coverage,
 }
 
 fn parse_corpus() -> Manifest {
@@ -168,4 +185,73 @@ fn transaction_qualification_corpus_covers_the_core_fault_boundaries() {
             "canonical qualification corpus is missing {category}"
         );
     }
+}
+
+#[test]
+fn transaction_qualification_coverage_inventory_is_pinned_and_explicit() {
+    let manifest = parse_corpus();
+    let snapshot = manifest.coverage_snapshot;
+
+    assert_eq!(snapshot.base_ref, "main");
+    assert_eq!(
+        snapshot.base_sha,
+        "ae60256f0be73138a539ecda048e81056dd14a30",
+        "coverage must be reviewed against a fixed source baseline"
+    );
+    assert_eq!(snapshot.as_of, "2026-10-28");
+    assert!(
+        snapshot.note.contains("not a passing run result"),
+        "coverage prose must not turn source mapping into qualification evidence"
+    );
+}
+
+#[test]
+fn every_qualification_case_declares_coverage_or_an_explicit_gap() {
+    let manifest = parse_corpus();
+    let mut partial = 0usize;
+    let mut not_implemented = 0usize;
+
+    for case in &manifest.cases {
+        let coverage = &case.coverage;
+        assert!(
+            !coverage.known_gap.trim().is_empty(),
+            "{} needs an explicit gap statement until qualified",
+            case.id
+        );
+        match coverage.status.as_str() {
+            "partial" => {
+                partial += 1;
+                assert!(
+                    !coverage.source_test_refs.is_empty(),
+                    "{} claims partial coverage without naming its source tests",
+                    case.id
+                );
+            }
+            "not_implemented" => {
+                not_implemented += 1;
+                assert!(
+                    coverage.source_test_refs.is_empty(),
+                    "{} lists tests despite being marked not_implemented",
+                    case.id
+                );
+            }
+            other => panic!(
+                "{} has unrecognized or overclaiming source coverage status {other:?}",
+                case.id
+            ),
+        }
+        for reference in &coverage.source_test_refs {
+            assert!(
+                reference.contains("::"),
+                "{} test reference {reference:?} must name a file and test/function",
+                case.id
+            );
+        }
+    }
+
+    assert!(partial > 0, "inventory should preserve known partial coverage");
+    assert!(
+        not_implemented > 0,
+        "inventory must make coverage debt explicit"
+    );
 }
