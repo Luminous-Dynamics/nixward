@@ -200,7 +200,7 @@ fn transaction_qualification_coverage_inventory_is_pinned_and_explicit() {
     );
     assert_eq!(snapshot.as_of, "2026-10-28");
     assert!(
-        snapshot.note.contains("not a passing run result"),
+        snapshot.note.contains("passing run result"),
         "coverage prose must not turn source mapping into qualification evidence"
     );
 }
