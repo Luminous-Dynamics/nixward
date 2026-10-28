@@ -330,6 +330,9 @@ impl SystemTransaction {
             return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
         }
         let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err("recovery reason must not be empty".into());
+        }
         if reason.len() > MAX_REASON_BYTES {
             return Err("recovery reason exceeds wire limit".into());
         }
@@ -554,7 +557,11 @@ impl SystemTransaction {
                         .is_some_and(|application| application.exit_status != 0)
                     && !has_verification
                     && self.outcome.as_ref().is_some_and(|outcome| {
-                        outcome.phase == TransactionPhase::Failed && outcome.reason.is_some()
+                        outcome.phase == TransactionPhase::Failed
+                            && outcome
+                                .reason
+                                .as_deref()
+                                .is_some_and(|reason| !reason.trim().is_empty())
                     })
             }
             TransactionPhase::Recovered => {
@@ -569,7 +576,11 @@ impl SystemTransaction {
                         }
                     })
                     && self.outcome.as_ref().is_some_and(|outcome| {
-                        outcome.phase == TransactionPhase::Recovered && outcome.reason.is_some()
+                        outcome.phase == TransactionPhase::Recovered
+                            && outcome
+                                .reason
+                                .as_deref()
+                                .is_some_and(|reason| !reason.trim().is_empty())
                     })
             }
         };
