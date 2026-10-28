@@ -209,7 +209,7 @@ fn transaction_qualification_coverage_inventory_is_pinned_and_explicit() {
 fn every_qualification_case_declares_coverage_or_an_explicit_gap() {
     let manifest = parse_corpus();
     let mut partial = 0usize;
-    let mut not_implemented = 0usize;
+    let mut no_behavioral_test = 0usize;
 
     for case in &manifest.cases {
         let coverage = &case.coverage;
@@ -227,11 +227,11 @@ fn every_qualification_case_declares_coverage_or_an_explicit_gap() {
                     case.id
                 );
             }
-            "not_implemented" => {
-                not_implemented += 1;
+            "no_behavioral_test" => {
+                no_behavioral_test += 1;
                 assert!(
                     coverage.source_test_refs.is_empty(),
-                    "{} lists tests despite being marked not_implemented",
+                    "{} lists tests despite being marked no_behavioral_test",
                     case.id
                 );
             }
@@ -251,7 +251,7 @@ fn every_qualification_case_declares_coverage_or_an_explicit_gap() {
 
     assert!(partial > 0, "inventory should preserve known partial coverage");
     assert!(
-        not_implemented > 0,
+        no_behavioral_test > 0,
         "inventory must make coverage debt explicit"
     );
 }
