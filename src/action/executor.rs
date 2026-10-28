@@ -2927,6 +2927,44 @@ impl NixOSExecutor {
             _ => {}
         }
         for worker in workers {
+            let observation_path = match WorkerObservationReceipt::path_for(&journal_path, worker) {
+                Ok(path) => path,
+                Err(error) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("cannot derive exact worker-observation path: {error}"),
+                        rollback_error: None,
+                    };
+                }
+            };
+            match std::fs::symlink_metadata(&observation_path) {
+                Ok(_) => match WorkerObservationReceipt::load_for_worker(&observation_path, worker) {
+                    Ok(receipt) => info!(
+                        transaction_id = %worker.transaction_id,
+                        worker_pid = worker.pid,
+                        purpose = ?worker.purpose,
+                        process_disposition = %receipt.disposition_label(),
+                        "loaded identity-bound process observation; independent NixOS post-state reconciliation is still required"
+                    ),
+                    Err(error) => warn!(
+                        transaction_id = %worker.transaction_id,
+                        worker_pid = worker.pid,
+                        error = %error,
+                        "worker observation exists but cannot be validated; do not use it as process evidence and continue only with independent read-only post-state reconciliation"
+                    ),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => warn!(
+                    transaction_id = %worker.transaction_id,
+                    worker_pid = worker.pid,
+                    "worker observation receipt is absent; absence is indeterminate and independent read-only post-state reconciliation is mandatory"
+                ),
+                Err(error) => warn!(
+                    transaction_id = %worker.transaction_id,
+                    worker_pid = worker.pid,
+                    error = %error,
+                    "worker observation receipt could not be inspected; independent read-only post-state reconciliation is mandatory"
+                ),
+            }
+
             match Self::persisted_worker_may_be_live(worker) {
                 Ok(true) => {
                     return ExecutionResult::FailedNoRollback {
