@@ -22,6 +22,7 @@ The next implementation should add a separate privileged transaction-worker boun
 
 The UI, CLI, cognition system, and ordinary awareness daemon submit a versioned request that identifies:
 - the exact transaction ID and immutable plan digest;
+- a durable, unique worker-start attempt ID and purpose (activation, profile transition, or recovery), never reused for a later attempt;
 - the approved store-backed worker executable and exact argument vector;
 - the authorization evidence already required by the transaction protocol;
 - the expected predecessor and candidate closure identities;
@@ -33,7 +34,7 @@ The control plane can query status and request read-only reconciliation. It does
 
 A separate root-owned supervisor validates the request against the durable transaction journal and existing authorization rules. It acquires the cross-process Nixward interlock, refuses unresolved peer transactions, validates that the exact worker capability has not been consumed, and asks systemd to start a transaction-specific service through the manager API (prefer a typed D-Bus interface such as StartTransientUnit over shell-composed systemctl/systemd-run command strings).
 
-The service name is derived from a canonical transaction identifier and cannot be supplied as an arbitrary unit name by the caller. The service executes only the immutable gate or another already-approved store-backed exact worker entry point, with explicit environment and exact argv. Its environment is cleared and rebuilt from a small allowlist. All unit properties are generated from a typed schema, never copied from client-controlled arbitrary key/value input.
+The service name is derived from the canonical transaction ID, worker purpose, and durable attempt ID; it cannot be supplied as an arbitrary unit name by the caller. A new attempt ID is created only after the previous attempt has been reconciled and the existing transaction state machine authorizes a retry (with fresh authorization where required). The same attempt ID is never retried after an ambiguous manager response. The service executes only the immutable gate or another already-approved store-backed exact worker entry point, with explicit environment and exact argv. Its environment is cleared and rebuilt from a small allowlist. All unit properties are generated from a typed schema, never copied from client-controlled arbitrary key/value input.
 
 The worker unit has a different lifecycle from the supervisor's request/session and Nixward awareness daemon. The service manager can observe, stop, and account for the worker independently of whether the original requester remains connected. Do not automatically restart a completed or failed mutation unit: a one-shot activation is not an idempotent daemon heartbeat, and retrying after an ambiguous result may replay a mutation.
 
@@ -43,10 +44,10 @@ The current systemd service-management contract documents Restart=on-failure as 
 
 The ordering is:
 1. Validate request and exact authorization against the journal.
-2. Persist the Starting/mutation-boundary record and exact worker intent.
-3. Subscribe to the manager's JobRemoved signal before the request, then ask systemd to start the uniquely named worker unit through StartTransientUnit.
-4. Treat the method's returned job object path only as acknowledgement that a start job was enqueued. Separately query the canonical unit for its InvocationID and main-process identity where supported, and monitor the matching JobRemoved signal for the start-job outcome.
-5. Bind the observed unit invocation and process identity to the transaction; persist them before any release capability can authorize a worker payload.
+2. Persist the unique attempt ID, Starting/mutation-boundary record, and exact worker intent. This is the write-ahead barrier: after it is recorded, any crash is treated as though the manager call might have occurred.
+3. Subscribe to the manager's JobRemoved signal before the request, then ask systemd to start the uniquely named attempt unit through StartTransientUnit.
+4. Treat the method's returned job object path only as acknowledgement that a start job was enqueued. Separately query the canonical attempt unit for its InvocationID and main-process identity where supported, and monitor the matching JobRemoved signal for the start-job outcome.
+5. Bind the observed attempt unit invocation and process identity to the transaction; persist them before any release capability can authorize a worker payload.
 6. Observe the unit/process disposition independently and write a no-clobber process observation receipt.
 7. Perform a fresh read-only observation of both the running closure and selected system profile.
 8. Advance the transaction only through the existing transaction state machine after its postconditions are satisfied.
