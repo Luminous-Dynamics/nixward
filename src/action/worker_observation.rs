@@ -235,6 +235,13 @@ impl WorkerObservationReceipt {
         Ok(receipt)
     }
 
+    pub(super) fn disposition_label(&self) -> String {
+        match self.disposition {
+            WorkerProcessDisposition::Exited { code } => format!("exited:{code}"),
+            WorkerProcessDisposition::Signaled { signal } => format!("signaled:{signal}"),
+        }
+    }
+
     fn validate_shape(&self) -> Result<(), String> {
         if self.schema != OBSERVATION_SCHEMA || self.version != OBSERVATION_VERSION {
             return Err("unsupported worker observation schema/version".into());
