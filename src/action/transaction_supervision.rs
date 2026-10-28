@@ -128,6 +128,82 @@ pub fn decide_reconciliation(
     }
 }
 
+/// Durable progress recorded around a systemd StartTransientUnit request.
+///
+/// SubmissionMayHaveOccurred must be persisted before the D-Bus request is sent.
+/// This intentionally means a crash just before send is treated as ambiguous;
+/// that sacrifices automatic retry/liveness to avoid duplicate privileged starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStartIntent {
+    /// Durable state proves no start request has been submitted for this attempt.
+    PreparedNotSubmitted,
+    /// The pre-call barrier was persisted; the manager may have accepted the request.
+    SubmissionMayHaveOccurred,
+    /// The manager returned an accepted invocation identity and it was durably recorded.
+    InvocationAccepted,
+}
+
+/// Read-only result of querying the manager for the canonical transaction unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerUnitObservation {
+    NotQueried,
+    MatchingTransactionUnit,
+    ConflictingUnitIdentity,
+    Absent,
+    Unavailable,
+}
+
+/// Safe restart behavior for the unit-start operation.
+///
+/// None of these outcomes authorizes a system mutation. In particular, a lost
+/// manager response followed by an absent unit requires target-state reconciliation,
+/// not an automatic second StartTransientUnit call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStartRecoveryDecision {
+    SubmitInitialStartAfterDurablePreflight,
+    QueryCanonicalManagerUnit,
+    ObserveExistingMatchingUnit,
+    HoldOnUnitIdentityConflict,
+    ReconcileTargetBeforeAnyNewAttempt,
+}
+
+/// Classify the next safe action when recovering a systemd worker-start attempt.
+pub fn decide_worker_start_recovery(
+    intent: WorkerStartIntent,
+    manager: ManagerUnitObservation,
+) -> WorkerStartRecoveryDecision {
+    match intent {
+        WorkerStartIntent::PreparedNotSubmitted => match manager {
+            ManagerUnitObservation::Absent => {
+                WorkerStartRecoveryDecision::SubmitInitialStartAfterDurablePreflight
+            }
+            ManagerUnitObservation::NotQueried | ManagerUnitObservation::Unavailable => {
+                WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
+            }
+            ManagerUnitObservation::MatchingTransactionUnit
+            | ManagerUnitObservation::ConflictingUnitIdentity => {
+                WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
+            }
+        },
+        WorkerStartIntent::SubmissionMayHaveOccurred | WorkerStartIntent::InvocationAccepted => {
+            match manager {
+                ManagerUnitObservation::MatchingTransactionUnit => {
+                    WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
+                }
+                ManagerUnitObservation::ConflictingUnitIdentity => {
+                    WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
+                }
+                ManagerUnitObservation::Absent => {
+                    WorkerStartRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
+                }
+                ManagerUnitObservation::NotQueried | ManagerUnitObservation::Unavailable => {
+                    WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +283,69 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_manager_start_recovery_combination_prevents_ambiguous_replay() {
+        const INTENTS: [WorkerStartIntent; 3] = [
+            WorkerStartIntent::PreparedNotSubmitted,
+            WorkerStartIntent::SubmissionMayHaveOccurred,
+            WorkerStartIntent::InvocationAccepted,
+        ];
+        const MANAGER_STATES: [ManagerUnitObservation; 5] = [
+            ManagerUnitObservation::NotQueried,
+            ManagerUnitObservation::MatchingTransactionUnit,
+            ManagerUnitObservation::ConflictingUnitIdentity,
+            ManagerUnitObservation::Absent,
+            ManagerUnitObservation::Unavailable,
+        ];
+
+        for intent in INTENTS {
+            for manager in MANAGER_STATES {
+                let actual = decide_worker_start_recovery(intent, manager);
+                let expected = match (intent, manager) {
+                    (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::Absent) => {
+                        WorkerStartRecoveryDecision::SubmitInitialStartAfterDurablePreflight
+                    }
+                    (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::NotQueried)
+                    | (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::Unavailable)
+                    | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::NotQueried)
+                    | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::Unavailable)
+                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::NotQueried)
+                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::Unavailable) => {
+                        WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
+                    }
+                    (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::MatchingTransactionUnit)
+                    | (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::ConflictingUnitIdentity)
+                    | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::ConflictingUnitIdentity)
+                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::ConflictingUnitIdentity) => {
+                        WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
+                    }
+                    (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::MatchingTransactionUnit)
+                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::MatchingTransactionUnit) => {
+                        WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
+                    }
+                    (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::Absent)
+                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::Absent) => {
+                        WorkerStartRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
+                    }
+                };
+                assert_eq!(actual, expected, "unsafe start-recovery result for {intent:?} × {manager:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn lost_start_response_never_reissues_an_ambiguous_mutation() {
+        for intent in [
+            WorkerStartIntent::SubmissionMayHaveOccurred,
+            WorkerStartIntent::InvocationAccepted,
+        ] {
+            assert_eq!(
+                decide_worker_start_recovery(intent, ManagerUnitObservation::Absent),
+                WorkerStartRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
+            );
         }
     }
 
