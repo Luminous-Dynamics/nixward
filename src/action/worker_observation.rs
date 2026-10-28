@@ -135,9 +135,9 @@ impl WorkerObservationReceipt {
         {
             return Err("worker observation time exceeds the interoperable safe-integer range".into());
         }
-        match self.disposition {
+        match &self.disposition {
             WorkerProcessDisposition::Exited { .. } => {}
-            WorkerProcessDisposition::Signaled { signal } if signal > 0 => {}
+            WorkerProcessDisposition::Signaled { signal } if *signal > 0 => {}
             WorkerProcessDisposition::Signaled { .. } => {
                 return Err("worker observation signal must be positive".into());
             }
@@ -261,8 +261,8 @@ impl WorkerObservationReceipt {
         {
             return Err("worker observation time exceeds the interoperable safe-integer range".into());
         }
-        if let WorkerProcessDisposition::Signaled { signal } = self.disposition {
-            if signal <= 0 {
+        if let WorkerProcessDisposition::Signaled { signal } = &self.disposition {
+            if *signal <= 0 {
                 return Err("worker observation signal must be positive".into());
             }
         }
