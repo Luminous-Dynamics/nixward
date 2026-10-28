@@ -38,7 +38,7 @@ The receipt intentionally omits stdout/stderr, credentials, and any claim of obs
 | Observer task/runtime crashes or is aborted | This slice cannot ensure the sidecar exists. Treat the journal as unresolved and reconcile before retry. |
 | Nixward process crashes or host reboots | This slice does not persist an independent supervising process. Boot ID and persisted process identity can help rule out a previous live worker, but do not prove the transaction's final post-state. Read-only runtime/profile observation is mandatory before any new mutation. |
 
-The transaction journal's existing nonterminal phases remain reconciliation-required. A sidecar alone does not promote a transaction to Activated, BootSelected, or Recovered. No retry is allowed solely because the request timed out or lost its response. Do not enable generic kill-on-request-cancellation as a recovery strategy: terminating an activation midway is not evidence that the previous system state was restored.
+During authorized recovery, Nixward now looks for the exact identity-bound sidecar and logs a validated process disposition when one exists. An absent or unreadable sidecar remains indeterminate; it never substitutes for independent read-only runtime/profile observations. The transaction journal's existing nonterminal phases remain reconciliation-required. A sidecar alone does not promote a transaction to Activated, BootSelected, or Recovered. No retry is allowed solely because the request timed out or lost its response. Do not enable generic kill-on-request-cancellation as a recovery strategy: terminating an activation midway is not evidence that the previous system state was restored.
 
 ## Tests authored in this slice
 
