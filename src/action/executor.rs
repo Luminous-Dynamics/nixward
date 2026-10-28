@@ -4516,6 +4516,73 @@ mod tests {
 
     #[cfg(all(feature = "native", target_os = "linux"))]
     #[tokio::test]
+    async fn observer_publication_collision_after_exit_preserves_existing_receipt() {
+        use super::super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("transaction.json");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 23"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().expect("controlled helper process must start");
+        let pid = child.id().expect("helper process must have a PID");
+        let boot_id = NixOSExecutor::current_boot_id().unwrap();
+        let start_time_ticks = NixOSExecutor::proc_start_time_ticks(pid).unwrap().unwrap();
+        let pidfd = NixOSExecutor::open_pidfd(pid).unwrap();
+
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-rebuild/bin/nixos-rebuild";
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "e".repeat(64);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            payload_executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
+        let worker = ActivationWorkerIdentity {
+            transaction_id: "d".repeat(64),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid,
+            boot_id,
+            start_time_ticks,
+            executable: executable.into(),
+            process_image: executable.into(),
+            argv_digest: NixOSExecutor::activation_argv_digest(executable, &gate_args),
+            payload_executable: payload_executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: NixOSExecutor::activation_argv_digest(payload_executable, &payload_args),
+            environment_digest: NixOSExecutor::activation_worker_environment_digest(),
+        };
+        let observation_path = WorkerObservationReceipt::path_for(&journal_path, &worker).unwrap();
+        let sentinel = b"do-not-overwrite-existing-observation";
+        std::fs::write(&observation_path, sentinel).unwrap();
+
+        let result = NixOSExecutor::supervise_worker_process(
+            child,
+            pidfd,
+            worker,
+            observation_path.clone(),
+            std::time::Instant::now(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a process that exited but cannot publish its receipt must remain indeterminate"
+        );
+        assert_eq!(
+            std::fs::read(&observation_path).unwrap(),
+            sentinel,
+            "receipt publication must not overwrite an existing file"
+        );
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[tokio::test]
     async fn worker_observation_survives_request_task_cancellation() {
         use super::super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
         use tokio::time::{sleep, Duration};
