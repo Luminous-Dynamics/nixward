@@ -93,3 +93,18 @@ These are proposed acceptance targets, not measured results. Safety gates are no
 Compare the eventual integrated Nixward protocol against `nixos-rebuild` and Colmena using the same disposable host image, NixOS release, tasks, cache/network conditions, and injected failures. Keep separate outcomes for task success, mutation replay, false-success claims, recovery time, operator effort, and latency percentiles. A safer protocol may deliberately refuse an ambiguous operation; report that loss of availability separately instead of hiding it inside a single aggregate score.
 
 The current PR does not implement the systemd-owned privileged worker, wire this trace validator into production recovery, or qualify a NixOS VM. It is an independently reviewable safety contract intended to make temporal invariants executable before integration.
+
+
+## External engineering references
+
+These sources inform the qualification strategy; none establishes that Nixward is already safer or faster than the referenced deployment tools.
+
+- [systemd D-Bus manager interface](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html): a successful start call enqueues a job, and observing the job result requires subscribing to the relevant signal before the request and filtering by the returned job object. Transient units may be released when no longer running/referenced or after reboot.
+- [NixOS VM integration testing](https://nix.dev/tutorials/nixos/integration-testing-using-virtual-machines.html): reproducible one- and multi-machine tests using pinned NixOS configurations and QEMU. Use this for service-manager integration and crash/reboot fault injection rather than treating pure Rust tests as system qualification.
+- [Proptest](https://proptest-rs.github.io/proptest/): property-based generation with shrinking. Upgrade the deterministic trace campaign to shrinking strategies so a failing random trace can be reduced to a minimal reproducer.
+- [Loom](https://github.com/tokio-rs/loom): explores interleavings of concurrent Rust executions under a modeled memory model. Use only for suitable in-process synchronization logic; it does not model external systemd state, journal fsync behavior, or actual NixOS reboot semantics.
+- [DORA delivery metrics](https://dora.dev/guides/dora-metrics/): use delivery and recovery outcomes longitudinally, with the same application/task context, rather than a single score to rank dissimilar tools.
+
+## Comparison protocol
+
+For every baseline—Nixward, `nixos-rebuild`, and Colmena where the same task applies—pin hardware or VM resource allocation, NixOS/systemd/kernel versions, target configuration, closure/cache state, network conditions, and fault checkpoints. Publish per-scenario raw outcomes and all deviations. Separate (a) safety failures, (b) availability/safe refusal, (c) task utility, (d) recovery and operator effort, and (e) latency. Never allow speed or task completion to compensate for one unauthorized mutation or false-success claim.
