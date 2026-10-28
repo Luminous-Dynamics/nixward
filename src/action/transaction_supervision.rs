@@ -143,11 +143,11 @@ pub enum WorkerStartIntent {
     UnitInvocationIdentityPersisted,
 }
 
-/// Read-only result of querying the manager for the canonical transaction unit.
+/// Read-only result of querying the manager for this exact persisted start attempt's unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagerUnitObservation {
     NotQueried,
-    MatchingTransactionUnit,
+    MatchingAttemptUnit,
     ConflictingUnitIdentity,
     Absent,
     Unavailable,
@@ -180,14 +180,14 @@ pub fn decide_worker_start_recovery(
             ManagerUnitObservation::NotQueried | ManagerUnitObservation::Unavailable => {
                 WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
             }
-            ManagerUnitObservation::MatchingTransactionUnit
+            ManagerUnitObservation::MatchingAttemptUnit
             | ManagerUnitObservation::ConflictingUnitIdentity => {
                 WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
             }
         },
         WorkerStartIntent::SubmissionMayHaveOccurred | WorkerStartIntent::UnitInvocationIdentityPersisted => {
             match manager {
-                ManagerUnitObservation::MatchingTransactionUnit => {
+                ManagerUnitObservation::MatchingAttemptUnit => {
                     WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
                 }
                 ManagerUnitObservation::ConflictingUnitIdentity => {
@@ -295,7 +295,7 @@ mod tests {
         ];
         const MANAGER_STATES: [ManagerUnitObservation; 5] = [
             ManagerUnitObservation::NotQueried,
-            ManagerUnitObservation::MatchingTransactionUnit,
+            ManagerUnitObservation::MatchingAttemptUnit,
             ManagerUnitObservation::ConflictingUnitIdentity,
             ManagerUnitObservation::Absent,
             ManagerUnitObservation::Unavailable,
@@ -316,14 +316,14 @@ mod tests {
                     | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::Unavailable) => {
                         WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
                     }
-                    (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::MatchingTransactionUnit)
+                    (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::MatchingAttemptUnit)
                     | (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::ConflictingUnitIdentity)
                     | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::ConflictingUnitIdentity)
                     | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::ConflictingUnitIdentity) => {
                         WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
                     }
-                    (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::MatchingTransactionUnit)
-                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::MatchingTransactionUnit) => {
+                    (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::MatchingAttemptUnit)
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::MatchingAttemptUnit) => {
                         WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
                     }
                     (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::Absent)
