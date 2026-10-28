@@ -90,7 +90,19 @@ The machine-readable corpus is `docs/fixtures/transaction-qualification-v0.1.jso
 | Confidentiality | secrets in diagnostics, logs, receipts, failure output | no secret disclosure |
 | Fleet | canary unhealthy or one host fails during staged rollout | halt/contain rollout; preserve per-host evidence |
 
-## 5. Metrics and acceptance targets
+## 5. Coverage snapshot (source audit, not qualification evidence)
+
+The corpus carries a scenario-by-scenario coverage inventory against reviewed `main` commit `ae60256f0be73138a539ecda048e81056dd14a30`. As of 2026-10-28, the inventory records:
+
+- **9 partial** scenarios: one or more related lower-level tests exist, but the scenario's end-to-end security claim remains unproven.
+- **9 with no behavioral test found** on that baseline: the named failure mode still needs a dedicated executable test.
+- **0 behaviorally qualified scenarios claimed** by this inventory: it is a source audit, not a test-run report.
+
+Every partial reference names an actual test function in the pinned baseline. The Rust manifest-integrity guard checks that these referenced functions still exist and that each scenario has an explicit coverage status and gap. This prevents stale test references from silently surviving code movement. It does not assess whether those tests pass, prove the gap is closed, or certify any runtime behavior.
+
+The inventory is intentionally conservative. “No behavioral test found” does not prove the implementation itself is absent; it means the specific benchmark scenario was not found as an executable behavioral test in the reviewed baseline. Coverage should advance only when a named test actually exercises the relevant scenario and its expected disposition. Qualification still requires exact-head runs and evidence for the declared fault model.
+
+## 6. Metrics and acceptance targets
 
 The first release should report raw counts and per-case results. Hard safety gates are not averaged with latency or intent accuracy.
 
@@ -110,7 +122,7 @@ Zero observed failures in a finite test corpus is a release criterion for that c
 
 For industry-facing operational comparison, also report the current DORA five metrics: change lead time, deployment frequency, failed-deployment recovery time, change fail rate, and deployment rework rate. Compute them over a clearly defined observation window and count only changes and failures in the benchmark's stated scope. These measures complement, but do not replace, Nixward's security gates: a fast system that performs an unauthorized mutation is still a failing system. For a longitudinal pilot after the deterministic suite is stable, aim for at least a 50% reduction in failed-deployment recovery time and a 30% relative reduction in change-fail/rework rates against a matched baseline. These are ambitious research targets, not current results; do not claim them from a small synthetic VM suite, and report sample size and uncertainty.
 
-## 6. Evidence bundle
+## 7. Evidence bundle
 
 Every run should produce a machine-readable, content-addressable report with at least:
 
@@ -126,7 +138,7 @@ Every run should produce a machine-readable, content-addressable report with at 
 
 A queue state is not a pass. If an essential assertion did not execute, the report is incomplete and qualification remains unproven. Do not put secrets or full sensitive filesystem snapshots into the evidence bundle.
 
-## 7. Industry position and differentiation
+## 8. Industry position and differentiation
 
 Native NixOS commands already provide declarative evaluation/build, activation modes, generations, and useful VM testing primitives. Deployment tools address fleet rollout. Nixward should compose those proven capabilities and compete on the **evidence and safety envelope**:
 
@@ -139,7 +151,7 @@ Native NixOS commands already provide declarative evaluation/build, activation m
 
 SLSA provenance can help identify how a software artifact was built; it does not authorize a particular machine mutation. Similarly, a valid owner signature does not prove that the desired configuration is safe. These are separate assertions and should remain separate in reports.
 
-## 8. Implementation order
+## 9. Implementation order
 
 1. Resolve documentation language so no path implies that Phi or confidence grants execution authority.
 2. Map every canonical scenario to an existing exact-head test, a new test, or an explicit unimplemented item.
