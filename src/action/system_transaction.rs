@@ -655,9 +655,13 @@ mod tests {
         let plan = plan();
 
         // A phase label alone cannot synthesize a completed transaction.
-        let mut forged = SystemTransaction::planned(&plan);
-        forged.phase = TransactionPhase::Promoted;
-        assert!(forged.validate_wire().is_err());
+        let mut wire = serde_json::to_value(SystemTransaction::planned(&plan)).unwrap();
+        wire["phase"] = serde_json::Value::String("promoted".into());
+        let forged: SystemTransaction = serde_json::from_value(wire).unwrap();
+        assert!(
+            forged.validate_wire().is_err(),
+            "a deserialized promoted phase must carry all required receipts"
+        );
         assert!(
             forged.promote(&plan).is_err(),
             "a malformed public envelope must not be usable by transition methods"
