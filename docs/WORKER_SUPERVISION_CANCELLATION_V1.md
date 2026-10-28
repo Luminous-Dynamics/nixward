@@ -44,6 +44,7 @@ During authorized recovery, Nixward now looks for the exact identity-bound sidec
 
 - worker_observation_round_trips_and_does_not_export_process_output: serializes a fixture process disposition, checks that no output field is present, performs no-clobber persistence, and reloads against the exact worker identity.
 - worker_observation_rejects_receipt_rebinding_to_another_worker: changing the payload argv invalidates the prior receipt.
+- observer_publication_collision_after_exit_preserves_existing_receipt: a controlled child exits, then a pre-existing receipt path forces publication failure; the observer must report an indeterminate error without clobbering the file.
 - worker_observation_survives_request_task_cancellation: a harmless controlled child exits nonzero; cancellation of the request-facing task is injected while a detached observer owns the child, and the test expects a matching on-disk receipt.
 
 These tests are **authored but not executed** in this environment. They must run on the exact PR head before merge. Required next tests include cancellation at each gate-frame byte boundary, receipt-publication failure after child exit, supervisor task/runtime shutdown, and a disposable NixOS VM with read-only independent postcondition observations.
