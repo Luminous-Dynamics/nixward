@@ -43,10 +43,10 @@ Nixward's security claims are evaluated as state-transition guarantees, not by P
 ```
 Observation ──> Encoding ──> Cognition ──> Action
    │              │             │            │
-   │ systemd      │ HDC         │ Active     │ Phi-gated
-   │ journal      │ 16384-dim   │ Inference  │ execution
-   │ store        │ vectors     │ Causal     │ with rollback
-   │ hardware     │             │ graph      │ verification
+   │ systemd      │ HDC         │ Active     │ Policy + signed
+   │ journal      │ 16384-dim   │ Inference  │ authorization
+   │ store        │ vectors     │ Causal     │ exact-plan checks
+   │ hardware     │             │ graph      │ and verification
    └──────────────┴─────────────┴────────────┘
 ```
 
