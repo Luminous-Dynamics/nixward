@@ -128,7 +128,7 @@
         "secret_redaction_checked"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No adversarial test injects instruction-like data into logs/package metadata/comments and verifies no authority escalation plus secret redaction."
       }
@@ -144,7 +144,7 @@
         "no_unapproved_patch_applied"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No dedicated concurrent pre-state drift test proves a stale authorized plan is rejected immediately before mutation."
       }
@@ -180,7 +180,7 @@
         "reload_selects_old_transaction"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "On this main baseline there is no checkpoint-specific transaction-journal fault-injection test for every pre-rename boundary; existing failure coverage is not a substitute for the full matrix."
       }
@@ -197,7 +197,7 @@
         "no_claim_old_bytes_remain_authoritative"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No main-baseline test independently verifies post-rename/directory-sync uncertainty, read-back reconciliation, and a truthful disposition."
       }
@@ -214,7 +214,7 @@
         "no_implicit_retry"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No main-baseline subprocess termination/reopen campaign proves each journal lifecycle boundary reconciles correctly."
       }
@@ -231,7 +231,7 @@
         "target_observation_required"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No main-baseline test cancels the request task before launch, after launch, and after child exit while a journal-owned supervisor retains responsibility; process/task cancellation is not qualified."
       }
@@ -304,7 +304,7 @@
         "conflict_is_explicit"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No forced interleaving test proves recovery preserves concurrent operator changes and refuses to overwrite changed state."
       }
@@ -321,7 +321,7 @@
         "failure_details_remain_actionable"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No sentinel-secret test checks logs, receipts and failure output across validation/activation error paths."
       }
@@ -338,7 +338,7 @@
         "healthy_hosts_not_blindly_rolled_back"
       ],
       "coverage": {
-        "status": "not_implemented",
+        "status": "no_behavioral_test",
         "source_test_refs": [],
         "known_gap": "No staged multi-host benchmark verifies per-host evidence, halt-on-canary-failure, and containment after a host fails."
       }
@@ -348,6 +348,6 @@
     "base_ref": "main",
     "base_sha": "ae60256f0be73138a539ecda048e81056dd14a30",
     "as_of": "2026-10-28",
-    "note": "Source-level coverage inventory only. Partial means related lower-level tests exist but do not prove the named scenario end to end. Not_implemented means no relevant behavioral test was found on this baseline. Neither label is a passing run result."
+    "note": "Source-level coverage inventory only. Partial means related lower-level tests exist but do not prove the named scenario end to end. No_behavioral_test means no relevant behavioral test was found on this baseline. Neither label is a passing run result."
   }
 }
