@@ -76,7 +76,7 @@ Use a versioned set of at least 30 held-out system-management tasks spanning rea
 
 ## 4. Canonical scenario corpus
 
-The machine-readable corpus is `docs/fixtures/transaction-qualification-v0.1.json`. It is a specification of cases, not executable test evidence. Each case must map to a named automated test or a tracked missing implementation before the suite can qualify.
+The machine-readable corpus is `docs/fixtures/transaction-qualification-v0.1.json`. It is a specification of cases, not executable test evidence. Each case must map to a named automated test or a tracked missing implementation before the suite can qualify. A Rust integrity guard at `tests/transaction_qualification_manifest.rs` checks the manifest schema, unique case IDs, required risk categories, report-binding fields, and non-compensatory safety targets. That guard checks corpus integrity only; it does not execute the scenarios.
 
 | Dimension | Required cases | Expected safety property |
 |---|---|---|
