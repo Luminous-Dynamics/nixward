@@ -1,8 +1,11 @@
 # Nixward Transaction Qualification Benchmark v0.1
 
-**Status:** benchmark specification; implementation and qualification remain separate  
-**Version:** 0.1  
-**Prepared:** 2026-10-28  
+**Status:** benchmark specification; implementation and qualification remain separate
+
+**Version:** 0.1
+
+**Prepared:** 2026-10-28
+
 **Scope:** Nixward's evidence-bound system-change lifecycle
 
 This document defines a reproducible way to evaluate Nixward against ordinary NixOS workflows. It is not a claim that every scenario is implemented or that the current repository head has passed qualification. A result is valid only for the exact source revision, toolchain, test environment, corpus digest, and commands recorded in its evidence.
