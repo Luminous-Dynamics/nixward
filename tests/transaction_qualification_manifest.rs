@@ -167,6 +167,7 @@ fn transaction_qualification_corpus_covers_the_core_fault_boundaries() {
 
     for category in [
         "authorization",
+        "wire_lifecycle",
         "untrusted_input",
         "concurrency",
         "realization",
