@@ -288,14 +288,22 @@ fn partial_coverage_references_resolve_to_real_source_tests() {
 
     for case in &manifest.cases {
         for reference in &case.coverage.source_test_refs {
-            let (path, test_name) = reference
-                .split_once("::")
-                .unwrap_or_else(|| panic!("{} has malformed source test ref {reference:?}", case.id));
+            let (path, test_name) = reference.split_once("::").unwrap_or_else(|| {
+                panic!(
+                    "{} has malformed source test ref {reference:?}",
+                    case.id
+                )
+            });
             let source = sources
                 .iter()
                 .find(|(source_path, _)| *source_path == path)
                 .map(|(_, source)| *source)
-                .unwrap_or_else(|| panic!("{} references unregistered source file {path:?}", case.id));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} references unregistered source file {path:?}",
+                        case.id
+                    )
+                });
             let signature = format!("fn {test_name}(");
             assert!(
                 source.contains(&signature),
