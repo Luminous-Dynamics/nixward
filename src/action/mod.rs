@@ -28,6 +28,7 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 pub mod transaction_supervision;
+pub mod transaction_supervision_trace;
 mod worker_observation;
 
 pub use authority_approval::{
