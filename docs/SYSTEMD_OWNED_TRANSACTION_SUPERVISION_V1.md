@@ -44,14 +44,14 @@ The current systemd service-management contract documents Restart=on-failure as 
 The ordering is:
 1. Validate request and exact authorization against the journal.
 2. Persist the Starting/mutation-boundary record and exact worker intent.
-3. Ask systemd to start the uniquely named worker unit.
-4. Capture returned unit invocation identity and query the unit's main process identity where supported.
-5. Bind process identity to the transaction; persist it before any release capability can authorize a worker payload.
+3. Subscribe to the manager's JobRemoved signal before the request, then ask systemd to start the uniquely named worker unit through StartTransientUnit.
+4. Treat the method's returned job object path only as acknowledgement that a start job was enqueued. Separately query the canonical unit for its InvocationID and main-process identity where supported, and monitor the matching JobRemoved signal for the start-job outcome.
+5. Bind the observed unit invocation and process identity to the transaction; persist them before any release capability can authorize a worker payload.
 6. Observe the unit/process disposition independently and write a no-clobber process observation receipt.
 7. Perform a fresh read-only observation of both the running closure and selected system profile.
 8. Advance the transaction only through the existing transaction state machine after its postconditions are satisfied.
 
-If the supervisor crashes at any boundary, restart begins with reconciliation, not with repeating step 3. A unit start response that was lost may mean the unit was created. Query the canonical unit name and invocation ID before considering any retry.
+If the supervisor crashes at any boundary, restart begins with reconciliation, not with repeating step 3. A unit start response that was lost may mean the unit was created. Query the canonical unit name and, when still available, its InvocationID before considering any retry. The manager's transient-unit interface explicitly permits a unit to be released once it is no longer running/referenced or when the host reboots; it is therefore not a durable transaction ledger. An absent unit or absent JobRemoved signal does not prove the worker never ran. See the [systemd D-Bus manager interface](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html).
 
 ### 4. Stop, restart, and reboot semantics
 
