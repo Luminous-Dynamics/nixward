@@ -7,9 +7,7 @@
 //! records that the exact journal-bound worker identity was observed to exit
 //! (or terminate by signal) and that this observer published a receipt.
 
-use super::config_transaction::{
-    activation_argv_digest, ActivationWorkerIdentity, ActivationWorkerPurpose,
-};
+use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -122,6 +120,7 @@ impl WorkerObservationReceipt {
         &self,
         expected_worker: &ActivationWorkerIdentity,
     ) -> Result<(), String> {
+        self.validate_shape()?;
         expected_worker.validate_identity()?;
         if self.schema != OBSERVATION_SCHEMA || self.version != OBSERVATION_VERSION {
             return Err("unsupported worker observation schema/version".into());
@@ -286,7 +285,7 @@ impl WorkerObservationReceipt {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::action::config_transaction::activation_argv_digest;
