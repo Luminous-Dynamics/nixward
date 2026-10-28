@@ -92,10 +92,10 @@ The machine-readable corpus is `docs/fixtures/transaction-qualification-v0.1.jso
 
 ## 5. Coverage snapshot (source audit, not qualification evidence)
 
-The corpus carries a scenario-by-scenario coverage inventory against reviewed `main` commit `ae60256f0be73138a539ecda048e81056dd14a30`. As of 2026-10-28, the inventory records:
+The 19-case corpus carries a scenario-by-scenario coverage inventory against reviewed `main` commit `ae60256f0be73138a539ecda048e81056dd14a30`. As of 2026-10-28, the inventory records:
 
 - **9 partial** scenarios: one or more related lower-level tests exist, but the scenario's end-to-end security claim remains unproven.
-- **9 with no behavioral test found** on that baseline: the named failure mode still needs a dedicated executable test.
+- **10 with no behavioral test found** on that baseline: the named failure mode still needs a dedicated executable test.
 - **0 behaviorally qualified scenarios claimed** by this inventory: it is a source audit, not a test-run report.
 
 Every partial reference names an actual test function in the pinned baseline. The Rust manifest-integrity guard checks that these referenced functions still exist and that each scenario has an explicit coverage status and gap. This prevents stale test references from silently surviving code movement. It does not assess whether those tests pass, prove the gap is closed, or certify any runtime behavior.
