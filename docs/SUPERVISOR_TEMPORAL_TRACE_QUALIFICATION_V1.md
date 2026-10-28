@@ -58,7 +58,7 @@ The Rust unit tests cover:
 - a safe but incomplete trace after an ambiguous manager submission;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract.
 
-The 5,040-case check is exhaustive only for those seven event orderings. It is not a full model check of arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
+The 5,040-case check is exhaustive only for those seven event orderings. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
 
 ## Next qualification gates
 
