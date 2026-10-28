@@ -255,3 +255,53 @@ fn every_qualification_case_declares_coverage_or_an_explicit_gap() {
         "inventory must make coverage debt explicit"
     );
 }
+
+#[test]
+fn partial_coverage_references_resolve_to_real_source_tests() {
+    let manifest = parse_corpus();
+    let sources = [
+        (
+            "src/action/change_covenant.rs",
+            include_str!("../src/action/change_covenant.rs"),
+        ),
+        (
+            "src/action/executor.rs",
+            include_str!("../src/action/executor.rs"),
+        ),
+        (
+            "src/authority_signature.rs",
+            include_str!("../src/authority_signature.rs"),
+        ),
+        (
+            "src/action/authority_replay.rs",
+            include_str!("../src/action/authority_replay.rs"),
+        ),
+        (
+            "src/action/execution_intent.rs",
+            include_str!("../src/action/execution_intent.rs"),
+        ),
+        (
+            "src/action/system_transaction.rs",
+            include_str!("../src/action/system_transaction.rs"),
+        ),
+    ];
+
+    for case in &manifest.cases {
+        for reference in &case.coverage.source_test_refs {
+            let (path, test_name) = reference
+                .split_once("::")
+                .unwrap_or_else(|| panic!("{} has malformed source test ref {reference:?}", case.id));
+            let source = sources
+                .iter()
+                .find(|(source_path, _)| *source_path == path)
+                .map(|(_, source)| *source)
+                .unwrap_or_else(|| panic!("{} references unregistered source file {path:?}", case.id));
+            let signature = format!("fn {test_name}(");
+            assert!(
+                source.contains(&signature),
+                "{} references missing source test {reference:?}",
+                case.id
+            );
+        }
+    }
+}
