@@ -2826,7 +2826,7 @@ impl ConfigTransaction {
         self.persist_atomic_classified_with_hook(path.as_ref(), |_| Ok(()))
     }
 
-    pub(super) fn persist_atomic_classified_with_hook<F>
+    pub(super) fn persist_atomic_classified_with_hook<F>(
         &self,
         path: &Path,
         mut boundary_hook: F,
