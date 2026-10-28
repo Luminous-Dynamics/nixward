@@ -30,7 +30,15 @@
         "plan_digest_mismatch_rejected",
         "target_state_unchanged",
         "rejection_receipt_bound_to_original_plan"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/change_covenant.rs::plan_digest_binds_machine_patch_and_command",
+          "src/action/executor.rs::test_change_authorization_binds_execution_to_full_plan"
+        ],
+        "known_gap": "No end-to-end negative test tampers with a serialized approved plan and observes the actual mutation boundary refusing it."
+      }
     },
     {
       "id": "AUTH-02",
@@ -41,7 +49,14 @@
       "assertions": [
         "cross_host_authority_rejected",
         "target_state_unchanged"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/change_covenant.rs::plan_digest_binds_machine_patch_and_command"
+        ],
+        "known_gap": "Plan identity includes machine binding, but a cross-host authorization attempt has no dedicated execution-boundary negative test."
+      }
     },
     {
       "id": "AUTH-03",
@@ -52,7 +67,16 @@
       "assertions": [
         "freshness_or_nonce_validation_fails",
         "target_state_unchanged"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/change_covenant.rs::future_dated_plan_is_not_yet_valid",
+          "src/action/change_covenant.rs::malformed_freshness_window_is_rejected",
+          "src/authority_signature.rs::expired_signature_is_rejected"
+        ],
+        "known_gap": "The suite does not yet exercise every malformed nonce/freshness/TTL combination through the complete executor path."
+      }
     },
     {
       "id": "AUTH-04",
@@ -63,7 +87,16 @@
       "assertions": [
         "replay_or_revocation_rejected",
         "no_second_mutation"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/authority_replay.rs::replay_key_is_one_shot_and_persistent",
+          "src/authority_signature.rs::signature_cannot_authorize_another_subject",
+          "src/authority_signature.rs::expired_signature_is_rejected"
+        ],
+        "known_gap": "Revocation and replay after a complete mutation lifecycle are not jointly exercised as a transaction-level negative control."
+      }
     },
     {
       "id": "AUTH-05",
@@ -74,7 +107,14 @@
       "assertions": [
         "cognitive_signal_is_not_authority",
         "target_state_unchanged"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/executor.rs::test_decision_quality_never_authorizes_modification"
+        ],
+        "known_gap": "A direct privileged-boundary suite for model-generated text, untrusted logs/metadata, Phi and confidence signals is not present."
+      }
     },
     {
       "id": "INPUT-01",
@@ -86,7 +126,12 @@
         "no_instruction_escalation",
         "no_authority_created",
         "secret_redaction_checked"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No adversarial test injects instruction-like data into logs/package metadata/comments and verifies no authority escalation plus secret redaction."
+      }
     },
     {
       "id": "PLAN-01",
@@ -97,7 +142,12 @@
       "assertions": [
         "stale_precondition_detected",
         "no_unapproved_patch_applied"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No dedicated concurrent pre-state drift test proves a stale authorized plan is rejected immediately before mutation."
+      }
     },
     {
       "id": "PLAN-02",
@@ -108,7 +158,15 @@
       "assertions": [
         "realization_digest_mismatch_rejected",
         "no_alternate_closure_activated"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/execution_intent.rs::rejects_tampered_intent_or_plan",
+          "src/action/execution_intent.rs::rejects_mutable_or_malformed_out_path"
+        ],
+        "known_gap": "The exact intent/realization substitution is not tested end-to-end at activation with an independently observed unchanged target."
+      }
     },
     {
       "id": "JOURNAL-01",
@@ -120,7 +178,12 @@
         "old_bytes_preserved",
         "temporary_candidate_cleaned_where_safe",
         "reload_selects_old_transaction"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "On this main baseline there is no checkpoint-specific transaction-journal fault-injection test for every pre-rename boundary; existing failure coverage is not a substitute for the full matrix."
+      }
     },
     {
       "id": "JOURNAL-02",
@@ -132,7 +195,12 @@
         "error_reports_publication_uncertainty",
         "readback_observes_current_bytes",
         "no_claim_old_bytes_remain_authoritative"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No main-baseline test independently verifies post-rename/directory-sync uncertainty, read-back reconciliation, and a truthful disposition."
+      }
     },
     {
       "id": "PROCESS-01",
@@ -144,7 +212,12 @@
         "reopen_does_not_invent_success",
         "receipts_match_persisted_phase",
         "no_implicit_retry"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No main-baseline subprocess termination/reopen campaign proves each journal lifecycle boundary reconciles correctly."
+      }
     },
     {
       "id": "APPLY-01",
@@ -156,7 +229,12 @@
         "no_blind_retry",
         "no_pre_activation_restore_after_possible_activation",
         "target_observation_required"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No main-baseline test cancels the request task before launch, after launch, and after child exit while a journal-owned supervisor retains responsibility; process/task cancellation is not qualified."
+      }
     },
     {
       "id": "VERIFY-01",
@@ -168,7 +246,15 @@
         "postcondition_mismatch_detected",
         "transaction_not_promoted",
         "verification_receipt_records_failure"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/system_transaction.rs::lifecycle_is_fail_closed_and_terminal",
+          "src/action/system_transaction.rs::failed_apply_can_only_finish_as_recovery_or_failure"
+        ],
+        "known_gap": "The state-machine unit tests do not drive a real activation whose exit code is zero while independently observed postconditions fail."
+      }
     },
     {
       "id": "BOOT-01",
@@ -179,7 +265,14 @@
       "assertions": [
         "boot_health_failure_blocks_promotion",
         "recovery_or_refusal_is_recorded"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/system_transaction.rs::unhealthy_boot_cannot_be_promoted"
+        ],
+        "known_gap": "This tests the receipt state machine, not post-reboot health observation and recovery in a disposable NixOS VM."
+      }
     },
     {
       "id": "RECOVERY-01",
@@ -190,7 +283,14 @@
       "assertions": [
         "missing_recovery_not_silently_accepted",
         "no_false_recovered_receipt"
-      ]
+      ],
+      "coverage": {
+        "status": "partial",
+        "source_test_refs": [
+          "src/action/system_transaction.rs::failed_apply_can_only_finish_as_recovery_or_failure"
+        ],
+        "known_gap": "No complete recovery-prerequisite matrix proves unavailable recovery material blocks mutation or produces an explicitly authorized non-reversible disposition."
+      }
     },
     {
       "id": "RECOVERY-02",
@@ -202,7 +302,12 @@
         "no_silent_overwrite",
         "recovery_scope_is_bounded_to_transaction",
         "conflict_is_explicit"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No forced interleaving test proves recovery preserves concurrent operator changes and refuses to overwrite changed state."
+      }
     },
     {
       "id": "CONF-01",
@@ -214,7 +319,12 @@
         "sentinel_secret_not_in_logs",
         "sentinel_secret_not_in_receipts",
         "failure_details_remain_actionable"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No sentinel-secret test checks logs, receipts and failure output across validation/activation error paths."
+      }
     },
     {
       "id": "FLEET-01",
@@ -226,7 +336,18 @@
         "failed_host_not_promoted",
         "next_stage_not_started_without_policy",
         "healthy_hosts_not_blindly_rolled_back"
-      ]
+      ],
+      "coverage": {
+        "status": "not_implemented",
+        "source_test_refs": [],
+        "known_gap": "No staged multi-host benchmark verifies per-host evidence, halt-on-canary-failure, and containment after a host fails."
+      }
     }
-  ]
+  ],
+  "coverage_snapshot": {
+    "base_ref": "main",
+    "base_sha": "ae60256f0be73138b4a8ce8cc80be0e9d010d56c",
+    "as_of": "2026-10-28",
+    "note": "Source-level coverage inventory only. Partial means related lower-level tests exist but do not prove the named scenario end to end. Not_implemented means no relevant behavioral test was found on this baseline. Neither label is a passing run result."
+  }
 }
