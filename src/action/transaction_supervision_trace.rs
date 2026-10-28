@@ -642,4 +642,59 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn deterministic_mutations_of_valid_trace_reject_required_evidence_loss() {
+        for seed in 0..20_000_u64 {
+            let mutation = (seed % 10) as usize;
+            let mut trace = valid_success_trace();
+
+            match mutation {
+                0 => {}
+                1 => {
+                    trace.remove(0); // exact authorization evidence
+                }
+                2 => {
+                    trace.remove(2); // write-ahead barrier
+                }
+                3 => {
+                    trace.remove(5); // durable worker identity
+                }
+                4 => {
+                    trace.remove(8); // process receipt
+                }
+                5 => {
+                    trace[9].kind =
+                        TraceEventKind::TargetObserved(TargetObservation::MixedOrUnknown);
+                }
+                6 => {
+                    trace[8].attempt_id = "attempt-from-another-worker".to_owned();
+                }
+                7 => {
+                    trace.insert(4, event(TraceEventKind::ManagerStartSubmitted));
+                }
+                8 => {
+                    trace.push(event(TraceEventKind::TargetObserved(
+                        TargetObservation::CandidateRuntimeAndProfileActive,
+                    )));
+                }
+                _ => {
+                    let target = trace.remove(9);
+                    trace.insert(7, target); // target snapshot predates process exit
+                }
+            }
+
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            if mutation == 0 {
+                assert!(result.is_safe(), "seed {seed}: valid trace rejected");
+                assert!(result.terminal_success_recorded);
+            } else {
+                assert!(
+                    !result.is_safe(),
+                    "seed {seed}, mutation {mutation}: unsafe trace accepted"
+                );
+            }
+        }
+    }
+
 }
