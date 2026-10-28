@@ -129,6 +129,10 @@ impl SystemTransaction {
     }
 
     fn ensure_identity(&self, plan: &ChangePlan) -> Result<(), String> {
+        // The envelope may have crossed a serialization boundary or its public
+        // fields may have been modified by a caller. Validate its internal
+        // receipt/phase relation before using it as a transition precondition.
+        self.validate_wire()?;
         if self.schema != SYSTEM_TRANSACTION_SCHEMA || self.version != SYSTEM_TRANSACTION_VERSION {
             return Err("unsupported system transaction schema".into());
         }
