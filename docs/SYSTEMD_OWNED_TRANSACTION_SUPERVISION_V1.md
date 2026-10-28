@@ -96,6 +96,8 @@ to a conservative reconciliation directive. None of the result variants grants m
 
 The cross-product test covers 5 worker states × 5 receipt states × 6 target states = 150 combinations. It specifically asserts that unknown identity dominates, a receipt claiming exit while the exact worker is live is contradictory, missing receipts still require target observation, and a boot-selected profile is not reported as a running candidate.
 
+A second pure contract covers the systemd start-response crash window. Before the D-Bus call, the supervisor must durably record that submission may have occurred. On restart, a matching canonical unit is observed; a conflicting unit identity is held; an absent unit after an ambiguous submission triggers read-only target reconciliation instead of replay. The start-recovery test covers 3 durable intent states × 5 manager lookup states = 15 combinations. This is deliberately at-most-once-biased: when the evidence cannot distinguish “the request was never delivered” from “the unit ran and was later unloaded,” availability is sacrificed to avoid a duplicate privileged mutation.
+
 This pure decision contract is not yet connected to the production recovery path. That integration requires the separate supervisor implementation and exact-head compilation/behavioral tests. It is a testable contract for the next integration step, not a claim that the architecture is already deployed.
 
 ## Qualification plan
