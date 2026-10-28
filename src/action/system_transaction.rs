@@ -455,7 +455,129 @@ impl SystemTransaction {
             }
         }
 
+        self.validate_phase_receipts()?;
         Ok(())
+    }
+
+    /// Reject wire envelopes that claim a lifecycle phase unsupported by their receipts.
+    ///
+    /// Field-level digest validation is not enough: because this type is deserialized
+    /// across process/UI boundaries, callers must not be able to label a planned
+    /// transaction as promoted merely by editing the public phase field.
+    fn validate_phase_receipts(&self) -> Result<(), String> {
+        let has_validation = self.validation.is_some();
+        let has_authorization = self.authorization.is_some();
+        let has_snapshot = self.snapshot.is_some();
+        let has_application = self.application.is_some();
+        let has_verification = self.verification.is_some();
+        let has_outcome = self.outcome.is_some();
+
+        let phase_is_consistent = match self.phase {
+            TransactionPhase::Planned => {
+                !has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Validated => {
+                has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Authorized => {
+                has_validation
+                    && has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Snapshotted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Applied => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Verified => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Promoted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status == 0)
+                    && has_verification
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Promoted && outcome.reason.is_none()
+                    })
+            }
+            TransactionPhase::Failed => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.exit_status != 0)
+                    && !has_verification
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Failed && outcome.reason.is_some()
+                    })
+            }
+            TransactionPhase::Recovered => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && self.application.as_ref().is_some_and(|application| {
+                        if application.exit_status == 0 {
+                            has_verification
+                        } else {
+                            !has_verification
+                        }
+                    })
+                    && self.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.phase == TransactionPhase::Recovered && outcome.reason.is_some()
+                    })
+            }
+        };
+
+        if phase_is_consistent {
+            Ok(())
+        } else {
+            Err(format!(
+                "transaction phase {:?} is inconsistent with its lifecycle receipts",
+                self.phase
+            ))
+        }
     }
 
     pub fn digest(&self) -> Result<[u8; 32], String> {
