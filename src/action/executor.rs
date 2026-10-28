@@ -12,7 +12,7 @@
 use super::authority_replay::AuthorityReplayLedger;
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use super::generation_manager::GenerationManager;
-use super::worker_observation::{WorkerObservationReceipt, WorkerProcessDisposition};
+use super::worker_observation::WorkerObservationReceipt;
 use crate::traits::{ActionType, ConsciousnessThresholds, PhiAwareScoring};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -1898,20 +1898,12 @@ impl NixOSExecutor {
                 let _ = child.wait().await;
                 return Err("worker gate stdin channel is unavailable; payload was not released".into());
             };
-            if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
-                drop(gate_stdin);
-                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                return Err(format!(
-                    "worker gate release token could not be delivered; payload was not intentionally released: {error}"
-                ));
-            }
-            drop(gate_stdin);
-            // The release token is no longer needed once EOF has been sent.
-            // Zeroize it before waiting for a potentially long-running activation.
-            drop(release_token);
 
+            // Transfer child and pidfd ownership to the journal-owned observer
+            // before writing the release capability. From this point on, request
+            // cancellation may close stdin (causing either an unreleased gate to
+            // exit or a fully delivered one-shot frame to release) but cannot
+            // drop the child handle and abandon process observation.
             let started_at = std::time::Instant::now();
             let supervisor = tokio::spawn(async move {
                 Self::supervise_worker_process(
@@ -1923,6 +1915,23 @@ impl NixOSExecutor {
                 )
                 .await
             });
+
+            if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
+                drop(gate_stdin);
+                drop(release_token);
+                // The frame may be incomplete. Do not kill a possibly released
+                // activation; the detached supervisor records its process
+                // disposition and the transaction remains reconciliation-required.
+                drop(supervisor);
+                return Err(format!(
+                    "worker gate release delivery failed or became indeterminate: {error}; journal-owned observation continues and reconciliation is required"
+                ));
+            }
+            drop(gate_stdin);
+            // Closing stdin sends the frame terminator; the token is no longer
+            // needed. Zeroize it before awaiting a potentially long activation.
+            drop(release_token);
+
             match supervisor.await {
                 Ok(result) => result,
                 Err(error) => Err(format!(
