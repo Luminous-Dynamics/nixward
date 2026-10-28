@@ -46,9 +46,11 @@ pub enum TraceViolationKind {
     PayloadReleasedWithoutAuthorization,
     PayloadReleasedBeforeStartSubmission,
     PayloadReleasedBeforeDurableWorkerIdentity,
+    DuplicatePayloadRelease,
     PayloadExitBeforePayloadRelease,
     ReceiptBeforePayloadExit,
     ReceiptWithoutDurableWorkerIdentity,
+    DuplicateProcessReceiptPublication,
     LifecycleValidationBeforePayloadExit,
     LifecycleValidationWithoutPostExitTargetObservation,
     LifecycleValidationWithoutCandidatePostState,
@@ -201,6 +203,12 @@ pub fn validate_trace(
                         kind: TraceViolationKind::PayloadReleasedBeforeDurableWorkerIdentity,
                     });
                 }
+                if payload_released {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicatePayloadRelease,
+                    });
+                }
                 payload_released = true;
             }
             TraceEventKind::PayloadExited => {
@@ -213,6 +221,12 @@ pub fn validate_trace(
                 payload_exited = true;
             }
             TraceEventKind::ProcessReceiptPersisted => {
+                if process_receipt_persisted {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateProcessReceiptPublication,
+                    });
+                }
                 if !payload_exited {
                     violations.push(TraceViolation {
                         event_index,
@@ -228,7 +242,7 @@ pub fn validate_trace(
                 process_receipt_persisted = true;
             }
             TraceEventKind::TargetObserved(observation) => {
-                if payload_exited {
+                if payload_exited && process_receipt_persisted {
                     target_observed_after_exit = Some(observation);
                     // A newer target snapshot invalidates validation of an older one.
                     lifecycle_postcondition_validated = false;
