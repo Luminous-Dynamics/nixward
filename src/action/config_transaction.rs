@@ -2794,7 +2794,8 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Release candidate retention only after activation/recovery is terminal.    #[cfg(feature = "native")]
+    /// Release candidate retention only after activation/recovery is terminal.
+    #[cfg(feature = "native")]
     pub fn release_candidate_retention(&self) -> Result<(), String> {
         if !matches!(self.phase, ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) {
             return Err("candidate retention cannot be released before a terminal transaction phase".into());
