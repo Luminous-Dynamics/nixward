@@ -102,13 +102,13 @@ The first release should report raw counts and per-case results. Hard safety gat
 | Receipt completeness | mutation attempts ending in a valid terminal or explicitly indeterminate state with required evidence | **100%** |
 | Recoverable-fault resolution | injected fault reaches verified recovery or safe refusal according to its declared recovery class | **100%** of canonical cases |
 | Unsupported claim count | report labels queued/skipped/missing checks as passes or extrapolates a test result beyond its fault model | **0** |
-| Intent task success | desired-state postconditions satisfied for held-out tasks | report baseline and confidence interval; establish threshold after pilot |
-| Operator effort | active review, intervention, and recovery time per task | report median/p95 against baseline |
-| Performance overhead | added preflight/receipt verification latency, excluding Nix build time | report p50/p95 by operation class |
+| Intent task success | desired-state postconditions satisfied for held-out tasks | target ≥95% exact postcondition success on a 100-task held-out suite; report 95% confidence intervals and per-task-class results |
+| Operator effort | active review, intervention, and recovery time per task | target ≥30% lower median active operator time than the matched baseline without weakening safety gates |
+| Performance overhead | added policy/authority preflight and receipt-verification latency, excluding Nix evaluation/build time | target p95 <100 ms on a documented reference host; report p50/p95 and the exact hardware/software environment |
 
 Zero observed failures in a finite test corpus is a release criterion for that corpus, not a proof of zero real-world risk. Report denominator, environment, test independence limits, and untested fault models beside every rate. Never merge test, simulation, static-analysis, benchmark, and live-host evidence into one unlabeled success number.
 
-For industry-facing operational comparison, also report the current DORA five metrics: change lead time, deployment frequency, failed-deployment recovery time, change fail rate, and deployment rework rate. Compute them over a clearly defined observation window and count only changes and failures in the benchmark's stated scope. These measures complement, but do not replace, Nixward's security gates: a fast system that performs an unauthorized mutation is still a failing system.
+For industry-facing operational comparison, also report the current DORA five metrics: change lead time, deployment frequency, failed-deployment recovery time, change fail rate, and deployment rework rate. Compute them over a clearly defined observation window and count only changes and failures in the benchmark's stated scope. These measures complement, but do not replace, Nixward's security gates: a fast system that performs an unauthorized mutation is still a failing system. For a longitudinal pilot after the deterministic suite is stable, aim for at least a 50% reduction in failed-deployment recovery time and a 30% relative reduction in change-fail/rework rates against a matched baseline. These are ambitious research targets, not current results; do not claim them from a small synthetic VM suite, and report sample size and uncertainty.
 
 ## 6. Evidence bundle
 
