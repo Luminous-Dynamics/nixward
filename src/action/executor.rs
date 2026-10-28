@@ -4500,7 +4500,8 @@ mod tests {
             environment_digest: NixOSExecutor::activation_worker_environment_digest(),
         };
         worker.validate_identity().unwrap();
-        let receipt_path = WorkerObservationReceipt::path_for(&journal_path, &worker).unwrap();
+        let observation_path = WorkerObservationReceipt::path_for(&journal_path, &worker).unwrap();
+        let receipt_path = observation_path.clone();
         let started_at = std::time::Instant::now();
 
         // The request task owns only the JoinHandle. Cancellation drops that
@@ -4510,7 +4511,7 @@ mod tests {
                 child,
                 pidfd,
                 worker,
-                receipt_path.clone(),
+                receipt_path,
                 started_at,
             )
             .await
@@ -4520,9 +4521,6 @@ mod tests {
         request.abort();
         let _ = request.await;
 
-        let observation_path = directory.path().join(format!(
-            "transaction.json.worker-{pid}-{start_time_ticks}.json"
-        ));
         for _ in 0..100 {
             if observation_path.exists() {
                 break;
