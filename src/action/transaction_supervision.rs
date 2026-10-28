@@ -139,8 +139,8 @@ pub enum WorkerStartIntent {
     PreparedNotSubmitted,
     /// The pre-call barrier was persisted; the manager may have accepted the request.
     SubmissionMayHaveOccurred,
-    /// The manager returned an accepted invocation identity and it was durably recorded.
-    InvocationAccepted,
+    /// The unit invocation identity was observed after manager acceptance and durably recorded.
+    UnitInvocationIdentityPersisted,
 }
 
 /// Read-only result of querying the manager for the canonical transaction unit.
@@ -185,7 +185,7 @@ pub fn decide_worker_start_recovery(
                 WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
             }
         },
-        WorkerStartIntent::SubmissionMayHaveOccurred | WorkerStartIntent::InvocationAccepted => {
+        WorkerStartIntent::SubmissionMayHaveOccurred | WorkerStartIntent::UnitInvocationIdentityPersisted => {
             match manager {
                 ManagerUnitObservation::MatchingTransactionUnit => {
                     WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
@@ -291,7 +291,7 @@ mod tests {
         const INTENTS: [WorkerStartIntent; 3] = [
             WorkerStartIntent::PreparedNotSubmitted,
             WorkerStartIntent::SubmissionMayHaveOccurred,
-            WorkerStartIntent::InvocationAccepted,
+            WorkerStartIntent::UnitInvocationIdentityPersisted,
         ];
         const MANAGER_STATES: [ManagerUnitObservation; 5] = [
             ManagerUnitObservation::NotQueried,
@@ -312,22 +312,22 @@ mod tests {
                     | (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::Unavailable)
                     | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::NotQueried)
                     | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::Unavailable)
-                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::NotQueried)
-                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::Unavailable) => {
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::NotQueried)
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::Unavailable) => {
                         WorkerStartRecoveryDecision::QueryCanonicalManagerUnit
                     }
                     (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::MatchingTransactionUnit)
                     | (WorkerStartIntent::PreparedNotSubmitted, ManagerUnitObservation::ConflictingUnitIdentity)
                     | (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::ConflictingUnitIdentity)
-                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::ConflictingUnitIdentity) => {
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::ConflictingUnitIdentity) => {
                         WorkerStartRecoveryDecision::HoldOnUnitIdentityConflict
                     }
                     (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::MatchingTransactionUnit)
-                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::MatchingTransactionUnit) => {
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::MatchingTransactionUnit) => {
                         WorkerStartRecoveryDecision::ObserveExistingMatchingUnit
                     }
                     (WorkerStartIntent::SubmissionMayHaveOccurred, ManagerUnitObservation::Absent)
-                    | (WorkerStartIntent::InvocationAccepted, ManagerUnitObservation::Absent) => {
+                    | (WorkerStartIntent::UnitInvocationIdentityPersisted, ManagerUnitObservation::Absent) => {
                         WorkerStartRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
                     }
                 };
@@ -340,7 +340,7 @@ mod tests {
     fn lost_start_response_never_reissues_an_ambiguous_mutation() {
         for intent in [
             WorkerStartIntent::SubmissionMayHaveOccurred,
-            WorkerStartIntent::InvocationAccepted,
+            WorkerStartIntent::UnitInvocationIdentityPersisted,
         ] {
             assert_eq!(
                 decide_worker_start_recovery(intent, ManagerUnitObservation::Absent),
