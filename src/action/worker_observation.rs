@@ -60,8 +60,15 @@ impl WorkerObservationReceipt {
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .ok_or_else(|| "transaction journal filename is not canonical UTF-8".to_string())?;
+        let purpose = match worker.purpose {
+            ActivationWorkerPurpose::ProfileTransition => "profile_transition",
+            ActivationWorkerPurpose::Activation => "activation",
+            ActivationWorkerPurpose::RecoveryProfileTransition => "recovery_profile_transition",
+            ActivationWorkerPurpose::RecoveryActivation => "recovery_activation",
+        };
+        let boot_id = worker.boot_id.replace('-', "");
         Ok(parent.join(format!(
-            "{journal_name}.worker-{}-{}.json",
+            "{journal_name}.worker-{purpose}-{}-{}-{boot_id}.json",
             worker.pid, worker.start_time_ticks
         )))
     }
