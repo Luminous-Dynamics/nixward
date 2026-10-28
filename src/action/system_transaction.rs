@@ -640,6 +640,91 @@ mod tests {
     }
 
     #[test]
+    fn wire_validation_rejects_impossible_phase_receipt_combinations() {
+        let plan = plan();
+
+        // A phase label alone cannot synthesize a completed transaction.
+        let mut forged = SystemTransaction::planned(&plan);
+        forged.phase = TransactionPhase::Promoted;
+        assert!(forged.validate_wire().is_err());
+
+        // Validated requires validation evidence, and Authorized requires the
+        // following authorization receipt—not just an edited phase field.
+        let mut forged = SystemTransaction::planned(&plan);
+        forged.phase = TransactionPhase::Validated;
+        assert!(forged.validate_wire().is_err());
+
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.phase = TransactionPhase::Authorized;
+        assert!(tx.validate_wire().is_err());
+
+        // Applied/Verified must agree with the exact process outcome and
+        // the existence of verification evidence.
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+
+        let mut missing_verification = tx.clone();
+        missing_verification.phase = TransactionPhase::Verified;
+        assert!(missing_verification.validate_wire().is_err());
+
+        let mut contradictory_exit = tx.clone();
+        contradictory_exit
+            .application
+            .as_mut()
+            .expect("application was just recorded")
+            .exit_status = 17;
+        assert!(contradictory_exit.validate_wire().is_err());
+
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(true))
+            .unwrap();
+        tx.promote(&plan).unwrap();
+
+        let mut mismatched_outcome = tx.clone();
+        mismatched_outcome.outcome.as_mut().unwrap().phase = TransactionPhase::Failed;
+        assert!(mismatched_outcome.validate_wire().is_err());
+
+        let mut missing_outcome = tx;
+        missing_outcome.outcome = None;
+        assert!(missing_outcome.validate_wire().is_err());
+    }
+
+    #[test]
+    fn every_reachable_lifecycle_phase_has_a_consistent_wire_envelope() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Validated);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Authorized);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Snapshotted);
+        assert!(tx.validate_wire().is_ok());
+
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Applied);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(true))
+            .unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.validate_wire().is_ok());
+
+        tx.promote(&plan).unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Promoted);
+        assert!(tx.validate_wire().is_ok());
+    }
+
+    #[test]
     fn wire_fixture_round_trips_with_stable_schema() {
         let raw = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -709,10 +794,12 @@ mod tests {
         let command = plan.command().unwrap().command_digest();
         tx.record_application(&plan, command, 10, 20, 1).unwrap();
         assert_eq!(tx.phase, TransactionPhase::Failed);
+        assert!(tx.validate_wire().is_ok());
         assert!(tx.promote(&plan).is_err());
 
         tx.recover(&plan, "restored previous generation").unwrap();
         assert_eq!(tx.phase, TransactionPhase::Recovered);
+        assert!(tx.validate_wire().is_ok());
         assert!(tx.is_terminal());
     }
 
