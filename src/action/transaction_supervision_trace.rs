@@ -466,7 +466,7 @@ mod tests {
                     TraceEventKind::WorkerIdentityPersisted,
                     TraceEventKind::PayloadReleased,
                 ];
-                let safe_order = prefix.as_slice() == required_order;
+                let safe_order = prefix.as_slice() == &required_order[..];
                 let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
                 assert_eq!(
                     result.is_safe(),
