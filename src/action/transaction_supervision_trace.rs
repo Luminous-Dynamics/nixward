@@ -664,23 +664,49 @@ mod tests {
                     trace.remove(8); // process receipt
                 }
                 5 => {
-                    trace[9].kind =
-                        TraceEventKind::TargetObserved(TargetObservation::MixedOrUnknown);
+                    let target = match (seed / 10) % 5 {
+                        0 => TargetObservation::NotAttempted,
+                        1 => TargetObservation::PredecessorRuntimeAndProfileActive,
+                        2 => TargetObservation::BootCandidateProfileSelected,
+                        3 => TargetObservation::MixedOrUnknown,
+                        _ => TargetObservation::Unavailable,
+                    };
+                    trace[9].kind = TraceEventKind::TargetObserved(target);
                 }
                 6 => {
-                    trace[8].attempt_id = "attempt-from-another-worker".to_owned();
+                    if (seed / 10) % 2 == 0 {
+                        trace[8].attempt_id = "attempt-from-another-worker".to_owned();
+                    } else {
+                        trace[8].transaction_id = "transaction-from-another-worker".to_owned();
+                    }
                 }
                 7 => {
-                    trace.insert(4, event(TraceEventKind::ManagerStartSubmitted));
+                    let position = 3 + ((seed / 10) % 4) as usize;
+                    trace.insert(position, event(TraceEventKind::ManagerStartSubmitted));
                 }
                 8 => {
-                    trace.push(event(TraceEventKind::TargetObserved(
-                        TargetObservation::CandidateRuntimeAndProfileActive,
-                    )));
+                    let trailing_kind = match (seed / 10) % 12 {
+                        0 => TraceEventKind::AuthorizationVerified,
+                        1 => TraceEventKind::AttemptPreparedDurably,
+                        2 => TraceEventKind::SubmissionBarrierPersisted,
+                        3 => TraceEventKind::ManagerStartSubmitted,
+                        4 => TraceEventKind::WorkerIdentityObserved,
+                        5 => TraceEventKind::WorkerIdentityPersisted,
+                        6 => TraceEventKind::PayloadReleased,
+                        7 => TraceEventKind::PayloadExited,
+                        8 => TraceEventKind::ProcessReceiptPersisted,
+                        9 => TraceEventKind::TargetObserved(
+                            TargetObservation::CandidateRuntimeAndProfileActive,
+                        ),
+                        10 => TraceEventKind::LifecyclePostconditionValidated,
+                        _ => TraceEventKind::TerminalSuccessRecorded,
+                    };
+                    trace.push(event(trailing_kind));
                 }
                 _ => {
                     let target = trace.remove(9);
-                    trace.insert(7, target); // target snapshot predates process exit
+                    let position = ((seed / 10) % 8) as usize;
+                    trace.insert(position, target); // target snapshot predates process exit
                 }
             }
 
