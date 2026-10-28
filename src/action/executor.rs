@@ -1777,7 +1777,16 @@ impl NixOSExecutor {
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis())
             .map_err(|_| "worker observation elapsed time exceeded u64".to_string())?;
         let receipt = WorkerObservationReceipt::from_status(&worker, &output.status, elapsed_ms)?;
+        let disposition = receipt.disposition_label();
         receipt.persist_atomic(&observation_path)?;
+        info!(
+            transaction_id = %worker.transaction_id,
+            worker_pid = worker.pid,
+            purpose = ?worker.purpose,
+            process_disposition = %disposition,
+            elapsed_ms,
+            "durable worker process observation published; independently verify NixOS post-state before classifying transaction outcome"
+        );
         Ok(output)
     }
 
@@ -1905,15 +1914,28 @@ impl NixOSExecutor {
             // exit or a fully delivered one-shot frame to release) but cannot
             // drop the child handle and abandon process observation.
             let started_at = std::time::Instant::now();
+            let supervised_transaction_id = worker_for_observation.transaction_id.clone();
+            let supervised_worker_pid = worker_for_observation.pid;
+            let supervised_purpose = worker_for_observation.purpose;
             let supervisor = tokio::spawn(async move {
-                Self::supervise_worker_process(
+                let result = Self::supervise_worker_process(
                     child,
                     pidfd,
                     worker_for_observation,
                     observation_path,
                     started_at,
                 )
-                .await
+                .await;
+                if let Err(error) = &result {
+                    warn!(
+                        transaction_id = %supervised_transaction_id,
+                        worker_pid = supervised_worker_pid,
+                        purpose = ?supervised_purpose,
+                        error = %error,
+                        "worker supervisor could not publish complete process observation; transaction remains indeterminate and requires read-only reconciliation"
+                    );
+                }
+                result
             });
 
             if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
