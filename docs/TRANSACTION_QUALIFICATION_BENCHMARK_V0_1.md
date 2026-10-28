@@ -108,6 +108,8 @@ The first release should report raw counts and per-case results. Hard safety gat
 
 Zero observed failures in a finite test corpus is a release criterion for that corpus, not a proof of zero real-world risk. Report denominator, environment, test independence limits, and untested fault models beside every rate. Never merge test, simulation, static-analysis, benchmark, and live-host evidence into one unlabeled success number.
 
+For industry-facing operational comparison, also report the current DORA five metrics: change lead time, deployment frequency, failed-deployment recovery time, change fail rate, and deployment rework rate. Compute them over a clearly defined observation window and count only changes and failures in the benchmark's stated scope. These measures complement, but do not replace, Nixward's security gates: a fast system that performs an unauthorized mutation is still a failing system.
+
 ## 6. Evidence bundle
 
 Every run should produce a machine-readable, content-addressable report with at least:
@@ -152,4 +154,6 @@ SLSA provenance can help identify how a software artifact was built; it does not
 - [NixOS Manual — What happens during a system switch?](https://github.com/NixOS/nixpkgs/blob/master/nixos/doc/manual/development/what-happens-during-a-system-switch.chapter.md)
 - [NixOS VM tests](https://wiki.nixos.org/wiki/NixOS_VM_tests)
 - [SLSA specification v1.2](https://slsa.dev/spec/v1.2/)
+- [DORA's software delivery performance metrics](https://dora.dev/guides/dora-metrics/)
+- [Colmena deployment tool](https://github.com/nix-community/colmena)
 - Nixward's [system transaction architecture](SYSTEM_TRANSACTION_ARCHITECTURE.md) and [wire contract](SYSTEM_TRANSACTION_WIRE_V1.md)
