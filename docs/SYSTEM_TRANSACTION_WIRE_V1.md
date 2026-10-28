@@ -65,8 +65,8 @@ A syntactically valid envelope is not necessarily a valid lifecycle history. Con
 - `applied`: the preceding receipts plus an application receipt whose exit status is zero; no verification or outcome receipt yet.
 - `verified`: the applied receipts plus verification; no terminal outcome yet.
 - `promoted`: verified receipts plus a promoted outcome that has no failure reason.
-- `failed`: the validated/authorized/snapshotted receipts plus a nonzero application exit status, no verification receipt, and a failed outcome with a reason.
-- `recovered`: the validated/authorized/snapshotted receipts plus a recovered outcome with a reason. If application exited zero, verification must be present; if application exited nonzero, verification must be absent.
+- `failed`: the validated/authorized/snapshotted receipts plus a nonzero application exit status, no verification receipt, and a failed outcome with a non-empty reason.
+- `recovered`: the validated/authorized/snapshotted receipts plus a recovered outcome with a non-empty reason. If application exited zero, verification must be present; if application exited nonzero, verification must be absent.
 
 For terminal phases, `outcome.phase` must equal the envelope's `phase`. Nonterminal phases must not carry a terminal outcome. These checks establish internal lifecycle consistency only: digest syntax and phase consistency do not establish that the evidence is truthful or that the post-state digest satisfies the desired-state contract.
 
