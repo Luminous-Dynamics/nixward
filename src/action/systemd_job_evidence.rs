@@ -328,6 +328,11 @@ pub fn correlate_job_removed(
             reason: "JobRemoved evidence has an invalid job ID or object path".into(),
         };
     }
+    if job_id_from_object_path(&signal.job_object_path).ok() != Some(signal.job_id) {
+        return StartJobCorrelation::HoldForReconciliation {
+            reason: "JobRemoved numeric ID conflicts with the ID encoded in its object path".into(),
+        };
+    }
     if signal.unit_name.trim().is_empty() || signal.unit_name.chars().any(char::is_control) {
         return StartJobCorrelation::RejectedEvidence {
             reason: "JobRemoved evidence has an invalid unit name".into(),
