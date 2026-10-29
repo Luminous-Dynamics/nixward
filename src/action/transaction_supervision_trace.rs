@@ -1038,6 +1038,11 @@ mod tests {
             TraceViolationKind::EventIdentityBindingMismatch => "event_identity_binding_mismatch",
             TraceViolationKind::EmptyExpectedTransactionId => "empty_expected_transaction_id",
             TraceViolationKind::EmptyExpectedAttemptId => "empty_expected_attempt_id",
+            TraceViolationKind::DuplicateAuthorizationVerification => {
+                "duplicate_authorization_verification"
+            }
+            TraceViolationKind::DuplicateAttemptPreparation => "duplicate_attempt_preparation",
+            TraceViolationKind::DuplicateSubmissionBarrier => "duplicate_submission_barrier",
             TraceViolationKind::AttemptPreparedWithoutVerifiedAuthorization => {
                 "attempt_prepared_without_verified_authorization"
             }
