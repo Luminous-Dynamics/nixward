@@ -265,6 +265,7 @@ fn valid_job_object_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn start(reply: ManagerStartReply) -> SystemdStartEvidence {
         SystemdStartEvidence {
@@ -483,5 +484,83 @@ mod tests {
             correlate_job_removed(&start, &signal(JobRemovedResult::Done)),
             StartJobCorrelation::RejectedEvidence { .. }
         ));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// A single-field mismatch must not be downgraded to an unrelated event:
+        /// each partial identity collision is suspicious and therefore held.
+        #[test]
+        fn one_field_job_identity_mutation_never_completes(field in 0u8..3) {
+            let start = enqueued_start();
+            let mut event = signal(JobRemovedResult::Done);
+            match field {
+                0 => event.job_id += 1,
+                1 => event.job_object_path = "/org/freedesktop/systemd1/job/42".into(),
+                _ => event.unit_name = "unrelated.service".into(),
+            }
+
+            prop_assert!(matches!(
+                correlate_job_removed(&start, &event),
+                StartJobCorrelation::HoldForReconciliation { .. }
+            ));
+        }
+
+        /// A lost direct reply is ambiguous irrespective of the later signal's
+        /// apparent completion; it never becomes evidence of completed start.
+        #[test]
+        fn unknown_manager_reply_never_becomes_completed_start(field in 0u8..3) {
+            let start = start(ManagerStartReply::Unknown);
+            let mut event = signal(JobRemovedResult::Done);
+            match field {
+                0 => event.job_id += 1,
+                1 => event.job_object_path = "/org/freedesktop/systemd1/job/42".into(),
+                _ => event.unit_name = "unrelated.service".into(),
+            }
+            prop_assert!(matches!(
+                correlate_job_removed(&start, &event),
+                StartJobCorrelation::HoldForReconciliation { .. }
+            ));
+        }
+
+        /// Only a matched JobRemoved done result can be start-job completion.
+        #[test]
+        fn every_non_done_job_result_is_non_success(result_code in 0u8..5) {
+            let result = match result_code {
+                0 => JobRemovedResult::Canceled,
+                1 => JobRemovedResult::Timeout,
+                2 => JobRemovedResult::Failed,
+                3 => JobRemovedResult::Dependency,
+                _ => JobRemovedResult::Skipped,
+            };
+            prop_assert_eq!(
+                correlate_job_removed(&enqueued_start(), &signal(result)),
+                StartJobCorrelation::MatchedStartJobFailed { result }
+            );
+        }
+
+        /// Canonical names must be independent of raw IDs and limited to one
+        /// unit prefix + exactly 64 lowercase hexadecimal digest characters.
+        #[test]
+        fn canonical_unit_name_is_bounded_and_safe(
+            transaction_id in "[a-z0-9]{1,32}",
+            attempt_id in "[a-z0-9]{1,32}"
+        ) {
+            let name = canonical_attempt_unit_name(
+                &transaction_id,
+                &attempt_id,
+                TransactionWorkerPurpose::Activation
+            ).unwrap();
+            let prefix = "nixward-transaction@";
+            let suffix = ".service";
+            prop_assert!(name.starts_with(prefix));
+            prop_assert!(name.ends_with(suffix));
+            let digest = &name[prefix.len()..name.len() - suffix.len()];
+            prop_assert_eq!(digest.len(), 64);
+            prop_assert!(digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            prop_assert!(!digest.contains(&transaction_id));
+            prop_assert!(!digest.contains(&attempt_id));
+        }
     }
 }
