@@ -230,9 +230,12 @@ pub fn correlate_job_removed(
     }
 
     if signal.job_id != expected_job_id || signal.job_object_path != expected_job_path {
-        if signal.unit_name == start.unit_name || signal.job_object_path == expected_job_path {
+        if signal.job_id == expected_job_id
+            || signal.unit_name == start.unit_name
+            || signal.job_object_path == expected_job_path
+        {
             return StartJobCorrelation::HoldForReconciliation {
-                reason: "JobRemoved shares the expected unit or job object path but conflicts with the acknowledged job identity".into(),
+                reason: "JobRemoved shares the expected job ID, unit, or object path but conflicts with the acknowledged job identity".into(),
             };
         }
         return StartJobCorrelation::UnrelatedSignal;
@@ -361,6 +364,14 @@ mod tests {
         same_unit_wrong_job.unit_name = start.unit_name.clone();
         assert!(matches!(
             correlate_job_removed(&start, &same_unit_wrong_job),
+            StartJobCorrelation::HoldForReconciliation { .. }
+        ));
+
+        let mut same_id_wrong_path = signal(JobRemovedResult::Done);
+        same_id_wrong_path.job_object_path = "/org/freedesktop/systemd1/job/42".into();
+        same_id_wrong_path.unit_name = "unrelated.service".into();
+        assert!(matches!(
+            correlate_job_removed(&start, &same_id_wrong_path),
             StartJobCorrelation::HoldForReconciliation { .. }
         ));
     }
