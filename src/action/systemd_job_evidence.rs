@@ -427,6 +427,29 @@ mod tests {
     }
 
     #[test]
+    fn start_reply_can_be_classified_without_fabricating_a_job_signal() {
+        assert_eq!(
+            classify_start_reply(&enqueued_start()),
+            Ok(StartReplyDisposition::Enqueued {
+                job_id: 41,
+                job_object_path: "/org/freedesktop/systemd1/job/41".into(),
+            })
+        );
+        assert_eq!(
+            classify_start_reply(&start(ManagerStartReply::Unknown)),
+            Ok(StartReplyDisposition::Ambiguous)
+        );
+        assert_eq!(
+            classify_start_reply(&start(ManagerStartReply::Rejected {
+                error_name: "org.freedesktop.systemd1.UnitMasked".into(),
+            })),
+            Ok(StartReplyDisposition::ManagerRejected {
+                error_name: "org.freedesktop.systemd1.UnitMasked".into(),
+            })
+        );
+    }
+
+    #[test]
     fn known_manager_rejection_is_not_a_success_signal() {
         let start = start(ManagerStartReply::Rejected {
             error_name: "org.freedesktop.systemd1.UnitMasked".into(),
