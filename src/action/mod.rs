@@ -27,6 +27,7 @@ pub mod phi_gate;
 pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
+mod worker_observation;
 
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,

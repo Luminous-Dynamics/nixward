@@ -12,6 +12,7 @@
 use super::authority_replay::AuthorityReplayLedger;
 use super::change_covenant::{ApprovalEvidenceKind, ChangeAuthorization, ChangePlan};
 use super::generation_manager::GenerationManager;
+use super::worker_observation::WorkerObservationReceipt;
 use crate::traits::{ActionType, ConsciousnessThresholds, PhiAwareScoring};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -1756,6 +1757,39 @@ impl NixOSExecutor {
         Ok(())
     }
 
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    async fn supervise_worker_process(
+        child: tokio::process::Child,
+        pidfd: OwnedFd,
+        worker: super::config_transaction::ActivationWorkerIdentity,
+        observation_path: PathBuf,
+        started_at: std::time::Instant,
+    ) -> Result<std::process::Output, String> {
+        // This task owns the child and pidfd. The request-facing future may be
+        // dropped without dropping the process handle or abandoning observation.
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|error| format!("worker supervisor failed waiting for {}: {error}", worker.pid))?;
+        if !Self::pidfd_exited(&pidfd)? {
+            return Err("worker wait completed without pidfd exit evidence; transaction remains indeterminate".into());
+        }
+        let elapsed_ms = u64::try_from(started_at.elapsed().as_millis())
+            .map_err(|_| "worker observation elapsed time exceeded u64".to_string())?;
+        let receipt = WorkerObservationReceipt::from_status(&worker, &output.status, elapsed_ms)?;
+        let disposition = receipt.disposition_label();
+        receipt.persist_atomic(&observation_path)?;
+        info!(
+            transaction_id = %worker.transaction_id,
+            worker_pid = worker.pid,
+            purpose = ?worker.purpose,
+            process_disposition = %disposition,
+            elapsed_ms,
+            "durable worker process observation published; independently verify NixOS post-state before classifying transaction outcome"
+        );
+        Ok(output)
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
@@ -1832,6 +1866,25 @@ impl NixOSExecutor {
                 ));
             }
 
+            let worker_for_observation = match transaction.activation_worker_identities().last().cloned() {
+                Some(worker) if worker.purpose == purpose => worker,
+                _ => {
+                    let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err("persisted transaction has no matching worker identity; payload was not released".into());
+                }
+            };
+            let observation_path = match WorkerObservationReceipt::path_for(journal_path, &worker_for_observation) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Err(format!("worker observation path is invalid; payload was not released: {error}"));
+                }
+            };
+
             // The payload remains blocked until its pidfd, exact gate argv,
             // payload digest, and transaction binding are durable. Re-observe
             // the selected profile after that durable receipt and immediately
@@ -1854,28 +1907,59 @@ impl NixOSExecutor {
                 let _ = child.wait().await;
                 return Err("worker gate stdin channel is unavailable; payload was not released".into());
             };
+
+            // Transfer child and pidfd ownership to the journal-owned observer
+            // before writing the release capability. From this point on, request
+            // cancellation may close stdin (causing either an unreleased gate to
+            // exit or a fully delivered one-shot frame to release) but cannot
+            // drop the child handle and abandon process observation.
+            let started_at = std::time::Instant::now();
+            let supervised_transaction_id = worker_for_observation.transaction_id.clone();
+            let supervised_worker_pid = worker_for_observation.pid;
+            let supervised_purpose = worker_for_observation.purpose;
+            let supervisor = tokio::spawn(async move {
+                let result = Self::supervise_worker_process(
+                    child,
+                    pidfd,
+                    worker_for_observation,
+                    observation_path,
+                    started_at,
+                )
+                .await;
+                if let Err(error) = &result {
+                    warn!(
+                        transaction_id = %supervised_transaction_id,
+                        worker_pid = supervised_worker_pid,
+                        purpose = ?supervised_purpose,
+                        error = %error,
+                        "worker supervisor could not publish complete process observation; transaction remains indeterminate and requires read-only reconciliation"
+                    );
+                }
+                result
+            });
+
             if let Err(error) = gate_stdin.write_all(&release_token[..]).await {
                 drop(gate_stdin);
-                let _ = Self::signal_pidfd(&pidfd, nix::libc::SIGKILL);
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                drop(release_token);
+                // The frame may be incomplete. Do not kill a possibly released
+                // activation; the detached supervisor records its process
+                // disposition and the transaction remains reconciliation-required.
+                drop(supervisor);
                 return Err(format!(
-                    "worker gate release token could not be delivered; payload was not intentionally released: {error}"
+                    "worker gate release delivery failed or became indeterminate: {error}; journal-owned observation continues and reconciliation is required"
                 ));
             }
             drop(gate_stdin);
-            // The release token is no longer needed once EOF has been sent.
-            // Zeroize it before waiting for a potentially long-running activation.
+            // Closing stdin sends the frame terminator; the token is no longer
+            // needed. Zeroize it before awaiting a potentially long activation.
             drop(release_token);
 
-            let output = child
-                .wait_with_output()
-                .await
-                .map_err(|error| format!("failed waiting for gated transaction worker {executable}: {error}"))?;
-            if !Self::pidfd_exited(&pidfd)? {
-                return Err("transaction worker wait completed without pidfd exit evidence".into());
+            match supervisor.await {
+                Ok(result) => result,
+                Err(error) => Err(format!(
+                    "journal-owned worker supervisor stopped before publishing a durable process observation: {error}; transaction remains indeterminate and must be reconciled before retry"
+                )),
             }
-            Ok(output)
         }
     }
 
@@ -2865,6 +2949,44 @@ impl NixOSExecutor {
             _ => {}
         }
         for worker in workers {
+            let observation_path = match WorkerObservationReceipt::path_for(&journal_path, worker) {
+                Ok(path) => path,
+                Err(error) => {
+                    return ExecutionResult::FailedNoRollback {
+                        error: format!("cannot derive exact worker-observation path: {error}"),
+                        rollback_error: None,
+                    };
+                }
+            };
+            match std::fs::symlink_metadata(&observation_path) {
+                Ok(_) => match WorkerObservationReceipt::load_for_worker(&observation_path, worker) {
+                    Ok(receipt) => info!(
+                        transaction_id = %worker.transaction_id,
+                        worker_pid = worker.pid,
+                        purpose = ?worker.purpose,
+                        process_disposition = %receipt.disposition_label(),
+                        "loaded identity-bound process observation; independent NixOS post-state reconciliation is still required"
+                    ),
+                    Err(error) => warn!(
+                        transaction_id = %worker.transaction_id,
+                        worker_pid = worker.pid,
+                        error = %error,
+                        "worker observation exists but cannot be validated; do not use it as process evidence and continue only with independent read-only post-state reconciliation"
+                    ),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => warn!(
+                    transaction_id = %worker.transaction_id,
+                    worker_pid = worker.pid,
+                    "worker observation receipt is absent; absence is indeterminate and independent read-only post-state reconciliation is mandatory"
+                ),
+                Err(error) => warn!(
+                    transaction_id = %worker.transaction_id,
+                    worker_pid = worker.pid,
+                    error = %error,
+                    "worker observation receipt could not be inspected; independent read-only post-state reconciliation is mandatory"
+                ),
+            }
+
             match Self::persisted_worker_may_be_live(worker) {
                 Ok(true) => {
                     return ExecutionResult::FailedNoRollback {
@@ -4361,22 +4483,190 @@ mod tests {
         let pid = std::process::id();
         let boot_id = NixOSExecutor::current_boot_id().unwrap();
         let start_time_ticks = NixOSExecutor::proc_start_time_ticks(pid).unwrap().unwrap();
-        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-test/bin/worker";
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-rebuild/bin/nixos-rebuild";
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "e".repeat(64);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            payload_executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
         let identity = ActivationWorkerIdentity {
-            transaction_id: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            transaction_id: "d".repeat(64),
             purpose: ActivationWorkerPurpose::Activation,
             pid,
             boot_id,
             start_time_ticks,
             executable: executable.into(),
             process_image: executable.into(),
-            argv_digest: NixOSExecutor::activation_argv_digest(executable, &["switch".into()]),
+            argv_digest: NixOSExecutor::activation_argv_digest(executable, &gate_args),
+            payload_executable: payload_executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: NixOSExecutor::activation_argv_digest(payload_executable, &payload_args),
             environment_digest: NixOSExecutor::activation_worker_environment_digest(),
         };
         assert!(NixOSExecutor::persisted_worker_may_be_live(&identity).unwrap());
         let mut reused = identity;
         reused.start_time_ticks = start_time_ticks.saturating_add(1);
         assert!(!NixOSExecutor::persisted_worker_may_be_live(&reused).unwrap());
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[tokio::test]
+    async fn observer_publication_collision_after_exit_preserves_existing_receipt() {
+        use super::super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("transaction.json");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 23"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().expect("controlled helper process must start");
+        let pid = child.id().expect("helper process must have a PID");
+        let boot_id = NixOSExecutor::current_boot_id().unwrap();
+        let start_time_ticks = NixOSExecutor::proc_start_time_ticks(pid).unwrap().unwrap();
+        let pidfd = NixOSExecutor::open_pidfd(pid).unwrap();
+
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-rebuild/bin/nixos-rebuild";
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "e".repeat(64);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            payload_executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
+        let worker = ActivationWorkerIdentity {
+            transaction_id: "d".repeat(64),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid,
+            boot_id,
+            start_time_ticks,
+            executable: executable.into(),
+            process_image: executable.into(),
+            argv_digest: NixOSExecutor::activation_argv_digest(executable, &gate_args),
+            payload_executable: payload_executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: NixOSExecutor::activation_argv_digest(payload_executable, &payload_args),
+            environment_digest: NixOSExecutor::activation_worker_environment_digest(),
+        };
+        let observation_path = WorkerObservationReceipt::path_for(&journal_path, &worker).unwrap();
+        let sentinel = b"do-not-overwrite-existing-observation";
+        std::fs::write(&observation_path, sentinel).unwrap();
+
+        let result = NixOSExecutor::supervise_worker_process(
+            child,
+            pidfd,
+            worker,
+            observation_path.clone(),
+            std::time::Instant::now(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a process that exited but cannot publish its receipt must remain indeterminate"
+        );
+        assert_eq!(
+            std::fs::read(&observation_path).unwrap(),
+            sentinel,
+            "receipt publication must not overwrite an existing file"
+        );
+    }
+
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    #[tokio::test]
+    async fn worker_observation_survives_request_task_cancellation() {
+        use super::super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+        use tokio::time::{sleep, Duration};
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal_path = directory.path().join("transaction.json");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 0.15; exit 23"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().expect("controlled helper process must start");
+        let pid = child.id().expect("helper process must have a PID");
+        let boot_id = NixOSExecutor::current_boot_id().unwrap();
+        let start_time_ticks = NixOSExecutor::proc_start_time_ticks(pid).unwrap().unwrap();
+        let pidfd = NixOSExecutor::open_pidfd(pid).unwrap();
+
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
+        let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-rebuild/bin/nixos-rebuild";
+        let payload_args = vec!["switch".to_string()];
+        let release_challenge_digest = "e".repeat(64);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            payload_executable.to_string(),
+            release_challenge_digest.clone(),
+        ];
+        gate_args.extend(payload_args.iter().cloned());
+        let worker = ActivationWorkerIdentity {
+            transaction_id: "d".repeat(64),
+            purpose: ActivationWorkerPurpose::Activation,
+            pid,
+            boot_id,
+            start_time_ticks,
+            executable: executable.into(),
+            process_image: executable.into(),
+            argv_digest: NixOSExecutor::activation_argv_digest(executable, &gate_args),
+            payload_executable: payload_executable.into(),
+            payload_args: payload_args.clone(),
+            release_challenge_digest,
+            payload_argv_digest: NixOSExecutor::activation_argv_digest(payload_executable, &payload_args),
+            environment_digest: NixOSExecutor::activation_worker_environment_digest(),
+        };
+        worker.validate_identity().unwrap();
+        let observation_path = WorkerObservationReceipt::path_for(&journal_path, &worker).unwrap();
+        let receipt_path = observation_path.clone();
+        let started_at = std::time::Instant::now();
+
+        // The request task owns only the JoinHandle. Cancellation drops that
+        // handle, which detaches the supervisor rather than dropping its child.
+        let supervisor = tokio::spawn(async move {
+            NixOSExecutor::supervise_worker_process(
+                child,
+                pidfd,
+                worker,
+                receipt_path,
+                started_at,
+            )
+            .await
+        });
+        let request = tokio::spawn(async move { supervisor.await });
+        tokio::task::yield_now().await;
+        request.abort();
+        let _ = request.await;
+
+        for _ in 0..100 {
+            if observation_path.exists() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            observation_path.exists(),
+            "the detached supervisor must publish a process observation after request cancellation"
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&observation_path).unwrap()).unwrap();
+        assert_eq!(value["transaction_id"], "d".repeat(64));
+        assert_eq!(value["disposition"]["kind"], "exited");
+        assert_eq!(value["disposition"]["code"], 23);
+        assert!(
+            value.get("target_state").is_none(),
+            "process exit evidence must not be presented as proof of the NixOS postcondition"
+        );
     }
 
     #[test]
