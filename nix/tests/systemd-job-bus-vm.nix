@@ -14,6 +14,10 @@ pkgs.testers.runNixOSTest {
 
         [Service]
         Type=oneshot
+        # These digests are the canonical unit instances for the fixed
+        # transaction/attempt/purpose tuples in the two ignored Rust tests.
+        # Keep them synchronized deliberately: an identity algorithm change
+        # must force the live VM fixture to be reviewed.
         ExecStart=${pkgs.writeShellScript "nixward-transaction-test-action" ''
           case "$1" in
             62a0ce8ee10e06ec5458889470c2ade5a65ec0d24342559ce8fdcfc6a8d5f95f)
