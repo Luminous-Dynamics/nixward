@@ -1,12 +1,12 @@
 # Live systemd job observer v1
 
-Status: **zbus adapter authored behind the optional systemd feature; not compiled or executed here**  
+Status: **crate-private zbus adapter authored behind the optional systemd feature; not compiled or executed here**  
 Date: 2026-10-29  
 Related: [PR #93](https://github.com/Luminous-Dynamics/nixward/pull/93), [Issue #75](https://github.com/Luminous-Dynamics/nixward/issues/75)
 
 ## Scope
 
-The new module, src/action/systemd_job_bus.rs, implements the manager-level observation path using zbus. It does not launch the privileged worker directly, authorize a change, write the transaction journal itself, validate a worker receipt, or prove the actual NixOS runtime/profile postcondition.
+The crate-private module src/action/systemd_job_bus.rs implements the manager submission/observation path using zbus. It performs a mutating StartUnit request and is deliberately not wired to a production caller. It must remain uncalled until the existing authorized transaction template, canonical unit definition, cross-process journal interlock, crash-reconciliation path, and disposable-VM qualification are integrated. It does not launch or qualify the privileged worker, authorize a change, write the transaction journal itself, validate a worker receipt, or prove the actual NixOS runtime/profile postcondition.
 
 The API is intentionally split so the caller owns journal publication. A caller must durably persist the write-ahead intent before creating a prepared start capability; after the manager reply arrives, it must persist that exact reply before consuming the JobRemoved stream.
 
@@ -63,4 +63,4 @@ Use the same harmless service, VM configuration, and fault schedule against dire
 
 ## Execution status
 
-Static source review only. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. The adapter is unqualified until those checks run on the exact PR head.
+Static source review only. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
