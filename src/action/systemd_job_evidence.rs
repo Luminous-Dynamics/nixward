@@ -649,6 +649,7 @@ mod tests {
             JobRemovedResult::Failed,
             JobRemovedResult::Dependency,
             JobRemovedResult::Skipped,
+            JobRemovedResult::Unknown,
         ] {
             assert_eq!(
                 correlate_job_removed(&start, &signal(result)),
@@ -680,6 +681,17 @@ mod tests {
             intent.purpose(),
         ).unwrap());
         assert_eq!(intent.unit_name(), enqueued_start().unit_name);
+        let journal_evidence = intent.journal_evidence();
+        assert_eq!(journal_evidence.unit_name, intent.unit_name());
+        assert_eq!(
+            journal_evidence.unit_name,
+            canonical_attempt_unit_name(
+                &journal_evidence.transaction_id,
+                &journal_evidence.attempt_id,
+                journal_evidence.purpose,
+            )
+            .unwrap()
+        );
     }
 
     #[cfg(feature = "native")]
