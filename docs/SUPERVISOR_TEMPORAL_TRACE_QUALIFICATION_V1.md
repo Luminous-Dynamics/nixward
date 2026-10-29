@@ -66,13 +66,13 @@ The Rust unit tests cover:
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
 - three Proptest properties, configured for 512 cases each, covering removal of every mandatory success event, transaction/attempt identity rebinding, and the distinction between candidate-active and all other target observations; Proptest shrinking should reduce any failure to a minimal example;
 - **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success;
-- a versioned, language-neutral [JSON conformance corpus](fixtures/supervisor-temporal-qualification-v1.json) with **23 named input/output vectors**. A Rust fixture test loads the same corpus via `include_str!` and compares each vector's disposition, terminal-success claim, and complete violation multiset. This makes the contract reusable for an independent Python/Nix/other-language checker without treating the JSON fixture itself as proof.
+- a versioned, language-neutral [JSON conformance corpus](fixtures/supervisor-temporal-qualification-v1.json) with **33 named input/output vectors**. The Rust fixture test loads it via `include_str!`; an independent pure Nix reference model also evaluates every vector during `nix flake check`. Both compare the expected disposition, terminal-success claim, and complete violation multiset. This creates a Rust/Nix differential check and a portable contract for other implementations, without treating the shared fixture as proof of the requirements themselves.
 
-The 5,040-case check is exhaustive only for those seven event orderings. The 18-vector corpus covers selected positive, incomplete, identity, duplicate-event, freshness, and terminality scenarios. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
+The 5,040-case check is exhaustive only for those seven event orderings. The 33-vector corpus covers selected positive, incomplete, identity, duplicate-event, freshness, and terminality scenarios. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The test and check definitions are authored but have not been executed in this environment; do not interpret their presence as test results.
 
 ## Next qualification gates
 
-1. Compile and run the module tests at the exact commit; run formatting, Clippy, and the repository's locked-feature matrix.
+1. Run `nix flake check` to evaluate the Nix-native corpus-integrity gate, then compile and run the module tests at the exact commit; run formatting, Clippy, and the repository's locked-feature matrix.
 2. Expand the new Proptest properties to generate arbitrary-length event sequences and systematically enumerate unsafe terminal-success prefixes. The repository's Proptest integration enables shrinking, but the current three properties focus on mutations of a canonical successful trace rather than covering the full temporal state space. Consider Loom for in-process concurrent coordination only if the integrated Rust synchronization layer can be modeled; Loom is not a substitute for systemd or VM crash testing.
 3. Integrate the validator into the actual recovery path only after event provenance and journal binding are represented by trusted types. Do not let caller-created enums stand in for verified evidence.
 4. Inject failures at every persistence and manager-call boundary, and run on disposable NixOS VMs: lost D-Bus response, supervisor SIGKILL, receipt write/fsync failure, worker stop, daemon restart, and host reboot.
@@ -90,7 +90,7 @@ The 5,040-case check is exhaustive only for those seven event orderings. The 18-
 | Trace events accepted from another transaction/attempt identity | 0 |
 | False terminal success in deterministic and randomized fault-injection campaigns | 0 |
 | Critical seven-event permutations checked by the authored bounded test | 5,040 |
-| Shared JSON conformance vectors checked by the Rust fixture test | 23 |
+| Shared JSON conformance vectors checked by the Rust fixture test | 33 |
 | Deterministic generated traces checked by the authored oracle | 20,000 |
 | Deterministic required-evidence mutation trials | 20,000 |
 | Proptest cases per authored temporal property | 512 |
@@ -103,7 +103,11 @@ These are proposed acceptance targets, not measured results. Safety gates are no
 
 Compare the eventual integrated Nixward protocol against `nixos-rebuild` and Colmena using the same disposable host image, NixOS release, tasks, cache/network conditions, and injected failures. Keep separate outcomes for task success, mutation replay, false-success claims, recovery time, operator effort, and latency percentiles. A safer protocol may deliberately refuse an ambiguous operation; report that loss of availability separately instead of hiding it inside a single aggregate score.
 
-The current PR does not implement the systemd-owned privileged worker, wire this trace validator into production recovery, or qualify a NixOS VM. It is an independently reviewable safety contract intended to make temporal invariants executable before integration.
+The current PR does not implement the systemd-owned privileged worker, wire this trace validator into production recovery, or qualify a NixOS VM. The Nix reference model is a second policy implementation, not a production executor. It is an independently reviewable safety contract intended to make temporal invariants executable before integration.
+
+## Nix-native differential conformance gate
+
+`flake.nix` now exposes `checks.supervisor-temporal-qualification-vectors`. It validates the JSON schema/version, frozen 33-vector count, unique/nonempty case IDs, presence of all 33 named vector IDs, presence of each of the three dispositions, known event kinds, required fields/types, and coverage of every declared trace violation class. It then runs each vector through `nix/supervisor-temporal-trace.nix`, an independent pure Nix state-machine implementation, and asserts the Nix model agrees with the fixture's expected disposition, terminal-success claim, and sorted violation multiset. The Rust test separately checks the same corpus against the Rust implementation. This is stronger than a schema-only check: it can catch some Rust/Nix divergence in CI without building Rust first. It remains a differential test against a shared fixture, not a formal proof of correctness, evidence authenticity, or actual operating-system behavior. Do not claim the check passes until `nix flake check` is run.
 
 ## Canonical event semantics and remaining gap
 
