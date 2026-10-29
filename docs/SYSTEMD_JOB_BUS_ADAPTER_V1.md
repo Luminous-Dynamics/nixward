@@ -39,7 +39,11 @@ This chain constrains in-process call order. It is not a security boundary: the 
 
 ## Qualification plan
 
-Next, run a disposable NixOS VM with a harmless service whose lifecycle is controlled by the test driver. Capture exact Nixpkgs revision, systemd version, Nixward head SHA, VM config digest, and raw outcomes. Inject:
+The new flake check `checks.systemd-job-bus-live-vm` builds the library unit-test binary with the optional systemd feature, then runs only the explicitly ignored `live_systemd_start_job_round_trip` test inside `pkgs.testers.runNixOSTest`. The VM provides a harmless `nixward-transaction@.service` template whose ExecStart is coreutils true. The test requires StartUnit to return the real object path and then verifies the exact ID/path/unit-correlated `JobRemoved(done)` event and preserved raw result.
+
+The persistence callbacks in this VM test are intentionally no-ops. This is a live manager ABI/order/correlation smoke test only; it does not qualify journal durability, authorization, process receipts, crash recovery, or post-state verification. The test is marked ignored in the Rust suite so ordinary `cargo test` cannot mutate a developer's machine. Run the dedicated flake check on Linux to exercise the mutation explicitly.
+
+Capture exact Nixpkgs revision, systemd version, Nixward head SHA, VM config digest, and raw outcomes. Additional fault injection remains required. Inject:
 
 | Fault | Acceptance condition |
 |---|---|
@@ -64,4 +68,4 @@ Use the same harmless service, VM configuration, and fault schedule against dire
 
 ## Execution status
 
-Static source review only. Added a pre-wait classifier and test proving an unknown direct reply remains eligible for signal observation while a later Done signal is still held for reconciliation. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Added a pure recovered-intent validator and mutation tests, but no Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, or NixOS VM fault injection has been run in this environment. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
+Static source review only. The ignored live-manager round-trip test and NixOS VM harness are authored but have not been built or run. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, durable inter-process locking/reconciliation, and full VM fault qualification. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM tests have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
