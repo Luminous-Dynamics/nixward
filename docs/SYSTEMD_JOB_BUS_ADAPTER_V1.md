@@ -19,7 +19,7 @@ The API is intentionally split so the caller owns journal publication. A caller 
 5. Invoke StartUnit with the exact derived unit name and mode fail. The adapter records the actual returned object path; it does not invent a numeric job ID.
 6. Treat a zbus non-FDO MethodError reply as Rejected and preserve its D-Bus error name. Treat other errors, including generic/FDO-wrapped failures, as Unknown because this slice does not yet normalize their error names and a transport failure may follow enqueue.
 7. Retain the signal stream in SubmittedStart. The caller must call persist_before_observing with the direct StartUnit reply and only then receives PersistedStart.
-8. Consume that persisted ticket with a bounded wait for JobRemoved. Correlate the exact path, path-derived ID, unit and result. Unrelated units are skipped; partial identity conflicts hold for reconciliation; timeouts, stream closure, malformed signals and unknown result strings never become transaction success.
+8. Consume that persisted ticket with a bounded wait for JobRemoved. Correlate the exact path, path-derived ID, unit and result. Unrelated units are skipped; partial identity conflicts hold for reconciliation; timeouts, stream closure, malformed signals and unknown result strings never become transaction success. If the direct reply is Unknown but the stream remains alive, the observer still retains a matching unit event as supplemental evidence; it never promotes that signal to confirmed completion without the direct returned job path.
 9. Preserve raw systemd result text in SystemdStartObservation, even when the result is unknown to this version of the enum.
 
 The typestate chain is:
@@ -30,7 +30,7 @@ This chain constrains in-process call order. It is not a security boundary: the 
 
 ## Important recovery limits
 
-- StartUnit may have been accepted even when the method reply is lost. The adapter emits Unknown and must not resubmit that attempt.
+- StartUnit may have been accepted even when the method reply is lost. The adapter emits Unknown and must not resubmit that attempt. If the existing signal stream remains live, a matching JobRemoved event is retained with HoldForReconciliation; it is supplemental evidence, not a substitute for the lost direct reply.
 - A recovered StartIntentEvidence record must pass validate_start_intent_evidence; the serialized transaction, attempt, purpose and canonical unit must agree. This validates identity consistency, not cryptographic authenticity or journal integrity.
 - If reply persistence fails after StartUnit, the returned failure retains the submitted attempt and live subscription so the caller can retry publication, not the manager request.
 - If JobRemoved times out or the stream closes, the result is a hold-for-reconciliation. It is not proof that the unit did not run.
@@ -64,4 +64,4 @@ Use the same harmless service, VM configuration, and fault schedule against dire
 
 ## Execution status
 
-Static source review only. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Added a pure recovered-intent validator and mutation tests, but no Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, or NixOS VM fault injection has been run in this environment. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
+Static source review only. Added a pre-wait classifier and test proving an unknown direct reply remains eligible for signal observation while a later Done signal is still held for reconciliation. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Added a pure recovered-intent validator and mutation tests, but no Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, or NixOS VM fault injection has been run in this environment. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
