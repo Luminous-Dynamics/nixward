@@ -133,16 +133,12 @@ pub async fn wait_for_job_removed(
 
     match classify_start_reply(&start_evidence) {
         Ok(StartReplyDisposition::Enqueued { .. }) => {}
-        Ok(StartReplyDisposition::Ambiguous) => {
-            return SystemdStartObservation {
-                start_evidence,
-                job_removed: None,
-                raw_job_result: None,
-                correlation: StartJobCorrelation::HoldForReconciliation {
-                    reason: "StartUnit reply is unknown; reconcile the canonical unit before any retry".into(),
-                },
-            };
-        }
+        // Even with an ambiguous direct reply, keep observing the canonical
+        // unit's filtered stream until the deadline. A JobRemoved event can be
+        // retained as reconciliation evidence, but correlate_job_removed
+        // deliberately refuses to turn it into a matched completion without
+        // the direct StartUnit object path.
+        Ok(StartReplyDisposition::Ambiguous) => {}
         Ok(StartReplyDisposition::ManagerRejected { error_name }) => {
             return SystemdStartObservation {
                 start_evidence,
