@@ -117,6 +117,25 @@
 
         checks.nixward-cli = self.packages.${system}.nixward;
 
+        # Live manager ABI qualification is executed only inside a disposable
+        # NixOS VM. The test binary is compiled here with the optional systemd
+        # feature but its ignored mutating test is never run during the build.
+        checks.systemd-job-bus-live-vm =
+          if pkgs.stdenv.isLinux then
+            let
+              systemdJobBusTestBinary = import ./nix/systemd-job-bus-test-runner.nix {
+                inherit pkgs commonBuildInputs commonNativeBuildInputs;
+              };
+            in
+              import ./nix/tests/systemd-job-bus-vm.nix {
+                inherit pkgs;
+                testBinary = systemdJobBusTestBinary;
+              }
+          else
+            pkgs.runCommand "nixward-systemd-job-bus-live-vm-not-applicable" {} ''
+              echo "The live systemd observer VM test requires a Linux host/target." > $out
+            '';
+
         # Validate the shared supervisor temporal corpus during nix flake check.
         # A separate pure Nix reference model replays each vector, providing a
         # cross-language semantic check without compiling the Rust test binary.

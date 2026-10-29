@@ -28,6 +28,7 @@ use super::systemd_job_evidence::{
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
+const START_UNIT_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Start intent plus the live JobRemoved subscription and exact direct reply.
 ///
@@ -86,9 +87,19 @@ pub async fn submit_start(
             // depend on the closure's inferred lifetime.
             let manager = manager.clone();
             async move {
-                let result: Result<OwnedObjectPath, zbus::Error> = manager
-                    .call("StartUnit", &(unit_name.as_str(), "fail"))
-                    .await;
+                let result: Result<OwnedObjectPath, zbus::Error> =
+                    match tokio::time::timeout(
+                        START_UNIT_REPLY_TIMEOUT,
+                        manager.call("StartUnit", &(unit_name.as_str(), "fail")),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        // The request may already have reached PID 1. Expiry
+                        // is therefore an ambiguous reply, never permission
+                        // to resubmit this attempt.
+                        Err(_) => return ManagerStartReply::Unknown,
+                    };
                 match result {
                     Ok(job_object_path) => ManagerStartReply::Enqueued {
                         job_object_path: job_object_path.to_string(),
@@ -268,11 +279,121 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "systemd")]
+    #[tokio::test]
+    #[ignore = "requires the dedicated NixOS VM and nixward-transaction@.service test template"]
+    async fn live_systemd_failed_start_is_not_success() {
+        use super::super::systemd_job_evidence::{
+            StartIntent, StartJobCorrelation, TransactionWorkerPurpose,
+        };
+
+        let intent = StartIntent::new(
+            "vm-systemd-observer",
+            "round-trip-failure-0001",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+
+        // These callbacks validate protocol sequencing only; they do not
+        // implement durable journal publication.
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), String>(()) })
+            .await
+            .unwrap();
+        let submitted = submit_start(prepared).await.unwrap();
+        assert!(
+            matches!(
+                &submitted.evidence().reply,
+                ManagerStartReply::Enqueued { .. }
+            ),
+            "the VM's intentionally failing template instance must still enqueue: {:?}",
+            submitted.evidence().reply
+        );
+
+        let persisted = submitted
+            .persist_before_observing(|_evidence| async { Ok::<(), String>(()) })
+            .await
+            .unwrap();
+        let observation =
+            wait_for_job_removed(persisted, Duration::from_secs(15)).await;
+
+        assert_eq!(
+            observation.correlation,
+            StartJobCorrelation::MatchedStartJobFailed {
+                result: JobRemovedResult::Failed,
+            },
+            "a failing unit must never be reported as completed: {observation:?}"
+        );
+        assert_eq!(observation.raw_job_result.as_deref(), Some("failed"));
+    }
+
     #[test]
     fn unknown_manager_result_is_never_mapped_to_done() {
         assert_eq!(parse_job_result("done"), JobRemovedResult::Done);
         for raw in ["", "finished", "future-result", "OOM-kill"] {
             assert_eq!(parse_job_result(raw), JobRemovedResult::Unknown, "{raw}");
         }
+    }
+
+    /// This mutates the systemd manager and therefore must only be executed
+    /// by the explicit disposable-VM test harness. Ordinary cargo test runs
+    /// ignore it so a developer's host is never changed by the test suite.
+    #[cfg(feature = "systemd")]
+    #[tokio::test]
+    #[ignore = "requires the dedicated NixOS VM and nixward-transaction@.service test template"]
+    async fn live_systemd_start_job_round_trip() {
+        use super::super::systemd_job_evidence::{
+            StartIntent, StartJobCorrelation, TransactionWorkerPurpose,
+        };
+
+        let intent = StartIntent::new(
+            "vm-systemd-observer",
+            "round-trip-0001",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+
+        // This callback intentionally tests protocol order only. It is not a
+        // durable-journal implementation and must never be used in production.
+        let prepared = intent
+            .persist_before_submission(|evidence| async move {
+                assert_eq!(evidence.transaction_id, "vm-systemd-observer");
+                assert_eq!(evidence.attempt_id, "round-trip-0001");
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap();
+
+        let submitted = submit_start(prepared).await.unwrap();
+        assert!(
+            matches!(
+                &submitted.evidence().reply,
+                ManagerStartReply::Enqueued { .. }
+            ),
+            "the VM's dedicated template unit must be enqueued: {:?}",
+            submitted.evidence().reply
+        );
+
+        let persisted = submitted
+            .persist_before_observing(|evidence| async move {
+                assert!(matches!(evidence.reply, ManagerStartReply::Enqueued { .. }));
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap();
+
+        let observation =
+            wait_for_job_removed(persisted, Duration::from_secs(15)).await;
+        assert_eq!(
+            observation.correlation,
+            StartJobCorrelation::MatchedStartJobCompleted,
+            "expected a path/ID/unit-correlated JobRemoved done event: {observation:?}"
+        );
+        assert_eq!(
+            observation.raw_job_result.as_deref(),
+            Some("done"),
+            "preserve the manager's raw result string"
+        );
+        assert!(observation.job_removed.is_some());
     }
 }
