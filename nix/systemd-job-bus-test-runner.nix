@@ -15,6 +15,8 @@ pkgs.rustPlatform.buildRustPackage {
   env.HOME = "$TMPDIR";
   env.RUSTC_WRAPPER = "";
 
+  cargoBuildFlags = [ "-p" "nixward" "--lib" "--features" "systemd" ];
+
   doCheck = false;
 
   # Build the library's unit-test binary but do not execute it during the Nix
