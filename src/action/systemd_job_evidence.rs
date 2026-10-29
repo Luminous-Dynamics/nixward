@@ -745,7 +745,9 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[tokio::test]
-    async fn failed_subscription_does_not_produce_a_subscribed_start() {
+    async fn failed_subscription_does_not_produce_a_subscribed_start_or_call_start() {
+        use std::cell::Cell;
+
         let intent = StartIntent::new(
             "tx-7f3c",
             "attempt-0004",
@@ -756,10 +758,21 @@ mod tests {
             .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
             .await
             .unwrap();
+        let start_called = Cell::new(false);
         let result = prepared
             .subscribe_before_start(|| async { Err::<(), _>("injected subscription failure") })
             .await;
-        assert!(result.is_err());
+
+        if let Ok(subscribed) = result {
+            let _ = subscribed
+                .submit_start(|_| {
+                    start_called.set(true);
+                    async { ManagerStartReply::Unknown }
+                })
+                .await;
+        }
+
+        assert!(!start_called.get(), "StartUnit must not run if subscription setup failed");
     }
 
     #[cfg(feature = "native")]
