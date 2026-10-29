@@ -28,6 +28,11 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 pub mod systemd_job_evidence;
+// Keep the observer crate-private until its transaction authorization,
+// journal interlock, and disposable-VM qualification are integrated.
+#[allow(dead_code)]
+#[cfg(feature = "systemd")]
+pub(crate) mod systemd_job_bus;
 pub mod transaction_supervision;
 pub mod transaction_supervision_trace;
 mod worker_observation;

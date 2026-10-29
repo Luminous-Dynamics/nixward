@@ -1,6 +1,6 @@
 # Systemd job evidence adversarial qualification v1
 
-Status: **property-based contract tests authored; not executed**  
+Status: **property-based tests and optional zbus observer authored; no runtime qualification claimed**  
 Date: 2026-10-29  
 Related: [PR #90](https://github.com/Luminous-Dynamics/nixward/pull/90), [Issue #75](https://github.com/Luminous-Dynamics/nixward/issues/75)
 
@@ -8,7 +8,7 @@ Related: [PR #90](https://github.com/Luminous-Dynamics/nixward/pull/90), [Issue 
 
 A conventional unit test demonstrates that selected inputs produce expected outputs. It does not, on its own, establish that the implementation is robust to nearby mutations, partial identity collisions, hidden event-order races, or actual manager behavior.
 
-The systemd evidence contract therefore needs three distinct qualification layers:
+The repository now has the pure contract, adversarial properties, and an optional zbus observer. These still need three distinct qualification layers:
 
 1. **Pure contract tests** — deterministic examples and property-based mutations of transaction, attempt, unit, job ID, object path, and result.
 2. **Live manager tests** — a real systemd D-Bus session/service manager and controlled harmless units, verifying subscription order and event correlation.
@@ -18,18 +18,19 @@ These layers answer different questions. Passing one does not establish the guar
 
 ## Added property-based tests
 
-The module now uses the repository's existing proptest dev-dependency to add four properties, each configured for 512 generated cases:
+The module now uses the repository's existing proptest dev-dependency for five properties, each configured for 512 generated cases (2,560 generated cases per normal run):
 
-- **One-field identity mutation:** alter only the job ID, only the object path, or only the unit name. A partial identity collision must hold for reconciliation, never be accepted as completion and never be discarded as wholly unrelated.
+- **One-field job identity mutation:** alter only the job ID, only the object path, or only the unit name. A partial identity collision must hold for reconciliation, never be accepted as completion and never be discarded as wholly unrelated.
 - **Unknown direct reply:** after a lost/unknown StartUnit response, a subsequently presented signal cannot retroactively establish a known acknowledgement. The result remains hold-for-reconciliation.
-- **Non-done manager results:** canceled, timeout, failed, dependency, and skipped are never classified as a completed start job.
+- **Non-done and unknown manager results:** canceled, timeout, failed, dependency, skipped, and the forward-compatible unknown result are never classified as completed start jobs.
+- **Recovered intent identity mutation:** independently alter transaction ID, attempt ID, purpose or the derived unit name. Recovered write-ahead evidence is rejected unless all four fields bind to the same canonical attempt identity.
 - **Canonical naming:** generated non-hex identifiers produce a stable unit name with a fixed prefix and exactly 64 lowercase hexadecimal digest characters, without embedding raw identifiers.
 
-The deterministic cases also cover explicit manager rejection, malformed/non-canonical job paths, failed subscription typestate transition, unknown reply, numeric ID/path inconsistency, and exact job/path/unit correlation. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
+The deterministic cases also cover explicit manager rejection, malformed/non-canonical job paths, failed pre-launch persistence, failed subscription, reply persistence failure, unknown reply, numeric ID/path inconsistency, and exact job/path/unit correlation. The live adapter installs a unit-filtered JobRemoved match before Manager.Subscribe() and StartUnit. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
 
 ## Qualification corpus for the eventual adapter
 
-A production D-Bus adapter should expose a small typed boundary that can be independently tested. Capture the exact request identity before the manager call; establish the JobRemoved match and call Manager.Subscribe(); then submit StartUnit and retain the returned job object path. StartUnit's reply is an object path, not a separate numeric job ID. The JobRemoved signal carries the numeric ID, object path, unit name, and result; preserve these values from the same signal and verify the path/ID correspondence rather than joining fields from unrelated events. See the [systemd Manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [current JobRemoved emission in systemd source](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c).
+The new optional adapter provides the first live boundary but is not runtime-qualified. The caller must persist the exact pre-launch intent first; the adapter then establishes a unit-filtered JobRemoved match, calls Manager.Subscribe(), submits StartUnit once, and retains the returned job object path alongside the live signal stream. The caller's reply-persistence callback must succeed before the wait API consumes that stream. StartUnit's reply is an object path, not a separate numeric job ID. The JobRemoved signal carries the numeric ID, object path, unit name, and result; preserve these values from the same signal and verify the path/ID correspondence rather than joining fields from unrelated events. See the [systemd Manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [current JobRemoved emission in systemd source](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c).
 
 Minimum live cases:
 
@@ -83,4 +84,4 @@ NixOS VM integration tests are the natural next step because they provide declar
 
 ## Execution status
 
-The four property tests have been added to PR #91's stacked branch. No Rust test, build, formatter, Clippy, D-Bus manager integration, or NixOS VM test has been executed in the present environment. All targets above are proposed acceptance criteria until measured.
+Four original properties are in PR #91's stack; PR #94 adds the fifth recovered-intent identity-mutation property. No Rust test/build, formatter, Clippy, live D-Bus manager integration, Nix evaluation, or NixOS VM test has been executed in this environment. All targets above are proposed acceptance criteria until measured.

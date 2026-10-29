@@ -3,11 +3,14 @@
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
 //! Pure correlation contract for asynchronous systemd start-job evidence.
 //!
-//! This module deliberately does not talk to D-Bus or authorize host mutation.
-//! It prevents callers from confusing a StartUnit acknowledgement, an
-//! unrelated JobRemoved signal, or a lost reply with proof that a worker ran.
-//! Production D-Bus integration must subscribe before StartUnit and feed this
-//! contract the exact reply and signal values it observed.
+//! This module is the pure evidence/correlation layer; the sibling
+//! systemd_job_bus adapter performs live zbus I/O but remains crate-private
+//! and unqualified. Neither module authorizes host mutation or proves that a
+//! worker ran. They prevent a StartUnit acknowledgement, unrelated
+//! JobRemoved signal, or lost reply from being treated as transaction success.
+//! Production integration still requires the authorized transaction path,
+//! durable journal interlocks, worker receipt validation, and fresh host-state
+//! verification.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -73,8 +76,9 @@ fn validate_identity(label: &str, value: &str) -> Result<(), String> {
 }
 
 
-/// Unsubmitted transaction-scoped start intent. It is data, not permission
-/// to start a unit; it has no serialization or public field constructor.
+/// Unsubmitted transaction-scoped start intent. It contains no start authority
+/// and cannot be passed to the systemd adapter until the caller's durable
+/// preflight callback succeeds.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StartIntent {
     transaction_id: String,
@@ -116,36 +120,114 @@ impl StartIntent {
         &self.unit_name
     }
 
-    /// Establish the manager signal subscription before advancing the intent.
-    ///
-    /// The crate-internal adapter must pass a closure that awaits both the
-    /// D-Bus match registration and systemd Manager.Subscribe() successfully.
-    /// No subscribed capability is returned if either operation fails.
-    /// This stays crate-internal until the real D-Bus adapter consumes it.
-    #[allow(dead_code)]
-    pub(crate) async fn subscribe_before_start<E, F, Fut>(
+    pub fn journal_evidence(&self) -> StartIntentEvidence {
+        StartIntentEvidence {
+            transaction_id: self.transaction_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            purpose: self.purpose,
+            unit_name: self.unit_name.clone(),
+        }
+    }
+
+    /// Run the caller's durable write-ahead publication before any manager
+    /// connection or StartUnit call is allowed by this type-state API.
+    pub async fn persist_before_submission<E, F, Fut>(
         self,
-        establish_subscription: F,
-    ) -> Result<SubscribedStart, E>
+        persist: F,
+    ) -> Result<PreparedStartIntent, E>
     where
-        F: FnOnce() -> Fut,
+        F: FnOnce(StartIntentEvidence) -> Fut,
         Fut: std::future::Future<Output = Result<(), E>>,
     {
-        establish_subscription().await?;
-        Ok(SubscribedStart { intent: self })
+        persist(self.journal_evidence()).await?;
+        Ok(PreparedStartIntent { intent: self })
     }
 }
 
-/// Ephemeral capability proving the in-process adapter's subscription step
-/// returned successfully. This type is intentionally not serializable and its
-/// constructor is private; durable evidence is created only by consuming it
-/// after receiving the direct manager reply.
+/// Serializable, journal-bound intent for exactly one transaction/attempt.
+/// The caller's persistence callback must publish this before allowing
+/// PreparedStartIntent to be used for a manager request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartIntentEvidence {
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub purpose: TransactionWorkerPurpose,
+    pub unit_name: String,
+}
+
+/// Validate a recovered or deserialized write-ahead intent before it is used
+/// to reconcile systemd. Deserializing fields is not proof they bind to the
+/// original canonical transaction/attempt unit identity.
+pub fn validate_start_intent_evidence(
+    evidence: &StartIntentEvidence,
+) -> Result<(), String> {
+    let expected_unit = canonical_attempt_unit_name(
+        &evidence.transaction_id,
+        &evidence.attempt_id,
+        evidence.purpose,
+    )?;
+    if evidence.unit_name != expected_unit {
+        return Err(
+            "start intent unit name is not derived from its transaction/attempt identity".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Non-serializable authority to proceed past the pre-launch write-ahead
+/// barrier. Its constructor is private and only persistence success returns it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SubscribedStart {
+pub struct PreparedStartIntent {
     intent: StartIntent,
 }
 
-impl SubscribedStart {
+impl PreparedStartIntent {
+    pub fn transaction_id(&self) -> &str {
+        self.intent.transaction_id()
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        self.intent.attempt_id()
+    }
+
+    pub fn purpose(&self) -> TransactionWorkerPurpose {
+        self.intent.purpose()
+    }
+
+    pub fn unit_name(&self) -> &str {
+        self.intent.unit_name()
+    }
+
+    /// Establish the manager signal subscription before advancing the intent.
+    /// The closure should install the JobRemoved match and call Manager.Subscribe().
+    /// The resulting type retains the live subscription across StartUnit.
+    pub(crate) async fn subscribe_before_start<E, F, Fut, S>(
+        self,
+        establish_subscription: F,
+    ) -> Result<SubscribedStart<S>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<S, E>>,
+    {
+        let subscription = establish_subscription().await?;
+        Ok(SubscribedStart {
+            intent: self.intent,
+            subscription,
+        })
+    }
+}
+
+/// Ephemeral capability proving the in-process adapter's subscription closure
+/// returned successfully. This non-serializable object retains the live signal
+/// subscription; its constructor is private.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubscribedStart<S> {
+    intent: StartIntent,
+    subscription: S,
+}
+
+impl<S> SubscribedStart<S> {
     pub fn unit_name(&self) -> &str {
         self.intent.unit_name()
     }
@@ -158,19 +240,99 @@ impl SubscribedStart {
         self.intent.attempt_id()
     }
 
-    /// Consume the ephemeral subscription capability and record one direct
-    /// manager reply. Unknown is a valid record of a lost/ambiguous response,
-    /// not permission to repeat the same start attempt.
-    pub fn record_reply(self, reply: ManagerStartReply) -> Result<SystemdStartEvidence, String> {
+    /// Submit exactly one start request after the subscription stage. Any
+    /// transport failure should be represented as Unknown and never retried
+    /// here. The live subscription is carried forward in SubmittedStart.
+    pub(crate) async fn submit_start<F, Fut>(self, submit: F) -> SubmittedStart<S>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = ManagerStartReply>,
+    {
+        let reply = submit(self.intent.unit_name.clone()).await;
+        SubmittedStart {
+            evidence: SystemdStartEvidence {
+                transaction_id: self.intent.transaction_id,
+                attempt_id: self.intent.attempt_id,
+                purpose: self.intent.purpose,
+                unit_name: self.intent.unit_name,
+                reply,
+            },
+            subscription: self.subscription,
+        }
+    }
+
+    #[cfg(test)]
+    fn record_reply(self, reply: ManagerStartReply) -> Result<SubmittedStart<S>, String> {
         validate_start_reply(&reply)?;
-        Ok(SystemdStartEvidence {
-            transaction_id: self.intent.transaction_id,
-            attempt_id: self.intent.attempt_id,
-            purpose: self.intent.purpose,
-            unit_name: self.intent.unit_name,
-            reply,
+        Ok(SubmittedStart {
+            evidence: SystemdStartEvidence {
+                transaction_id: self.intent.transaction_id,
+                attempt_id: self.intent.attempt_id,
+                purpose: self.intent.purpose,
+                unit_name: self.intent.unit_name,
+                reply,
+            },
+            subscription: self.subscription,
         })
     }
+}
+
+/// A direct StartUnit reply and its live subscription. Before observing any
+/// JobRemoved signal, the caller must durably publish the reply evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubmittedStart<S> {
+    evidence: SystemdStartEvidence,
+    subscription: S,
+}
+
+impl<S> SubmittedStart<S> {
+    pub fn evidence(&self) -> &SystemdStartEvidence {
+        &self.evidence
+    }
+
+    pub async fn persist_before_observing<E, F, Fut>(
+        self,
+        persist: F,
+    ) -> Result<PersistedStart<S>, StartEvidencePersistenceFailure<S, E>>
+    where
+        F: FnOnce(SystemdStartEvidence) -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        let Self { evidence, subscription } = self;
+        match persist(evidence.clone()).await {
+            Ok(()) => Ok(PersistedStart { evidence, subscription }),
+            Err(source) => Err(StartEvidencePersistenceFailure {
+                attempt: Self { evidence, subscription },
+                source,
+            }),
+        }
+    }
+}
+
+/// The only typestate that permits signal observation: StartUnit reply
+/// evidence has been handed to a persistence callback and it succeeded.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PersistedStart<S> {
+    evidence: SystemdStartEvidence,
+    subscription: S,
+}
+
+impl<S> PersistedStart<S> {
+    pub fn evidence(&self) -> &SystemdStartEvidence {
+        &self.evidence
+    }
+
+    pub(crate) fn into_parts(self) -> (SystemdStartEvidence, S) {
+        (self.evidence, self.subscription)
+    }
+}
+
+/// A failed evidence write after StartUnit. The attempt and signal stream are
+/// retained so the caller can retry persistence without repeating StartUnit.
+#[derive(Debug)]
+pub struct StartEvidencePersistenceFailure<S, E> {
+    pub attempt: SubmittedStart<S>,
+    pub source: E,
 }
 
 /// The method-level result of asking systemd to enqueue a unit start.
@@ -227,6 +389,8 @@ pub enum JobRemovedResult {
     Failed,
     Dependency,
     Skipped,
+    /// An unrecognized future manager result. Never interpreted as success.
+    Unknown,
 }
 
 /// A single observed JobRemoved signal. The D-Bus adapter must preserve the
@@ -466,6 +630,34 @@ mod tests {
     }
 
     #[test]
+    fn recovered_start_intent_must_bind_transaction_attempt_purpose_and_unit() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let original = intent.journal_evidence();
+        assert_eq!(validate_start_intent_evidence(&original), Ok(()));
+
+        let mut changed_transaction = original.clone();
+        changed_transaction.transaction_id = "tx-other".into();
+        assert!(validate_start_intent_evidence(&changed_transaction).is_err());
+
+        let mut changed_attempt = original.clone();
+        changed_attempt.attempt_id = "attempt-other".into();
+        assert!(validate_start_intent_evidence(&changed_attempt).is_err());
+
+        let mut changed_unit = original.clone();
+        changed_unit.unit_name = "nixward-transaction@forged.service".into();
+        assert!(validate_start_intent_evidence(&changed_unit).is_err());
+
+        let mut changed_purpose = original;
+        changed_purpose.purpose = TransactionWorkerPurpose::RecoveryActivation;
+        assert!(validate_start_intent_evidence(&changed_purpose).is_err());
+    }
+
+    #[test]
     fn only_the_exact_acknowledged_job_and_unit_match() {
         let start = enqueued_start();
         assert_eq!(
@@ -507,6 +699,7 @@ mod tests {
             JobRemovedResult::Failed,
             JobRemovedResult::Dependency,
             JobRemovedResult::Skipped,
+            JobRemovedResult::Unknown,
         ] {
             assert_eq!(
                 correlate_job_removed(&start, &signal(result)),
@@ -538,21 +731,118 @@ mod tests {
             intent.purpose(),
         ).unwrap());
         assert_eq!(intent.unit_name(), enqueued_start().unit_name);
+        let journal_evidence = intent.journal_evidence();
+        assert_eq!(journal_evidence.unit_name, intent.unit_name());
+        assert_eq!(
+            journal_evidence.unit_name,
+            canonical_attempt_unit_name(
+                &journal_evidence.transaction_id,
+                &journal_evidence.attempt_id,
+                journal_evidence.purpose,
+            )
+            .unwrap()
+        );
     }
 
     #[cfg(feature = "native")]
     #[tokio::test]
-    async fn failed_subscription_does_not_produce_a_subscribed_start() {
+    async fn failed_prelaunch_persistence_does_not_subscribe_or_start() {
+        use std::cell::Cell;
+
         let intent = StartIntent::new(
             "tx-7f3c",
             "attempt-0004",
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
+        let subscribe_called = Cell::new(false);
+        let start_called = Cell::new(false);
         let result = intent
+            .persist_before_submission(|_evidence| async {
+                Err::<(), _>("injected journal write failure")
+            })
+            .await;
+
+        if let Ok(prepared) = result {
+            let subscribed = prepared
+                .subscribe_before_start(|| async {
+                    subscribe_called.set(true);
+                    Ok::<(), ()>(())
+                })
+                .await;
+            if let Ok(subscribed) = subscribed {
+                let _ = subscribed
+                    .submit_start(|_| {
+                        start_called.set(true);
+                        async { ManagerStartReply::Unknown }
+                    })
+                    .await;
+            }
+        }
+
+        assert!(!subscribe_called.get(), "subscription must not be installed before durable intent");
+        assert!(!start_called.get(), "StartUnit must not run before durable intent");
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn failed_reply_persistence_retains_attempt_without_replaying_start() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let subscribed = prepared
+            .subscribe_before_start(|| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let submitted = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        let failure = submitted
+            .persist_before_observing(|evidence| async move {
+                assert_eq!(evidence.reply, ManagerStartReply::Unknown);
+                Err::<(), _>("injected reply journal failure")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.attempt.evidence().reply, ManagerStartReply::Unknown);
+        assert_eq!(failure.attempt.subscription, ());
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn failed_subscription_does_not_produce_a_subscribed_start_or_call_start() {
+        use std::cell::Cell;
+
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let start_called = Cell::new(false);
+        let result = prepared
             .subscribe_before_start(|| async { Err::<(), _>("injected subscription failure") })
             .await;
-        assert!(result.is_err());
+
+        if let Ok(subscribed) = result {
+            let _ = subscribed
+                .submit_start(|_| {
+                    start_called.set(true);
+                    async { ManagerStartReply::Unknown }
+                })
+                .await;
+        }
+
+        assert!(!start_called.get(), "StartUnit must not run if subscription setup failed");
     }
 
     #[cfg(feature = "native")]
@@ -564,19 +854,41 @@ mod tests {
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
+        let prepared = intent
+            .persist_before_submission(|evidence| async move {
+                assert_eq!(evidence.transaction_id, "tx-7f3c");
+                assert_eq!(evidence.attempt_id, "attempt-0004");
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap();
         let mut subscription_completed = false;
-        let subscribed = intent
+        let subscribed = prepared
             .subscribe_before_start(|| async {
                 subscription_completed = true;
-                Ok::<(), ()>(())
+                Ok::<_, ()>(())
             })
             .await
             .unwrap();
         assert!(subscription_completed);
         assert!(subscribed.unit_name().starts_with("nixward-transaction@"));
 
-        let evidence = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        let submitted = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        assert_eq!(
+            classify_start_reply(submitted.evidence()),
+            Ok(StartReplyDisposition::Ambiguous)
+        );
+        let persisted = submitted
+            .persist_before_observing(|evidence| async move {
+                assert_eq!(evidence.reply, ManagerStartReply::Unknown);
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted.evidence().reply, ManagerStartReply::Unknown);
+        let (evidence, subscription) = persisted.into_parts();
         assert_eq!(classify_start_reply(&evidence), Ok(StartReplyDisposition::Ambiguous));
+        assert_eq!(subscription, ());
     }
 
     #[cfg(feature = "native")]
@@ -588,7 +900,11 @@ mod tests {
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
-        let subscribed = intent
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let subscribed = prepared
             .subscribe_before_start(|| async { Ok::<(), ()>(()) })
             .await
             .unwrap();
@@ -734,19 +1050,47 @@ mod tests {
         }
 
         /// Only a matched JobRemoved done result can be start-job completion.
+        /// Unknown/future result strings are deliberately part of this property.
         #[test]
-        fn every_non_done_job_result_is_non_success(result_code in 0u8..5) {
+        fn every_non_done_job_result_is_non_success(result_code in 0u8..6) {
             let result = match result_code {
                 0 => JobRemovedResult::Canceled,
                 1 => JobRemovedResult::Timeout,
                 2 => JobRemovedResult::Failed,
                 3 => JobRemovedResult::Dependency,
-                _ => JobRemovedResult::Skipped,
+                4 => JobRemovedResult::Skipped,
+                _ => JobRemovedResult::Unknown,
             };
             prop_assert_eq!(
                 correlate_job_removed(&enqueued_start(), &signal(result)),
                 StartJobCorrelation::MatchedStartJobFailed { result }
             );
+        }
+
+        /// Every serialized/recovered start intent must preserve the same
+        /// canonical transaction/attempt/purpose binding.
+        #[test]
+        fn recovered_intent_rejects_single_field_identity_mutations(
+            transaction_id in "[a-z0-9_-]{1,32}",
+            attempt_id in "[a-z0-9_-]{1,32}",
+            mutation in 0u8..4
+        ) {
+            let intent = StartIntent::new(
+                &transaction_id,
+                &attempt_id,
+                TransactionWorkerPurpose::Activation,
+            ).unwrap();
+            let original = intent.journal_evidence();
+            prop_assert_eq!(validate_start_intent_evidence(&original), Ok(()));
+
+            let mut changed = original.clone();
+            match mutation {
+                0 => changed.transaction_id.push_str("-changed"),
+                1 => changed.attempt_id.push_str("-changed"),
+                2 => changed.unit_name.push_str("-changed"),
+                _ => changed.purpose = TransactionWorkerPurpose::RecoveryActivation,
+            }
+            prop_assert!(validate_start_intent_evidence(&changed).is_err());
         }
 
         /// Canonical names must be independent of raw IDs and limited to one
