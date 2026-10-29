@@ -130,6 +130,7 @@ pub fn validate_trace(
     let mut process_receipt_persisted = false;
     let mut target_observed_after_exit: Option<TargetObservation> = None;
     let mut lifecycle_postcondition_validated = false;
+    let mut lifecycle_validation_seen_for_current_target = false;
     let mut terminal_success_recorded = false;
 
     for (event_index, event) in events.iter().enumerate() {
@@ -311,15 +312,17 @@ pub fn validate_trace(
                     target_observed_after_exit = Some(observation);
                     // A newer target snapshot invalidates validation of an older one.
                     lifecycle_postcondition_validated = false;
+                    lifecycle_validation_seen_for_current_target = false;
                 }
             }
             TraceEventKind::LifecyclePostconditionValidated => {
-                if lifecycle_postcondition_validated {
+                if lifecycle_validation_seen_for_current_target {
                     violations.push(TraceViolation {
                         event_index,
                         kind: TraceViolationKind::DuplicateLifecycleValidation,
                     });
                 }
+                lifecycle_validation_seen_for_current_target = true;
                 let candidate_post_state = target_observed_after_exit
                     == Some(TargetObservation::CandidateRuntimeAndProfileActive);
                 if !payload_exited {
@@ -871,6 +874,20 @@ mod tests {
                 result.violations
             );
         }
+    }
+
+
+    #[test]
+    fn duplicate_failed_lifecycle_validation_is_rejected_without_new_target_evidence() {
+        let mut trace = valid_success_trace();
+        trace[9].kind = TraceEventKind::TargetObserved(TargetObservation::MixedOrUnknown);
+        trace.insert(11, event(TraceEventKind::LifecyclePostconditionValidated));
+
+        let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+        assert_eq!(result.disposition, TraceDisposition::Rejected);
+        assert!(result.violations.iter().any(|violation| {
+            violation.kind == TraceViolationKind::DuplicateLifecycleValidation
+        }));
     }
 
 }
