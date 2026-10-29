@@ -407,7 +407,6 @@ mod tests {
 
     fn enqueued_start() -> SystemdStartEvidence {
         start(ManagerStartReply::Enqueued {
-            job_id: 41,
             job_object_path: "/org/freedesktop/systemd1/job/41".into(),
         })
     }
@@ -595,7 +594,6 @@ mod tests {
             .unwrap();
         assert!(subscribed
             .record_reply(ManagerStartReply::Enqueued {
-                job_id: 0,
                 job_object_path: "/org/freedesktop/systemd1/job/0".into(),
             })
             .is_err());
@@ -670,7 +668,6 @@ mod tests {
     #[test]
     fn acknowledgement_with_zero_job_id_is_rejected() {
         let start = start(ManagerStartReply::Enqueued {
-            job_id: 0,
             job_object_path: "/org/freedesktop/systemd1/job/0".into(),
         });
         assert!(matches!(
