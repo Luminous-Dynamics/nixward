@@ -156,6 +156,25 @@ pub struct StartIntentEvidence {
     pub unit_name: String,
 }
 
+/// Validate a recovered or deserialized write-ahead intent before it is used
+/// to reconcile systemd. Deserializing fields is not proof they bind to the
+/// original canonical transaction/attempt unit identity.
+pub fn validate_start_intent_evidence(
+    evidence: &StartIntentEvidence,
+) -> Result<(), String> {
+    let expected_unit = canonical_attempt_unit_name(
+        &evidence.transaction_id,
+        &evidence.attempt_id,
+        evidence.purpose,
+    )?;
+    if evidence.unit_name != expected_unit {
+        return Err(
+            "start intent unit name is not derived from its transaction/attempt identity".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Non-serializable authority to proceed past the pre-launch write-ahead
 /// barrier. Its constructor is private and only persistence success returns it.
 #[derive(Debug, PartialEq, Eq)]
@@ -608,6 +627,34 @@ mod tests {
         assert!(canonical_attempt_unit_name("", "attempt", TransactionWorkerPurpose::Activation).is_err());
         assert!(canonical_attempt_unit_name("tx", " \t ", TransactionWorkerPurpose::Activation).is_err());
         assert!(canonical_attempt_unit_name("tx\nother", "attempt", TransactionWorkerPurpose::Activation).is_err());
+    }
+
+    #[test]
+    fn recovered_start_intent_must_bind_transaction_attempt_purpose_and_unit() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let original = intent.journal_evidence();
+        assert_eq!(validate_start_intent_evidence(&original), Ok(()));
+
+        let mut changed_transaction = original.clone();
+        changed_transaction.transaction_id = "tx-other".into();
+        assert!(validate_start_intent_evidence(&changed_transaction).is_err());
+
+        let mut changed_attempt = original.clone();
+        changed_attempt.attempt_id = "attempt-other".into();
+        assert!(validate_start_intent_evidence(&changed_attempt).is_err());
+
+        let mut changed_unit = original.clone();
+        changed_unit.unit_name = "nixward-transaction@forged.service".into();
+        assert!(validate_start_intent_evidence(&changed_unit).is_err());
+
+        let mut changed_purpose = original;
+        changed_purpose.purpose = TransactionWorkerPurpose::RecoveryActivation;
+        assert!(validate_start_intent_evidence(&changed_purpose).is_err());
     }
 
     #[test]
