@@ -582,13 +582,11 @@ mod tests {
                 job_object_path: "/org/freedesktop/systemd1/job/0".into(),
             })
             .is_err());
-        assert!(subscribed_capability_rejects_blank_error_name());
-    }
-
-    fn subscribed_capability_rejects_blank_error_name() -> bool {
-        // Check validation independently: malformed manager errors are rejected
-        // before any durable evidence record is returned.
-        validate_start_reply(&ManagerStartReply::Rejected { error_name: "  ".into() }).is_err()
+        // Malformed manager errors are rejected before a durable record exists.
+        assert!(validate_start_reply(&ManagerStartReply::Rejected {
+            error_name: "  ".into(),
+        })
+        .is_err());
     }
 
     #[test]
