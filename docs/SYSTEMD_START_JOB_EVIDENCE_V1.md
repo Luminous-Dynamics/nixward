@@ -18,17 +18,18 @@ The new module, src/action/systemd_job_evidence.rs, introduces a pure correlatio
 
 - Derives a template unit name from transaction ID, unique attempt ID, and worker purpose using domain-separated SHA-256 and length-prefixed fields. User-provided IDs never appear directly in the privileged unit name.
 - Represents manager reply states separately: enqueued with exact job ID and object path, known rejection, or unknown/lost reply.
-- Carries the subscription-before-start invariant as an explicit field for the production adapter to attest to.
+- Uses a non-serializable `StartIntent -> SubscribedStart` typestate transition. The crate-internal transition awaits a subscription closure and only yields `SubscribedStart` if that closure succeeds; its constructor is not exposed to downstream crates.
+- Allows `SubscribedStart::record_reply` to create the durable `SystemdStartEvidence` record only after the transient capability exists. The record itself remains data, not authority: persisted or externally supplied evidence still needs provenance validation at the adapter/journal boundary.
 - Correlates a JobRemoved event only when job ID, object path, and canonical unit name agree.
 - Ignores an unrelated job only when its job ID, object path, and unit name are all foreign to the expected job; any conflict sharing one of those identifiers requires reconciliation.
 - Maps only JobRemoved done to MatchedStartJobCompleted. Every other known result is explicitly non-success.
 - Treats a lost StartUnit reply as indeterminate even if a signal is later presented without an authenticated exact acknowledgement.
 
-The new module is exported from src/action/mod.rs and includes unit tests for canonical identity binding, each non-done manager result, exact signal correlation, unrelated signals, conflicting job identity, malformed paths, lost replies, and pre-subscription calls.
+The new module is exported from src/action/mod.rs and includes unit tests for canonical identity binding, each non-done manager result, exact signal correlation, unrelated signals, conflicting job identity, malformed paths, lost replies, and failed subscription transitions, and reply recording only from the transient subscribed capability.
 
 ## Deliberate limits
 
-This is an executable contract, not a D-Bus adapter. The subscribed_before_start field is caller-supplied evidence until a production adapter derives it from the actual D-Bus subscription operation. Unit tests over fabricated values do not prove live signal delivery, D-Bus ordering, or manager behavior. The module neither launches nor authorizes a worker, writes transaction journals, verifies cryptographic provenance, nor proves host state.
+This is an executable contract, not a D-Bus adapter. The typestate seam makes the intended in-process order explicit, but it cannot authenticate a serialized record or prove that a future adapter's subscription closure actually registered the correct systemd signal match and called Manager.Subscribe(). That must be checked in the real adapter and live manager tests. The module neither launches nor authorizes a worker, writes transaction journals, verifies cryptographic provenance, nor proves host state.
 
 The existing temporal trace contract in PR #88 and cross-language fixture gate in PR #89 remain separate. This model must eventually feed a provenance-bound event recorder; it must not replace process identity, the output-free process receipt, or fresh read-only profile/runtime observation.
 
@@ -58,4 +59,4 @@ Suggested baselines include direct systemd service management and established Ni
 
 ## Execution status
 
-The unit tests are authored but have not been compiled or run in this environment. No D-Bus test, NixOS VM test, Rust test, formatter, or Clippy pass is claimed. The next implementation step is a typed D-Bus adapter and a testers.runNixOSTest fixture that exercises it against a real systemd manager.
+The unit and property tests are authored but have not been compiled or run in this environment. Two Tokio-gated tests exercise the subscription typestate seam when the `native` feature is enabled; they do not prove live D-Bus behavior. No D-Bus test, NixOS VM test, Rust test, formatter, or Clippy pass is claimed. The next implementation step is a typed D-Bus adapter and a `testers.runNixOSTest` fixture that exercises it against a real systemd manager.
