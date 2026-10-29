@@ -37,6 +37,8 @@ pub enum TraceEventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceViolationKind {
     EventIdentityBindingMismatch,
+    EmptyExpectedTransactionId,
+    EmptyExpectedAttemptId,
     DuplicateAuthorizationVerification,
     DuplicateAttemptPreparation,
     DuplicateSubmissionBarrier,
@@ -119,6 +121,18 @@ pub fn validate_trace(
     events: &[TraceEvent],
 ) -> TraceValidation {
     let mut violations = Vec::new();
+    if expected_transaction_id.trim().is_empty() {
+        violations.push(TraceViolation {
+            event_index: usize::MAX,
+            kind: TraceViolationKind::EmptyExpectedTransactionId,
+        });
+    }
+    if expected_attempt_id.trim().is_empty() {
+        violations.push(TraceViolation {
+            event_index: usize::MAX,
+            kind: TraceViolationKind::EmptyExpectedAttemptId,
+        });
+    }
     let mut authorization_verified = false;
     let mut attempt_prepared = false;
     let mut submission_barrier_persisted = false;
@@ -887,6 +901,25 @@ mod tests {
         assert_eq!(result.disposition, TraceDisposition::Rejected);
         assert!(result.violations.iter().any(|violation| {
             violation.kind == TraceViolationKind::DuplicateLifecycleValidation
+        }));
+    }
+
+
+    #[test]
+    fn empty_expected_transaction_or_attempt_identity_can_never_validate_success() {
+        let trace = valid_success_trace();
+        let bad_transaction = validate_trace("", ATTEMPT, &trace);
+        assert_eq!(bad_transaction.disposition, TraceDisposition::Rejected);
+        assert!(bad_transaction.violations.iter().any(|violation| {
+            violation.kind == TraceViolationKind::EmptyExpectedTransactionId
+                && violation.event_index == usize::MAX
+        }));
+
+        let bad_attempt = validate_trace(TRANSACTION, "  ", &trace);
+        assert_eq!(bad_attempt.disposition, TraceDisposition::Rejected);
+        assert!(bad_attempt.violations.iter().any(|violation| {
+            violation.kind == TraceViolationKind::EmptyExpectedAttemptId
+                && violation.event_index == usize::MAX
         }));
     }
 
