@@ -117,6 +117,61 @@
 
         checks.nixward-cli = self.packages.${system}.nixward;
 
+        # Validate the shared supervisor temporal trace corpus during
+        # nix flake check, without requiring the Rust test binary to run.
+        # This checks fixture/schema completeness only, not trace semantics.
+        checks.supervisor-temporal-qualification-vectors =
+          let
+            corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/supervisor-temporal-qualification-v1.json);
+            vectors = corpus.vectors;
+            ids = map (vector: vector.id) vectors;
+            expectedViolations = pkgs.lib.concatLists (map (vector: vector.expected_violations) vectors);
+            validDispositions = [
+              "rejected"
+              "incomplete"
+              "validated_terminal_success"
+            ];
+            requiredDuplicateMilestones = [
+              "duplicate_authorization_verification"
+              "duplicate_attempt_preparation"
+              "duplicate_submission_barrier"
+              "duplicate_manager_start_submission"
+              "duplicate_worker_identity_observation"
+              "duplicate_worker_identity_persistence"
+              "duplicate_payload_release"
+              "duplicate_payload_exit"
+              "duplicate_process_receipt_publication"
+              "duplicate_lifecycle_validation"
+            ];
+            validEvent = event:
+              builtins.isString event.transaction_id
+              && builtins.isString event.attempt_id
+              && builtins.isString event.kind;
+            validVector = vector:
+              builtins.isString vector.id
+              && builtins.isString vector.purpose
+              && builtins.isString vector.expected_transaction_id
+              && builtins.isString vector.expected_attempt_id
+              && builtins.elem vector.expected_disposition validDispositions
+              && builtins.isBool vector.expected_terminal_success_claimed
+              && builtins.isList vector.expected_violations
+              && builtins.isList vector.events
+              && builtins.all validEvent vector.events;
+          in
+            assert corpus.schema == "org.luminousdynamics.nixward.supervisor-temporal-trace-vectors";
+            assert corpus.version == 1;
+            # Version 1 is deliberately frozen at 23 unique cases; revise this
+            # expectation explicitly when adding/removing normative vectors.
+            assert builtins.length vectors == 23;
+            assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
+            assert builtins.all validVector vectors;
+            assert builtins.all
+              (milestone: builtins.elem milestone expectedViolations)
+              requiredDuplicateMilestones;
+            pkgs.runCommand "nixward-supervisor-temporal-qualification-vectors" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
