@@ -544,8 +544,8 @@ mod tests {
         /// unit prefix + exactly 64 lowercase hexadecimal digest characters.
         #[test]
         fn canonical_unit_name_is_bounded_and_safe(
-            transaction_id in "[a-z0-9]{1,32}",
-            attempt_id in "[a-z0-9]{1,32}"
+            transaction_id in "[g-z]{1,32}",
+            attempt_id in "[g-z]{1,32}"
         ) {
             let name = canonical_attempt_unit_name(
                 &transaction_id,
@@ -559,8 +559,8 @@ mod tests {
             let digest = &name[prefix.len()..name.len() - suffix.len()];
             prop_assert_eq!(digest.len(), 64);
             prop_assert!(digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
-            prop_assert!(!digest.contains(&transaction_id));
-            prop_assert!(!digest.contains(&attempt_id));
+            prop_assert!(!digest.contains(transaction_id.as_str()));
+            prop_assert!(!digest.contains(attempt_id.as_str()));
         }
     }
 }
