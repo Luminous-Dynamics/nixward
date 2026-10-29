@@ -26,7 +26,7 @@ The module src/action/systemd_job_evidence.rs defines the pure evidence contract
 - Maps only JobRemoved done to MatchedStartJobCompleted. Every other known result is explicitly non-success.
 - Treats a lost StartUnit reply as indeterminate even if a signal is later presented without an authenticated exact acknowledgement.
 
-The new module is exported from src/action/mod.rs and includes unit tests for canonical identity binding, each non-done manager result, exact signal correlation, unrelated signals, conflicting job identity, malformed paths, lost replies, and failed subscription transitions, and reply recording only from the transient subscribed capability.
+The pure evidence module is exported from src/action/mod.rs and includes deterministic tests for canonical identity binding, recovered-intent mutation rejection, unknown/non-done manager results, exact signal correlation, unrelated signals, conflicting job identity, malformed paths, lost replies, pre-launch persistence failure, failed subscription setup, and failed reply persistence. The optional live observer is separate and remains crate-private until integrated and qualified.
 
 ## Deliberate limits
 
@@ -60,4 +60,4 @@ Suggested baselines include direct systemd service management and established Ni
 
 ## Execution status
 
-The deterministic/property tests and adapter unit test are authored but have not been compiled or run here. No Rust test, formatter, Clippy, live D-Bus test, Nix evaluation, or NixOS VM test is claimed. The next step is a `testers.runNixOSTest` fixture that exercises the optional adapter against a real systemd manager, including lost replies and supervisor interruption.
+The deterministic/property tests and adapter unit test are authored but have not been compiled or run here. A fifth 512-case property now mutates recovered intent identity fields; this and all prior authored tests remain unexecuted. No Rust test, formatter, Clippy, live D-Bus test, Nix evaluation, or NixOS VM test is claimed. The next step is a `testers.runNixOSTest` fixture that exercises the optional adapter against a real systemd manager, including lost replies and supervisor interruption.
