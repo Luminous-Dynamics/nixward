@@ -22,7 +22,8 @@ pkgs.rustPlatform.buildRustPackage {
   # Build the library's unit-test binary but do not execute it during the Nix
   # build. The NixOS VM harness runs exactly one explicit, ignored live test.
   postBuild = ''
-    cargo test --no-run --features systemd --lib 2>&1 | tee "$TMPDIR/nixward-test-build.log"
+    set -o pipefail
+    cargo test --offline --locked --no-run --features systemd --lib 2>&1 | tee "$TMPDIR/nixward-test-build.log"
   '';
 
   installPhase = ''
