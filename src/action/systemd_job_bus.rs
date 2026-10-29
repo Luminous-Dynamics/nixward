@@ -18,8 +18,8 @@ use zbus::{Connection, Proxy, proxy::SignalStream};
 
 use super::systemd_job_evidence::{
     JobRemovedEvidence, JobRemovedResult, ManagerStartReply, PersistedStart, StartIntent,
-    StartJobCorrelation, StartReplyDisposition, SubmittedStart, SystemdStartEvidence,
-    TransactionWorkerPurpose, classify_start_reply, correlate_job_removed,
+    PreparedStartIntent, StartJobCorrelation, StartReplyDisposition, SubmittedStart,
+    SystemdStartEvidence, classify_start_reply, correlate_job_removed,
 };
 
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
@@ -32,11 +32,8 @@ const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 /// with the caller's durable journal publication routine; only the resulting
 /// PersistedStart can be passed to wait_for_job_removed.
 pub async fn submit_start(
-    transaction_id: impl Into<String>,
-    attempt_id: impl Into<String>,
-    purpose: TransactionWorkerPurpose,
+    intent: PreparedStartIntent,
 ) -> Result<SubmittedStart<SignalStream<'static>>, String> {
-    let intent = StartIntent::new(transaction_id, attempt_id, purpose)?;
     let connection = Connection::system()
         .await
         .map_err(|error| format!("failed to connect to the system bus: {error}"))?;
