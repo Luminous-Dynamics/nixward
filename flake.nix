@@ -126,6 +126,7 @@
             vectors = corpus.vectors;
             ids = map (vector: vector.id) vectors;
             expectedViolations = pkgs.lib.concatLists (map (vector: vector.expected_violations) vectors);
+            referenceTraceCheck = import ./nix/supervisor-temporal-trace.nix { inherit (pkgs) lib; };
             validDispositions = [
               "rejected"
               "incomplete"
@@ -180,6 +181,15 @@
               builtins.isString event.transaction_id
               && builtins.isString event.attempt_id
               && builtins.isString event.kind;
+            matchesReferenceModel = vector:
+              let
+                actual = referenceTraceCheck {
+                  inherit (vector) expected_transaction_id expected_attempt_id events;
+                };
+              in
+                actual.disposition == vector.expected_disposition
+                && actual.terminal_success_claimed == vector.expected_terminal_success_claimed
+                && actual.violations == pkgs.lib.sort builtins.lessThan vector.expected_violations;
             validVector = vector:
               builtins.isString vector.id
               && builtins.isString vector.purpose
@@ -199,6 +209,8 @@
             assert builtins.length vectors == 33;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
             assert builtins.all validVector vectors;
+            # Differential semantic check: Nix reference model vs. Rust fixture expectations.
+            assert builtins.all matchesReferenceModel vectors;
             assert builtins.all
               (name: builtins.elem name expectedViolations)
               requiredViolationNames;
