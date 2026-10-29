@@ -57,10 +57,10 @@ The Rust unit tests cover:
 - a later mixed/unknown target observation invalidating prior candidate validation;
 - event rebinding to a different attempt ID;
 - a safe but incomplete trace after an ambiguous manager submission;
-- rejection of duplicate one-shot milestones, while allowing a new lifecycle validation only after a newer target observation;
+- rejection of all ten one-shot milestone types when repeated in the same attempt, while allowing a new lifecycle validation only after a newer target observation;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
-- **20,000 deterministic mutation trials** of a known-valid success trace, including required-evidence deletion, identity rebinding, duplicate manager start, stale target observation, contradictory target state, and events after terminal success.
+- **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success.
 
 The 5,040-case check is exhaustive only for those seven event orderings. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
 
@@ -78,6 +78,7 @@ The 5,040-case check is exhaustive only for those seven event orderings. The gen
 |---|---:|
 | Unsafe event orderings accepted by the canonical trace suite | 0 |
 | Duplicate manager start accepted for one attempt | 0 |
+| Duplicate one-shot milestone event accepted within one attempt | 0 |
 | Payload releases missing exact authorization or durable worker identity | 0 |
 | Success claims missing receipt, fresh candidate state, or lifecycle validation | 0 |
 | Trace events accepted from another transaction/attempt identity | 0 |
