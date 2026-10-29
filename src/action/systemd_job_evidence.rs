@@ -72,6 +72,105 @@ fn validate_identity(label: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+
+/// Unsubmitted transaction-scoped start intent. It is data, not permission
+/// to start a unit; it has no serialization or public field constructor.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StartIntent {
+    transaction_id: String,
+    attempt_id: String,
+    purpose: TransactionWorkerPurpose,
+    unit_name: String,
+}
+
+impl StartIntent {
+    pub fn new(
+        transaction_id: impl Into<String>,
+        attempt_id: impl Into<String>,
+        purpose: TransactionWorkerPurpose,
+    ) -> Result<Self, String> {
+        let transaction_id = transaction_id.into();
+        let attempt_id = attempt_id.into();
+        let unit_name = canonical_attempt_unit_name(&transaction_id, &attempt_id, purpose)?;
+        Ok(Self {
+            transaction_id,
+            attempt_id,
+            purpose,
+            unit_name,
+        })
+    }
+
+    pub fn transaction_id(&self) -> &str {
+        &self.transaction_id
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
+    pub fn purpose(&self) -> TransactionWorkerPurpose {
+        self.purpose
+    }
+
+    pub fn unit_name(&self) -> &str {
+        &self.unit_name
+    }
+
+    /// Establish the manager signal subscription before advancing the intent.
+    ///
+    /// The crate-internal adapter must pass a closure that awaits both the
+    /// D-Bus match registration and systemd Manager.Subscribe() successfully.
+    /// No subscribed capability is returned if either operation fails.
+    pub(crate) async fn subscribe_before_start<E, F, Fut>(
+        self,
+        establish_subscription: F,
+    ) -> Result<SubscribedStart, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        establish_subscription().await?;
+        Ok(SubscribedStart { intent: self })
+    }
+}
+
+/// Ephemeral capability proving the in-process adapter's subscription step
+/// returned successfully. This type is intentionally not serializable and its
+/// constructor is private; durable evidence is created only by consuming it
+/// after receiving the direct manager reply.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubscribedStart {
+    intent: StartIntent,
+}
+
+impl SubscribedStart {
+    pub fn unit_name(&self) -> &str {
+        self.intent.unit_name()
+    }
+
+    pub fn transaction_id(&self) -> &str {
+        self.intent.transaction_id()
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        self.intent.attempt_id()
+    }
+
+    /// Consume the ephemeral subscription capability and record one direct
+    /// manager reply. Unknown is a valid record of a lost/ambiguous response,
+    /// not permission to repeat the same start attempt.
+    pub fn record_reply(self, reply: ManagerStartReply) -> Result<SystemdStartEvidence, String> {
+        validate_start_reply(&reply)?;
+        Ok(SystemdStartEvidence {
+            transaction_id: self.intent.transaction_id,
+            attempt_id: self.intent.attempt_id,
+            purpose: self.intent.purpose,
+            unit_name: self.intent.unit_name,
+            reply,
+        })
+    }
+}
+
 /// The method-level result of asking systemd to enqueue a unit start.
 ///
 /// Unknown is important: a dropped D-Bus connection after the request does
@@ -89,8 +188,9 @@ pub enum ManagerStartReply {
     Unknown,
 }
 
-/// Durable fields that a production adapter must bind to the exact request
-/// and reply. This evidence is not itself proof of a process or post-state.
+/// Durable fields bound to the exact request and direct manager reply.
+/// This record is not a runtime capability and proves neither signal ordering
+/// nor process exit or the intended NixOS post-state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemdStartEvidence {
@@ -98,9 +198,23 @@ pub struct SystemdStartEvidence {
     pub attempt_id: String,
     pub purpose: TransactionWorkerPurpose,
     pub unit_name: String,
-    /// Must reflect a confirmed D-Bus signal subscription before StartUnit.
-    pub subscribed_before_start: bool,
     pub reply: ManagerStartReply,
+}
+
+fn validate_start_reply(reply: &ManagerStartReply) -> Result<(), String> {
+    match reply {
+        ManagerStartReply::Unknown => Ok(()),
+        ManagerStartReply::Rejected { error_name } if error_name.trim().is_empty() => {
+            Err("manager rejection is missing its D-Bus error name".into())
+        }
+        ManagerStartReply::Rejected { .. } => Ok(()),
+        ManagerStartReply::Enqueued { job_id, job_object_path } => {
+            if *job_id == 0 || !valid_job_object_path(job_object_path) {
+                return Err("StartUnit reply has an invalid job ID or object path".into());
+            }
+            Ok(())
+        }
+    }
 }
 
 /// The result field documented by systemd's JobRemoved signal.
@@ -154,9 +268,6 @@ pub enum StartReplyDisposition {
 pub fn classify_start_reply(
     start: &SystemdStartEvidence,
 ) -> Result<StartReplyDisposition, String> {
-    if !start.subscribed_before_start {
-        return Err("JobRemoved subscription was not confirmed before StartUnit".into());
-    }
     let expected_unit = canonical_attempt_unit_name(
         &start.transaction_id,
         &start.attempt_id,
@@ -165,26 +276,17 @@ pub fn classify_start_reply(
     if start.unit_name != expected_unit {
         return Err("start evidence unit name is not derived from its transaction/attempt identity".into());
     }
+    validate_start_reply(&start.reply)?;
 
     match &start.reply {
         ManagerStartReply::Unknown => Ok(StartReplyDisposition::Ambiguous),
-        ManagerStartReply::Rejected { error_name } => {
-            if error_name.trim().is_empty() {
-                return Err("manager rejection is missing its D-Bus error name".into());
-            }
-            Ok(StartReplyDisposition::ManagerRejected {
-                error_name: error_name.clone(),
-            })
-        }
-        ManagerStartReply::Enqueued { job_id, job_object_path } => {
-            if *job_id == 0 || !valid_job_object_path(job_object_path) {
-                return Err("StartUnit reply has an invalid job ID or object path".into());
-            }
-            Ok(StartReplyDisposition::Enqueued {
-                job_id: *job_id,
-                job_object_path: job_object_path.clone(),
-            })
-        }
+        ManagerStartReply::Rejected { error_name } => Ok(StartReplyDisposition::ManagerRejected {
+            error_name: error_name.clone(),
+        }),
+        ManagerStartReply::Enqueued { job_id, job_object_path } => Ok(StartReplyDisposition::Enqueued {
+            job_id: *job_id,
+            job_object_path: job_object_path.clone(),
+        }),
     }
 }
 
@@ -268,17 +370,18 @@ mod tests {
     use proptest::prelude::*;
 
     fn start(reply: ManagerStartReply) -> SystemdStartEvidence {
+        let transaction_id = "tx-7f3c".to_owned();
+        let attempt_id = "attempt-0004".to_owned();
         SystemdStartEvidence {
-            transaction_id: "tx-7f3c".into(),
-            attempt_id: "attempt-0004".into(),
-            purpose: TransactionWorkerPurpose::Activation,
             unit_name: canonical_attempt_unit_name(
-                "tx-7f3c",
-                "attempt-0004",
+                &transaction_id,
+                &attempt_id,
                 TransactionWorkerPurpose::Activation,
             )
             .unwrap(),
-            subscribed_before_start: true,
+            transaction_id,
+            attempt_id,
+            purpose: TransactionWorkerPurpose::Activation,
             reply,
         }
     }
@@ -404,13 +507,58 @@ mod tests {
     }
 
     #[test]
-    fn subscription_must_precede_the_start_call() {
-        let mut start = enqueued_start();
-        start.subscribed_before_start = false;
-        assert!(matches!(
-            correlate_job_removed(&start, &signal(JobRemovedResult::Done)),
-            StartJobCorrelation::RejectedEvidence { .. }
-        ));
+    fn start_intent_derives_and_freezes_the_expected_unit_identity() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        assert_eq!(intent.unit_name(), canonical_attempt_unit_name(
+            intent.transaction_id(),
+            intent.attempt_id(),
+            intent.purpose(),
+        ).unwrap());
+        assert_eq!(intent.unit_name(), enqueued_start().unit_name);
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn failed_subscription_does_not_produce_a_subscribed_start() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let result = intent
+            .subscribe_before_start(|| async { Err::<(), _>("injected subscription failure") })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn successful_subscription_is_required_before_reply_can_be_recorded() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let mut subscription_completed = false;
+        let subscribed = intent
+            .subscribe_before_start(|| async {
+                subscription_completed = true;
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap();
+        assert!(subscription_completed);
+        assert!(subscribed.unit_name().starts_with("nixward-transaction@"));
+
+        let evidence = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        assert_eq!(classify_start_reply(&evidence), Ok(StartReplyDisposition::Ambiguous));
     }
 
     #[test]
