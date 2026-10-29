@@ -358,13 +358,24 @@ pub fn correlate_job_removed(
     }
 }
 
-fn valid_job_object_path(path: &str) -> bool {
+fn job_id_from_object_path(path: &str) -> Result<u32, String> {
     let Some(suffix) = path.strip_prefix(JOB_OBJECT_PATH_PREFIX) else {
-        return false;
+        return Err("systemd job object path has the wrong prefix".into());
     };
-    !suffix.is_empty()
-        && !suffix.contains('/')
-        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    if suffix.is_empty() || suffix.contains('/') {
+        return Err("systemd job object path has an invalid suffix".into());
+    }
+    let job_id = suffix
+        .parse::<u32>()
+        .map_err(|_| "systemd job object path does not end in a numeric job ID".to_string())?;
+    if job_id == 0 || suffix != job_id.to_string() {
+        return Err("systemd job object path has a non-canonical or zero job ID".into());
+    }
+    Ok(job_id)
+}
+
+fn valid_job_object_path(path: &str) -> bool {
+    job_id_from_object_path(path).is_ok()
 }
 
 #[cfg(test)]
