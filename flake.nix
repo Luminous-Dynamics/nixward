@@ -152,6 +152,41 @@
               "target_observed:mixed_or_unknown"
               "target_observed:unavailable"
             ];
+            requiredVectorIds = [
+              "valid-terminal-success"
+              "ambiguous-manager-submission"
+              "manager-start-before-barrier"
+              "duplicate-manager-start"
+              "release-before-durable-worker-identity"
+              "foreign-transaction-event"
+              "empty-expected-transaction"
+              "whitespace-expected-attempt"
+              "target-before-receipt-is-stale"
+              "mixed-target-invalidates-prior-validation"
+              "duplicate-process-receipt"
+              "event-after-terminal-success"
+              "repeated-failed-lifecycle-validation"
+              "duplicate-successful-lifecycle-validation"
+              "duplicate-payload-exit"
+              "duplicate-authorization-verification"
+              "worker-identity-persisted-before-observation"
+              "foreign-attempt-event"
+              "duplicate-attempt-preparation"
+              "duplicate-write-ahead-barrier"
+              "duplicate-worker-identity-observation"
+              "duplicate-worker-identity-persistence"
+              "duplicate-payload-release"
+              "attempt-prepared-without-authorization"
+              "barrier-without-prepared-attempt"
+              "worker-identity-observed-before-start"
+              "payload-released-without-authorization"
+              "payload-released-before-start"
+              "payload-exit-before-release"
+              "receipt-before-payload-exit"
+              "receipt-without-durable-worker-identity"
+              "lifecycle-validation-before-exit"
+              "terminal-success-without-process-receipt"
+            ];
             requiredViolationNames = [
               "event_identity_binding_mismatch"
               "empty_expected_transaction_id"
@@ -230,6 +265,12 @@
             assert builtins.length vectors == 33;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
             assert builtins.all (id: id != "") ids;
+            assert builtins.all
+              (id: builtins.elem id ids)
+              requiredVectorIds;
+            assert builtins.all
+              (disposition: builtins.elem disposition (map (vector: vector.expected_disposition) vectors))
+              validDispositions;
             assert builtins.all validVector vectors;
             # Differential semantic check: Nix reference model vs. Rust fixture expectations.
             assert builtins.all matchesReferenceModel vectors;
