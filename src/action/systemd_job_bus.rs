@@ -28,6 +28,7 @@ use super::systemd_job_evidence::{
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
+const START_UNIT_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Start intent plus the live JobRemoved subscription and exact direct reply.
 ///
@@ -86,9 +87,19 @@ pub async fn submit_start(
             // depend on the closure's inferred lifetime.
             let manager = manager.clone();
             async move {
-                let result: Result<OwnedObjectPath, zbus::Error> = manager
-                    .call("StartUnit", &(unit_name.as_str(), "fail"))
-                    .await;
+                let result: Result<OwnedObjectPath, zbus::Error> =
+                    match tokio::time::timeout(
+                        START_UNIT_REPLY_TIMEOUT,
+                        manager.call("StartUnit", &(unit_name.as_str(), "fail")),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        // The request may already have reached PID 1. Expiry
+                        // is therefore an ambiguous reply, never permission
+                        // to resubmit this attempt.
+                        Err(_) => return ManagerStartReply::Unknown,
+                    };
                 match result {
                     Ok(job_object_path) => ManagerStartReply::Enqueued {
                         job_object_path: job_object_path.to_string(),
