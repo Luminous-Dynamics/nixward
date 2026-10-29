@@ -17,7 +17,7 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, Proxy, proxy::SignalStream};
 
 use super::systemd_job_evidence::{
-    JobRemovedEvidence, JobRemovedResult, ManagerStartReply, PersistedStart, StartIntent,
+    JobRemovedEvidence, JobRemovedResult, ManagerStartReply, PersistedStart,
     PreparedStartIntent, StartJobCorrelation, StartReplyDisposition, SubmittedStart,
     SystemdStartEvidence, classify_start_reply, correlate_job_removed,
 };
