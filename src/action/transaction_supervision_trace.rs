@@ -791,6 +791,10 @@ mod tests {
                 TraceViolationKind::DuplicateSubmissionBarrier,
             ),
             (
+                TraceEventKind::ManagerStartSubmitted,
+                TraceViolationKind::DuplicateManagerStartSubmission,
+            ),
+            (
                 TraceEventKind::WorkerIdentityObserved,
                 TraceViolationKind::DuplicateWorkerIdentityObservation,
             ),
@@ -799,8 +803,16 @@ mod tests {
                 TraceViolationKind::DuplicateWorkerIdentityPersistence,
             ),
             (
+                TraceEventKind::PayloadReleased,
+                TraceViolationKind::DuplicatePayloadRelease,
+            ),
+            (
                 TraceEventKind::PayloadExited,
                 TraceViolationKind::DuplicatePayloadExit,
+            ),
+            (
+                TraceEventKind::ProcessReceiptPersisted,
+                TraceViolationKind::DuplicateProcessReceiptPublication,
             ),
             (
                 TraceEventKind::LifecyclePostconditionValidated,
