@@ -3,7 +3,7 @@
 pkgs.rustPlatform.buildRustPackage {
   pname = "nixward-systemd-job-bus-test-runner";
   version = "0.1.0";
-  src = ..;
+  src = ../.;
   cargoLock = {
     lockFile = ../Cargo.lock;
     allowBuiltinFetchGit = true;
