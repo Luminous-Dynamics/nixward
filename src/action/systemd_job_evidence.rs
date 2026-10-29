@@ -1050,19 +1050,47 @@ mod tests {
         }
 
         /// Only a matched JobRemoved done result can be start-job completion.
+        /// Unknown/future result strings are deliberately part of this property.
         #[test]
-        fn every_non_done_job_result_is_non_success(result_code in 0u8..5) {
+        fn every_non_done_job_result_is_non_success(result_code in 0u8..6) {
             let result = match result_code {
                 0 => JobRemovedResult::Canceled,
                 1 => JobRemovedResult::Timeout,
                 2 => JobRemovedResult::Failed,
                 3 => JobRemovedResult::Dependency,
-                _ => JobRemovedResult::Skipped,
+                4 => JobRemovedResult::Skipped,
+                _ => JobRemovedResult::Unknown,
             };
             prop_assert_eq!(
                 correlate_job_removed(&enqueued_start(), &signal(result)),
                 StartJobCorrelation::MatchedStartJobFailed { result }
             );
+        }
+
+        /// Every serialized/recovered start intent must preserve the same
+        /// canonical transaction/attempt/purpose binding.
+        #[test]
+        fn recovered_intent_rejects_single_field_identity_mutations(
+            transaction_id in "[a-z0-9_-]{1,32}",
+            attempt_id in "[a-z0-9_-]{1,32}",
+            mutation in 0u8..4
+        ) {
+            let intent = StartIntent::new(
+                &transaction_id,
+                &attempt_id,
+                TransactionWorkerPurpose::Activation,
+            ).unwrap();
+            let original = intent.journal_evidence();
+            prop_assert_eq!(validate_start_intent_evidence(&original), Ok(()));
+
+            let mut changed = original.clone();
+            match mutation {
+                0 => changed.transaction_id.push_str("-changed"),
+                1 => changed.attempt_id.push_str("-changed"),
+                2 => changed.unit_name.push_str("-changed"),
+                _ => changed.purpose = TransactionWorkerPurpose::RecoveryActivation,
+            }
+            prop_assert!(validate_start_intent_evidence(&changed).is_err());
         }
 
         /// Canonical names must be independent of raw IDs and limited to one
