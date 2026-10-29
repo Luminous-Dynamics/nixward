@@ -25,11 +25,11 @@ The module now uses the repository's existing proptest dev-dependency to add fou
 - **Non-done manager results:** canceled, timeout, failed, dependency, and skipped are never classified as a completed start job.
 - **Canonical naming:** generated non-hex identifiers produce a stable unit name with a fixed prefix and exactly 64 lowercase hexadecimal digest characters, without embedding raw identifiers.
 
-The pre-existing deterministic cases continue to cover explicit manager rejection, malformed job paths, missing pre-subscription evidence, unknown reply, and exact job/unit correlation. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
+The deterministic cases also cover explicit manager rejection, malformed/non-canonical job paths, failed subscription typestate transition, unknown reply, numeric ID/path inconsistency, and exact job/path/unit correlation. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
 
 ## Qualification corpus for the eventual adapter
 
-A production D-Bus adapter should expose a small typed boundary that can be independently tested. Capture the exact request identity before the manager call; establish and confirm the manager subscription; then submit StartUnit and retain the returned job object and ID. The event adapter must preserve the job ID, object path, unit name, and result from the same JobRemoved signal rather than joining fields from unrelated events.
+A production D-Bus adapter should expose a small typed boundary that can be independently tested. Capture the exact request identity before the manager call; establish the JobRemoved match and call Manager.Subscribe(); then submit StartUnit and retain the returned job object path. StartUnit's reply is an object path, not a separate numeric job ID. The JobRemoved signal carries the numeric ID, object path, unit name, and result; preserve these values from the same signal and verify the path/ID correspondence rather than joining fields from unrelated events. See the [systemd Manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [current JobRemoved emission in systemd source](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c).
 
 Minimum live cases:
 
@@ -41,9 +41,9 @@ Minimum live cases:
 | One field matches expected identity but others disagree | Hold for reconciliation |
 | Start request reply is lost | Ambiguous; do not resubmit same attempt |
 | Subscription fails or cannot be confirmed before request | Do not submit |
-| Matching event arrives before the request returns | Buffer and correlate only after exact acknowledgement; no early success |
+| Matching event arrives before the request returns | Buffer and correlate only after the returned path is known; no early success |
 | Duplicate JobRemoved signal | Idempotently preserve one exact terminal manager event; flag contradictory duplicate |
-| D-Bus disconnect after enqueue | Persist indeterminate state, reconnect and reconcile canonical unit/job before any new attempt |
+| D-Bus disconnect after enqueue | Persist indeterminate state, reconnect and reconcile the canonical unit/path before any new attempt |
 | Supervisor killed at every boundary | Restart reads durable intent and current manager state before deciding |
 | Host reboot during one-shot operation | Treat old process identity as boot-scoped and verify actual running closure/profile separately |
 

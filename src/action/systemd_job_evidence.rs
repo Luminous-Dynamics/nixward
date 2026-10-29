@@ -181,7 +181,7 @@ impl SubscribedStart {
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ManagerStartReply {
     Enqueued {
-        job_id: u32,
+        /// The actual value returned by systemd StartUnit(): an object path.
         job_object_path: String,
     },
     Rejected {
@@ -210,10 +210,8 @@ fn validate_start_reply(reply: &ManagerStartReply) -> Result<(), String> {
             Err("manager rejection is missing its D-Bus error name".into())
         }
         ManagerStartReply::Rejected { .. } => Ok(()),
-        ManagerStartReply::Enqueued { job_id, job_object_path } => {
-            if *job_id == 0 || !valid_job_object_path(job_object_path) {
-                return Err("StartUnit reply has an invalid job ID or object path".into());
-            }
+        ManagerStartReply::Enqueued { job_object_path } => {
+            job_id_from_object_path(job_object_path)?;
             Ok(())
         }
     }
@@ -285,10 +283,13 @@ pub fn classify_start_reply(
         ManagerStartReply::Rejected { error_name } => Ok(StartReplyDisposition::ManagerRejected {
             error_name: error_name.clone(),
         }),
-        ManagerStartReply::Enqueued { job_id, job_object_path } => Ok(StartReplyDisposition::Enqueued {
-            job_id: *job_id,
-            job_object_path: job_object_path.clone(),
-        }),
+        ManagerStartReply::Enqueued { job_object_path } => {
+            let job_id = job_id_from_object_path(job_object_path)?;
+            Ok(StartReplyDisposition::Enqueued {
+                job_id,
+                job_object_path: job_object_path.clone(),
+            })
+        },
     }
 }
 
@@ -327,6 +328,11 @@ pub fn correlate_job_removed(
             reason: "JobRemoved evidence has an invalid job ID or object path".into(),
         };
     }
+    if job_id_from_object_path(&signal.job_object_path).ok() != Some(signal.job_id) {
+        return StartJobCorrelation::HoldForReconciliation {
+            reason: "JobRemoved numeric ID conflicts with the ID encoded in its object path".into(),
+        };
+    }
     if signal.unit_name.trim().is_empty() || signal.unit_name.chars().any(char::is_control) {
         return StartJobCorrelation::RejectedEvidence {
             reason: "JobRemoved evidence has an invalid unit name".into(),
@@ -357,13 +363,24 @@ pub fn correlate_job_removed(
     }
 }
 
-fn valid_job_object_path(path: &str) -> bool {
+fn job_id_from_object_path(path: &str) -> Result<u32, String> {
     let Some(suffix) = path.strip_prefix(JOB_OBJECT_PATH_PREFIX) else {
-        return false;
+        return Err("systemd job object path has the wrong prefix".into());
     };
-    !suffix.is_empty()
-        && !suffix.contains('/')
-        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    if suffix.is_empty() || suffix.contains('/') {
+        return Err("systemd job object path has an invalid suffix".into());
+    }
+    let job_id = suffix
+        .parse::<u32>()
+        .map_err(|_| "systemd job object path does not end in a numeric job ID".to_string())?;
+    if job_id == 0 || suffix != job_id.to_string() {
+        return Err("systemd job object path has a non-canonical or zero job ID".into());
+    }
+    Ok(job_id)
+}
+
+fn valid_job_object_path(path: &str) -> bool {
+    job_id_from_object_path(path).is_ok()
 }
 
 #[cfg(test)]
@@ -390,7 +407,6 @@ mod tests {
 
     fn enqueued_start() -> SystemdStartEvidence {
         start(ManagerStartReply::Enqueued {
-            job_id: 41,
             job_object_path: "/org/freedesktop/systemd1/job/41".into(),
         })
     }
@@ -578,7 +594,6 @@ mod tests {
             .unwrap();
         assert!(subscribed
             .record_reply(ManagerStartReply::Enqueued {
-                job_id: 0,
                 job_object_path: "/org/freedesktop/systemd1/job/0".into(),
             })
             .is_err());
@@ -653,12 +668,30 @@ mod tests {
     #[test]
     fn acknowledgement_with_zero_job_id_is_rejected() {
         let start = start(ManagerStartReply::Enqueued {
-            job_id: 0,
             job_object_path: "/org/freedesktop/systemd1/job/0".into(),
         });
         assert!(matches!(
             correlate_job_removed(&start, &signal(JobRemovedResult::Done)),
             StartJobCorrelation::RejectedEvidence { .. }
+        ));
+    }
+
+    #[test]
+    fn startunit_object_path_is_the_reply_source_for_job_identity() {
+        assert_eq!(
+            job_id_from_object_path("/org/freedesktop/systemd1/job/41"),
+            Ok(41)
+        );
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/0").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/041").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/not-a-number").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/unit/example.service").is_err());
+
+        let mut inconsistent_signal = signal(JobRemovedResult::Done);
+        inconsistent_signal.job_id = 42;
+        assert!(matches!(
+            correlate_job_removed(&enqueued_start(), &inconsistent_signal),
+            StartJobCorrelation::HoldForReconciliation { .. }
         ));
     }
 

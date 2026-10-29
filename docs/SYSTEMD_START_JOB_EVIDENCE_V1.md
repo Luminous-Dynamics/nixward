@@ -17,10 +17,10 @@ Reference: [systemd D-Bus manager interface](https://www.freedesktop.org/softwar
 The new module, src/action/systemd_job_evidence.rs, introduces a pure correlation contract:
 
 - Derives a template unit name from transaction ID, unique attempt ID, and worker purpose using domain-separated SHA-256 and length-prefixed fields. User-provided IDs never appear directly in the privileged unit name.
-- Represents manager reply states separately: enqueued with exact job ID and object path, known rejection, or unknown/lost reply.
+- Matches the actual D-Bus signature: an enqueued StartUnit reply contains the job object path, not a separate numeric job ID. The contract validates the canonical path suffix and derives the numeric ID only to cross-check it against the later JobRemoved signal.
 - Uses a non-serializable `StartIntent -> SubscribedStart` typestate transition. The crate-internal transition awaits a subscription closure and only yields `SubscribedStart` if that closure succeeds; its constructor is not exposed to downstream crates.
 - Allows `SubscribedStart::record_reply` to create the durable `SystemdStartEvidence` record only after the transient capability exists. The record itself remains data, not authority: persisted or externally supplied evidence still needs provenance validation at the adapter/journal boundary.
-- Correlates a JobRemoved event only when job ID, object path, and canonical unit name agree.
+- Correlates JobRemoved using the exact returned object path and expected canonical unit name, and holds if the signal's numeric job ID disagrees with the ID encoded in its object path.
 - Ignores an unrelated job only when its job ID, object path, and unit name are all foreign to the expected job; any conflict sharing one of those identifiers requires reconciliation.
 - Maps only JobRemoved done to MatchedStartJobCompleted. Every other known result is explicitly non-success.
 - Treats a lost StartUnit reply as indeterminate even if a signal is later presented without an authenticated exact acknowledgement.
@@ -31,7 +31,7 @@ The new module is exported from src/action/mod.rs and includes unit tests for ca
 
 This is an executable contract, not a D-Bus adapter. The typestate seam makes the intended in-process order explicit, but it cannot authenticate a serialized record or prove that a future adapter's subscription closure actually registered the correct systemd signal match and called Manager.Subscribe(). That must be checked in the real adapter and live manager tests. The module neither launches nor authorizes a worker, writes transaction journals, verifies cryptographic provenance, nor proves host state.
 
-The existing temporal trace contract in PR #88 and cross-language fixture gate in PR #89 remain separate. This model must eventually feed a provenance-bound event recorder; it must not replace process identity, the output-free process receipt, or fresh read-only profile/runtime observation.
+The existing temporal trace contract in PR #88 and cross-language fixture gate in PR #89 remain separate. The StartUnit method reply is modeled as its actual returned object path only; the numeric job ID appears in JobRemoved's signal tuple (signature `uoss`) and is checked against the canonical job path. See the [systemd manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [systemd's current JobRemoved emission](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c). This model must eventually feed a provenance-bound event recorder; it must not replace process identity, the output-free process receipt, or fresh read-only profile/runtime observation.
 
 ## Qualification plan
 
@@ -45,7 +45,7 @@ The production integration should use a disposable NixOS VM and a controlled har
 | StartUnit returns an explicit D-Bus error | Record the manager rejection; do not call it transaction success |
 | JobRemoved is done | Record only start-job completion; await worker/process/post-state evidence |
 | JobRemoved is canceled, timeout, failed, dependency, or skipped | Non-success result; no terminal transaction claim |
-| Correct ID with conflicting path/unit or vice versa | Hold for reconciliation |
+| Numeric JobRemoved ID conflicts with the ID encoded in its object path | Hold for reconciliation |\n| Correct object path with conflicting unit, or a foreign path claiming the expected unit | Hold for reconciliation |
 | Supervisor process dies before/after request | Restart must inspect durable intent and existing unit identity before any new request |
 | Host reboots during an attempt | Treat boot-scoped process identity as stale; independently observe current runtime and profile |
 
