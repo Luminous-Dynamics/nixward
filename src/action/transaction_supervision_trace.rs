@@ -1129,7 +1129,7 @@ mod tests {
         let vectors = fixture["vectors"]
             .as_array()
             .expect("qualification vectors must be an array");
-        assert_eq!(vectors.len(), 18);
+        assert_eq!(vectors.len(), 23);
 
         let mut ids = HashSet::new();
         for vector in vectors {
