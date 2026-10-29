@@ -20,7 +20,7 @@ The new module, src/action/systemd_job_evidence.rs, introduces a pure correlatio
 - Represents manager reply states separately: enqueued with exact job ID and object path, known rejection, or unknown/lost reply.
 - Carries the subscription-before-start invariant as an explicit field for the production adapter to attest to.
 - Correlates a JobRemoved event only when job ID, object path, and canonical unit name agree.
-- Ignores an unrelated job only when it does not appear to concern the expected unit; a conflicting event that shares the expected unit or job path requires reconciliation.
+- Ignores an unrelated job only when its job ID, object path, and unit name are all foreign to the expected job; any conflict sharing one of those identifiers requires reconciliation.
 - Maps only JobRemoved done to MatchedStartJobCompleted. Every other known result is explicitly non-success.
 - Treats a lost StartUnit reply as indeterminate even if a signal is later presented without an authenticated exact acknowledgement.
 
