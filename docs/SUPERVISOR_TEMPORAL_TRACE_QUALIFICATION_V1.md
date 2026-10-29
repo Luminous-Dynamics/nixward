@@ -68,7 +68,7 @@ The Rust unit tests cover:
 - **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success;
 - a versioned, language-neutral [JSON conformance corpus](fixtures/supervisor-temporal-qualification-v1.json) with **33 named input/output vectors**. A Rust fixture test loads the same corpus via `include_str!` and compares each vector's disposition, terminal-success claim, and complete violation multiset. This makes the contract reusable for an independent Python/Nix/other-language checker without treating the JSON fixture itself as proof.
 
-The 5,040-case check is exhaustive only for those seven event orderings. The 18-vector corpus covers selected positive, incomplete, identity, duplicate-event, freshness, and terminality scenarios. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
+The 5,040-case check is exhaustive only for those seven event orderings. The 33-vector corpus covers selected positive, incomplete, identity, duplicate-event, freshness, and terminality scenarios. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
 
 ## Next qualification gates
 
