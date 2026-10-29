@@ -403,6 +403,7 @@ pub fn validate_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     const TRANSACTION: &str = "transaction-1";
     const ATTEMPT: &str = "attempt-1";
@@ -921,6 +922,68 @@ mod tests {
             violation.kind == TraceViolationKind::EmptyExpectedAttemptId
                 && violation.event_index == usize::MAX
         }));
+    }
+
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn deleting_any_mandatory_success_event_cannot_still_prove_success(index in 0usize..12) {
+            let mut trace = valid_success_trace();
+            trace.remove(index);
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            prop_assert_ne!(
+                result.disposition,
+                TraceDisposition::ValidatedTerminalSuccess,
+                "removing event {index} must prevent terminal success"
+            );
+        }
+
+        #[test]
+        fn event_identity_rebinding_always_rejects_success(
+            index in 0usize..12,
+            foreign_transaction in any::<bool>(),
+            foreign_attempt in any::<bool>()
+        ) {
+            let mut trace = valid_success_trace();
+            if foreign_transaction {
+                trace[index].transaction_id = "foreign-transaction".to_owned();
+            }
+            if foreign_attempt {
+                trace[index].attempt_id = "foreign-attempt".to_owned();
+            }
+
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            if foreign_transaction || foreign_attempt {
+                prop_assert_eq!(result.disposition, TraceDisposition::Rejected);
+            } else {
+                prop_assert_eq!(result.disposition, TraceDisposition::ValidatedTerminalSuccess);
+            }
+        }
+
+        #[test]
+        fn only_candidate_active_target_can_satisfy_terminal_state(
+            observation_code in 0u8..6
+        ) {
+            let observation = match observation_code {
+                0 => TargetObservation::NotAttempted,
+                1 => TargetObservation::CandidateRuntimeAndProfileActive,
+                2 => TargetObservation::PredecessorRuntimeAndProfileActive,
+                3 => TargetObservation::BootCandidateProfileSelected,
+                4 => TargetObservation::MixedOrUnknown,
+                _ => TargetObservation::Unavailable,
+            };
+            let mut trace = valid_success_trace();
+            trace[9].kind = TraceEventKind::TargetObserved(observation);
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+
+            if observation == TargetObservation::CandidateRuntimeAndProfileActive {
+                prop_assert_eq!(result.disposition, TraceDisposition::ValidatedTerminalSuccess);
+            } else {
+                prop_assert_eq!(result.disposition, TraceDisposition::Rejected);
+            }
+        }
     }
 
 }
