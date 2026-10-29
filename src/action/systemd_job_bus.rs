@@ -1,14 +1,17 @@
 // Copyright (C) 2024-2026 Tristan Stoltz / Luminous Dynamics
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
-//! Live, read-only systemd start-job observation through zbus.
+//! systemd start-job submission and observation through zbus.
 //!
-//! This module submits one transaction-derived unit start and observes only
-//! its manager job lifecycle. It does not authorize the unit, create the
-//! privileged worker, mutate the NixOS transaction journal, or assert host
-//! activation success. The caller must persist the pre-launch write-ahead
-//! intent before calling submit_start, then persist the returned StartUnit
-//! reply before waiting for the completion signal.
+//! The submit path performs one mutating StartUnit request, then observes only
+//! the corresponding manager job lifecycle. This module is crate-private and
+//! must not be wired into production until the existing transaction
+//! authorization, interlock, canonical unit definition, and VM qualification
+//! are integrated. It does not authorize the unit, create/qualify the
+//! privileged worker, mutate the transaction journal itself, or assert host
+//! activation success. The caller must persist the pre-launch intent before
+//! calling submit_start, then persist the returned StartUnit reply before
+//! waiting for the completion signal.
 
 use std::time::Duration;
 
