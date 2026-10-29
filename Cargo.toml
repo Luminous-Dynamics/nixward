@@ -85,6 +85,7 @@ ratatui = { version = "0.30", optional = true }
 # Systemd (optional)
 zbus = { version = "4.0", optional = true }
 libsystemd = { version = "0.7", optional = true }
+futures-util = { version = "0.3", optional = true }
 
 # Observability (optional)
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
@@ -109,6 +110,6 @@ native = ["nix", "rusqlite", "tree-sitter", "tree-sitter-nix", "tokio", "openssl
 cli = ["clap", "clap_complete", "native"]
 tui = ["crossterm", "ratatui", "cli"]
 daemon = ["tokio/full", "native"]
-systemd = ["zbus", "libsystemd", "native"]
+systemd = ["zbus", "libsystemd", "native", "futures-util"]
 observability = ["tracing-subscriber", "metrics", "metrics-exporter-prometheus", "hyper", "hyper-util", "http-body-util", "daemon"]
 full = ["cli", "tui", "daemon", "systemd"]
