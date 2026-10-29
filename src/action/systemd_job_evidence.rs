@@ -283,10 +283,13 @@ pub fn classify_start_reply(
         ManagerStartReply::Rejected { error_name } => Ok(StartReplyDisposition::ManagerRejected {
             error_name: error_name.clone(),
         }),
-        ManagerStartReply::Enqueued { job_id, job_object_path } => Ok(StartReplyDisposition::Enqueued {
-            job_id: *job_id,
-            job_object_path: job_object_path.clone(),
-        }),
+        ManagerStartReply::Enqueued { job_object_path } => {
+            let job_id = job_id_from_object_path(job_object_path)?;
+            Ok(StartReplyDisposition::Enqueued {
+                job_id,
+                job_object_path: job_object_path.clone(),
+            })
+        },
     }
 }
 
