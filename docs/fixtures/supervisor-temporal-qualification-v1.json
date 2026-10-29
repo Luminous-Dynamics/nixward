@@ -1092,6 +1092,396 @@
       "expected_violations": [
         "event_identity_binding_mismatch"
       ]
+    },
+    {
+      "id": "duplicate-attempt-preparation",
+      "purpose": "duplicate-one-shot-negative-control",
+      "expected_transaction_id": "transaction-1",
+      "expected_attempt_id": "attempt-1",
+      "events": [
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "authorization_verified"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "manager_start_submitted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_exited"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "process_receipt_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "target_observed:candidate_runtime_and_profile_active"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "lifecycle_postcondition_validated"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "terminal_success_recorded"
+        }
+      ],
+      "expected_disposition": "rejected",
+      "expected_terminal_success_claimed": true,
+      "expected_violations": [
+        "duplicate_attempt_preparation"
+      ]
+    },
+    {
+      "id": "duplicate-write-ahead-barrier",
+      "purpose": "duplicate-one-shot-negative-control",
+      "expected_transaction_id": "transaction-1",
+      "expected_attempt_id": "attempt-1",
+      "events": [
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "authorization_verified"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "manager_start_submitted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_exited"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "process_receipt_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "target_observed:candidate_runtime_and_profile_active"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "lifecycle_postcondition_validated"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "terminal_success_recorded"
+        }
+      ],
+      "expected_disposition": "rejected",
+      "expected_terminal_success_claimed": true,
+      "expected_violations": [
+        "duplicate_submission_barrier"
+      ]
+    },
+    {
+      "id": "duplicate-worker-identity-observation",
+      "purpose": "duplicate-one-shot-negative-control",
+      "expected_transaction_id": "transaction-1",
+      "expected_attempt_id": "attempt-1",
+      "events": [
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "authorization_verified"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "manager_start_submitted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_exited"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "process_receipt_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "target_observed:candidate_runtime_and_profile_active"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "lifecycle_postcondition_validated"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "terminal_success_recorded"
+        }
+      ],
+      "expected_disposition": "rejected",
+      "expected_terminal_success_claimed": true,
+      "expected_violations": [
+        "duplicate_worker_identity_observation"
+      ]
+    },
+    {
+      "id": "duplicate-worker-identity-persistence",
+      "purpose": "duplicate-one-shot-negative-control",
+      "expected_transaction_id": "transaction-1",
+      "expected_attempt_id": "attempt-1",
+      "events": [
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "authorization_verified"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "manager_start_submitted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_exited"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "process_receipt_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "target_observed:candidate_runtime_and_profile_active"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "lifecycle_postcondition_validated"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "terminal_success_recorded"
+        }
+      ],
+      "expected_disposition": "rejected",
+      "expected_terminal_success_claimed": true,
+      "expected_violations": [
+        "duplicate_worker_identity_persistence"
+      ]
+    },
+    {
+      "id": "duplicate-payload-release",
+      "purpose": "duplicate-one-shot-negative-control",
+      "expected_transaction_id": "transaction-1",
+      "expected_attempt_id": "attempt-1",
+      "events": [
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "authorization_verified"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "attempt_prepared_durably"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "submission_barrier_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "manager_start_submitted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_observed"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "worker_identity_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_released"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "payload_exited"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "process_receipt_persisted"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "target_observed:candidate_runtime_and_profile_active"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "lifecycle_postcondition_validated"
+        },
+        {
+          "transaction_id": "transaction-1",
+          "attempt_id": "attempt-1",
+          "kind": "terminal_success_recorded"
+        }
+      ],
+      "expected_disposition": "rejected",
+      "expected_terminal_success_claimed": true,
+      "expected_violations": [
+        "duplicate_payload_release"
+      ]
     }
   ]
 }
