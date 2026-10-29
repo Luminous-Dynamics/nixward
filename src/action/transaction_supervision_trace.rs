@@ -91,7 +91,7 @@ pub enum TraceDisposition {
 pub struct TraceValidation {
     pub violations: Vec<TraceViolation>,
     pub disposition: TraceDisposition,
-    /// Records that an event claimed terminal success, even if the trace was rejected.
+    /// Records that a matching-identity event claimed terminal success, even if rejected.
     pub terminal_success_claimed: bool,
 }
 
