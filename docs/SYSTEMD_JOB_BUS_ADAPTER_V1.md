@@ -17,7 +17,7 @@ The API is intentionally split so the caller owns journal publication. A caller 
 3. Connect to the system bus and create a proxy for org.freedesktop.systemd1.Manager.
 4. Install a JobRemoved signal subscription filtered to the canonical attempt unit, then call Manager.Subscribe(). Failure in either step prevents StartUnit from being called.
 5. Invoke StartUnit with the exact derived unit name and mode fail. The adapter records the actual returned object path; it does not invent a numeric job ID.
-6. Treat an explicit D-Bus method-error reply as Rejected. Treat other call errors as Unknown because a lost transport reply does not prove the manager did not enqueue the job.
+6. Treat a zbus non-FDO MethodError reply as Rejected and preserve its D-Bus error name. Treat other errors, including generic/FDO-wrapped failures, as Unknown because this slice does not yet normalize their error names and a transport failure may follow enqueue.
 7. Retain the signal stream in SubmittedStart. The caller must call persist_before_observing with the direct StartUnit reply and only then receives PersistedStart.
 8. Consume that persisted ticket with a bounded wait for JobRemoved. Correlate the exact path, path-derived ID, unit and result. Unrelated units are skipped; partial identity conflicts hold for reconciliation; timeouts, stream closure, malformed signals and unknown result strings never become transaction success.
 9. Preserve raw systemd result text in SystemdStartObservation, even when the result is unknown to this version of the enum.
