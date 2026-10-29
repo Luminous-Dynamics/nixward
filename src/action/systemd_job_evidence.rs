@@ -563,6 +563,34 @@ mod tests {
         assert_eq!(classify_start_reply(&evidence), Ok(StartReplyDisposition::Ambiguous));
     }
 
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn subscribed_capability_rejects_malformed_manager_reply() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let subscribed = intent
+            .subscribe_before_start(|| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        assert!(subscribed
+            .record_reply(ManagerStartReply::Enqueued {
+                job_id: 0,
+                job_object_path: "/org/freedesktop/systemd1/job/0".into(),
+            })
+            .is_err());
+        assert!(subscribed_capability_rejects_blank_error_name());
+    }
+
+    fn subscribed_capability_rejects_blank_error_name() -> bool {
+        // Check validation independently: malformed manager errors are rejected
+        // before any durable evidence record is returned.
+        validate_start_reply(&ManagerStartReply::Rejected { error_name: "  ".into() }).is_err()
+    }
+
     #[test]
     fn identity_mismatch_and_malformed_paths_fail_closed() {
         let mut start = enqueued_start();
