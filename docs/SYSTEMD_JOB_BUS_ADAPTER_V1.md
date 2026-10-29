@@ -13,7 +13,7 @@ The API is intentionally split so the caller owns journal publication. A caller 
 ## Implemented sequence
 
 1. Construct a non-serializable StartIntent from a transaction ID, unique attempt ID, and worker purpose.
-2. Pass its serializable StartIntentEvidence to the caller's durable pre-launch persistence callback. Only success returns PreparedStartIntent, which is the only type accepted by the live adapter.
+2. Pass its serializable StartIntentEvidence to the caller's durable pre-launch persistence callback. Only success returns PreparedStartIntent, which is the only type accepted by the live adapter. When a write-ahead record is recovered after process restart, call validate_start_intent_evidence and reject any transaction/attempt/purpose/unit mismatch before reconciliation.
 3. Connect to the system bus and create a proxy for org.freedesktop.systemd1.Manager.
 4. Install a JobRemoved signal subscription filtered to the canonical attempt unit, then call Manager.Subscribe(). Failure in either step prevents StartUnit from being called.
 5. Invoke StartUnit with the exact derived unit name and mode fail. The adapter records the actual returned object path; it does not invent a numeric job ID.
@@ -31,6 +31,7 @@ This chain constrains in-process call order. It is not a security boundary: the 
 ## Important recovery limits
 
 - StartUnit may have been accepted even when the method reply is lost. The adapter emits Unknown and must not resubmit that attempt.
+- A recovered StartIntentEvidence record must pass validate_start_intent_evidence; the serialized transaction, attempt, purpose and canonical unit must agree. This validates identity consistency, not cryptographic authenticity or journal integrity.
 - If reply persistence fails after StartUnit, the returned failure retains the submitted attempt and live subscription so the caller can retry publication, not the manager request.
 - If JobRemoved times out or the stream closes, the result is a hold-for-reconciliation. It is not proof that the unit did not run.
 - The in-memory signal stream does not survive a Nixward process crash or machine reboot. A restarted supervisor must reconcile the durable attempt and query the canonical manager unit, then independently inspect runtime/profile state. This adapter does not yet implement restart recovery or a durable event journal.
@@ -63,4 +64,4 @@ Use the same harmless service, VM configuration, and fault schedule against dire
 
 ## Execution status
 
-Static source review only. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
+Static source review only. The adapter remains crate-private and is not production-wired because it issues a real, mutating StartUnit request while still lacking integrated transaction authorization, an established unit template, durable inter-process locking/reconciliation, and VM qualification. Added a pure recovered-intent validator and mutation tests, but no Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, or NixOS VM fault injection has been run in this environment. Rust tests/build, rustfmt, Clippy, live D-Bus tests, Nix evaluation, and NixOS VM fault injection have not been run in this environment. Do not connect it to a production caller until those gaps are closed and the exact PR head is qualified.
