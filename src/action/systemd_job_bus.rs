@@ -40,8 +40,11 @@ pub async fn submit_start(
     let connection = Connection::system()
         .await
         .map_err(|error| format!("failed to connect to the system bus: {error}"))?;
-    let manager = Proxy::new(
-        &connection,
+    // Own the connection and all proxy addressing strings. The returned signal
+    // stream is carried beyond this function, so it must not borrow a local
+    // Connection, Proxy, or unit-name buffer.
+    let manager = Proxy::new_owned(
+        connection,
         SYSTEMD_SERVICE,
         SYSTEMD_PATH,
         SYSTEMD_MANAGER_INTERFACE,
