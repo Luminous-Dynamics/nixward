@@ -17,7 +17,7 @@ The API is intentionally split so the caller owns journal publication. A caller 
 3. Connect to the system bus and create a proxy for org.freedesktop.systemd1.Manager.
 4. Install a JobRemoved signal subscription filtered to the canonical attempt unit, then call Manager.Subscribe(). Failure in either step prevents StartUnit from being called.
 5. Invoke StartUnit with the exact derived unit name and mode fail. The adapter records the actual returned object path; it does not invent a numeric job ID.
-6. Treat a zbus non-FDO MethodError reply as Rejected and preserve its D-Bus error name. Treat other errors, including generic/FDO-wrapped failures, as Unknown because this slice does not yet normalize their error names and a transport failure may follow enqueue.
+6. Bound the StartUnit method-reply wait to 15 seconds. Treat a zbus non-FDO MethodError reply as Rejected and preserve its D-Bus error name. Treat deadline expiry and other errors, including generic/FDO-wrapped failures, as Unknown because the request may already have reached PID 1. Never retry the same attempt because this local wait expired.
 7. Retain the signal stream in SubmittedStart. The caller must call persist_before_observing with the direct StartUnit reply and only then receives PersistedStart.
 8. Consume that persisted ticket with a bounded wait for JobRemoved. Correlate the exact path, path-derived ID, unit and result. Unrelated units are skipped; partial identity conflicts hold for reconciliation; timeouts, stream closure, malformed signals and unknown result strings never become transaction success. If the direct reply is Unknown but the stream remains alive, the observer still retains a matching unit event as supplemental evidence; it never promotes that signal to confirmed completion without the direct returned job path.
 9. Preserve raw systemd result text in SystemdStartObservation, even when the result is unknown to this version of the enum.
@@ -30,7 +30,7 @@ This chain constrains in-process call order. It is not a security boundary: the 
 
 ## Important recovery limits
 
-- StartUnit may have been accepted even when the method reply is lost. The adapter emits Unknown and must not resubmit that attempt. If the existing signal stream remains live, a matching JobRemoved event is retained with HoldForReconciliation; it is supplemental evidence, not a substitute for the lost direct reply.
+- StartUnit may have been accepted even when the method reply is lost or the 15-second local reply deadline expires. The adapter emits Unknown and must not resubmit that attempt. If the existing signal stream remains live, a matching JobRemoved event is retained with HoldForReconciliation; it is supplemental evidence, not a substitute for the lost direct reply.
 - A recovered StartIntentEvidence record must pass validate_start_intent_evidence; the serialized transaction, attempt, purpose and canonical unit must agree. This validates identity consistency, not cryptographic authenticity or journal integrity.
 - If reply persistence fails after StartUnit, the returned failure retains the submitted attempt and live subscription so the caller can retry publication, not the manager request.
 - If JobRemoved times out or the stream closes, the result is a hold-for-reconciliation. It is not proof that the unit did not run.
