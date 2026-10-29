@@ -118,34 +118,32 @@ impl StartIntent {
 
     /// Establish the manager signal subscription before advancing the intent.
     ///
-    /// The crate-internal adapter must pass a closure that awaits both the
-    /// D-Bus match registration and systemd Manager.Subscribe() successfully.
-    /// No subscribed capability is returned if either operation fails.
-    /// This stays crate-internal until the real D-Bus adapter consumes it.
-    #[allow(dead_code)]
-    pub(crate) async fn subscribe_before_start<E, F, Fut>(
+    /// The closure should install the JobRemoved match and call Manager.Subscribe().
+    /// The subscription is retained in the returned type, so it remains alive
+    /// across StartUnit and until the observer finishes or reconciles.
+    pub(crate) async fn subscribe_before_start<E, F, Fut, S>(
         self,
         establish_subscription: F,
-    ) -> Result<SubscribedStart, E>
+    ) -> Result<SubscribedStart<S>, E>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<(), E>>,
+        Fut: std::future::Future<Output = Result<S, E>>,
     {
-        establish_subscription().await?;
-        Ok(SubscribedStart { intent: self })
+        let subscription = establish_subscription().await?;
+        Ok(SubscribedStart { intent: self, subscription })
     }
 }
 
-/// Ephemeral capability proving the in-process adapter's subscription step
-/// returned successfully. This type is intentionally not serializable and its
-/// constructor is private; durable evidence is created only by consuming it
-/// after receiving the direct manager reply.
+/// Ephemeral capability proving the in-process adapter's subscription closure
+/// returned successfully. This non-serializable object retains the live signal
+/// subscription; its constructor is private.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SubscribedStart {
+pub struct SubscribedStart<S> {
     intent: StartIntent,
+    subscription: S,
 }
 
-impl SubscribedStart {
+impl<S> SubscribedStart<S> {
     pub fn unit_name(&self) -> &str {
         self.intent.unit_name()
     }
@@ -158,19 +156,99 @@ impl SubscribedStart {
         self.intent.attempt_id()
     }
 
-    /// Consume the ephemeral subscription capability and record one direct
-    /// manager reply. Unknown is a valid record of a lost/ambiguous response,
-    /// not permission to repeat the same start attempt.
-    pub fn record_reply(self, reply: ManagerStartReply) -> Result<SystemdStartEvidence, String> {
+    /// Submit exactly one start request after the subscription stage. Any
+    /// transport failure should be represented as Unknown and never retried
+    /// here. The live subscription is carried forward in SubmittedStart.
+    pub(crate) async fn submit_start<F, Fut>(self, submit: F) -> SubmittedStart<S>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = ManagerStartReply>,
+    {
+        let reply = submit(self.intent.unit_name.clone()).await;
+        SubmittedStart {
+            evidence: SystemdStartEvidence {
+                transaction_id: self.intent.transaction_id,
+                attempt_id: self.intent.attempt_id,
+                purpose: self.intent.purpose,
+                unit_name: self.intent.unit_name,
+                reply,
+            },
+            subscription: self.subscription,
+        }
+    }
+
+    #[cfg(test)]
+    fn record_reply(self, reply: ManagerStartReply) -> Result<SubmittedStart<S>, String> {
         validate_start_reply(&reply)?;
-        Ok(SystemdStartEvidence {
-            transaction_id: self.intent.transaction_id,
-            attempt_id: self.intent.attempt_id,
-            purpose: self.intent.purpose,
-            unit_name: self.intent.unit_name,
-            reply,
+        Ok(SubmittedStart {
+            evidence: SystemdStartEvidence {
+                transaction_id: self.intent.transaction_id,
+                attempt_id: self.intent.attempt_id,
+                purpose: self.intent.purpose,
+                unit_name: self.intent.unit_name,
+                reply,
+            },
+            subscription: self.subscription,
         })
     }
+}
+
+/// A direct StartUnit reply and its live subscription. Before observing any
+/// JobRemoved signal, the caller must durably publish the reply evidence.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SubmittedStart<S> {
+    evidence: SystemdStartEvidence,
+    subscription: S,
+}
+
+impl<S> SubmittedStart<S> {
+    pub fn evidence(&self) -> &SystemdStartEvidence {
+        &self.evidence
+    }
+
+    pub async fn persist_before_observing<E, F, Fut>(
+        self,
+        persist: F,
+    ) -> Result<PersistedStart<S>, StartEvidencePersistenceFailure<S, E>>
+    where
+        F: FnOnce(SystemdStartEvidence) -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        let Self { evidence, subscription } = self;
+        match persist(evidence.clone()).await {
+            Ok(()) => Ok(PersistedStart { evidence, subscription }),
+            Err(source) => Err(StartEvidencePersistenceFailure {
+                attempt: Self { evidence, subscription },
+                source,
+            }),
+        }
+    }
+}
+
+/// The only typestate that permits signal observation: StartUnit reply
+/// evidence has been handed to a persistence callback and it succeeded.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PersistedStart<S> {
+    evidence: SystemdStartEvidence,
+    subscription: S,
+}
+
+impl<S> PersistedStart<S> {
+    pub fn evidence(&self) -> &SystemdStartEvidence {
+        &self.evidence
+    }
+
+    pub(crate) fn into_parts(self) -> (SystemdStartEvidence, S) {
+        (self.evidence, self.subscription)
+    }
+}
+
+/// A failed evidence write after StartUnit. The attempt and signal stream are
+/// retained so the caller can retry persistence without repeating StartUnit.
+#[derive(Debug)]
+pub struct StartEvidencePersistenceFailure<S, E> {
+    pub attempt: SubmittedStart<S>,
+    pub source: E,
 }
 
 /// The method-level result of asking systemd to enqueue a unit start.
@@ -227,6 +305,8 @@ pub enum JobRemovedResult {
     Failed,
     Dependency,
     Skipped,
+    /// An unrecognized future manager result. Never interpreted as success.
+    Unknown,
 }
 
 /// A single observed JobRemoved signal. The D-Bus adapter must preserve the
