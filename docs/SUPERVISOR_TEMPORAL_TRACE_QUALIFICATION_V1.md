@@ -63,6 +63,7 @@ The Rust unit tests cover:
 - rejection of empty/whitespace-only expected transaction or attempt identities;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
+- three Proptest properties, configured for 512 cases each, covering removal of every mandatory success event, transaction/attempt identity rebinding, and the distinction between candidate-active and all other target observations; Proptest shrinking should reduce any failure to a minimal example;
 - **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success.
 
 The 5,040-case check is exhaustive only for those seven event orderings. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
@@ -70,7 +71,7 @@ The 5,040-case check is exhaustive only for those seven event orderings. The gen
 ## Next qualification gates
 
 1. Compile and run the module tests at the exact commit; run formatting, Clippy, and the repository's locked-feature matrix.
-2. Upgrade the deterministic trace generator to shrinking property-based strategies (the repository already declares Proptest as a dev dependency), and systematically enumerate unsafe terminal-success prefixes. Consider Loom for in-process concurrent coordination only if the integrated Rust synchronization layer can be modeled; Loom is not a substitute for systemd or VM crash testing.
+2. Expand the new Proptest properties to generate arbitrary-length event sequences and systematically enumerate unsafe terminal-success prefixes. The repository's Proptest integration enables shrinking, but the current three properties focus on mutations of a canonical successful trace rather than covering the full temporal state space. Consider Loom for in-process concurrent coordination only if the integrated Rust synchronization layer can be modeled; Loom is not a substitute for systemd or VM crash testing.
 3. Integrate the validator into the actual recovery path only after event provenance and journal binding are represented by trusted types. Do not let caller-created enums stand in for verified evidence.
 4. Inject failures at every persistence and manager-call boundary, and run on disposable NixOS VMs: lost D-Bus response, supervisor SIGKILL, receipt write/fsync failure, worker stop, daemon restart, and host reboot.
 5. Retain a replayable evidence bundle for every case: exact source SHA, lockfile/flake digest, kernel and systemd versions, fixture seed, ordered event log, journal/receipt digests, fault checkpoint, and independent before/after target observations.
@@ -89,6 +90,7 @@ The 5,040-case check is exhaustive only for those seven event orderings. The gen
 | Critical seven-event permutations checked by the authored bounded test | 5,040 |
 | Deterministic generated traces checked by the authored oracle | 20,000 |
 | Deterministic required-evidence mutation trials | 20,000 |
+| Proptest cases per authored temporal property | 512 |
 | Required-evidence removal/rebinding mutations rejected in the canonical mutation suite | 100% |
 | Randomized trials per interruption checkpoint after deterministic tests stabilize | >= 100 |
 
