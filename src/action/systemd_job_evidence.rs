@@ -3,11 +3,14 @@
 // Commercial licensing: see COMMERCIAL_LICENSE.md at repository root
 //! Pure correlation contract for asynchronous systemd start-job evidence.
 //!
-//! This module deliberately does not talk to D-Bus or authorize host mutation.
-//! It prevents callers from confusing a StartUnit acknowledgement, an
-//! unrelated JobRemoved signal, or a lost reply with proof that a worker ran.
-//! Production D-Bus integration must subscribe before StartUnit and feed this
-//! contract the exact reply and signal values it observed.
+//! This module is the pure evidence/correlation layer; the sibling
+//! systemd_job_bus adapter performs live zbus I/O but remains crate-private
+//! and unqualified. Neither module authorizes host mutation or proves that a
+//! worker ran. They prevent a StartUnit acknowledgement, unrelated
+//! JobRemoved signal, or lost reply from being treated as transaction success.
+//! Production integration still requires the authorized transaction path,
+//! durable journal interlocks, worker receipt validation, and fresh host-state
+//! verification.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
