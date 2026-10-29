@@ -73,8 +73,9 @@ fn validate_identity(label: &str, value: &str) -> Result<(), String> {
 }
 
 
-/// Unsubmitted transaction-scoped start intent. It is data, not permission
-/// to start a unit; it has no serialization or public field constructor.
+/// Unsubmitted transaction-scoped start intent. It contains no start authority
+/// and cannot be passed to the systemd adapter until the caller's durable
+/// preflight callback succeeds.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StartIntent {
     transaction_id: String,
@@ -116,11 +117,69 @@ impl StartIntent {
         &self.unit_name
     }
 
+    pub fn journal_evidence(&self) -> StartIntentEvidence {
+        StartIntentEvidence {
+            transaction_id: self.transaction_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            purpose: self.purpose,
+            unit_name: self.unit_name.clone(),
+        }
+    }
+
+    /// Run the caller's durable write-ahead publication before any manager
+    /// connection or StartUnit call is allowed by this type-state API.
+    pub async fn persist_before_submission<E, F, Fut>(
+        self,
+        persist: F,
+    ) -> Result<PreparedStartIntent, E>
+    where
+        F: FnOnce(StartIntentEvidence) -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+    {
+        persist(self.journal_evidence()).await?;
+        Ok(PreparedStartIntent { intent: self })
+    }
+}
+
+/// Serializable, journal-bound intent for exactly one transaction/attempt.
+/// The caller's persistence callback must publish this before allowing
+/// PreparedStartIntent to be used for a manager request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartIntentEvidence {
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub purpose: TransactionWorkerPurpose,
+    pub unit_name: String,
+}
+
+/// Non-serializable authority to proceed past the pre-launch write-ahead
+/// barrier. Its constructor is private and only persistence success returns it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PreparedStartIntent {
+    intent: StartIntent,
+}
+
+impl PreparedStartIntent {
+    pub fn transaction_id(&self) -> &str {
+        self.intent.transaction_id()
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        self.intent.attempt_id()
+    }
+
+    pub fn purpose(&self) -> TransactionWorkerPurpose {
+        self.intent.purpose()
+    }
+
+    pub fn unit_name(&self) -> &str {
+        self.intent.unit_name()
+    }
+
     /// Establish the manager signal subscription before advancing the intent.
-    ///
     /// The closure should install the JobRemoved match and call Manager.Subscribe().
-    /// The subscription is retained in the returned type, so it remains alive
-    /// across StartUnit and until the observer finishes or reconciles.
+    /// The resulting type retains the live subscription across StartUnit.
     pub(crate) async fn subscribe_before_start<E, F, Fut, S>(
         self,
         establish_subscription: F,
@@ -130,7 +189,10 @@ impl StartIntent {
         Fut: std::future::Future<Output = Result<S, E>>,
     {
         let subscription = establish_subscription().await?;
-        Ok(SubscribedStart { intent: self, subscription })
+        Ok(SubscribedStart {
+            intent: self.intent,
+            subscription,
+        })
     }
 }
 
