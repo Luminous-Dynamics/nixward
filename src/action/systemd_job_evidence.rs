@@ -181,7 +181,7 @@ impl SubscribedStart {
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 pub enum ManagerStartReply {
     Enqueued {
-        job_id: u32,
+        /// The actual value returned by systemd StartUnit(): an object path.
         job_object_path: String,
     },
     Rejected {
@@ -210,10 +210,8 @@ fn validate_start_reply(reply: &ManagerStartReply) -> Result<(), String> {
             Err("manager rejection is missing its D-Bus error name".into())
         }
         ManagerStartReply::Rejected { .. } => Ok(()),
-        ManagerStartReply::Enqueued { job_id, job_object_path } => {
-            if *job_id == 0 || !valid_job_object_path(job_object_path) {
-                return Err("StartUnit reply has an invalid job ID or object path".into());
-            }
+        ManagerStartReply::Enqueued { job_object_path } => {
+            job_id_from_object_path(job_object_path)?;
             Ok(())
         }
     }
