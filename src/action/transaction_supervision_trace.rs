@@ -37,23 +37,30 @@ pub enum TraceEventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceViolationKind {
     EventIdentityBindingMismatch,
+    DuplicateAuthorizationVerification,
+    DuplicateAttemptPreparation,
+    DuplicateSubmissionBarrier,
     AttemptPreparedWithoutVerifiedAuthorization,
     SubmissionBarrierWithoutPreparedAttempt,
     StartSubmissionWithoutWriteAheadBarrier,
     DuplicateManagerStartSubmission,
     WorkerIdentityObservedBeforeStartSubmission,
+    DuplicateWorkerIdentityObservation,
     WorkerIdentityPersistedBeforeObservation,
+    DuplicateWorkerIdentityPersistence,
     PayloadReleasedWithoutAuthorization,
     PayloadReleasedBeforeStartSubmission,
     PayloadReleasedBeforeDurableWorkerIdentity,
     DuplicatePayloadRelease,
     PayloadExitBeforePayloadRelease,
+    DuplicatePayloadExit,
     ReceiptBeforePayloadExit,
     ReceiptWithoutDurableWorkerIdentity,
     DuplicateProcessReceiptPublication,
     LifecycleValidationBeforePayloadExit,
     LifecycleValidationWithoutPostExitTargetObservation,
     LifecycleValidationWithoutCandidatePostState,
+    DuplicateLifecycleValidation,
     TerminalSuccessWithoutProcessReceipt,
     TerminalSuccessWithoutCandidatePostState,
     TerminalSuccessWithoutLifecycleValidation,
@@ -126,8 +133,22 @@ pub fn validate_trace(
         }
 
         match event.kind {
-            TraceEventKind::AuthorizationVerified => authorization_verified = true,
+            TraceEventKind::AuthorizationVerified => {
+                if authorization_verified {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateAuthorizationVerification,
+                    });
+                }
+                authorization_verified = true;
+            }
             TraceEventKind::AttemptPreparedDurably => {
+                if attempt_prepared {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateAttemptPreparation,
+                    });
+                }
                 if !authorization_verified {
                     violations.push(TraceViolation {
                         event_index,
@@ -137,6 +158,12 @@ pub fn validate_trace(
                 attempt_prepared = true;
             }
             TraceEventKind::SubmissionBarrierPersisted => {
+                if submission_barrier_persisted {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateSubmissionBarrier,
+                    });
+                }
                 if !attempt_prepared {
                     violations.push(TraceViolation {
                         event_index,
@@ -167,6 +194,12 @@ pub fn validate_trace(
                 manager_start_submitted = true;
             }
             TraceEventKind::WorkerIdentityObserved => {
+                if worker_identity_observed {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateWorkerIdentityObservation,
+                    });
+                }
                 if !manager_start_submitted {
                     violations.push(TraceViolation {
                         event_index,
@@ -176,6 +209,12 @@ pub fn validate_trace(
                 worker_identity_observed = true;
             }
             TraceEventKind::WorkerIdentityPersisted => {
+                if worker_identity_persisted {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateWorkerIdentityPersistence,
+                    });
+                }
                 if !worker_identity_observed {
                     violations.push(TraceViolation {
                         event_index,
@@ -212,6 +251,12 @@ pub fn validate_trace(
                 payload_released = true;
             }
             TraceEventKind::PayloadExited => {
+                if payload_exited {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicatePayloadExit,
+                    });
+                }
                 if !payload_released {
                     violations.push(TraceViolation {
                         event_index,
@@ -249,6 +294,12 @@ pub fn validate_trace(
                 }
             }
             TraceEventKind::LifecyclePostconditionValidated => {
+                if lifecycle_postcondition_validated {
+                    violations.push(TraceViolation {
+                        event_index,
+                        kind: TraceViolationKind::DuplicateLifecycleValidation,
+                    });
+                }
                 let candidate_post_state = target_observed_after_exit
                     == Some(TargetObservation::CandidateRuntimeAndProfileActive);
                 if !payload_exited {
@@ -720,6 +771,61 @@ mod tests {
                     "seed {seed}, mutation {mutation}: unsafe trace accepted"
                 );
             }
+        }
+    }
+
+
+    #[test]
+    fn duplicate_one_shot_milestones_are_rejected() {
+        let cases = [
+            (
+                TraceEventKind::AuthorizationVerified,
+                TraceViolationKind::DuplicateAuthorizationVerification,
+            ),
+            (
+                TraceEventKind::AttemptPreparedDurably,
+                TraceViolationKind::DuplicateAttemptPreparation,
+            ),
+            (
+                TraceEventKind::SubmissionBarrierPersisted,
+                TraceViolationKind::DuplicateSubmissionBarrier,
+            ),
+            (
+                TraceEventKind::WorkerIdentityObserved,
+                TraceViolationKind::DuplicateWorkerIdentityObservation,
+            ),
+            (
+                TraceEventKind::WorkerIdentityPersisted,
+                TraceViolationKind::DuplicateWorkerIdentityPersistence,
+            ),
+            (
+                TraceEventKind::PayloadExited,
+                TraceViolationKind::DuplicatePayloadExit,
+            ),
+            (
+                TraceEventKind::LifecyclePostconditionValidated,
+                TraceViolationKind::DuplicateLifecycleValidation,
+            ),
+        ];
+
+        for (milestone, expected_violation) in cases {
+            let mut trace = valid_success_trace();
+            let first = trace
+                .iter()
+                .position(|item| item.kind == milestone)
+                .expect("milestone should exist in valid trace");
+            trace.insert(first + 1, event(milestone));
+
+            let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            assert!(
+                result
+                    .violations
+                    .iter()
+                    .any(|violation| violation.kind == expected_violation),
+                "duplicate {:?} was not rejected: {:?}",
+                milestone,
+                result.violations
+            );
         }
     }
 
