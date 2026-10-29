@@ -16,6 +16,7 @@ The trace validator rejects:
 
 - a manager start submitted before the write-ahead submission barrier;
 - a second manager start submission under the same attempt ID;
+- repeated one-shot milestones within the same attempt (authorization verification, attempt preparation, write-ahead barrier, worker identity observation/persistence, payload exit, or lifecycle validation without a newer target observation). Repeated target observations remain admissible and invalidate prior lifecycle validation.
 - worker identity being persisted before observation, or payload release before authorization and durable worker identity;
 - duplicate payload release or duplicate process-receipt publication;
 - payload exit reported before payload release, or a receipt reported before payload exit / durable identity;
@@ -56,6 +57,7 @@ The Rust unit tests cover:
 - a later mixed/unknown target observation invalidating prior candidate validation;
 - event rebinding to a different attempt ID;
 - a safe but incomplete trace after an ambiguous manager submission;
+- rejection of duplicate one-shot milestones, while allowing a new lifecycle validation only after a newer target observation;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
 - **20,000 deterministic mutation trials** of a known-valid success trace, including required-evidence deletion, identity rebinding, duplicate manager start, stale target observation, contradictory target state, and events after terminal success.
@@ -93,6 +95,12 @@ These are proposed acceptance targets, not measured results. Safety gates are no
 Compare the eventual integrated Nixward protocol against `nixos-rebuild` and Colmena using the same disposable host image, NixOS release, tasks, cache/network conditions, and injected failures. Keep separate outcomes for task success, mutation replay, false-success claims, recovery time, operator effort, and latency percentiles. A safer protocol may deliberately refuse an ambiguous operation; report that loss of availability separately instead of hiding it inside a single aggregate score.
 
 The current PR does not implement the systemd-owned privileged worker, wire this trace validator into production recovery, or qualify a NixOS VM. It is an independently reviewable safety contract intended to make temporal invariants executable before integration.
+
+## Canonical event semantics and remaining gap
+
+This validator treats the milestones above as one-shot protocol transitions within a single worker-start attempt, not as a raw append-only telemetry stream. Because `TraceEvent` currently has no globally unique event ID or durable sequence number, identical repeated milestone records are rejected rather than assumed to be harmless redeliveries. If the production event transport needs at-least-once delivery, add a durable event identity and an explicit deduplication contract before allowing idempotent redelivery. Do not silently weaken the duplicate-event gate.
+
+Repeated `TargetObserved` events are different: each is a new observation of machine state, and a later observation invalidates lifecycle validation against an earlier one. This avoids treating a stale candidate snapshot as a permanent proof.
 
 
 ## External engineering references
