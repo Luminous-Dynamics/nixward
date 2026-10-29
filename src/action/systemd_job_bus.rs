@@ -81,7 +81,10 @@ pub async fn submit_start(
     // was enqueued. Never retry this attempt from this adapter.
     Ok(subscribed
         .submit_start(|unit_name| {
-            let manager = &manager;
+            // Move an owned proxy into the request future. Borrowing the
+            // function-local proxy here would make the future's lifetime
+            // depend on the closure's inferred lifetime.
+            let manager = manager.clone();
             async move {
                 let result: Result<OwnedObjectPath, zbus::Error> = manager
                     .call("StartUnit", &(unit_name.as_str(), "fail"))
