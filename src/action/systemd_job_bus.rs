@@ -108,6 +108,24 @@ pub async fn submit_start(
         .await)
 }
 
+/// Decide whether signal observation is appropriate after the direct reply.
+///
+/// Unknown is intentionally waitable: if the transport remains alive, retain a
+/// JobRemoved event as additional reconciliation evidence. The correlator still
+/// holds because a signal alone cannot replace a lost StartUnit object path.
+fn classify_wait_precondition(
+    evidence: &SystemdStartEvidence,
+) -> Result<(), StartJobCorrelation> {
+    match classify_start_reply(evidence) {
+        Ok(StartReplyDisposition::Enqueued { .. }) => Ok(()),
+        Ok(StartReplyDisposition::Ambiguous) => Ok(()),
+        Ok(StartReplyDisposition::ManagerRejected { error_name }) => {
+            Err(StartJobCorrelation::ManagerRejected { error_name })
+        }
+        Err(reason) => Err(StartJobCorrelation::RejectedEvidence { reason }),
+    }
+}
+
 /// Result of observing one manager-level job. This is not a transaction result:
 /// done means the systemd job completed, not that the worker exited or the
 /// desired NixOS runtime/profile became active.
@@ -131,30 +149,13 @@ pub async fn wait_for_job_removed(
 ) -> SystemdStartObservation {
     let (start_evidence, mut stream) = persisted.into_parts();
 
-    match classify_start_reply(&start_evidence) {
-        Ok(StartReplyDisposition::Enqueued { .. }) => {}
-        // Even with an ambiguous direct reply, keep observing the canonical
-        // unit's filtered stream until the deadline. A JobRemoved event can be
-        // retained as reconciliation evidence, but correlate_job_removed
-        // deliberately refuses to turn it into a matched completion without
-        // the direct StartUnit object path.
-        Ok(StartReplyDisposition::Ambiguous) => {}
-        Ok(StartReplyDisposition::ManagerRejected { error_name }) => {
-            return SystemdStartObservation {
-                start_evidence,
-                job_removed: None,
-                raw_job_result: None,
-                correlation: StartJobCorrelation::ManagerRejected { error_name },
-            };
-        }
-        Err(reason) => {
-            return SystemdStartObservation {
-                start_evidence,
-                job_removed: None,
-                raw_job_result: None,
-                correlation: StartJobCorrelation::RejectedEvidence { reason },
-            };
-        }
+    if let Err(correlation) = classify_wait_precondition(&start_evidence) {
+        return SystemdStartObservation {
+            start_evidence,
+            job_removed: None,
+            raw_job_result: None,
+            correlation,
+        };
     }
 
     type DecodedSignal = (JobRemovedEvidence, String, StartJobCorrelation);
@@ -235,6 +236,37 @@ fn parse_job_result(raw: &str) -> JobRemovedResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_direct_reply_remains_observable_but_never_proves_completion() {
+        use super::super::systemd_job_evidence::{
+            canonical_attempt_unit_name, correlate_job_removed, JobRemovedEvidence,
+            StartJobCorrelation, SystemdStartEvidence, TransactionWorkerPurpose,
+        };
+
+        let transaction_id = "tx-observer-test";
+        let attempt_id = "attempt-unknown-reply";
+        let purpose = TransactionWorkerPurpose::Activation;
+        let evidence = SystemdStartEvidence {
+            transaction_id: transaction_id.into(),
+            attempt_id: attempt_id.into(),
+            purpose,
+            unit_name: canonical_attempt_unit_name(transaction_id, attempt_id, purpose).unwrap(),
+            reply: ManagerStartReply::Unknown,
+        };
+        assert_eq!(classify_wait_precondition(&evidence), Ok(()));
+
+        let signal = JobRemovedEvidence {
+            job_id: 41,
+            job_object_path: "/org/freedesktop/systemd1/job/41".into(),
+            unit_name: evidence.unit_name.clone(),
+            result: JobRemovedResult::Done,
+        };
+        assert!(matches!(
+            correlate_job_removed(&evidence, &signal),
+            StartJobCorrelation::HoldForReconciliation { .. }
+        ));
+    }
 
     #[test]
     fn unknown_manager_result_is_never_mapped_to_done() {
