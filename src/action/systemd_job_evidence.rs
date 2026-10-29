@@ -684,7 +684,7 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[tokio::test]
-    async fn failed_subscription_does_not_produce_a_subscribed_start() {
+    async fn failed_prelaunch_persistence_does_not_produce_a_prepared_intent() {
         let intent = StartIntent::new(
             "tx-7f3c",
             "attempt-0004",
@@ -692,6 +692,56 @@ mod tests {
         )
         .unwrap();
         let result = intent
+            .persist_before_submission(|_evidence| async {
+                Err::<(), _>("injected journal write failure")
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn failed_reply_persistence_retains_attempt_without_replaying_start() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let subscribed = prepared
+            .subscribe_before_start(|| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let submitted = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        let failure = submitted
+            .persist_before_observing(|evidence| async move {
+                assert_eq!(evidence.reply, ManagerStartReply::Unknown);
+                Err::<(), _>("injected reply journal failure")
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.attempt.evidence().reply, ManagerStartReply::Unknown);
+        assert_eq!(failure.attempt.subscription, ());
+    }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn failed_subscription_does_not_produce_a_subscribed_start() {
+        let intent = StartIntent::new(
+            "tx-7f3c",
+            "attempt-0004",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap();
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let result = prepared
             .subscribe_before_start(|| async { Err::<(), _>("injected subscription failure") })
             .await;
         assert!(result.is_err());
@@ -706,11 +756,19 @@ mod tests {
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
+        let prepared = intent
+            .persist_before_submission(|evidence| async move {
+                assert_eq!(evidence.transaction_id, "tx-7f3c");
+                assert_eq!(evidence.attempt_id, "attempt-0004");
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap();
         let mut subscription_completed = false;
-        let subscribed = intent
+        let subscribed = prepared
             .subscribe_before_start(|| async {
                 subscription_completed = true;
-                Ok::<(), ()>(())
+                Ok::<_, ()>(())
             })
             .await
             .unwrap();
@@ -722,7 +780,17 @@ mod tests {
             classify_start_reply(submitted.evidence()),
             Ok(StartReplyDisposition::Ambiguous)
         );
-        assert_eq!(submitted.subscription, ());
+        let persisted = submitted
+            .persist_before_observing(|evidence| async move {
+                assert_eq!(evidence.reply, ManagerStartReply::Unknown);
+                Ok::<(), ()>(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted.evidence().reply, ManagerStartReply::Unknown);
+        let (evidence, subscription) = persisted.into_parts();
+        assert_eq!(classify_start_reply(&evidence), Ok(StartReplyDisposition::Ambiguous));
+        assert_eq!(subscription, ());
     }
 
     #[cfg(feature = "native")]
@@ -734,7 +802,11 @@ mod tests {
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
-        let subscribed = intent
+        let prepared = intent
+            .persist_before_submission(|_evidence| async { Ok::<(), ()>(()) })
+            .await
+            .unwrap();
+        let subscribed = prepared
             .subscribe_before_start(|| async { Ok::<(), ()>(()) })
             .await
             .unwrap();
