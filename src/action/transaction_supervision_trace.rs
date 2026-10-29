@@ -986,4 +986,223 @@ mod tests {
         }
     }
 
+
+    fn fixture_event_kind(name: &str) -> TraceEventKind {
+        match name {
+            "authorization_verified" => TraceEventKind::AuthorizationVerified,
+            "attempt_prepared_durably" => TraceEventKind::AttemptPreparedDurably,
+            "submission_barrier_persisted" => TraceEventKind::SubmissionBarrierPersisted,
+            "manager_start_submitted" => TraceEventKind::ManagerStartSubmitted,
+            "worker_identity_observed" => TraceEventKind::WorkerIdentityObserved,
+            "worker_identity_persisted" => TraceEventKind::WorkerIdentityPersisted,
+            "payload_released" => TraceEventKind::PayloadReleased,
+            "payload_exited" => TraceEventKind::PayloadExited,
+            "process_receipt_persisted" => TraceEventKind::ProcessReceiptPersisted,
+            "lifecycle_postcondition_validated" => {
+                TraceEventKind::LifecyclePostconditionValidated
+            }
+            "terminal_success_recorded" => TraceEventKind::TerminalSuccessRecorded,
+            other if other.starts_with("target_observed:") => {
+                let state = other.strip_prefix("target_observed:").unwrap();
+                let observation = match state {
+                    "not_attempted" => TargetObservation::NotAttempted,
+                    "candidate_runtime_and_profile_active" => {
+                        TargetObservation::CandidateRuntimeAndProfileActive
+                    }
+                    "predecessor_runtime_and_profile_active" => {
+                        TargetObservation::PredecessorRuntimeAndProfileActive
+                    }
+                    "boot_candidate_profile_selected" => {
+                        TargetObservation::BootCandidateProfileSelected
+                    }
+                    "mixed_or_unknown" => TargetObservation::MixedOrUnknown,
+                    "unavailable" => TargetObservation::Unavailable,
+                    _ => panic!("unknown target observation in fixture: {state}"),
+                };
+                TraceEventKind::TargetObserved(observation)
+            }
+            other => panic!("unknown event kind in qualification fixture: {other}"),
+        }
+    }
+
+    fn fixture_disposition_name(disposition: TraceDisposition) -> &'static str {
+        match disposition {
+            TraceDisposition::Rejected => "rejected",
+            TraceDisposition::Incomplete => "incomplete",
+            TraceDisposition::ValidatedTerminalSuccess => "validated_terminal_success",
+        }
+    }
+
+    fn fixture_violation_name(kind: TraceViolationKind) -> &'static str {
+        match kind {
+            TraceViolationKind::EventIdentityBindingMismatch => "event_identity_binding_mismatch",
+            TraceViolationKind::EmptyExpectedTransactionId => "empty_expected_transaction_id",
+            TraceViolationKind::EmptyExpectedAttemptId => "empty_expected_attempt_id",
+            TraceViolationKind::AttemptPreparedWithoutVerifiedAuthorization => {
+                "attempt_prepared_without_verified_authorization"
+            }
+            TraceViolationKind::SubmissionBarrierWithoutPreparedAttempt => {
+                "submission_barrier_without_prepared_attempt"
+            }
+            TraceViolationKind::StartSubmissionWithoutWriteAheadBarrier => {
+                "start_submission_without_write_ahead_barrier"
+            }
+            TraceViolationKind::DuplicateManagerStartSubmission => {
+                "duplicate_manager_start_submission"
+            }
+            TraceViolationKind::WorkerIdentityObservedBeforeStartSubmission => {
+                "worker_identity_observed_before_start_submission"
+            }
+            TraceViolationKind::DuplicateWorkerIdentityObservation => {
+                "duplicate_worker_identity_observation"
+            }
+            TraceViolationKind::WorkerIdentityPersistedBeforeObservation => {
+                "worker_identity_persisted_before_observation"
+            }
+            TraceViolationKind::DuplicateWorkerIdentityPersistence => {
+                "duplicate_worker_identity_persistence"
+            }
+            TraceViolationKind::PayloadReleasedWithoutAuthorization => {
+                "payload_released_without_authorization"
+            }
+            TraceViolationKind::PayloadReleasedBeforeStartSubmission => {
+                "payload_released_before_start_submission"
+            }
+            TraceViolationKind::PayloadReleasedBeforeDurableWorkerIdentity => {
+                "payload_released_before_durable_worker_identity"
+            }
+            TraceViolationKind::DuplicatePayloadRelease => "duplicate_payload_release",
+            TraceViolationKind::PayloadExitBeforePayloadRelease => {
+                "payload_exit_before_payload_release"
+            }
+            TraceViolationKind::DuplicatePayloadExit => "duplicate_payload_exit",
+            TraceViolationKind::ReceiptBeforePayloadExit => "receipt_before_payload_exit",
+            TraceViolationKind::ReceiptWithoutDurableWorkerIdentity => {
+                "receipt_without_durable_worker_identity"
+            }
+            TraceViolationKind::DuplicateProcessReceiptPublication => {
+                "duplicate_process_receipt_publication"
+            }
+            TraceViolationKind::LifecycleValidationBeforePayloadExit => {
+                "lifecycle_validation_before_payload_exit"
+            }
+            TraceViolationKind::LifecycleValidationWithoutPostExitTargetObservation => {
+                "lifecycle_validation_without_post_exit_target_observation"
+            }
+            TraceViolationKind::LifecycleValidationWithoutCandidatePostState => {
+                "lifecycle_validation_without_candidate_post_state"
+            }
+            TraceViolationKind::DuplicateLifecycleValidation => {
+                "duplicate_lifecycle_validation"
+            }
+            TraceViolationKind::TerminalSuccessWithoutProcessReceipt => {
+                "terminal_success_without_process_receipt"
+            }
+            TraceViolationKind::TerminalSuccessWithoutCandidatePostState => {
+                "terminal_success_without_candidate_post_state"
+            }
+            TraceViolationKind::TerminalSuccessWithoutLifecycleValidation => {
+                "terminal_success_without_lifecycle_validation"
+            }
+            TraceViolationKind::EventAfterTerminalSuccess => "event_after_terminal_success",
+        }
+    }
+
+    #[test]
+    fn shared_json_qualification_vectors_match_the_rust_validator() {
+        use std::collections::HashSet;
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/fixtures/supervisor-temporal-qualification-v1.json"
+        ))
+        .expect("qualification fixture must parse as JSON");
+        assert_eq!(
+            fixture["schema"].as_str(),
+            Some("org.luminousdynamics.nixward.supervisor-temporal-trace-vectors")
+        );
+        assert_eq!(fixture["version"].as_u64(), Some(1));
+        let vectors = fixture["vectors"]
+            .as_array()
+            .expect("qualification vectors must be an array");
+        assert_eq!(vectors.len(), 18);
+
+        let mut ids = HashSet::new();
+        for vector in vectors {
+            let id = vector["id"]
+                .as_str()
+                .expect("every vector must have an ID");
+            assert!(ids.insert(id.to_owned()), "duplicate fixture ID: {id}");
+
+            let expected_transaction_id = vector["expected_transaction_id"]
+                .as_str()
+                .expect("expected transaction identity must be a string");
+            let expected_attempt_id = vector["expected_attempt_id"]
+                .as_str()
+                .expect("expected attempt identity must be a string");
+            let event_values = vector["events"]
+                .as_array()
+                .expect("events must be an array");
+            let events = event_values
+                .iter()
+                .map(|value| {
+                    let transaction_id = value["transaction_id"]
+                        .as_str()
+                        .expect("event transaction identity must be a string");
+                    let attempt_id = value["attempt_id"]
+                        .as_str()
+                        .expect("event attempt identity must be a string");
+                    let kind = value["kind"]
+                        .as_str()
+                        .expect("event kind must be a string");
+                    TraceEvent {
+                        transaction_id: transaction_id.to_owned(),
+                        attempt_id: attempt_id.to_owned(),
+                        kind: fixture_event_kind(kind),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            let actual = validate_trace(expected_transaction_id, expected_attempt_id, &events);
+            let expected_disposition = vector["expected_disposition"]
+                .as_str()
+                .expect("expected disposition must be a string");
+            assert_eq!(
+                fixture_disposition_name(actual.disposition),
+                expected_disposition,
+                "wrong disposition for qualification vector {id}: {:?}",
+                actual.violations
+            );
+            assert_eq!(
+                actual.terminal_success_claimed,
+                vector["expected_terminal_success_claimed"]
+                    .as_bool()
+                    .expect("terminal-success claim expectation must be Boolean"),
+                "wrong terminal-success claim for qualification vector {id}"
+            );
+
+            let mut actual_violations = actual
+                .violations
+                .iter()
+                .map(|violation| fixture_violation_name(violation.kind).to_owned())
+                .collect::<Vec<_>>();
+            let mut expected_violations = vector["expected_violations"]
+                .as_array()
+                .expect("expected violations must be an array")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("expected violation name must be a string")
+                        .to_owned()
+                })
+                .collect::<Vec<_>>();
+            actual_violations.sort_unstable();
+            expected_violations.sort_unstable();
+            assert_eq!(
+                actual_violations, expected_violations,
+                "wrong violation set for qualification vector {id}"
+            );
+        }
+    }
+
 }
