@@ -12,6 +12,8 @@ This module adds a separate temporal layer in `src/action/transaction_supervisio
 
 ## Invariants checked
 
+The trace validator classifies every trace as one of three explicit dispositions: **Rejected**, **Incomplete**, or **ValidatedTerminalSuccess**. A prefix with no violation is only Incomplete until the terminal-success proof is complete; callers must not use a Boolean “safe” result as a synonym for successful execution.
+
 The trace validator rejects:
 
 - a manager start submitted before the write-ahead submission barrier;
@@ -56,7 +58,7 @@ The Rust unit tests cover:
 - a target snapshot taken before worker exit not satisfying terminal success;
 - a later mixed/unknown target observation invalidating prior candidate validation;
 - event rebinding to a different attempt ID;
-- a safe but incomplete trace after an ambiguous manager submission;
+- a safe but incomplete trace after an ambiguous manager submission, explicitly classified as Incomplete rather than success;
 - rejection of all ten one-shot milestone types when repeated in the same attempt, while allowing a new lifecycle validation only after a newer target observation;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
@@ -98,6 +100,9 @@ Compare the eventual integrated Nixward protocol against `nixos-rebuild` and Col
 The current PR does not implement the systemd-owned privileged worker, wire this trace validator into production recovery, or qualify a NixOS VM. It is an independently reviewable safety contract intended to make temporal invariants executable before integration.
 
 ## Canonical event semantics and remaining gap
+
+The result API intentionally avoids a single safe/success Boolean: an incomplete but non-violating trace is distinct from a rejected trace and from a fully validated terminal-success claim. The trace checker remains a policy contract; it cannot by itself authorize a mutation, permit retry, or prove that the supplied evidence is authentic.
+
 
 This validator treats the milestones above as one-shot protocol transitions within a single worker-start attempt, not as a raw append-only telemetry stream. Because `TraceEvent` currently has no globally unique event ID or durable sequence number, identical repeated milestone records are rejected rather than assumed to be harmless redeliveries. If the production event transport needs at-least-once delivery, add a durable event identity and an explicit deduplication contract before allowing idempotent redelivery. Do not silently weaken the duplicate-event gate.
 
