@@ -138,7 +138,7 @@ let
             ++ (if !state.lifecycle_postcondition_validated then [ "terminal_success_without_lifecycle_validation" ] else []);
         }
       else
-        append [ "unknown_event_kind" ];
+        throw "unknown event kind in temporal trace fixture: ${kind}";
 
   final = lib.foldl' step initial events;
   disposition =
