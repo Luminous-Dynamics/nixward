@@ -319,7 +319,7 @@ mod tests {
         let submitted = submit_start(prepared).await.unwrap();
         assert!(
             matches!(
-                submitted.evidence().reply,
+                &submitted.evidence().reply,
                 ManagerStartReply::Enqueued { .. }
             ),
             "the VM's dedicated template unit must be enqueued: {:?}",
