@@ -121,6 +121,8 @@ impl StartIntent {
     /// The crate-internal adapter must pass a closure that awaits both the
     /// D-Bus match registration and systemd Manager.Subscribe() successfully.
     /// No subscribed capability is returned if either operation fails.
+    /// This stays crate-internal until the real D-Bus adapter consumes it.
+    #[allow(dead_code)]
     pub(crate) async fn subscribe_before_start<E, F, Fut>(
         self,
         establish_subscription: F,
