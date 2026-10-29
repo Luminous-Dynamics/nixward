@@ -699,19 +699,42 @@ mod tests {
 
     #[cfg(feature = "native")]
     #[tokio::test]
-    async fn failed_prelaunch_persistence_does_not_produce_a_prepared_intent() {
+    async fn failed_prelaunch_persistence_does_not_subscribe_or_start() {
+        use std::cell::Cell;
+
         let intent = StartIntent::new(
             "tx-7f3c",
             "attempt-0004",
             TransactionWorkerPurpose::Activation,
         )
         .unwrap();
+        let subscribe_called = Cell::new(false);
+        let start_called = Cell::new(false);
         let result = intent
             .persist_before_submission(|_evidence| async {
                 Err::<(), _>("injected journal write failure")
             })
             .await;
-        assert!(result.is_err());
+
+        if let Ok(prepared) = result {
+            let subscribed = prepared
+                .subscribe_before_start(|| async {
+                    subscribe_called.set(true);
+                    Ok::<(), ()>(())
+                })
+                .await;
+            if let Ok(subscribed) = subscribed {
+                let _ = subscribed
+                    .submit_start(|_| {
+                        start_called.set(true);
+                        async { ManagerStartReply::Unknown }
+                    })
+                    .await;
+            }
+        }
+
+        assert!(!subscribe_called.get(), "subscription must not be installed before durable intent");
+        assert!(!start_called.get(), "StartUnit must not run before durable intent");
     }
 
     #[cfg(feature = "native")]
