@@ -46,13 +46,19 @@ pub async fn submit_start(
     .await
     .map_err(|error| format!("failed to create systemd manager proxy: {error}"))?;
 
+    // Match only JobRemoved events for this attempt's canonical unit. This
+    // prevents unrelated host job traffic from filling the connection queue
+    // while the StartUnit method reply is in flight. A conflicting/missing
+    // matching event still yields a conservative hold or timeout.
+    let expected_unit = intent.unit_name().to_owned();
+
     // The subscription closure first installs the JobRemoved match, then
     // calls Manager.Subscribe(). If either operation fails, no SubscribedStart
     // capability is returned and StartUnit is never called.
     let subscribed = intent
         .subscribe_before_start(|| async {
             let stream = manager
-                .receive_signal("JobRemoved")
+                .receive_signal_with_args("JobRemoved", &[(2, expected_unit.as_str())])
                 .await
                 .map_err(|error| format!("failed to install JobRemoved subscription: {error}"))?;
             let _: () = manager
@@ -78,6 +84,14 @@ pub async fn submit_start(
                     Ok(job_object_path) => ManagerStartReply::Enqueued {
                         job_object_path: job_object_path.to_string(),
                     },
+                    // A D-Bus method-error reply is known manager rejection.
+                    // Other errors may indicate a lost reply after enqueue and
+                    // therefore remain ambiguous.
+                    Err(zbus::Error::MethodError(name, _, _)) => {
+                        ManagerStartReply::Rejected {
+                            error_name: name.to_string(),
+                        }
+                    }
                     Err(_) => ManagerStartReply::Unknown,
                 }
             }
