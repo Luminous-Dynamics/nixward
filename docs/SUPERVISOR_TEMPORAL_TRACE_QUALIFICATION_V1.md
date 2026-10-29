@@ -60,12 +60,13 @@ The Rust unit tests cover:
 - event rebinding to a different attempt ID;
 - a safe but incomplete trace after an ambiguous manager submission, explicitly classified as Incomplete rather than success;
 - rejection of all ten one-shot milestone types when repeated in the same attempt, including a repeated lifecycle-validation event after a failed validation; a new lifecycle validation is allowed only after a newer admissible post-receipt target observation;
+- a shared JSON corpus covering all ten duplicate one-shot milestones, identity preconditions, ambiguous start/incomplete traces, stale target observations, post-terminal events, and a valid terminal-success control;
 - rejection of empty/whitespace-only expected transaction or attempt identities;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
 - three Proptest properties, configured for 512 cases each, covering removal of every mandatory success event, transaction/attempt identity rebinding, and the distinction between candidate-active and all other target observations; Proptest shrinking should reduce any failure to a minimal example;
 - **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success;
-- a versioned, language-neutral [JSON conformance corpus](fixtures/supervisor-temporal-qualification-v1.json) with **18 named input/output vectors**. A Rust fixture test loads the same corpus via `include_str!` and compares each vector's disposition, terminal-success claim, and complete violation multiset. This makes the contract reusable for an independent Python/Nix/other-language checker without treating the JSON fixture itself as proof.
+- a versioned, language-neutral [JSON conformance corpus](fixtures/supervisor-temporal-qualification-v1.json) with **23 named input/output vectors**. A Rust fixture test loads the same corpus via `include_str!` and compares each vector's disposition, terminal-success claim, and complete violation multiset. This makes the contract reusable for an independent Python/Nix/other-language checker without treating the JSON fixture itself as proof.
 
 The 5,040-case check is exhaustive only for those seven event orderings. The 18-vector corpus covers selected positive, incomplete, identity, duplicate-event, freshness, and terminality scenarios. The generated checks are bounded deterministic test campaigns, not a proof over arbitrary-length traces, a concurrency proof, or an operating-system fault-injection campaign. The tests are authored but have not been executed in this environment; do not interpret their presence as test results.
 
@@ -89,7 +90,7 @@ The 5,040-case check is exhaustive only for those seven event orderings. The 18-
 | Trace events accepted from another transaction/attempt identity | 0 |
 | False terminal success in deterministic and randomized fault-injection campaigns | 0 |
 | Critical seven-event permutations checked by the authored bounded test | 5,040 |
-| Shared JSON conformance vectors checked by the Rust fixture test | 18 |
+| Shared JSON conformance vectors checked by the Rust fixture test | 23 |
 | Deterministic generated traces checked by the authored oracle | 20,000 |
 | Deterministic required-evidence mutation trials | 20,000 |
 | Proptest cases per authored temporal property | 512 |
