@@ -655,8 +655,12 @@ mod tests {
         assert!(subscription_completed);
         assert!(subscribed.unit_name().starts_with("nixward-transaction@"));
 
-        let evidence = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
-        assert_eq!(classify_start_reply(&evidence), Ok(StartReplyDisposition::Ambiguous));
+        let submitted = subscribed.record_reply(ManagerStartReply::Unknown).unwrap();
+        assert_eq!(
+            classify_start_reply(submitted.evidence()),
+            Ok(StartReplyDisposition::Ambiguous)
+        );
+        assert_eq!(submitted.subscription, ());
     }
 
     #[cfg(feature = "native")]
