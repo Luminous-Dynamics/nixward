@@ -676,6 +676,25 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn startunit_object_path_is_the_reply_source_for_job_identity() {
+        assert_eq!(
+            job_id_from_object_path("/org/freedesktop/systemd1/job/41"),
+            Ok(41)
+        );
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/0").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/041").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/job/not-a-number").is_err());
+        assert!(job_id_from_object_path("/org/freedesktop/systemd1/unit/example.service").is_err());
+
+        let mut inconsistent_signal = signal(JobRemovedResult::Done);
+        inconsistent_signal.job_id = 42;
+        assert!(matches!(
+            correlate_job_removed(&enqueued_start(), &inconsistent_signal),
+            StartJobCorrelation::HoldForReconciliation { .. }
+        ));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
