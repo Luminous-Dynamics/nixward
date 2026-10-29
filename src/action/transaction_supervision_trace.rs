@@ -651,7 +651,7 @@ mod tests {
             }
 
             let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
-            if result.is_valid_prefix() && result.terminal_success_claimed {
+            if result.is_terminal_success() {
                 let auth = first_position(&trace, TraceEventKind::AuthorizationVerified)
                     .expect("accepted success must have authorization");
                 let prepared = first_position(&trace, TraceEventKind::AttemptPreparedDurably)
@@ -794,12 +794,13 @@ mod tests {
             let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
             if mutation == 0 {
                 assert!(result.is_valid_prefix(), "seed {seed}: valid trace rejected");
-                assert!(result.terminal_success_claimed);
+                assert!(result.is_terminal_success());
             } else {
                 assert!(
                     !result.is_valid_prefix(),
                     "seed {seed}, mutation {mutation}: unsafe trace accepted"
                 );
+                assert_eq!(result.disposition, TraceDisposition::Rejected);
             }
         }
     }
@@ -859,6 +860,7 @@ mod tests {
             trace.insert(first + 1, event(milestone));
 
             let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
+            assert_eq!(result.disposition, TraceDisposition::Rejected);
             assert!(
                 result
                     .violations
