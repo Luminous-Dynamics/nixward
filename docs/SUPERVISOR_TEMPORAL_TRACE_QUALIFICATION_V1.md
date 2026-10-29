@@ -26,7 +26,7 @@ The trace validator rejects:
 - terminal success without a durable process receipt, a post-receipt candidate runtime-and-profile observation, and lifecycle postcondition validation;
 - a later target observation that invalidates an earlier lifecycle validation, or any event appended after a terminal-success claim.
 
-The expected transaction and attempt IDs must come from an already-validated durable journal. The validator does **not** authenticate event provenance, verify receipt signatures/digests, validate systemd D-Bus responses, establish that target observations are true, or check authorization cryptography. Those remain prerequisites of the caller.
+The expected transaction and attempt IDs must come from an already-validated durable journal and must not be empty or whitespace-only. Trace-level identity precondition failures use `event_index = usize::MAX` because no particular trace event caused them. The validator does **not** authenticate event provenance, verify receipt signatures/digests, validate systemd D-Bus responses, establish that target observations are true, or check authorization cryptography. Those remain prerequisites of the caller.
 
 ## Temporal contract
 
@@ -59,7 +59,8 @@ The Rust unit tests cover:
 - a later mixed/unknown target observation invalidating prior candidate validation;
 - event rebinding to a different attempt ID;
 - a safe but incomplete trace after an ambiguous manager submission, explicitly classified as Incomplete rather than success;
-- rejection of all ten one-shot milestone types when repeated in the same attempt, while allowing a new lifecycle validation only after a newer target observation;
+- rejection of all ten one-shot milestone types when repeated in the same attempt, including a repeated lifecycle-validation event after a failed validation; a new lifecycle validation is allowed only after a newer admissible post-receipt target observation;
+- rejection of empty/whitespace-only expected transaction or attempt identities;
 - all **5,040 permutations** of seven critical start/release events, asserting that only the required ordering passes the ordering contract;
 - **20,000 deterministic generated traces** across the event alphabet, event identities, and target observations, with an independent causal-order oracle for any accepted success trace;
 - **20,000 deterministic mutation trials** of a known-valid success trace: 2,000 valid-trace controls and 18,000 mutated trials covering required-evidence deletion, identity rebinding, duplicate manager start, stale/contradictory target observations, and events after terminal success.
