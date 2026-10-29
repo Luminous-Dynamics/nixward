@@ -229,32 +229,6 @@ pub fn correlate_job_removed(
         };
     }
 
-    let (expected_job_id, expected_job_path) = match &start.reply {
-        ManagerStartReply::Unknown => {
-            return StartJobCorrelation::HoldForReconciliation {
-                reason: "StartUnit reply is unknown; do not infer submission or retry the mutation".into(),
-            };
-        }
-        ManagerStartReply::Rejected { error_name } => {
-            if error_name.trim().is_empty() {
-                return StartJobCorrelation::RejectedEvidence {
-                    reason: "manager rejection is missing its D-Bus error name".into(),
-                };
-            }
-            return StartJobCorrelation::ManagerRejected {
-                error_name: error_name.clone(),
-            };
-        }
-        ManagerStartReply::Enqueued { job_id, job_object_path } => {
-            if *job_id == 0 || !valid_job_object_path(job_object_path) {
-                return StartJobCorrelation::RejectedEvidence {
-                    reason: "StartUnit reply has an invalid job ID or object path".into(),
-                };
-            }
-            (*job_id, job_object_path.as_str())
-        }
-    };
-
     if signal.job_id != expected_job_id || signal.job_object_path != expected_job_path {
         if signal.unit_name == start.unit_name || signal.job_object_path == expected_job_path {
             return StartJobCorrelation::HoldForReconciliation {
