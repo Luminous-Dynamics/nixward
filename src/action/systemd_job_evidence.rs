@@ -139,6 +139,55 @@ pub enum StartJobCorrelation {
     ManagerRejected { error_name: String },
 }
 
+/// Classification of the method-level StartUnit response. This is useful
+/// before any JobRemoved signal exists: a definite rejection is a rejection,
+/// while a lost reply remains ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartReplyDisposition {
+    Enqueued { job_id: u32, job_object_path: String },
+    ManagerRejected { error_name: String },
+    Ambiguous,
+}
+
+/// Validate the start intent and classify the direct manager response without
+/// requiring a fabricated JobRemoved event.
+pub fn classify_start_reply(
+    start: &SystemdStartEvidence,
+) -> Result<StartReplyDisposition, String> {
+    if !start.subscribed_before_start {
+        return Err("JobRemoved subscription was not confirmed before StartUnit".into());
+    }
+    let expected_unit = canonical_attempt_unit_name(
+        &start.transaction_id,
+        &start.attempt_id,
+        start.purpose,
+    )?;
+    if start.unit_name != expected_unit {
+        return Err("start evidence unit name is not derived from its transaction/attempt identity".into());
+    }
+
+    match &start.reply {
+        ManagerStartReply::Unknown => Ok(StartReplyDisposition::Ambiguous),
+        ManagerStartReply::Rejected { error_name } => {
+            if error_name.trim().is_empty() {
+                return Err("manager rejection is missing its D-Bus error name".into());
+            }
+            Ok(StartReplyDisposition::ManagerRejected {
+                error_name: error_name.clone(),
+            })
+        }
+        ManagerStartReply::Enqueued { job_id, job_object_path } => {
+            if *job_id == 0 || !valid_job_object_path(job_object_path) {
+                return Err("StartUnit reply has an invalid job ID or object path".into());
+            }
+            Ok(StartReplyDisposition::Enqueued {
+                job_id: *job_id,
+                job_object_path: job_object_path.clone(),
+            })
+        }
+    }
+}
+
 /// Correlate one event with one exact StartUnit request.
 ///
 /// Rules:
@@ -151,25 +200,23 @@ pub fn correlate_job_removed(
     start: &SystemdStartEvidence,
     signal: &JobRemovedEvidence,
 ) -> StartJobCorrelation {
-    if !start.subscribed_before_start {
-        return StartJobCorrelation::RejectedEvidence {
-            reason: "JobRemoved subscription was not confirmed before StartUnit".into(),
-        };
-    }
-
-    let expected_unit = match canonical_attempt_unit_name(
-        &start.transaction_id,
-        &start.attempt_id,
-        start.purpose,
-    ) {
-        Ok(name) => name,
+    let reply = match classify_start_reply(start) {
+        Ok(reply) => reply,
         Err(reason) => return StartJobCorrelation::RejectedEvidence { reason },
     };
-    if start.unit_name != expected_unit {
-        return StartJobCorrelation::RejectedEvidence {
-            reason: "start evidence unit name is not derived from its transaction/attempt identity".into(),
-        };
-    }
+    let (expected_job_id, expected_job_path) = match reply {
+        StartReplyDisposition::Ambiguous => {
+            return StartJobCorrelation::HoldForReconciliation {
+                reason: "StartUnit reply is unknown; do not infer submission or retry the mutation".into(),
+            };
+        }
+        StartReplyDisposition::ManagerRejected { error_name } => {
+            return StartJobCorrelation::ManagerRejected { error_name };
+        }
+        StartReplyDisposition::Enqueued { job_id, job_object_path } => {
+            (job_id, job_object_path)
+        }
+    };
 
     if signal.job_id == 0 || !valid_job_object_path(&signal.job_object_path) {
         return StartJobCorrelation::RejectedEvidence {
@@ -209,7 +256,7 @@ pub fn correlate_job_removed(
     };
 
     if signal.job_id != expected_job_id || signal.job_object_path != expected_job_path {
-        if signal.unit_name == expected_unit || signal.job_object_path == expected_job_path {
+        if signal.unit_name == start.unit_name || signal.job_object_path == expected_job_path {
             return StartJobCorrelation::HoldForReconciliation {
                 reason: "JobRemoved shares the expected unit or job object path but conflicts with the acknowledged job identity".into(),
             };
@@ -217,7 +264,7 @@ pub fn correlate_job_removed(
         return StartJobCorrelation::UnrelatedSignal;
     }
 
-    if signal.unit_name != expected_unit {
+    if signal.unit_name != start.unit_name {
         return StartJobCorrelation::HoldForReconciliation {
             reason: "acknowledged job identity was reported for a different unit name".into(),
         };
