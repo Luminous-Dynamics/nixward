@@ -131,6 +131,39 @@
               "incomplete"
               "validated_terminal_success"
             ];
+            requiredViolationNames = [
+              "event_identity_binding_mismatch"
+              "empty_expected_transaction_id"
+              "empty_expected_attempt_id"
+              "duplicate_authorization_verification"
+              "duplicate_attempt_preparation"
+              "duplicate_submission_barrier"
+              "attempt_prepared_without_verified_authorization"
+              "submission_barrier_without_prepared_attempt"
+              "start_submission_without_write_ahead_barrier"
+              "duplicate_manager_start_submission"
+              "worker_identity_observed_before_start_submission"
+              "duplicate_worker_identity_observation"
+              "worker_identity_persisted_before_observation"
+              "duplicate_worker_identity_persistence"
+              "payload_released_without_authorization"
+              "payload_released_before_start_submission"
+              "payload_released_before_durable_worker_identity"
+              "duplicate_payload_release"
+              "payload_exit_before_payload_release"
+              "duplicate_payload_exit"
+              "receipt_before_payload_exit"
+              "receipt_without_durable_worker_identity"
+              "duplicate_process_receipt_publication"
+              "lifecycle_validation_before_payload_exit"
+              "lifecycle_validation_without_post_exit_target_observation"
+              "lifecycle_validation_without_candidate_post_state"
+              "duplicate_lifecycle_validation"
+              "terminal_success_without_process_receipt"
+              "terminal_success_without_candidate_post_state"
+              "terminal_success_without_lifecycle_validation"
+              "event_after_terminal_success"
+            ];
             requiredDuplicateMilestones = [
               "duplicate_authorization_verification"
               "duplicate_attempt_preparation"
@@ -162,9 +195,12 @@
             assert corpus.version == 1;
             # Version 1 is deliberately frozen at 23 unique cases; revise this
             # expectation explicitly when adding/removing normative vectors.
-            assert builtins.length vectors == 23;
+            assert builtins.length vectors == 33;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
             assert builtins.all validVector vectors;
+            assert builtins.all
+              (name: builtins.elem name expectedViolations)
+              requiredViolationNames;
             assert builtins.all
               (milestone: builtins.elem milestone expectedViolations)
               requiredDuplicateMilestones;
