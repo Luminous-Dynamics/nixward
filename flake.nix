@@ -188,12 +188,13 @@
               && builtins.elem vector.expected_disposition validDispositions
               && builtins.isBool vector.expected_terminal_success_claimed
               && builtins.isList vector.expected_violations
+              && builtins.all builtins.isString vector.expected_violations
               && builtins.isList vector.events
               && builtins.all validEvent vector.events;
           in
             assert corpus.schema == "org.luminousdynamics.nixward.supervisor-temporal-trace-vectors";
             assert corpus.version == 1;
-            # Version 1 is deliberately frozen at 23 unique cases; revise this
+            # Version 1 is deliberately frozen at 33 unique cases; revise this
             # expectation explicitly when adding/removing normative vectors.
             assert builtins.length vectors == 33;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
