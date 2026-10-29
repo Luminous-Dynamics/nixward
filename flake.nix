@@ -117,9 +117,10 @@
 
         checks.nixward-cli = self.packages.${system}.nixward;
 
-        # Validate the shared supervisor temporal trace corpus during
-        # nix flake check, without requiring the Rust test binary to run.
-        # This checks fixture/schema completeness only, not trace semantics.
+        # Validate the shared supervisor temporal corpus during nix flake check.
+        # A separate pure Nix reference model replays each vector, providing a
+        # cross-language semantic check without compiling the Rust test binary.
+        # This is still a model check over fixtures, not OS/receipt authenticity.
         checks.supervisor-temporal-qualification-vectors =
           let
             corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/supervisor-temporal-qualification-v1.json);
@@ -131,6 +132,25 @@
               "rejected"
               "incomplete"
               "validated_terminal_success"
+            ];
+            knownEventKinds = [
+              "authorization_verified"
+              "attempt_prepared_durably"
+              "submission_barrier_persisted"
+              "manager_start_submitted"
+              "worker_identity_observed"
+              "worker_identity_persisted"
+              "payload_released"
+              "payload_exited"
+              "process_receipt_persisted"
+              "lifecycle_postcondition_validated"
+              "terminal_success_recorded"
+              "target_observed:not_attempted"
+              "target_observed:candidate_runtime_and_profile_active"
+              "target_observed:predecessor_runtime_and_profile_active"
+              "target_observed:boot_candidate_profile_selected"
+              "target_observed:mixed_or_unknown"
+              "target_observed:unavailable"
             ];
             requiredViolationNames = [
               "event_identity_binding_mismatch"
@@ -180,7 +200,8 @@
             validEvent = event:
               builtins.isString event.transaction_id
               && builtins.isString event.attempt_id
-              && builtins.isString event.kind;
+              && builtins.isString event.kind
+              && builtins.elem event.kind knownEventKinds;
             matchesReferenceModel = vector:
               let
                 actual = referenceTraceCheck {
@@ -208,6 +229,7 @@
             # expectation explicitly when adding/removing normative vectors.
             assert builtins.length vectors == 33;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
+            assert builtins.all (id: id != "") ids;
             assert builtins.all validVector vectors;
             # Differential semantic check: Nix reference model vs. Rust fixture expectations.
             assert builtins.all matchesReferenceModel vectors;
