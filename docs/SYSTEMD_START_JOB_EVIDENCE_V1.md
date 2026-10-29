@@ -1,6 +1,6 @@
 # Systemd start-job evidence contract v1
 
-Status: **pure Rust contract; no D-Bus client or privileged worker is implemented by this slice**  
+Status: **pure contract plus optional zbus observer authored; not compiled or runtime-qualified**  
 Date: 2026-10-29  
 Related: [Issue #75](https://github.com/Luminous-Dynamics/nixward/issues/75), [PR #87](https://github.com/Luminous-Dynamics/nixward/pull/87), [PR #89](https://github.com/Luminous-Dynamics/nixward/pull/89)
 
@@ -14,12 +14,13 @@ Reference: [systemd D-Bus manager interface](https://www.freedesktop.org/softwar
 
 ## Implemented in this slice
 
-The new module, src/action/systemd_job_evidence.rs, introduces a pure correlation contract:
+The module src/action/systemd_job_evidence.rs defines the pure evidence contract. The optional module src/action/systemd_job_bus.rs now provides a live zbus observation path, but it has not been compiled or exercised against a real manager. The contract:
 
 - Derives a template unit name from transaction ID, unique attempt ID, and worker purpose using domain-separated SHA-256 and length-prefixed fields. User-provided IDs never appear directly in the privileged unit name.
 - Matches the actual D-Bus signature: an enqueued StartUnit reply contains the job object path, not a separate numeric job ID. The contract validates the canonical path suffix and derives the numeric ID only to cross-check it against the later JobRemoved signal.
-- Uses a non-serializable `StartIntent -> SubscribedStart` typestate transition. The crate-internal transition awaits a subscription closure and only yields `SubscribedStart` if that closure succeeds; its constructor is not exposed to downstream crates.
-- Allows `SubscribedStart::record_reply` to create the durable `SystemdStartEvidence` record only after the transient capability exists. The record itself remains data, not authority: persisted or externally supplied evidence still needs provenance validation at the adapter/journal boundary.
+- Uses the extended non-serializable typestate chain `StartIntent -> PreparedStartIntent -> SubscribedStart -> SubmittedStart -> PersistedStart`. The pre-launch persistence callback must succeed before the adapter accepts the intent; signal subscription must succeed before StartUnit; the direct manager reply must pass a separate persistence callback before the stream can be consumed.
+- Retains the signal stream alongside the submitted ticket, so the subscription is not dropped between StartUnit and JobRemoved observation.
+- The persistence callback is a caller-owned contract, not a proof of durability. The journal implementation must actually provide the intended no-clobber and fsync/parent-directory durability guarantees. Persisted or externally supplied evidence still needs integrity, identity and authorization validation.
 - Correlates JobRemoved using the exact returned object path and expected canonical unit name, and holds if the signal's numeric job ID disagrees with the ID encoded in its object path.
 - Ignores an unrelated job only when its job ID, object path, and unit name are all foreign to the expected job; any conflict sharing one of those identifiers requires reconciliation.
 - Maps only JobRemoved done to MatchedStartJobCompleted. Every other known result is explicitly non-success.
@@ -29,7 +30,7 @@ The new module is exported from src/action/mod.rs and includes unit tests for ca
 
 ## Deliberate limits
 
-This is an executable contract, not a D-Bus adapter. The typestate seam makes the intended in-process order explicit, but it cannot authenticate a serialized record or prove that a future adapter's subscription closure actually registered the correct systemd signal match and called Manager.Subscribe(). That must be checked in the real adapter and live manager tests. The module neither launches nor authorizes a worker, writes transaction journals, verifies cryptographic provenance, nor proves host state.
+The live adapter is authored but not qualified. Typestate makes the intended in-process order explicit, but cannot prove that the callback really persisted the journal record or that a future journal implementation is crash-durable. Live manager tests must confirm match registration, Manager.Subscribe(), the actual StartUnit signature and JobRemoved order. The adapter observes only manager job lifecycle; it does not launch or authorize the privileged worker, write transaction journal records by itself, verify cryptographic provenance, or prove host state.
 
 The existing temporal trace contract in PR #88 and cross-language fixture gate in PR #89 remain separate. The StartUnit method reply is modeled as its actual returned object path only; the numeric job ID appears in JobRemoved's signal tuple (signature `uoss`) and is checked against the canonical job path. See the [systemd manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [systemd's current JobRemoved emission](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c). This model must eventually feed a provenance-bound event recorder; it must not replace process identity, the output-free process receipt, or fresh read-only profile/runtime observation.
 
@@ -59,4 +60,4 @@ Suggested baselines include direct systemd service management and established Ni
 
 ## Execution status
 
-The unit and property tests are authored but have not been compiled or run in this environment. Two Tokio-gated tests exercise the subscription typestate seam when the `native` feature is enabled; they do not prove live D-Bus behavior. No D-Bus test, NixOS VM test, Rust test, formatter, or Clippy pass is claimed. The next implementation step is a typed D-Bus adapter and a `testers.runNixOSTest` fixture that exercises it against a real systemd manager.
+The deterministic/property tests and adapter unit test are authored but have not been compiled or run here. No Rust test, formatter, Clippy, live D-Bus test, Nix evaluation, or NixOS VM test is claimed. The next step is a `testers.runNixOSTest` fixture that exercises the optional adapter against a real systemd manager, including lost replies and supervisor interruption.
