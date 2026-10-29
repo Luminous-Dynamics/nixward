@@ -73,17 +73,37 @@ pub struct TraceViolation {
     pub kind: TraceViolationKind,
 }
 
-/// A safe trace may be incomplete: for example, a crash after the durable
-/// submission barrier is not itself a violation. Safe does not mean successful.
+/// Mutually exclusive classification of a validated trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceDisposition {
+    /// At least one invariant was violated or a required proof ordering failed.
+    Rejected,
+    /// No invariant has been violated yet, but terminal success is not proven.
+    /// This includes prefixes ending at the ambiguous manager-call boundary.
+    Incomplete,
+    /// The trace has no violations and its terminal-success claim met the
+    /// required process-receipt, fresh target-observation, and lifecycle gates.
+    ValidatedTerminalSuccess,
+}
+
+/// A valid prefix is not a successful transaction and does not authorize retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceValidation {
     pub violations: Vec<TraceViolation>,
-    pub terminal_success_recorded: bool,
+    pub disposition: TraceDisposition,
+    /// Records that an event claimed terminal success, even if the trace was rejected.
+    pub terminal_success_claimed: bool,
 }
 
 impl TraceValidation {
-    pub fn is_safe(&self) -> bool {
+    /// True means only that the observed prefix violates no modeled invariant.
+    /// Callers must still inspect disposition; Incomplete is not success.
+    pub fn is_valid_prefix(&self) -> bool {
         self.violations.is_empty()
+    }
+
+    pub fn is_terminal_success(&self) -> bool {
+        self.disposition == TraceDisposition::ValidatedTerminalSuccess
     }
 }
 
@@ -348,9 +368,18 @@ pub fn validate_trace(
         }
     }
 
+    let disposition = if !violations.is_empty() {
+        TraceDisposition::Rejected
+    } else if terminal_success_recorded {
+        TraceDisposition::ValidatedTerminalSuccess
+    } else {
+        TraceDisposition::Incomplete
+    };
+
     TraceValidation {
         violations,
-        terminal_success_recorded,
+        disposition,
+        terminal_success_claimed: terminal_success_recorded,
     }
 }
 
@@ -391,8 +420,8 @@ mod tests {
     #[test]
     fn accepts_only_a_fully_bound_and_reconciled_success_trace() {
         let result = validate_trace(TRANSACTION, ATTEMPT, &valid_success_trace());
-        assert!(result.is_safe(), "{:?}", result.violations);
-        assert!(result.terminal_success_recorded);
+        assert!(result.is_valid_prefix(), "{:?}", result.violations);
+        assert!(result.is_terminal_success());
     }
 
     #[test]
@@ -495,8 +524,9 @@ mod tests {
             event(TraceEventKind::ManagerStartSubmitted),
         ];
         let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
-        assert!(result.is_safe());
-        assert!(!result.terminal_success_recorded);
+        assert!(result.is_valid_prefix());
+        assert!(!result.is_terminal_success());
+        assert_eq!(result.disposition, TraceDisposition::Incomplete);
     }
 
     #[test]
@@ -520,7 +550,7 @@ mod tests {
                 let safe_order = prefix.as_slice() == &required_order[..];
                 let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
                 assert_eq!(
-                    result.is_safe(),
+                    result.is_valid_prefix(),
                     safe_order,
                     "unexpected result for {:?}: {:?}",
                     prefix,
@@ -621,7 +651,7 @@ mod tests {
             }
 
             let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
-            if result.is_safe() && result.terminal_success_recorded {
+            if result.is_valid_prefix() && result.terminal_success_claimed {
                 let auth = first_position(&trace, TraceEventKind::AuthorizationVerified)
                     .expect("accepted success must have authorization");
                 let prepared = first_position(&trace, TraceEventKind::AttemptPreparedDurably)
@@ -686,7 +716,7 @@ mod tests {
                 .any(|item| item.kind == TraceEventKind::TerminalSuccessRecorded)
             {
                 assert!(
-                    !result.terminal_success_recorded,
+                    !result.terminal_success_claimed,
                     "seed {seed}: terminal claim invented by validator"
                 );
             }
@@ -763,11 +793,11 @@ mod tests {
 
             let result = validate_trace(TRANSACTION, ATTEMPT, &trace);
             if mutation == 0 {
-                assert!(result.is_safe(), "seed {seed}: valid trace rejected");
-                assert!(result.terminal_success_recorded);
+                assert!(result.is_valid_prefix(), "seed {seed}: valid trace rejected");
+                assert!(result.terminal_success_claimed);
             } else {
                 assert!(
-                    !result.is_safe(),
+                    !result.is_valid_prefix(),
                     "seed {seed}, mutation {mutation}: unsafe trace accepted"
                 );
             }
