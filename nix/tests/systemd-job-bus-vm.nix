@@ -22,7 +22,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    machine.start()
+    start_all()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("systemctl daemon-reload")
     machine.succeed("systemctl cat nixward-transaction@.service")
