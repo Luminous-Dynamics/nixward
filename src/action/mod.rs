@@ -29,7 +29,7 @@ pub mod service_manager;
 pub mod system_transaction;
 pub mod systemd_job_evidence;
 #[cfg(feature = "systemd")]
-pub mod systemd_job_bus;
+pub(crate) mod systemd_job_bus;
 pub mod transaction_supervision;
 pub mod transaction_supervision_trace;
 mod worker_observation;
