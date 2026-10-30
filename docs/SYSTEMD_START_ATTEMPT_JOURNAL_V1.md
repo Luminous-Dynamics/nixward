@@ -6,7 +6,7 @@ Date: 2026-10-30
 
 ## Problem closed by this layer
 
-The original systemd invocation join accepted an `expected_attempt_id` argument, but the existing `ActivationWorkerIdentity` did not carry an attempt ID and `ConfigTransaction` did not persist the start intent. A caller could therefore supply an ID that was consistent across the systemd evidence objects without proving that the same ID had been committed to the transaction journal.
+The original systemd invocation join accepted an `expected_attempt_id` string, but the existing `ActivationWorkerIdentity` did not carry an attempt ID and `ConfigTransaction` did not persist the start intent. A caller could therefore supply an ID that was consistent across the systemd evidence objects without proving that the same ID had been committed to the transaction journal.
 
 This change makes the attempt identity a first-class journal fact.
 
@@ -42,7 +42,7 @@ The future supervisor integration must perform this sequence while holding the e
 4. Construct the matching `StartIntent`; only after the read-back succeeds may its prepared capability be submitted to the systemd adapter.
 5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join.
 
-The method only reserves an in-memory record. Calling it is not itself evidence of persistence or permission to issue `StartUnit`. Do not submit until the durable write and independent read-back have succeeded.
+The method only reserves an in-memory record. Calling it is not itself evidence of persistence or permission to issue `StartUnit`. Do not submit until the durable write and independent read-back have succeeded. Invocation validation now takes the loaded `ConfigTransaction` object, locates the attempt record there, and verifies that the exact worker identity is also present in that transaction; it no longer accepts a free-standing expected-attempt string.
 
 ## Evidence boundary and remaining work
 
@@ -58,6 +58,8 @@ The source adds tests for:
 - phase-scoped reservation;
 - rejection of a second attempt for the same purpose;
 - binding a worker identity to the exact journaled attempt;
-- rejection of caller-only, absent, or foreign attempt IDs in the invocation join.
+- rejection of caller-only, absent, or foreign attempt IDs in the transaction-backed invocation join;
+- rejection when the worker identity supplied to the join is not the identity journaled in that transaction;
+- preservation of the legacy worker identity serialization shape when the optional systemd attempt is absent.
 
 No Cargo, Nix, D-Bus, systemd VM, crash-injection, or power-loss test is claimed in the authoring environment. The next gates are the systemd-feature Nix derivation from PR #103, followed by a disposable NixOS VM that tests all manager and crash boundaries.
