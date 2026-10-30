@@ -66,6 +66,14 @@ The captured InvocationID is not merely stored metadata. Recovery must require i
 
 A canonical unit match alone returns a request to query invocation identity, not permission to resume observation. A missing, conflicting, unavailable or unsupported invocation remains held. If an invocation ID was persisted but canonical name lookup says absent, query by the persisted InvocationID before classifying the unit as gone.
 
+## Live zbus capture adapter
+
+The optional crate-private `systemd_job_bus::observe_worker_invocation_by_pidfd()` now performs the read-only manager lookup using zbus. It passes `zvariant::Fd` so D-Bus receives an out-of-band UNIX_FD argument with signature `h`; the raw descriptor integer is never encoded as a PID.
+
+It preserves the exact object path/unit ID/InvocationID returned from `GetUnitByPIDFD`, then reads `Id` and `InvocationID` from `org.freedesktop.systemd1.Unit` and `MainPID` from `org.freedesktop.systemd1.Service`. The returned observations are passed to the pure capture validator. Any call/property failure is surfaced as an error; unsupported managers must become a safe hold, not a PID-only fallback.
+
+This is a live D-Bus code path but remains uncompiled and unqualified in this work session. No systemd VM test is claimed. The caller still owns pidfd acquisition, journal/authorization validation, the existing Nixward interlock, and durable publication.
+
 ## Join to the existing activation worker receipt
 
 The pure bridge in `SYSTEMD_WORKER_IDENTITY_BRIDGE_V1.md` maps the four `ActivationWorkerPurpose` variants to the systemd purpose enum and validates the InvocationID record against the existing `ActivationWorkerIdentity`. It reuses the existing process boot-ID/start-time, worker executable, gate argv, payload argv, release-challenge and environment checks.
