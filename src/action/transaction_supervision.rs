@@ -153,6 +153,118 @@ pub enum ManagerUnitObservation {
     Unavailable,
 }
 
+/// Result of correlating the canonical manager unit with the persisted
+/// systemd invocation identity. These are observations, not authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerInvocationObservation {
+    /// Invocation lookup/property validation has not been performed yet.
+    NotQueried,
+    /// PIDFD lookup and unit properties both bind to the expected attempt invocation.
+    ExactAttemptInvocation,
+    /// An invocation was found, but its unit/ID does not match the expected attempt.
+    ConflictingInvocation,
+    /// The canonical unit exists but currently exposes no admissible invocation ID.
+    Missing,
+    /// The manager/property query failed or returned malformed identity evidence.
+    Unavailable,
+    /// The manager predates GetUnitByPIDFD (systemd < 253).
+    Unsupported,
+}
+
+/// Restart/recovery directives after both unit-name and invocation evidence
+/// are considered. No variant authorizes a new mutation or terminal promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStartInvocationRecoveryDecision {
+    SubmitInitialStartAfterDurablePreflight,
+    QueryCanonicalManagerUnit,
+    QueryUnitInvocationIdentity,
+    ObserveExactAttemptInvocation,
+    HoldOnUnitIdentityConflict,
+    HoldOnInvocationIdentityConflict,
+    HoldForInvocationIdentityResolution,
+    HoldForUnsupportedManager,
+    ReconcileTargetBeforeAnyNewAttempt,
+}
+
+/// Apply the strict restart gate after the name-level manager lookup.
+///
+/// A matching canonical unit name is only a preliminary observation. For any
+/// attempt whose manager submission may have happened, observation may resume
+/// only after the exact systemd invocation ID has been independently bound to
+/// the expected PIDFD/unit/MainPID identity. Missing, unavailable, conflicting,
+/// or unsupported invocation evidence never becomes an automatic retry.
+pub fn decide_worker_start_recovery_with_invocation(
+    intent: WorkerStartIntent,
+    manager: ManagerUnitObservation,
+    invocation: ManagerInvocationObservation,
+) -> WorkerStartInvocationRecoveryDecision {
+    match intent {
+        WorkerStartIntent::PreparedNotSubmitted => match manager {
+            ManagerUnitObservation::NotQueried | ManagerUnitObservation::Unavailable => {
+                WorkerStartInvocationRecoveryDecision::QueryCanonicalManagerUnit
+            }
+            ManagerUnitObservation::MatchingAttemptUnit
+            | ManagerUnitObservation::ConflictingUnitIdentity => {
+                WorkerStartInvocationRecoveryDecision::HoldOnUnitIdentityConflict
+            }
+            ManagerUnitObservation::Absent => match invocation {
+                ManagerInvocationObservation::NotQueried
+                | ManagerInvocationObservation::Missing
+                | ManagerInvocationObservation::Unavailable => {
+                    WorkerStartInvocationRecoveryDecision::SubmitInitialStartAfterDurablePreflight
+                }
+                ManagerInvocationObservation::ExactAttemptInvocation
+                | ManagerInvocationObservation::ConflictingInvocation => {
+                    WorkerStartInvocationRecoveryDecision::HoldOnInvocationIdentityConflict
+                }
+                ManagerInvocationObservation::Unsupported => {
+                    WorkerStartInvocationRecoveryDecision::HoldForUnsupportedManager
+                }
+            },
+        },
+        WorkerStartIntent::SubmissionMayHaveOccurred
+        | WorkerStartIntent::UnitInvocationIdentityPersisted => match manager {
+            ManagerUnitObservation::NotQueried | ManagerUnitObservation::Unavailable => {
+                WorkerStartInvocationRecoveryDecision::QueryCanonicalManagerUnit
+            }
+            ManagerUnitObservation::ConflictingUnitIdentity => {
+                WorkerStartInvocationRecoveryDecision::HoldOnUnitIdentityConflict
+            }
+            ManagerUnitObservation::Absent => match invocation {
+                ManagerInvocationObservation::ExactAttemptInvocation
+                | ManagerInvocationObservation::ConflictingInvocation => {
+                    WorkerStartInvocationRecoveryDecision::HoldOnInvocationIdentityConflict
+                }
+                ManagerInvocationObservation::NotQueried
+                | ManagerInvocationObservation::Missing
+                | ManagerInvocationObservation::Unavailable => {
+                    WorkerStartInvocationRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
+                }
+                ManagerInvocationObservation::Unsupported => {
+                    WorkerStartInvocationRecoveryDecision::HoldForUnsupportedManager
+                }
+            },
+            ManagerUnitObservation::MatchingAttemptUnit => match invocation {
+                ManagerInvocationObservation::NotQueried => {
+                    WorkerStartInvocationRecoveryDecision::QueryUnitInvocationIdentity
+                }
+                ManagerInvocationObservation::ExactAttemptInvocation => {
+                    WorkerStartInvocationRecoveryDecision::ObserveExactAttemptInvocation
+                }
+                ManagerInvocationObservation::ConflictingInvocation => {
+                    WorkerStartInvocationRecoveryDecision::HoldOnInvocationIdentityConflict
+                }
+                ManagerInvocationObservation::Missing | ManagerInvocationObservation::Unavailable => {
+                    WorkerStartInvocationRecoveryDecision::HoldForInvocationIdentityResolution
+                }
+                ManagerInvocationObservation::Unsupported => {
+                    WorkerStartInvocationRecoveryDecision::HoldForUnsupportedManager
+                }
+            },
+        },
+    }
+}
+
 /// Safe restart behavior for the unit-start operation.
 ///
 /// None of these outcomes authorizes a system mutation. In particular, a lost
@@ -334,6 +446,123 @@ mod tests {
                 assert_eq!(actual, expected, "unsafe start-recovery result for {intent:?} × {manager:?}");
             }
         }
+    }
+
+    #[test]
+    fn canonical_unit_match_alone_never_resumes_ambiguous_worker_observation() {
+        for intent in [
+            WorkerStartIntent::SubmissionMayHaveOccurred,
+            WorkerStartIntent::UnitInvocationIdentityPersisted,
+        ] {
+            assert_eq!(
+                decide_worker_start_recovery_with_invocation(
+                    intent,
+                    ManagerUnitObservation::MatchingAttemptUnit,
+                    ManagerInvocationObservation::NotQueried,
+                ),
+                WorkerStartInvocationRecoveryDecision::QueryUnitInvocationIdentity,
+                "unit name alone is only a prefilter, not worker-invocation identity"
+            );
+            assert_eq!(
+                decide_worker_start_recovery_with_invocation(
+                    intent,
+                    ManagerUnitObservation::MatchingAttemptUnit,
+                    ManagerInvocationObservation::ExactAttemptInvocation,
+                ),
+                WorkerStartInvocationRecoveryDecision::ObserveExactAttemptInvocation
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_conflict_missing_and_unsupported_manager_never_resume_ambiguous_worker() {
+        for intent in [
+            WorkerStartIntent::SubmissionMayHaveOccurred,
+            WorkerStartIntent::UnitInvocationIdentityPersisted,
+        ] {
+            for invocation in [
+                ManagerInvocationObservation::ConflictingInvocation,
+                ManagerInvocationObservation::Missing,
+                ManagerInvocationObservation::Unavailable,
+                ManagerInvocationObservation::Unsupported,
+            ] {
+                let decision = decide_worker_start_recovery_with_invocation(
+                    intent,
+                    ManagerUnitObservation::MatchingAttemptUnit,
+                    invocation,
+                );
+                assert_ne!(
+                    decision,
+                    WorkerStartInvocationRecoveryDecision::ObserveExactAttemptInvocation,
+                    "non-exact invocation evidence must never resume observation: {intent:?} × {invocation:?}"
+                );
+                assert_ne!(
+                    decision,
+                    WorkerStartInvocationRecoveryDecision::SubmitInitialStartAfterDurablePreflight,
+                    "ambiguous attempts must never be resubmitted: {intent:?} × {invocation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_unit_and_invocation_recovery_matrix_fails_closed() {
+        const INTENTS: [WorkerStartIntent; 3] = [
+            WorkerStartIntent::PreparedNotSubmitted,
+            WorkerStartIntent::SubmissionMayHaveOccurred,
+            WorkerStartIntent::UnitInvocationIdentityPersisted,
+        ];
+        const MANAGER_STATES: [ManagerUnitObservation; 5] = [
+            ManagerUnitObservation::NotQueried,
+            ManagerUnitObservation::MatchingAttemptUnit,
+            ManagerUnitObservation::ConflictingUnitIdentity,
+            ManagerUnitObservation::Absent,
+            ManagerUnitObservation::Unavailable,
+        ];
+        const INVOCATION_STATES: [ManagerInvocationObservation; 6] = [
+            ManagerInvocationObservation::NotQueried,
+            ManagerInvocationObservation::ExactAttemptInvocation,
+            ManagerInvocationObservation::ConflictingInvocation,
+            ManagerInvocationObservation::Missing,
+            ManagerInvocationObservation::Unavailable,
+            ManagerInvocationObservation::Unsupported,
+        ];
+
+        let mut cases = 0usize;
+        for intent in INTENTS {
+            for manager in MANAGER_STATES {
+                for invocation in INVOCATION_STATES {
+                    cases += 1;
+                    let actual = decide_worker_start_recovery_with_invocation(
+                        intent,
+                        manager,
+                        invocation,
+                    );
+                    if intent != WorkerStartIntent::PreparedNotSubmitted {
+                        assert_ne!(
+                            actual,
+                            WorkerStartInvocationRecoveryDecision::SubmitInitialStartAfterDurablePreflight,
+                            "ambiguous intent must never submit: {intent:?} × {manager:?} × {invocation:?}"
+                        );
+                    }
+                    if actual == WorkerStartInvocationRecoveryDecision::ObserveExactAttemptInvocation {
+                        assert_eq!(manager, ManagerUnitObservation::MatchingAttemptUnit);
+                        assert_eq!(invocation, ManagerInvocationObservation::ExactAttemptInvocation);
+                    }
+                    if actual == WorkerStartInvocationRecoveryDecision::SubmitInitialStartAfterDurablePreflight {
+                        assert_eq!(intent, WorkerStartIntent::PreparedNotSubmitted);
+                        assert_eq!(manager, ManagerUnitObservation::Absent);
+                        assert!(matches!(
+                            invocation,
+                            ManagerInvocationObservation::NotQueried
+                                | ManagerInvocationObservation::Missing
+                                | ManagerInvocationObservation::Unavailable
+                        ));
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 3 * 5 * 6);
     }
 
     #[test]
