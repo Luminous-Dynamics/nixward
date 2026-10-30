@@ -4320,6 +4320,41 @@ mod tests {
     }
 
     #[test]
+    fn transaction_journal_round_trips_systemd_start_attempt_and_worker_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction
+            .reserve_systemd_start_attempt("attempt-journal-roundtrip", ActivationWorkerPurpose::Activation)
+            .unwrap();
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut worker = worker_identity_for_test(executable);
+        worker.transaction_id = transaction.transaction_id().to_string();
+        worker.systemd_attempt_id = Some(intent.attempt_id.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+        let loaded = ConfigTransaction::load(&journal).unwrap();
+
+        assert_eq!(loaded.systemd_start_attempts(), transaction.systemd_start_attempts());
+        assert_eq!(loaded.activation_worker_identities(), &[worker]);
+        assert_eq!(
+            loaded.systemd_start_attempts()[0].attempt_id,
+            "attempt-journal-roundtrip"
+        );
+    }
+
+    #[test]
     fn systemd_worker_identity_must_reference_the_reserved_journal_attempt() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.phase = ConfigTransactionPhase::ActivationStarted;
