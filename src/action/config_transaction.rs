@@ -1866,6 +1866,44 @@ impl SystemdStartAttemptRecord {
         if self.unit_name != expected_unit {
             return Err("systemd start attempt unit name is not canonical for its transaction/attempt/purpose".into());
         }
+        let phase_is_compatible = match self.purpose {
+            ActivationWorkerPurpose::ProfileTransition => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::ProfileTransitionStarted
+                    | ConfigTransactionPhase::ProfileCommitted
+                    | ConfigTransactionPhase::IndeterminateProfileTransition
+                    | ConfigTransactionPhase::ActivationStarted
+                    | ConfigTransactionPhase::IndeterminateActivation
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::Activated
+                    | ConfigTransactionPhase::BootSelected
+                    | ConfigTransactionPhase::Recovered
+            ),
+            ActivationWorkerPurpose::Activation => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::ActivationStarted
+                    | ConfigTransactionPhase::IndeterminateActivation
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::Activated
+                    | ConfigTransactionPhase::BootSelected
+                    | ConfigTransactionPhase::Recovered
+            ),
+            ActivationWorkerPurpose::RecoveryProfileTransition
+            | ActivationWorkerPurpose::RecoveryActivation => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::Recovered
+            ),
+        };
+        if !phase_is_compatible {
+            return Err("systemd start attempt purpose is incompatible with the persisted transaction phase".into());
+        }
         Ok(())
     }
 }
