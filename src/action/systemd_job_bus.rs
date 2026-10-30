@@ -33,7 +33,6 @@ const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
-const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 
 /// Parse the kernel-reported target PID from a pidfd's fdinfo record.
 /// A regular file/pipe/socket fd has no Pid field and is rejected; an exited
@@ -229,19 +228,6 @@ pub(crate) async fn observe_worker_invocation_by_pidfd(
         .await
         .map_err(|error| format!("failed to read PIDFD-resolved unit InvocationID: {error}"))?;
 
-    let service = Proxy::new(
-        &connection,
-        SYSTEMD_SERVICE,
-        unit_path.as_str(),
-        SYSTEMD_SERVICE_INTERFACE,
-    )
-    .await
-    .map_err(|error| format!("failed to create service proxy from PIDFD-resolved unit: {error}"))?;
-    let unit_main_pid: u32 = service
-        .get_property("MainPID")
-        .await
-        .map_err(|error| format!("failed to read PIDFD-resolved service MainPID: {error}"))?;
-
     capture_systemd_worker_invocation_evidence(
         intent,
         expected_transaction_id,
@@ -251,7 +237,6 @@ pub(crate) async fn observe_worker_invocation_by_pidfd(
         &unit_property_id,
         &pidfd_invocation_id,
         &unit_property_invocation_id,
-        unit_main_pid,
         expected_worker_pid,
     )
 }
