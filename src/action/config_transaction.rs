@@ -1902,6 +1902,42 @@ impl SystemdWorkerLaunchEnvelope {
         Ok(())
     }
 
+    /// Prove that this immutable launch envelope executes exactly the
+    /// system activation selected by a ChangePlan command. The caller must
+    /// already have verified the ChangePlan, machine binding and
+    /// ExecutionAuthorization; this method checks command identity only.
+    pub fn validate_for_exact_system_activation_command(
+        &self,
+        command: &NixOSCommand,
+        expected_current_system_profile: &str,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let (store_path, action) = match command {
+            NixOSCommand::ActivateSystemClosure { store_path, action, .. } => {
+                (store_path.as_str(), *action)
+            }
+            _ => return Err("systemd launch envelope is restricted to exact system-closure activation".into()),
+        };
+        if !super::execution_intent::is_valid_nix_store_path(store_path) {
+            return Err("authorized system activation command has an invalid store closure".into());
+        }
+        let expected_executable = format!("{store_path}/bin/switch-to-configuration");
+        let expected_args = vec![match action {
+            SystemActivation::Switch => "switch".to_string(),
+            SystemActivation::Test => "test".to_string(),
+            SystemActivation::Boot => "boot".to_string(),
+        }];
+        if self.payload_executable != expected_executable
+            || self.payload_args != expected_args
+        {
+            return Err("systemd launch envelope payload does not match the exact authorized system activation command".into());
+        }
+        if self.expected_system_profile != expected_current_system_profile {
+            return Err("systemd launch envelope pre-state profile does not match the independently observed transaction pre-state".into());
+        }
+        Ok(())
+    }
+
     pub fn validate_worker_identity(
         &self,
         worker: &ActivationWorkerIdentity,
@@ -4463,6 +4499,39 @@ mod tests {
         let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted["schema"], ConfigTransaction::SCHEMA);
         assert_eq!(persisted["version"], ConfigTransaction::VERSION);
+    }
+
+    #[test]
+    fn systemd_launch_envelope_must_match_authorized_closure_action_and_pre_state() {
+        let envelope = launch_envelope_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
+            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into()),
+            action: SystemActivation::Switch,
+        };
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &command,
+            CANDIDATE_PROFILE,
+        ).is_ok());
+
+        let wrong_action = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
+            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into()),
+            action: SystemActivation::Boot,
+        };
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &wrong_action,
+            CANDIDATE_PROFILE,
+        ).is_err(), "payload verb must match the signed action");
+
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &command,
+            PREDECESSOR_PROFILE,
+        ).is_err(), "pre-state profile must match the independently observed value");
     }
 
     #[test]
