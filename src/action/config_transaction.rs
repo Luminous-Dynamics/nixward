@@ -1835,6 +1835,202 @@ pub enum ActivationWorkerPurpose {
     RecoveryActivation,
 }
 
+/// Exact immutable execution contract committed before a systemd unit is
+/// submitted. It contains no release token: the runner creates a fresh token
+/// after it has acquired the transaction interlock and persisted worker
+/// identity. The environment itself is a fixed Nixward allowlist whose digest
+/// is checked against the worker process; callers cannot pass arbitrary env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemdWorkerLaunchEnvelope {
+    pub worker_gate_executable: String,
+    pub payload_executable: String,
+    pub payload_args: Vec<String>,
+    pub payload_argv_digest: String,
+    pub environment_digest: String,
+    pub expected_system_profile: String,
+}
+
+impl SystemdWorkerLaunchEnvelope {
+    pub fn new(
+        worker_gate_executable: impl Into<String>,
+        payload_executable: impl Into<String>,
+        payload_args: Vec<String>,
+        environment_digest: impl Into<String>,
+        expected_system_profile: impl Into<String>,
+    ) -> Result<Self, String> {
+        let worker_gate_executable = worker_gate_executable.into();
+        let payload_executable = payload_executable.into();
+        let payload_argv_digest = activation_argv_digest(&payload_executable, &payload_args);
+        let envelope = Self {
+            worker_gate_executable,
+            payload_executable,
+            payload_args,
+            payload_argv_digest,
+            environment_digest: environment_digest.into(),
+            expected_system_profile: expected_system_profile.into(),
+        };
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_store_backed_executable("worker gate executable", &self.worker_gate_executable)?;
+        validate_store_backed_executable("payload executable", &self.payload_executable)?;
+        let total_argument_bytes = self.payload_args.iter().try_fold(0usize, |total, argument| {
+            total.checked_add(argument.len())
+        }).ok_or_else(|| "systemd worker payload argument size overflowed".to_string())?;
+        if self.payload_args.len() > 128
+            || self.payload_args.iter().any(|argument| argument.contains('\\0'))
+            || total_argument_bytes > 64 * 1024
+        {
+            return Err("systemd worker payload arguments exceed the canonical limits or contain NUL".into());
+        }
+        if activation_argv_digest(&self.payload_executable, &self.payload_args)
+            != self.payload_argv_digest
+        {
+            return Err("systemd worker launch envelope payload digest does not bind its exact argv".into());
+        }
+        decode_digest(&self.environment_digest)
+            .map_err(|_| "systemd worker launch envelope environment digest is invalid".to_string())?;
+        if self.environment_digest != super::executor::NixOSExecutor::activation_worker_environment_digest() {
+            return Err("systemd worker launch envelope does not use Nixward's fixed privileged-worker environment".into());
+        }
+        if !super::execution_intent::is_valid_nix_store_path(&self.expected_system_profile) {
+            return Err("systemd worker launch envelope expected profile is not a canonical Nix store path".into());
+        }
+        Ok(())
+    }
+
+    /// Prove that this immutable launch envelope executes exactly the
+    /// system activation selected by a ChangePlan command. The caller must
+    /// already have verified the ChangePlan, machine binding and
+    /// ExecutionAuthorization; this method checks command identity only.
+    pub fn validate_for_exact_system_activation_command(
+        &self,
+        command: &NixOSCommand,
+        expected_current_system_profile: &str,
+    ) -> Result<(), String> {
+        self.validate()?;
+        let (store_path, profile_store_path, action) = match command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                action,
+            } => (store_path.as_str(), profile_store_path.as_str(), *action),
+            NixOSCommand::ActivateSystemClosure { .. } => {
+                return Err("system activation command has no exact system-profile target".into());
+            }
+            _ => return Err("systemd launch envelope is restricted to exact system-closure activation".into()),
+        };
+        if !super::execution_intent::is_valid_nix_store_path(store_path)
+            || !super::execution_intent::is_valid_nix_store_path(profile_store_path)
+        {
+            return Err("authorized system activation command has an invalid store closure or profile target".into());
+        }
+        let expected_executable = format!("{store_path}/bin/switch-to-configuration");
+        let expected_args = vec![match action {
+            SystemActivation::Switch => "switch".to_string(),
+            SystemActivation::Test => "test".to_string(),
+            SystemActivation::Boot => "boot".to_string(),
+        }];
+        if self.payload_executable != expected_executable
+            || self.payload_args != expected_args
+        {
+            return Err("systemd launch envelope payload does not match the exact authorized system activation command".into());
+        }
+        if self.expected_system_profile != expected_current_system_profile
+            || profile_store_path != expected_current_system_profile
+        {
+            return Err("systemd launch envelope profile guard does not match the exact selected profile before activation".into());
+        }
+        Ok(())
+    }
+
+    /// Validate the separate nix-env profile-selection operation that runs
+    /// before switch-to-configuration. The caller must derive the target from
+    /// verified activation/recovery authorization and obtain the trusted nix-env
+    /// path from the running NixOS closure; this method validates the command.
+    pub fn validate_for_exact_system_profile_transition(
+        &self,
+        trusted_nix_env_executable: &str,
+        target_profile: &str,
+        expected_current_profile: &str,
+    ) -> Result<(), String> {
+        self.validate()?;
+        validate_store_backed_executable("trusted nix-env executable", trusted_nix_env_executable)?;
+        if !super::execution_intent::is_valid_nix_store_path(target_profile)
+            || !super::execution_intent::is_valid_nix_store_path(expected_current_profile)
+        {
+            return Err("system profile transition target or pre-state is not a canonical Nix store path".into());
+        }
+        let expected_args = vec![
+            "-p".to_string(),
+            "/nix/var/nix/profiles/system".to_string(),
+            "--set".to_string(),
+            target_profile.to_string(),
+        ];
+        if self.payload_executable != trusted_nix_env_executable
+            || self.payload_args != expected_args
+        {
+            return Err("systemd launch envelope does not match the exact authorized nix-env profile transition".into());
+        }
+        if self.expected_system_profile != expected_current_profile {
+            return Err("systemd launch envelope profile guard does not match the observed pre-transition profile".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_worker_identity(
+        &self,
+        worker: &ActivationWorkerIdentity,
+    ) -> Result<(), String> {
+        self.validate()?;
+        worker.validate_identity()?;
+        if worker.executable != self.worker_gate_executable
+            || worker.payload_executable != self.payload_executable
+            || worker.payload_args != self.payload_args
+            || worker.payload_argv_digest != self.payload_argv_digest
+            || worker.environment_digest != self.environment_digest
+            || worker.process_image != self.worker_gate_executable
+        {
+            return Err("systemd worker process identity does not match the precommitted launch envelope".into());
+        }
+        Ok(())
+    }
+}
+
+/// Validate a canonical executable below one immutable Nix store object.
+/// The complete suffix is checked; prefix-only validation would admit traversal.
+fn validate_store_backed_executable(label: &str, value: &str) -> Result<(), String> {
+    const PREFIX: &str = "/nix/store/";
+    if !value.starts_with(PREFIX) {
+        return Err(format!("{label} is not an absolute Nix store executable"));
+    }
+    let relative = value.strip_prefix(PREFIX)
+        .ok_or_else(|| format!("{label} escaped the Nix store"))?;
+    let mut components = relative.split('/');
+    let store_component = components.next()
+        .ok_or_else(|| format!("{label} has no Nix store object"))?;
+    let store_path = format!("{PREFIX}{store_component}");
+    if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+        return Err(format!("{label} has an invalid Nix store object identity"));
+    }
+    let suffix = components.collect::<Vec<_>>();
+    if suffix.is_empty() || suffix.iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.chars().any(char::is_control)
+    }) {
+        return Err(format!("{label} has empty, traversal, or control path components"));
+    }
+    if format!("{PREFIX}{store_component}/{}", suffix.join("/")) != value {
+        return Err(format!("{label} is not in canonical lexical form"));
+    }
+    Ok(())
+}
+
 /// Durable write-ahead intent for one systemd-managed worker start. An intent
 /// is append-only and deliberately has no "not submitted" terminal marker:
 /// after a crash, absence of manager evidence cannot prove that StartUnit was
@@ -1848,6 +2044,10 @@ pub struct SystemdStartAttemptRecord {
     pub purpose: ActivationWorkerPurpose,
     pub unit_name: String,
     pub plan_digest: String,
+    /// Absent only on migrated v8 attempts, which remain auditable but are
+    /// not eligible for execution or successful InvocationID validation.
+    #[serde(default)]
+    pub launch_envelope: Option<SystemdWorkerLaunchEnvelope>,
 }
 
 impl SystemdStartAttemptRecord {
@@ -1865,6 +2065,9 @@ impl SystemdStartAttemptRecord {
         )?;
         if self.unit_name != expected_unit {
             return Err("systemd start attempt unit name is not canonical for its transaction/attempt/purpose".into());
+        }
+        if let Some(envelope) = self.launch_envelope.as_ref() {
+            envelope.validate()?;
         }
         let phase_is_compatible = match self.purpose {
             ActivationWorkerPurpose::ProfileTransition => matches!(
@@ -2311,10 +2514,12 @@ impl std::fmt::Display for JournalPersistFailure {
 
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
-    pub const VERSION: u16 = 8;
-    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
-    const PREVIOUS_VERSION: u16 = 7;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v9";
+    pub const VERSION: u16 = 9;
+    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
+    const PREVIOUS_VERSION: u16 = 8;
+    const LEGACY_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
+    const LEGACY_VERSION: u16 = 7;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2830,21 +3035,120 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Reserve one systemd start intent before submitting StartUnit. The
-    /// caller must durably persist and read back the transaction journal before
-    /// passing the returned evidence to StartIntent::persist_before_submission.
-    /// v1 permits only one systemd attempt per purpose: ambiguous starts cannot
-    /// be retried by inventing another attempt ID.
-    pub fn reserve_systemd_start_attempt(
+    /// Reserve a systemd attempt only after revalidating the exact
+    /// authorization and the corresponding command-stage launch contract.
+    ///
+    /// For initial activation, `command` and `authorization` must be the
+    /// already-verified candidate ChangePlan capability. For recovery, they
+    /// must be the derived, pre-bound rollback command/capability. This method
+    /// does not create approval evidence; it verifies that the immutable
+    /// envelope describes the command the existing capability authorizes.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    pub(super) fn reserve_authorized_systemd_start_attempt(
         &mut self,
         attempt_id: impl Into<String>,
         purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+        expected_current_profile: &str,
+    ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        let expected_gate = super::executor::NixOSExecutor::trusted_worker_gate_executable()?;
+        if launch_envelope.worker_gate_executable != expected_gate {
+            return Err("systemd launch envelope does not name this Nixward package's trusted worker gate".into());
+        }
+        let observed_profile = super::generation_manager::GenerationManager::current_system_profile_closure()
+            .map_err(|error| format!("cannot independently observe system profile before systemd attempt reservation: {error}"))?;
+        if observed_profile != expected_current_profile {
+            return Err(format!(
+                "system profile changed before systemd attempt reservation: expected {expected_current_profile}, observed {observed_profile}"
+            ));
+        }
+        match purpose {
+            ActivationWorkerPurpose::ProfileTransition => {
+                authorization.validate_for(command)?;
+                self.validate_activation_binding(self.transaction_id(), command, authorization)?;
+                let profile_target = match command {
+                    NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    } => path.as_str(),
+                    _ => return Err("profile transition requires the exact authorized system-closure command".into()),
+                };
+                let prebound_profile = match authorization.recovery_command() {
+                    Some(NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    }) => path.as_str(),
+                    _ => return Err("profile transition authorization has no exact predecessor profile binding".into()),
+                };
+                if prebound_profile != expected_current_profile {
+                    return Err("profile transition pre-state differs from the authorization's pre-bound predecessor profile".into());
+                }
+                let nix_env = super::executor::NixOSExecutor::trusted_system_executable("nix-env")?;
+                launch_envelope.validate_for_exact_system_profile_transition(
+                    &nix_env,
+                    profile_target,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::Activation => {
+                authorization.validate_for(command)?;
+                self.validate_activation_binding(self.transaction_id(), command, authorization)?;
+                launch_envelope.validate_for_exact_system_activation_command(
+                    command,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::RecoveryProfileTransition => {
+                authorization.validate_for_recovery(command)?;
+                if authorization.change_plan_digest() != Some(self.plan_digest()?) {
+                    return Err("recovery profile transition authorization is not bound to this transaction plan".into());
+                }
+                let profile_target = match command {
+                    NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    } => path.as_str(),
+                    _ => return Err("recovery profile transition requires an exact predecessor closure command".into()),
+                };
+                let nix_env = super::executor::NixOSExecutor::trusted_system_executable("nix-env")?;
+                launch_envelope.validate_for_exact_system_profile_transition(
+                    &nix_env,
+                    profile_target,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::RecoveryActivation => {
+                authorization.validate_for_recovery(command)?;
+                if authorization.change_plan_digest() != Some(self.plan_digest()?) {
+                    return Err("recovery activation authorization is not bound to this transaction plan".into());
+                }
+                launch_envelope.validate_for_exact_system_activation_command(
+                    command,
+                    expected_current_profile,
+                )?;
+            }
+        }
+        self.reserve_systemd_start_attempt(attempt_id, purpose, launch_envelope)
+    }
+
+    /// Reserve one systemd start intent after the exact authorization/command
+    /// contract has already been checked by the enclosing executor. This raw
+    /// mutation is private to the action module and has no external API surface.
+    fn reserve_systemd_start_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
     ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
         if !self.recovery_observed
             && !matches!(self.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen)
         {
             return Err("loaded transaction requires fresh recovery observation before reserving a systemd start".into());
         }
+        let launch_envelope = launch_envelope;
+        launch_envelope.validate()?;
         let phase_matches = match purpose {
             ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
             ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
@@ -2876,6 +3180,7 @@ impl ConfigTransaction {
             purpose,
             unit_name: unit_name.clone(),
             plan_digest: self.plan_digest.clone(),
+            launch_envelope: Some(launch_envelope),
         };
         record.validate_against(self)?;
         self.systemd_start_attempts.push(record);
@@ -2885,6 +3190,16 @@ impl ConfigTransaction {
             purpose: purpose_evidence,
             unit_name,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reserve_systemd_start_attempt_for_test(
+        &mut self,
+        attempt_id: impl Into<String>,
+        purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
+    ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        self.reserve_systemd_start_attempt(attempt_id, purpose, launch_envelope)
     }
 
     pub fn systemd_start_attempts(&self) -> &[SystemdStartAttemptRecord] {
@@ -2908,6 +3223,9 @@ impl ConfigTransaction {
                 if attempt.purpose != identity.purpose || attempt.transaction_id != identity.transaction_id {
                     return Err("systemd-bound worker identity conflicts with its journaled attempt purpose or transaction".into());
                 }
+                attempt.launch_envelope.as_ref()
+                    .ok_or_else(|| "migrated systemd attempt has no executable launch envelope and cannot accept a worker".to_string())?
+                    .validate_worker_identity(&identity)?;
             }
             None if self.systemd_start_attempts.iter().any(|record| record.purpose == identity.purpose) => {
                 return Err("worker identity for a systemd-managed purpose must carry its exact attempt ID".into());
@@ -3253,10 +3571,12 @@ impl ConfigTransaction {
         let mut transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
         match (transaction.schema.as_str(), transaction.version) {
             (Self::SCHEMA, Self::VERSION) => {}
-            (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION) => {
-                // The v8 fields are additive. A v7 journal has no systemd
-                // write-ahead attempts and its old process identities remain
-                // explicitly unbound; never synthesize attempt IDs on upgrade.
+            (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION)
+            | (Self::LEGACY_SCHEMA, Self::LEGACY_VERSION) => {
+                // v8 attempts predate the immutable launch envelope. Preserve
+                // them for audit, but their absent envelope makes them
+                // ineligible for worker binding or terminal InvocationID proof.
+                // v7 journals are upgraded without fabricating attempts.
                 transaction.schema = Self::SCHEMA.into();
                 transaction.version = Self::VERSION;
             }
@@ -3310,6 +3630,13 @@ impl ConfigTransaction {
                     if attempt.purpose != worker.purpose || attempt.transaction_id != worker.transaction_id {
                         return Err("transaction journal systemd worker conflicts with its write-ahead attempt".into());
                     }
+                    if let Some(envelope) = attempt.launch_envelope.as_ref() {
+                        envelope.validate_worker_identity(worker)?;
+                    }
+                    // A migrated v8 attempt has no launch envelope. Keep its
+                    // already-persisted process receipt readable for audit, but
+                    // the InvocationID validator will refuse to treat it as a
+                    // fully qualified execution contract.
                 }
                 None if transaction.systemd_start_attempts.iter().any(|record| record.purpose == worker.purpose) => {
                     return Err("transaction journal mixes a systemd attempt with an unbound worker identity for the same purpose".into());
@@ -3408,6 +3735,38 @@ mod tests {
     const PREDECESSOR: &str = "/nix/store/cccccccccccccccccccccccccccccccc-prior";
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
 
+    fn launch_envelope_for_test(
+        worker_gate_executable: &str,
+        payload_executable: &str,
+    ) -> SystemdWorkerLaunchEnvelope {
+        SystemdWorkerLaunchEnvelope::new(
+            worker_gate_executable,
+            payload_executable,
+            vec!["switch".into()],
+            super::executor::NixOSExecutor::activation_worker_environment_digest(),
+            CANDIDATE_PROFILE,
+        ).unwrap()
+    }
+
+    fn worker_identity_for_launch_envelope_for_test(
+        envelope: &SystemdWorkerLaunchEnvelope,
+    ) -> ActivationWorkerIdentity {
+        let mut worker = worker_identity_for_test(&envelope.worker_gate_executable);
+        worker.payload_executable = envelope.payload_executable.clone();
+        worker.payload_args = envelope.payload_args.clone();
+        worker.payload_argv_digest = envelope.payload_argv_digest.clone();
+        worker.environment_digest = envelope.environment_digest.clone();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            worker.payload_executable.clone(),
+            worker.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(worker.payload_args.iter().cloned());
+        worker.argv_digest = activation_argv_digest(&worker.executable, &gate_args);
+        worker.validate_identity().unwrap();
+        worker
+    }
+
     fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
         let payload_args = vec!["switch".to_string()];
         let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
@@ -3427,7 +3786,7 @@ mod tests {
             executable: executable.into(),
             process_image: executable.into(),
             argv_digest: activation_argv_digest(executable, &gate_args),
-            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            environment_digest: super::executor::NixOSExecutor::activation_worker_environment_digest(),
             payload_executable: executable.into(),
             payload_args: payload_args.clone(),
             release_challenge_digest,
@@ -3483,7 +3842,7 @@ mod tests {
             executable: executable.into(),
             process_image: executable.into(),
             argv_digest: activation_argv_digest(executable, &gate_args),
-            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            environment_digest: super::executor::NixOSExecutor::activation_worker_environment_digest(),
             payload_executable: executable.into(),
             payload_args: payload_args.clone(),
             release_challenge_digest,
@@ -4274,8 +4633,8 @@ mod tests {
         let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         let mut value = serde_json::to_value(&transaction).unwrap();
         let object = value.as_object_mut().unwrap();
-        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into()));
-        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into()));
+        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::LEGACY_SCHEMA.into()));
+        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::LEGACY_VERSION.into()));
         object.remove("systemd_start_attempts");
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
@@ -4288,6 +4647,167 @@ mod tests {
         let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted["schema"], ConfigTransaction::SCHEMA);
         assert_eq!(persisted["version"], ConfigTransaction::VERSION);
+    }
+
+    #[test]
+    fn systemd_launch_envelope_must_match_authorized_closure_action_and_pre_state() {
+        let envelope = launch_envelope_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+        );
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
+            profile_store_path: Some(CANDIDATE_PROFILE.into()),
+            action: SystemActivation::Switch,
+        };
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &command,
+            CANDIDATE_PROFILE,
+        ).is_ok());
+
+        let wrong_action = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
+            profile_store_path: Some(CANDIDATE_PROFILE.into()),
+            action: SystemActivation::Boot,
+        };
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &wrong_action,
+            CANDIDATE_PROFILE,
+        ).is_err(), "payload verb must match the signed action");
+
+        assert!(envelope.validate_for_exact_system_activation_command(
+            &command,
+            PREDECESSOR_PROFILE,
+        ).is_err(), "pre-state profile must match the independently observed value");
+    }
+
+    #[test]
+    fn systemd_launch_envelope_must_match_exact_profile_transition_command() {
+        let nix_env = "/nix/store/dddddddddddddddddddddddddddddddd-nix/bin/nix-env";
+        let target_profile = CANDIDATE_PROFILE;
+        let envelope = SystemdWorkerLaunchEnvelope::new(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            nix_env,
+            vec![
+                "-p".into(),
+                "/nix/var/nix/profiles/system".into(),
+                "--set".into(),
+                target_profile.into(),
+            ],
+            super::executor::NixOSExecutor::activation_worker_environment_digest(),
+            PREDECESSOR_PROFILE,
+        ).unwrap();
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            target_profile,
+            PREDECESSOR_PROFILE,
+        ).is_ok());
+
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            CANDIDATE,
+            PREDECESSOR_PROFILE,
+        ).is_err(), "profile selection target must match the exact authorization-bound candidate");
+
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            target_profile,
+            CANDIDATE_PROFILE,
+        ).is_err(), "profile guard must match the exact observed predecessor");
+    }
+
+    #[test]
+    fn systemd_launch_envelope_rejects_payload_drift_and_worker_identity_drift() {
+        let envelope = launch_envelope_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+        );
+        envelope.validate().unwrap();
+
+        let mut arbitrary_environment = envelope.clone();
+        arbitrary_environment.environment_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into();
+        assert!(arbitrary_environment.validate().is_err(),
+            "only the fixed Nixward worker environment may be committed");
+
+        let mut changed_argv = envelope.clone();
+        changed_argv.payload_args.push("unexpected-operation".into());
+        assert!(changed_argv.validate().is_err(), "payload argv mutation must invalidate its committed digest");
+
+        let mut traversing_gate = envelope.clone();
+        traversing_gate.worker_gate_executable =
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/../bin/evil".into();
+        assert!(traversing_gate.validate().is_err(), "gate path traversal must fail closed");
+
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction.reserve_systemd_start_attempt(
+            "attempt-envelope-drift",
+            ActivationWorkerPurpose::Activation,
+            envelope.clone(),
+        ).unwrap();
+        let mut worker = worker_identity_for_launch_envelope_for_test(&envelope);
+        worker.transaction_id = transaction.transaction_id().to_string();
+        worker.systemd_attempt_id = Some(intent.attempt_id.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+
+        let mut drifted_worker = worker;
+        drifted_worker.payload_args.push("unexpected-operation".into());
+        drifted_worker.payload_argv_digest =
+            activation_argv_digest(&drifted_worker.payload_executable, &drifted_worker.payload_args);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            drifted_worker.payload_executable.clone(),
+            drifted_worker.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(drifted_worker.payload_args.iter().cloned());
+        drifted_worker.argv_digest = activation_argv_digest(&drifted_worker.executable, &gate_args);
+        assert!(drifted_worker.validate_identity().is_ok(),
+            "negative control must be a structurally valid worker identity");
+        assert!(transaction.bind_activation_worker_identity(drifted_worker).is_err(),
+            "a worker whose exact command differs from the precommitted envelope must be rejected");
+    }
+
+    #[test]
+    fn transaction_journal_upgrades_v8_attempt_without_launch_envelope_for_audit_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        transaction.reserve_systemd_start_attempt(
+            "attempt-v8-without-launch",
+            ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+                ),
+        ).unwrap();
+
+        let mut value = serde_json::to_value(&transaction).unwrap();
+        value["schema"] = serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into());
+        value["version"] = serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into());
+        value["systemd_start_attempts"][0].as_object_mut().unwrap().remove("launch_envelope");
+        let path = dir.path().join("transaction-v8.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let mut loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.schema, ConfigTransaction::SCHEMA);
+        assert_eq!(loaded.systemd_start_attempts().len(), 1);
+        assert!(loaded.systemd_start_attempts()[0].launch_envelope.is_none());
+
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut worker = worker_identity_for_test(executable);
+        worker.transaction_id = loaded.transaction_id().to_string();
+        worker.systemd_attempt_id = Some("attempt-v8-without-launch".into());
+        assert!(loaded.bind_activation_worker_identity(worker).is_err(),
+            "a migrated v8 attempt must not accept a new worker without its precommitted launch envelope");
     }
 
     #[test]
@@ -4311,6 +4831,10 @@ mod tests {
         assert!(loaded.reserve_systemd_start_attempt(
             "attempt-after-restart",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+                ),
         ).is_err(), "a loaded transaction must reconcile before any new systemd start");
     }
 
@@ -4319,7 +4843,14 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.phase = ConfigTransactionPhase::ActivationStarted;
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-0001", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-0001",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_test(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                        ),
+            )
             .unwrap();
         assert_eq!(intent.transaction_id, transaction.transaction_id);
         assert_eq!(intent.attempt_id, "attempt-0001");
@@ -4336,10 +4867,18 @@ mod tests {
         assert!(transaction.reserve_systemd_start_attempt(
             "attempt-0002",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                ),
         ).is_err(), "a different ID must not replay an unresolved purpose");
         assert!(transaction.reserve_systemd_start_attempt(
             "attempt-0001",
             ActivationWorkerPurpose::RecoveryActivation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                ),
         ).is_err(), "purpose/phase mismatch must fail closed");
     }
 
@@ -4367,7 +4906,14 @@ mod tests {
         transaction.frozen_source = Some(source);
         transaction.phase = ConfigTransactionPhase::ActivationStarted;
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-journal-roundtrip", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-journal-roundtrip",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_test(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                        ),
+            )
             .unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
         let mut worker = worker_identity_for_test(executable);
@@ -4380,6 +4926,10 @@ mod tests {
         let loaded = ConfigTransaction::load(&journal).unwrap();
 
         assert_eq!(loaded.systemd_start_attempts(), transaction.systemd_start_attempts());
+        assert_eq!(
+            loaded.systemd_start_attempts()[0].launch_envelope,
+            transaction.systemd_start_attempts()[0].launch_envelope,
+        );
         assert_eq!(loaded.activation_worker_identities(), &[worker]);
         assert_eq!(
             loaded.systemd_start_attempts()[0].attempt_id,
@@ -4394,6 +4944,10 @@ mod tests {
         transaction.reserve_systemd_start_attempt(
             "attempt-0001",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                executable,
+                executable,
+                ),
         ).unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
         let mut identity = worker_identity_for_test(executable);

@@ -891,6 +891,10 @@ impl ExecutionAuthorization {
         self.change_plan_digest
     }
 
+    pub(super) fn recovery_command(&self) -> Option<&NixOSCommand> {
+        self.recovery_command.as_ref()
+    }
+
     pub fn execution_intent_digest(&self) -> Option<[u8; 32]> {
         self.execution_intent_digest
     }
@@ -939,13 +943,20 @@ impl ExecutionAuthorization {
                     | ApprovalEvidenceKind::ExecutionIntentAuthority
             )
         );
+        // The original execution consumes the one-shot replay key. A
+        // rollback capability is derived from that already-consumed approval,
+        // so it must retain signer/challenge/subject and execution-intent
+        // bindings without replaying (or carrying) the original key.
         if authority_backed
             && (self.authority_signer_key_id.is_none()
                 || self.authority_challenge_blake3.is_none()
-                || self.authority_replay_key.is_none()
-                || self.authority_subject_blake3.is_none())
+                || self.authority_subject_blake3.is_none()
+                || (!self.rollback_only && self.authority_replay_key.is_none()))
         {
-            return Err("recovery authorization is missing signer, challenge, subject or replay binding".into());
+            return Err("recovery authorization is missing signer, challenge, subject or required replay binding".into());
+        }
+        if self.rollback_only && self.authority_replay_key.is_some() {
+            return Err("rollback-only recovery capability must not reuse the original one-shot replay key".into());
         }
         if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
@@ -1139,7 +1150,7 @@ impl NixOSExecutor {
         hasher.finalize().to_hex().to_string()
     }
 
-    fn activation_worker_environment_digest() -> String {
+    pub(super) fn activation_worker_environment_digest() -> String {
         Self::environment_digest(Self::activation_worker_environment())
     }
     pub fn new() -> Self {
@@ -1673,7 +1684,7 @@ impl NixOSExecutor {
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
-    fn trusted_worker_gate_executable() -> Result<String, String> {
+    pub(super) fn trusted_worker_gate_executable() -> Result<String, String> {
         let current = std::env::current_exe()
             .map_err(|error| format!("failed to resolve current Nixward executable: {error}"))?
             .canonicalize()
@@ -1789,6 +1800,63 @@ impl NixOSExecutor {
             "durable worker process observation published; independently verify NixOS post-state before classifying transaction outcome"
         );
         Ok(output)
+    }
+
+    /// Construct the immutable contract for the exact system-profile
+    /// transition performed before a system activation. The caller must have
+    /// already validated the parent ChangePlan / recovery authorization.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    pub(super) fn systemd_profile_transition_launch_envelope(
+        profile_store_path: &str,
+        expected_current_profile: &str,
+    ) -> Result<super::config_transaction::SystemdWorkerLaunchEnvelope, String> {
+        let worker_gate = Self::trusted_worker_gate_executable()?;
+        let nix_env = Self::trusted_system_executable("nix-env")?;
+        let args = vec![
+            "-p".to_string(),
+            "/nix/var/nix/profiles/system".to_string(),
+            "--set".to_string(),
+            profile_store_path.to_string(),
+        ];
+        let envelope = super::config_transaction::SystemdWorkerLaunchEnvelope::new(
+            worker_gate,
+            nix_env.clone(),
+            args,
+            Self::activation_worker_environment_digest(),
+            expected_current_profile,
+        )?;
+        envelope.validate_for_exact_system_profile_transition(
+            &nix_env,
+            profile_store_path,
+            expected_current_profile,
+        )?;
+        Ok(envelope)
+    }
+
+    /// Construct the immutable contract for a ChangePlan's exact closure
+    /// activation. The caller must first verify machine binding and
+    /// ExecutionAuthorization; this helper then binds the exact executable,
+    /// switch/test/boot argv, fixed worker environment, and selected profile.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    pub(super) fn systemd_activation_launch_envelope(
+        command: &NixOSCommand,
+        expected_current_profile: &str,
+    ) -> Result<super::config_transaction::SystemdWorkerLaunchEnvelope, String> {
+        let worker_gate = Self::trusted_worker_gate_executable()?;
+        let executable = Self::trusted_bound_executable(command)?;
+        let (_, args) = command.to_command();
+        let envelope = super::config_transaction::SystemdWorkerLaunchEnvelope::new(
+            worker_gate,
+            executable,
+            args,
+            Self::activation_worker_environment_digest(),
+            expected_current_profile,
+        )?;
+        envelope.validate_for_exact_system_activation_command(
+            command,
+            expected_current_profile,
+        )?;
+        Ok(envelope)
     }
 
     async fn run_bound_process_with_worker_identity(
@@ -2053,7 +2121,7 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    fn trusted_system_executable(name: &str) -> Result<String, String> {
+    pub(super) fn trusted_system_executable(name: &str) -> Result<String, String> {
         if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
             return Err("trusted system executable name is invalid".into());
         }
@@ -4816,6 +4884,61 @@ mod tests {
             ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
         let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
         assert!(auth.validate_for_recovery(&command).is_err());
+    }
+
+    #[test]
+    fn rollback_only_capability_does_not_reuse_original_one_shot_replay_key() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate".into(),
+            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate".into()),
+            action: SystemActivation::Switch,
+        };
+        let recovery = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior".into(),
+            profile_store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior".into()),
+            action: SystemActivation::Switch,
+        };
+        let original = ExecutionAuthorization {
+            command_digest: command.command_digest(),
+            rollback_digest: Some(recovery.command_digest()),
+            authorized_safety: command.safety_level(),
+            issued_at_ms: ExecutionAuthorization::now_ms(),
+            expires_at_ms: ExecutionAuthorization::now_ms().saturating_add(60_000),
+            issuer: "unit-test-authority".into(),
+            evidence_digest: [9; 32],
+            change_plan_digest: Some([7; 32]),
+            approval_evidence_kind: Some(ApprovalEvidenceKind::ExecutionIntentAuthority),
+            execution_intent_digest: Some([8; 32]),
+            realization_plan_digest: Some([6; 32]),
+            realization_installable: Some("github:NixOS/nixpkgs#nixosConfigurations.host".into()),
+            authority_signer_key_id: Some("test-key".into()),
+            authority_challenge_blake3: Some("challenge".into()),
+            authority_replay_key: Some("one-shot-replay-key".into()),
+            authority_subject_blake3: Some("subject".into()),
+            recovery_command: Some(recovery.clone()),
+            automatic_read_only: false,
+            rollback_only: false,
+        };
+
+        assert!(original.validate_for_recovery(&recovery).is_err(),
+            "the original authorization is not itself the rollback command capability");
+
+        let mut missing_replay_key = original.clone();
+        missing_replay_key.authority_replay_key = None;
+        assert!(missing_replay_key.validate_for(&command).is_err(),
+            "an original execution capability must retain its one-shot replay key");
+
+        let rollback = original.for_rollback(&recovery).unwrap();
+        assert!(rollback.rollback_only);
+        assert!(rollback.authority_replay_key.is_none(),
+            "the original one-shot replay key must not be re-consumed");
+        assert!(rollback.validate_for_recovery(&recovery).is_ok(),
+            "the derived rollback capability retains the signed plan evidence without replay-key reuse");
+
+        let mut replay_key_reintroduced = rollback;
+        replay_key_reintroduced.authority_replay_key = Some("one-shot-replay-key".into());
+        assert!(replay_key_reintroduced.validate_for_recovery(&recovery).is_err(),
+            "a rollback-only capability must reject reintroduction of the original replay key");
     }
 
     #[test]

@@ -73,6 +73,7 @@ The required scorecard is safety-first. A faster result with a false success is 
 | Duplicate mutation | Crash / cancel / disconnect at every write and manager boundary, then recover | **0** duplicate submissions for an unresolved attempt |
 | Identity attribution | PID reuse, PID namespace mismatch, wrong unit, wrong InvocationID, recycled job ID | **0** foreign worker or invocation accepted |
 | Journal integrity | Rewritten transaction ID, attempt ID, unit, purpose, plan digest, missing/extra/duplicate records | **0** mutated records accepted |
+| Launch-contract integrity | Mutated gate executable, payload executable/argv, environment digest, or expected pre-release profile | **0** envelope/worker mismatches accepted; **0** caller-selected environments accepted |
 | Recovery classification | Exact live, exited, absent, previous boot, unsupported manager, stale and contradictory observations | **0** unsafe resume/rollback decisions |
 | Compatibility | v7 journals, direct-spawn receipts, systemd feature disabled, unsupported systemd version | No fabricated attempt identity; legacy direct-spawn receipts retain their original digest |
 | Concurrency | Two Nixward clients, external profile writer, lock contention, lock owner crash | No overlapping authorized mutation; conflict is explicitly held |
@@ -119,7 +120,7 @@ A publishable claim requires source SHAs, pinned tool versions, VM image digest,
 1. Build and test the optional `systemd` feature with the locked Rust toolchain.
 2. Resolve unit materialization and polkit authorization first. The current hash-derived unit has no matching template in `nix/module.nix`. On systemd 253+, the fixed static template + `StartUnit` route supports unit/verb-scoped polkit authorization; transient-unit authorization metadata is only passed from systemd v257 onward. The existing unprivileged Nixward daemon has no module-defined `manage-units` grant.
 3. Add a disposable headless NixOS VM test on systemd 253+ that proves a scoped authorization can start only the Nixward template instance, while unrelated start/stop/restart/modify operations are denied. Then test fixed runner identity, unique invocation, post-exit evidence retention and manager-restart behavior.
-4. Wire the existing Nixward interlock and transaction capability into the live start path; bind the exact authorized command / worker launch envelope, persist and read back the v8 attempt before manager submission.
+4. Wire the existing Nixward interlock and transaction capability into the live start path; bind the exact authorized command / worker launch envelope, call the authorization-aware reservation API with the already-verified plan/command capability, then persist and read back the v9 attempt plus immutable launch envelope before manager submission.
 5. Persist manager job / InvocationID, worker observation and runtime/profile observations as append-only, linked records.
 6. Run the fault corpus and the matched baseline workload; independently validate the result bundle.
 7. Only then remove the observer's crate-private / unqualified status.
