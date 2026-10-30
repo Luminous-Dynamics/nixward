@@ -312,6 +312,7 @@ mod tests {
             transaction_id: "d".repeat(64),
             purpose: ActivationWorkerPurpose::Activation,
             systemd_attempt_id: None,
+            systemd_invocation_id: None,
             pid: 4242,
             boot_id: "00000000-0000-0000-0000-000000000000".into(),
             start_time_ticks: 13,
