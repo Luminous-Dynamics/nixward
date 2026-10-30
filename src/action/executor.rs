@@ -891,6 +891,10 @@ impl ExecutionAuthorization {
         self.change_plan_digest
     }
 
+    pub(super) fn recovery_command(&self) -> Option<&NixOSCommand> {
+        self.recovery_command.as_ref()
+    }
+
     pub fn execution_intent_digest(&self) -> Option<[u8; 32]> {
         self.execution_intent_digest
     }
@@ -2110,7 +2114,7 @@ impl NixOSExecutor {
         Ok(())
     }
 
-    fn trusted_system_executable(name: &str) -> Result<String, String> {
+    pub(super) fn trusted_system_executable(name: &str) -> Result<String, String> {
         if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
             return Err("trusted system executable name is invalid".into());
         }
