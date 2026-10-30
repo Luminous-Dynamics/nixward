@@ -36,6 +36,8 @@ The separate pure restart classifier now enumerates 3 durable attempt states × 
 
 These 90 deterministic decision combinations are separate from the seven 512-case proptest properties (3,584 generated property cases configured per normal run). None of these source-level checks replaces a live manager or VM test.
 
+The purpose-enum bridge also has deterministic coverage for all four activation/recovery purpose variants in both directions, plus join tests that reject PID, purpose and expected-attempt drift when validating InvocationID evidence against the existing `ActivationWorkerIdentity`. This is a bridge between existing records, not yet a versioned journal attempt record.
+
 ## Qualification corpus for the eventual adapter
 
 The new optional adapter provides the first live boundary but is not runtime-qualified. The caller must persist the exact pre-launch intent first; the adapter then establishes a unit-filtered JobRemoved match, calls Manager.Subscribe(), submits StartUnit once, and retains the returned job object path alongside the live signal stream. The caller's reply-persistence callback must succeed before the wait API consumes that stream. StartUnit's reply is an object path, not a separate numeric job ID. The JobRemoved signal carries the numeric ID, object path, unit name, and result; preserve these values from the same signal and verify the path/ID correspondence rather than joining fields from unrelated events. See the [systemd Manager API](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html) and [current JobRemoved emission in systemd source](https://github.com/systemd/systemd/blob/main/src/core/dbus-job.c).

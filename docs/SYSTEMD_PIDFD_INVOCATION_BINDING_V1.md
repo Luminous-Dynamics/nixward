@@ -66,6 +66,12 @@ The captured InvocationID is not merely stored metadata. Recovery must require i
 
 A canonical unit match alone returns a request to query invocation identity, not permission to resume observation. A missing, conflicting, unavailable or unsupported invocation remains held. If an invocation ID was persisted but canonical name lookup says absent, query by the persisted InvocationID before classifying the unit as gone.
 
+## Join to the existing activation worker receipt
+
+The pure bridge in `SYSTEMD_WORKER_IDENTITY_BRIDGE_V1.md` maps the four `ActivationWorkerPurpose` variants to the systemd purpose enum and validates the InvocationID record against the existing `ActivationWorkerIdentity`. It reuses the existing process boot-ID/start-time, worker executable, gate argv, payload argv, release-challenge and environment checks.
+
+The durable attempt ID is passed independently from the attempt journal. The older process receipt does not invent or derive that ID. This is a type-level join only; the complete attempt record still needs a versioned `ConfigTransaction` schema and append-only journal publication.
+
 ## Evidence ceilings
 
 This evidence proves only that, at the time of capture, the pidfd-referenced process was resolved by systemd to the recorded unit and service invocation, and that the service's MainPID agreed with the journal-bound worker PID.
