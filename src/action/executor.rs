@@ -1791,6 +1791,63 @@ impl NixOSExecutor {
         Ok(output)
     }
 
+    /// Construct the immutable contract for the exact system-profile
+    /// transition performed before a system activation. The caller must have
+    /// already validated the parent ChangePlan / recovery authorization.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    pub(super) fn systemd_profile_transition_launch_envelope(
+        profile_store_path: &str,
+        expected_current_profile: &str,
+    ) -> Result<super::config_transaction::SystemdWorkerLaunchEnvelope, String> {
+        let worker_gate = Self::trusted_worker_gate_executable()?;
+        let nix_env = Self::trusted_system_executable("nix-env")?;
+        let args = vec![
+            "-p".to_string(),
+            "/nix/var/nix/profiles/system".to_string(),
+            "--set".to_string(),
+            profile_store_path.to_string(),
+        ];
+        let envelope = super::config_transaction::SystemdWorkerLaunchEnvelope::new(
+            worker_gate,
+            nix_env.clone(),
+            args,
+            Self::activation_worker_environment_digest(),
+            expected_current_profile,
+        )?;
+        envelope.validate_for_exact_system_profile_transition(
+            &nix_env,
+            profile_store_path,
+            expected_current_profile,
+        )?;
+        Ok(envelope)
+    }
+
+    /// Construct the immutable contract for a ChangePlan's exact closure
+    /// activation. The caller must first verify machine binding and
+    /// ExecutionAuthorization; this helper then binds the exact executable,
+    /// switch/test/boot argv, fixed worker environment, and selected profile.
+    #[cfg(all(feature = "native", target_os = "linux"))]
+    pub(super) fn systemd_activation_launch_envelope(
+        command: &NixOSCommand,
+        expected_current_profile: &str,
+    ) -> Result<super::config_transaction::SystemdWorkerLaunchEnvelope, String> {
+        let worker_gate = Self::trusted_worker_gate_executable()?;
+        let executable = Self::trusted_bound_executable(command)?;
+        let (_, args) = command.to_command();
+        let envelope = super::config_transaction::SystemdWorkerLaunchEnvelope::new(
+            worker_gate,
+            executable,
+            args.into_iter().map(String::from).collect(),
+            Self::activation_worker_environment_digest(),
+            expected_current_profile,
+        )?;
+        envelope.validate_for_exact_system_activation_command(
+            command,
+            expected_current_profile,
+        )?;
+        Ok(envelope)
+    }
+
     async fn run_bound_process_with_worker_identity(
         executable: &str,
         args: &[String],
