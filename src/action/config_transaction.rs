@@ -4553,7 +4553,7 @@ mod tests {
         );
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
-            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into()),
+            profile_store_path: Some(CANDIDATE_PROFILE.into()),
             action: SystemActivation::Switch,
         };
         assert!(envelope.validate_for_exact_system_activation_command(
@@ -4563,7 +4563,7 @@ mod tests {
 
         let wrong_action = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
-            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into()),
+            profile_store_path: Some(CANDIDATE_PROFILE.into()),
             action: SystemActivation::Boot,
         };
         assert!(envelope.validate_for_exact_system_activation_command(
@@ -4575,6 +4575,41 @@ mod tests {
             &command,
             PREDECESSOR_PROFILE,
         ).is_err(), "pre-state profile must match the independently observed value");
+    }
+
+    #[test]
+    fn systemd_launch_envelope_must_match_exact_profile_transition_command() {
+        let nix_env = "/nix/store/dddddddddddddddddddddddddddddddd-nix/bin/nix-env";
+        let target_profile = CANDIDATE_PROFILE;
+        let envelope = SystemdWorkerLaunchEnvelope::new(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            nix_env,
+            vec![
+                "-p".into(),
+                "/nix/var/nix/profiles/system".into(),
+                "--set".into(),
+                target_profile.into(),
+            ],
+            super::executor::NixOSExecutor::activation_worker_environment_digest(),
+            PREDECESSOR_PROFILE,
+        ).unwrap();
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            target_profile,
+            PREDECESSOR_PROFILE,
+        ).is_ok());
+
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            CANDIDATE,
+            PREDECESSOR_PROFILE,
+        ).is_err(), "profile selection target must match the exact authorization-bound candidate");
+
+        assert!(envelope.validate_for_exact_system_profile_transition(
+            nix_env,
+            target_profile,
+            CANDIDATE_PROFILE,
+        ).is_err(), "profile guard must match the exact observed predecessor");
     }
 
     #[test]
