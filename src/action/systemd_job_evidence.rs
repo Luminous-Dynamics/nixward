@@ -12,7 +12,10 @@
 //! durable journal interlocks, worker receipt validation, and fresh host-state
 //! verification.
 
-use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose, ConfigTransaction};
+use super::config_transaction::{
+    ActivationWorkerIdentity, ActivationWorkerPurpose, ConfigTransaction,
+    SystemdWorkerLaunchEnvelope,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -308,6 +311,9 @@ pub fn validate_systemd_worker_invocation_against_transaction(
         .find(|record| record.attempt_id == expected_attempt_id)
         .ok_or_else(|| "activation worker attempt ID is absent from the transaction journal".to_string())?;
     attempt.validate_against(transaction)?;
+    attempt.launch_envelope.as_ref()
+        .ok_or_else(|| "journaled systemd attempt has no precommitted launch envelope".to_string())?
+        .validate_worker_identity(worker)?;
     let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
     if attempt.purpose != worker.purpose
         || attempt.transaction_id != worker.transaction_id
@@ -1256,6 +1262,16 @@ mod tests {
         ));
     }
 
+    fn launch_envelope_for_invocation_test() -> SystemdWorkerLaunchEnvelope {
+        SystemdWorkerLaunchEnvelope::new(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+            vec!["switch".into()],
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "/nix/store/cccccccccccccccccccccccccccccccccccc-system-profile",
+        ).unwrap()
+    }
+
     fn activation_worker_identity_for_invocation_test(
         transaction_id: &str,
         purpose: ActivationWorkerPurpose,
@@ -1309,7 +1325,11 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-joined-0001", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-joined-0001",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_invocation_test(),
+            )
             .unwrap();
         let worker = activation_worker_identity_for_invocation_test(
             transaction.transaction_id(),
@@ -1350,7 +1370,11 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-joined-0002", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-joined-0002",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_invocation_test(),
+            )
             .unwrap();
         let worker = activation_worker_identity_for_invocation_test(
             transaction.transaction_id(),
