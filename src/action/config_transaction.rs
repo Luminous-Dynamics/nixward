@@ -1893,6 +1893,9 @@ impl SystemdWorkerLaunchEnvelope {
         }
         decode_digest(&self.environment_digest)
             .map_err(|_| "systemd worker launch envelope environment digest is invalid".to_string())?;
+        if self.environment_digest != super::executor::NixOSExecutor::activation_worker_environment_digest() {
+            return Err("systemd worker launch envelope does not use Nixward's fixed privileged-worker environment".into());
+        }
         if !super::execution_intent::is_valid_nix_store_path(&self.expected_system_profile) {
             return Err("systemd worker launch envelope expected profile is not a canonical Nix store path".into());
         }
@@ -3550,13 +3553,13 @@ mod tests {
     fn launch_envelope_for_test(
         worker_gate_executable: &str,
         payload_executable: &str,
-        environment_digest: &str,
+        _environment_digest: &str,
     ) -> SystemdWorkerLaunchEnvelope {
         SystemdWorkerLaunchEnvelope::new(
             worker_gate_executable,
             payload_executable,
             vec!["switch".into()],
-            environment_digest,
+            super::executor::NixOSExecutor::activation_worker_environment_digest(),
             CANDIDATE_PROFILE,
         ).unwrap()
     }
@@ -3599,7 +3602,7 @@ mod tests {
             executable: executable.into(),
             process_image: executable.into(),
             argv_digest: activation_argv_digest(executable, &gate_args),
-            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            environment_digest: super::executor::NixOSExecutor::activation_worker_environment_digest(),
             payload_executable: executable.into(),
             payload_args: payload_args.clone(),
             release_challenge_digest,
@@ -3655,7 +3658,7 @@ mod tests {
             executable: executable.into(),
             process_image: executable.into(),
             argv_digest: activation_argv_digest(executable, &gate_args),
-            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            environment_digest: super::executor::NixOSExecutor::activation_worker_environment_digest(),
             payload_executable: executable.into(),
             payload_args: payload_args.clone(),
             release_challenge_digest,
