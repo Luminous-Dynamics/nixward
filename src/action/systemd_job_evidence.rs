@@ -1267,7 +1267,7 @@ mod tests {
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
             "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
             vec!["switch".into()],
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            super::super::executor::NixOSExecutor::activation_worker_environment_digest(),
             "/nix/store/cccccccccccccccccccccccccccccccccccc-system-profile",
         ).unwrap()
     }
@@ -1299,7 +1299,7 @@ mod tests {
             executable: executable.into(),
             process_image: executable.into(),
             argv_digest: super::super::config_transaction::activation_argv_digest(executable, &gate_args),
-            environment_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+            environment_digest: super::super::executor::NixOSExecutor::activation_worker_environment_digest(),
             payload_executable: payload_executable.into(),
             payload_args: payload_args.clone(),
             release_challenge_digest,
