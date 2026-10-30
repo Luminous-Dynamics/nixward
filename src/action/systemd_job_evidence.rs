@@ -1236,7 +1236,19 @@ mod tests {
             intent.purpose,
             "foreign.service",
             &intent.unit_name,
+            &expected,
+            &expected,
+            4242,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
             &intent.unit_name,
+            "foreign.service",
             &expected,
             &expected,
             4242,
