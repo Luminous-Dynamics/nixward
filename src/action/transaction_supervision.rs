@@ -287,7 +287,13 @@ pub enum WorkerStartRecoveryDecision {
     ReconcileTargetBeforeAnyNewAttempt,
 }
 
-/// Classify the next safe action when recovering a systemd worker-start attempt.
+/// Perform the name-level prefilter for a systemd worker-start attempt.
+///
+/// This compatibility classifier is not the final recovery gate for an
+/// ambiguous submission: `ObserveExistingMatchingUnit` establishes only a
+/// canonical unit-name match. Callers must additionally use
+/// `decide_worker_start_recovery_with_invocation` with independently validated
+/// PIDFD/unit/MainPID InvocationID evidence before resuming worker observation.
 pub fn decide_worker_start_recovery(
     intent: WorkerStartIntent,
     manager: ManagerUnitObservation,
