@@ -3540,6 +3540,20 @@ mod tests {
     const PREDECESSOR: &str = "/nix/store/cccccccccccccccccccccccccccccccc-prior";
     const PREDECESSOR_PROFILE: &str = "/nix/store/dddddddddddddddddddddddddddddddd-profile";
 
+    fn launch_envelope_for_test(
+        worker_gate_executable: &str,
+        payload_executable: &str,
+        environment_digest: &str,
+    ) -> SystemdWorkerLaunchEnvelope {
+        SystemdWorkerLaunchEnvelope::new(
+            worker_gate_executable,
+            payload_executable,
+            vec!["switch".into()],
+            environment_digest,
+            CANDIDATE_PROFILE,
+        ).unwrap()
+    }
+
     fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
         let payload_args = vec!["switch".to_string()];
         let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
@@ -4406,8 +4420,8 @@ mod tests {
         let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         let mut value = serde_json::to_value(&transaction).unwrap();
         let object = value.as_object_mut().unwrap();
-        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into()));
-        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into()));
+        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::LEGACY_SCHEMA.into()));
+        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::LEGACY_VERSION.into()));
         object.remove("systemd_start_attempts");
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
@@ -4443,6 +4457,11 @@ mod tests {
         assert!(loaded.reserve_systemd_start_attempt(
             "attempt-after-restart",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
         ).is_err(), "a loaded transaction must reconcile before any new systemd start");
     }
 
@@ -4451,7 +4470,15 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.phase = ConfigTransactionPhase::ActivationStarted;
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-0001", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-0001",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_test(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                ),
+            )
             .unwrap();
         assert_eq!(intent.transaction_id, transaction.transaction_id);
         assert_eq!(intent.attempt_id, "attempt-0001");
@@ -4468,10 +4495,20 @@ mod tests {
         assert!(transaction.reserve_systemd_start_attempt(
             "attempt-0002",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
         ).is_err(), "a different ID must not replay an unresolved purpose");
         assert!(transaction.reserve_systemd_start_attempt(
             "attempt-0001",
             ActivationWorkerPurpose::RecoveryActivation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
         ).is_err(), "purpose/phase mismatch must fail closed");
     }
 
@@ -4499,7 +4536,15 @@ mod tests {
         transaction.frozen_source = Some(source);
         transaction.phase = ConfigTransactionPhase::ActivationStarted;
         let intent = transaction
-            .reserve_systemd_start_attempt("attempt-journal-roundtrip", ActivationWorkerPurpose::Activation)
+            .reserve_systemd_start_attempt(
+                "attempt-journal-roundtrip",
+                ActivationWorkerPurpose::Activation,
+                launch_envelope_for_test(
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                ),
+            )
             .unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
         let mut worker = worker_identity_for_test(executable);
@@ -4526,6 +4571,11 @@ mod tests {
         transaction.reserve_systemd_start_attempt(
             "attempt-0001",
             ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                executable,
+                executable,
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
         ).unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
         let mut identity = worker_identity_for_test(executable);
