@@ -1918,7 +1918,7 @@ pub struct ActivationWorkerIdentity {
     pub purpose: ActivationWorkerPurpose,
     /// The write-ahead systemd attempt this exact process belongs to. Legacy
     /// v7 direct-spawn records have no systemd attempt and deserialize as None.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub systemd_attempt_id: Option<String>,
     pub pid: u32,
     pub boot_id: String,
@@ -3308,10 +3308,10 @@ impl ConfigTransaction {
                 None => {}
             }
             match worker.purpose {
-                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
                 }
-                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
                 ActivationWorkerPurpose::RecoveryProfileTransition
