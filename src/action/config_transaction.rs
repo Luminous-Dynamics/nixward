@@ -4618,6 +4618,11 @@ mod tests {
         );
         envelope.validate().unwrap();
 
+        let mut arbitrary_environment = envelope.clone();
+        arbitrary_environment.environment_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into();
+        assert!(arbitrary_environment.validate().is_err(),
+            "only the fixed Nixward worker environment may be committed");
+
         let mut changed_argv = envelope.clone();
         changed_argv.payload_args.push("unexpected-operation".into());
         assert!(changed_argv.validate().is_err(), "payload argv mutation must invalidate its committed digest");
