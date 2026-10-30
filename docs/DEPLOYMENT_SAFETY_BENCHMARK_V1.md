@@ -14,7 +14,7 @@ Nixward should not claim to replace the strongest feature of every NixOS deploym
 | `deploy-rs` | Remote flake deployment, multiple profile types, and magic rollback using a post-activation connectivity confirmation | That a connectivity probe proves which process performed a mutation or binds the process to one systemd invocation |
 | Colmena | Stateless fleet deployment, node selection/tags, secrets and parallel operations | That fleet-level orchestration is a substitute for per-host process and activation evidence |
 | systemd | Unit/job lifecycle, manager-owned invocation identity and PIDFD-based process-to-unit lookup on supported versions | That a job result alone proves the intended NixOS runtime/profile post-state |
-| Nixward | Transaction-specific authorization, durable journal, worker identity and planned PIDFD / InvocationID correlation | That the current draft systemd observer is already production-integrated or benchmark-qualified |
+| Nixward | Transaction-specific authorization, durable attempt/envelope, worker identity and v10 persisted PIDFD / InvocationID join contract | That the draft systemd observer or supervisor is already production-integrated or benchmark-qualified |
 
 Sources and version scope are recorded in the accompanying research references below. The benchmark compares operational outcomes, not marketing feature lists.
 
