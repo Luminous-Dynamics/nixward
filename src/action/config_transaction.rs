@@ -2123,6 +2123,10 @@ pub struct ActivationWorkerIdentity {
     /// v7 direct-spawn records have no systemd attempt and deserialize as None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub systemd_attempt_id: Option<String>,
+    /// The systemd service invocation observed through GetUnitByPIDFD for this
+    /// exact process. Absent only on legacy/audit-only systemd receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub systemd_invocation_id: Option<String>,
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
@@ -2153,6 +2157,12 @@ impl ActivationWorkerIdentity {
                 attempt_id,
                 super::systemd_job_evidence::TransactionWorkerPurpose::from(self.purpose),
             )?;
+        }
+        if let Some(invocation_id) = self.systemd_invocation_id.as_deref() {
+            if self.systemd_attempt_id.is_none() {
+                return Err("systemd InvocationID cannot be present without a journal-bound attempt ID".into());
+            }
+            super::systemd_job_evidence::validate_encoded_systemd_invocation_id(invocation_id)?;
         }
         if self.pid <= 1 || self.start_time_ticks == 0 {
             return Err("activation worker PID or start-time identity is invalid".into());
@@ -2514,10 +2524,12 @@ impl std::fmt::Display for JournalPersistFailure {
 
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v9";
-    pub const VERSION: u16 = 9;
-    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
-    const PREVIOUS_VERSION: u16 = 8;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v10";
+    pub const VERSION: u16 = 10;
+    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v9";
+    const PREVIOUS_VERSION: u16 = 9;
+    const SECONDARY_SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
+    const SECONDARY_VERSION: u16 = 8;
     const LEGACY_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
     const LEGACY_VERSION: u16 = 7;
 
@@ -3218,6 +3230,9 @@ impl ConfigTransaction {
         }
         match identity.systemd_attempt_id.as_deref() {
             Some(attempt_id) => {
+                if identity.systemd_invocation_id.is_none() {
+                    return Err("new systemd-bound worker identity must persist the PIDFD-observed InvocationID".into());
+                }
                 let attempt = self.systemd_start_attempts.iter().find(|record| record.attempt_id == attempt_id)
                     .ok_or_else(|| "systemd-bound worker identity has no journaled write-ahead attempt".to_string())?;
                 if attempt.purpose != identity.purpose || attempt.transaction_id != identity.transaction_id {
@@ -3572,11 +3587,13 @@ impl ConfigTransaction {
         match (transaction.schema.as_str(), transaction.version) {
             (Self::SCHEMA, Self::VERSION) => {}
             (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION)
+            | (Self::SECONDARY_SCHEMA, Self::SECONDARY_VERSION)
             | (Self::LEGACY_SCHEMA, Self::LEGACY_VERSION) => {
-                // v8 attempts predate the immutable launch envelope. Preserve
-                // them for audit, but their absent envelope makes them
-                // ineligible for worker binding or terminal InvocationID proof.
-                // v7 journals are upgraded without fabricating attempts.
+                // v9 worker receipts predate durable systemd InvocationID
+                // binding. Keep missing IDs readable for audit, but never
+                // accept them as a complete manager/process identity join.
+                // v8 attempts also predate the launch envelope and remain
+                // audit-only; v7 journals have no synthesized start attempts.
                 transaction.schema = Self::SCHEMA.into();
                 transaction.version = Self::VERSION;
             }
@@ -3780,6 +3797,7 @@ mod tests {
             transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             purpose: ActivationWorkerPurpose::Activation,
             systemd_attempt_id: None,
+            systemd_invocation_id: None,
             pid: 123,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -3836,6 +3854,7 @@ mod tests {
             transaction_id: transaction.transaction_id().to_string(),
             purpose: ActivationWorkerPurpose::RecoveryProfileTransition,
             systemd_attempt_id: None,
+            systemd_invocation_id: None,
             pid: 123,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -3852,6 +3871,30 @@ mod tests {
         let mut relabelled = identity;
         relabelled.purpose = ActivationWorkerPurpose::RecoveryActivation;
         assert!(transaction.bind_activation_worker_identity(relabelled).is_err());
+    }
+
+    #[test]
+    fn activation_worker_systemd_invocation_id_requires_a_valid_journal_attempt() {
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut identity = worker_identity_for_test(executable);
+        identity.systemd_invocation_id = Some("5a".repeat(16));
+        assert!(
+            identity.validate_identity().is_err(),
+            "InvocationID without a journal-bound attempt must be rejected"
+        );
+
+        identity.systemd_attempt_id = Some("attempt-invocation-validation".into());
+        identity.systemd_invocation_id = Some("not-an-invocation-id".into());
+        assert!(
+            identity.validate_identity().is_err(),
+            "malformed InvocationID must be rejected"
+        );
+
+        identity.systemd_invocation_id = Some("00".repeat(16));
+        assert!(
+            identity.validate_identity().is_err(),
+            "the unset all-zero InvocationID must be rejected"
+        );
     }
 
     #[test]
@@ -4748,7 +4791,8 @@ mod tests {
         let mut worker = worker_identity_for_launch_envelope_for_test(&envelope);
         worker.transaction_id = transaction.transaction_id().to_string();
         worker.systemd_attempt_id = Some(intent.attempt_id.clone());
-        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+        worker.systemd_invocation_id = Some("ab".repeat(16));
+        transaction.bind_activation_worker_identity(worker.clone());
 
         let mut drifted_worker = worker;
         drifted_worker.payload_args.push("unexpected-operation".into());
@@ -4791,8 +4835,8 @@ mod tests {
         ).unwrap();
 
         let mut value = serde_json::to_value(&transaction).unwrap();
-        value["schema"] = serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into());
-        value["version"] = serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into());
+        value["schema"] = serde_json::Value::String(ConfigTransaction::SECONDARY_SCHEMA.into());
+        value["version"] = serde_json::Value::Number(ConfigTransaction::SECONDARY_VERSION.into());
         value["systemd_start_attempts"][0].as_object_mut().unwrap().remove("launch_envelope");
         let path = dir.path().join("transaction-v8.json");
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -4806,6 +4850,7 @@ mod tests {
         let mut worker = worker_identity_for_test(executable);
         worker.transaction_id = loaded.transaction_id().to_string();
         worker.systemd_attempt_id = Some("attempt-v8-without-launch".into());
+        worker.systemd_invocation_id = Some("cd".repeat(16));
         assert!(loaded.bind_activation_worker_identity(worker).is_err(),
             "a migrated v8 attempt must not accept a new worker without its precommitted launch envelope");
     }
@@ -4889,6 +4934,7 @@ mod tests {
         );
         let value = serde_json::to_value(&worker).unwrap();
         assert!(value.get("systemd_attempt_id").is_none());
+        assert!(value.get("systemd_invocation_id").is_none());
     }
 
     #[test]
@@ -4919,7 +4965,8 @@ mod tests {
         let mut worker = worker_identity_for_test(executable);
         worker.transaction_id = transaction.transaction_id().to_string();
         worker.systemd_attempt_id = Some(intent.attempt_id.clone());
-        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+        worker.systemd_invocation_id = Some("ab".repeat(16));
+        transaction.bind_activation_worker_identity(worker.clone());
 
         let journal = dir.path().join("transaction.json");
         transaction.persist_atomic(&journal).unwrap();
@@ -4953,6 +5000,7 @@ mod tests {
         let mut identity = worker_identity_for_test(executable);
         identity.transaction_id = transaction.transaction_id().to_string();
         identity.systemd_attempt_id = Some("attempt-0001".into());
+        identity.systemd_invocation_id = Some("ef".repeat(16));
         transaction.bind_activation_worker_identity(identity.clone()).unwrap();
 
         let mut foreign = identity.clone();
