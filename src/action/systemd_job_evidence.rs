@@ -206,6 +206,144 @@ pub fn validate_start_intent_evidence_against(
     Ok(())
 }
 
+/// Durable binding between the journal-owned start attempt and one exact
+/// systemd service invocation observed through GetUnitByPIDFD.
+///
+/// The invocation ID is stored as 32 lowercase hexadecimal characters (the
+/// canonical encoding of systemd's 16-byte D-Bus `ay` value). A PID alone is
+/// not sufficient: this record must be captured while a pidfd for the exact
+/// worker is available and correlated with the manager's unit/MainPID data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemdWorkerInvocationEvidence {
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub purpose: TransactionWorkerPurpose,
+    pub unit_name: String,
+    pub invocation_id: String,
+    pub worker_pid: u32,
+}
+
+fn encode_systemd_invocation_id(bytes: &[u8]) -> Result<String, String> {
+    if bytes.len() != 16 {
+        return Err("systemd InvocationID must contain exactly 16 bytes".into());
+    }
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err("systemd InvocationID is unset (all-zero value)".into());
+    }
+    let mut encoded = String::with_capacity(32);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| "failed to encode systemd InvocationID".to_string())?;
+    }
+    Ok(encoded)
+}
+
+fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
+    if value.len() != 32
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(
+            "systemd InvocationID must be 32 lowercase hexadecimal characters".into(),
+        );
+    }
+    if value.bytes().all(|byte| byte == b'0') {
+        return Err("systemd InvocationID must not be the unset all-zero value".into());
+    }
+    Ok(())
+}
+
+/// Capture the service invocation that owns the exact worker process.
+///
+/// The caller obtains `pidfd_unit_name` and `pidfd_invocation_id` from
+/// Manager.GetUnitByPIDFD(pidfd), then reads `Id`, `InvocationID`, and
+/// `MainPID` from the returned unit object. Requiring the two invocation ID
+/// observations to agree detects a unit restart/race between those queries.
+/// The PIDFD lookup is essential: this function does not treat a PID-only
+/// GetUnitByPID result as equivalent evidence.
+pub fn capture_systemd_worker_invocation_evidence(
+    intent: &StartIntentEvidence,
+    expected_transaction_id: &str,
+    expected_attempt_id: &str,
+    expected_purpose: TransactionWorkerPurpose,
+    pidfd_unit_name: &str,
+    unit_property_unit_name: &str,
+    pidfd_invocation_id: &[u8],
+    unit_property_invocation_id: &[u8],
+    unit_main_pid: u32,
+    expected_worker_pid: u32,
+) -> Result<SystemdWorkerInvocationEvidence, String> {
+    validate_start_intent_evidence_against(
+        intent,
+        expected_transaction_id,
+        expected_attempt_id,
+        expected_purpose,
+    )?;
+    if expected_worker_pid <= 1 || unit_main_pid != expected_worker_pid {
+        return Err(
+            "systemd unit MainPID does not match the exact journal-owned worker PID".into(),
+        );
+    }
+    if pidfd_unit_name != intent.unit_name
+        || unit_property_unit_name != intent.unit_name
+        || pidfd_unit_name != unit_property_unit_name
+    {
+        return Err(
+            "GetUnitByPIDFD unit ID and unit object Id do not both match the canonical attempt unit".into(),
+        );
+    }
+    let pidfd_id = encode_systemd_invocation_id(pidfd_invocation_id)?;
+    let property_id = encode_systemd_invocation_id(unit_property_invocation_id)?;
+    if pidfd_id != property_id {
+        return Err(
+            "GetUnitByPIDFD and unit InvocationID property disagree; the unit may have restarted during observation".into(),
+        );
+    }
+
+    Ok(SystemdWorkerInvocationEvidence {
+        transaction_id: intent.transaction_id.clone(),
+        attempt_id: intent.attempt_id.clone(),
+        purpose: intent.purpose,
+        unit_name: intent.unit_name.clone(),
+        invocation_id: pidfd_id,
+        worker_pid: expected_worker_pid,
+    })
+}
+
+/// Validate a persisted unit-invocation binding against trusted attempt and
+/// worker identities. The expected values must come from the validated
+/// transaction journal, not from this evidence record.
+pub fn validate_systemd_worker_invocation_evidence_against(
+    evidence: &SystemdWorkerInvocationEvidence,
+    expected_transaction_id: &str,
+    expected_attempt_id: &str,
+    expected_purpose: TransactionWorkerPurpose,
+    expected_worker_pid: u32,
+) -> Result<(), String> {
+    let intent = StartIntentEvidence {
+        transaction_id: evidence.transaction_id.clone(),
+        attempt_id: evidence.attempt_id.clone(),
+        purpose: evidence.purpose,
+        unit_name: evidence.unit_name.clone(),
+    };
+    validate_start_intent_evidence_against(
+        &intent,
+        expected_transaction_id,
+        expected_attempt_id,
+        expected_purpose,
+    )?;
+    validate_encoded_systemd_invocation_id(&evidence.invocation_id)?;
+    if expected_worker_pid <= 1 || evidence.worker_pid != expected_worker_pid {
+        return Err(
+            "systemd invocation evidence does not match the independently validated worker PID".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Non-serializable authority to proceed past the pre-launch write-ahead
 /// barrier. Its constructor is private and only persistence success returns it.
 #[derive(Debug, PartialEq, Eq)]
@@ -1043,6 +1181,193 @@ mod tests {
     }
 
     #[test]
+    fn pidfd_systemd_invocation_binding_requires_exact_unit_main_pid_and_matching_ids() {
+        let intent = StartIntent::new(
+            "tx-invocation",
+            "attempt-invocation",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap()
+        .journal_evidence();
+        let invocation_id = [0x5au8; 16];
+        let evidence = capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &invocation_id,
+            &invocation_id,
+            4242,
+            4242,
+        )
+        .unwrap();
+
+        assert_eq!(evidence.invocation_id, "5a".repeat(16));
+        assert_eq!(
+            validate_systemd_worker_invocation_evidence_against(
+                &evidence,
+                &intent.transaction_id,
+                &intent.attempt_id,
+                intent.purpose,
+                4242,
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn pidfd_systemd_invocation_binding_rejects_unit_pid_and_id_conflicts() {
+        let intent = StartIntent::new(
+            "tx-invocation-conflict",
+            "attempt-invocation-conflict",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap()
+        .journal_evidence();
+        let expected = [0x5au8; 16];
+        let different = [0x6bu8; 16];
+
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            "foreign.service",
+            &intent.unit_name,
+            &expected,
+            &expected,
+            4242,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            "foreign.service",
+            &expected,
+            &expected,
+            4242,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &expected,
+            &expected,
+            4243,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &expected,
+            &different,
+            4242,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &[0u8; 16],
+            &[0u8; 16],
+            4242,
+            4242,
+        )
+        .is_err());
+        assert!(capture_systemd_worker_invocation_evidence(
+            &intent,
+            "foreign-transaction",
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &expected,
+            &expected,
+            4242,
+            4242,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn persisted_systemd_invocation_evidence_rejects_malformed_or_rewritten_fields() {
+        let intent = StartIntent::new(
+            "tx-persisted-invocation",
+            "attempt-persisted-invocation",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap()
+        .journal_evidence();
+        let invocation_id = [0x7cu8; 16];
+        let original = capture_systemd_worker_invocation_evidence(
+            &intent,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            &intent.unit_name,
+            &intent.unit_name,
+            &invocation_id,
+            &invocation_id,
+            5151,
+            5151,
+        )
+        .unwrap();
+
+        let mut changed_invocation = original.clone();
+        changed_invocation.invocation_id = "not-an-invocation-id".into();
+        assert!(validate_systemd_worker_invocation_evidence_against(
+            &changed_invocation,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            5151,
+        )
+        .is_err());
+
+        let mut changed_worker = original.clone();
+        changed_worker.worker_pid = 6161;
+        assert!(validate_systemd_worker_invocation_evidence_against(
+            &changed_worker,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            5151,
+        )
+        .is_err());
+
+        let mut changed_attempt = original;
+        changed_attempt.attempt_id.push_str("-foreign");
+        assert!(validate_systemd_worker_invocation_evidence_against(
+            &changed_attempt,
+            &intent.transaction_id,
+            &intent.attempt_id,
+            intent.purpose,
+            5151,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn coherent_rewrite_of_recovered_identity_fails_independent_binding() {
         let trusted = StartIntent::new(
             "tx-trusted",
@@ -1208,6 +1533,57 @@ mod tests {
                 &trusted.transaction_id,
                 &trusted.attempt_id,
                 trusted.purpose
+            ).is_err());
+        }
+
+        
+        /// PIDFD-resolved unit and both manager invocation observations must
+        /// agree with the canonical attempt and exact worker PID.
+        #[test]
+        fn pidfd_invocation_binding_rejects_single_field_conflicts(
+            transaction_id in "[a-z0-9_-]{1,32}",
+            attempt_id in "[a-z0-9_-]{1,32}",
+            mutation in 0u8..5
+        ) {
+            let intent = StartIntent::new(
+                &transaction_id,
+                &attempt_id,
+                TransactionWorkerPurpose::Activation
+            ).unwrap().journal_evidence();
+            let invocation_id = [0x5au8; 16];
+            let pidfd_unit_name = if mutation == 0 {
+                "foreign.service"
+            } else {
+                intent.unit_name.as_str()
+            };
+            let unit_property_unit_name = if mutation == 4 {
+                "foreign.service"
+            } else {
+                intent.unit_name.as_str()
+            };
+            let unit_main_pid = if mutation == 1 { 9002 } else { 9001 };
+            let property_invocation_id = if mutation == 2 {
+                [0x6bu8; 16]
+            } else {
+                invocation_id
+            };
+            let expected_transaction_id = if mutation == 3 {
+                format!("{transaction_id}-foreign")
+            } else {
+                transaction_id.clone()
+            };
+
+            prop_assert!(capture_systemd_worker_invocation_evidence(
+                &intent,
+                &expected_transaction_id,
+                &intent.attempt_id,
+                intent.purpose,
+                pidfd_unit_name,
+                unit_property_unit_name,
+                &invocation_id,
+                &property_invocation_id,
+                unit_main_pid,
+                9001
             ).is_err());
         }
 
