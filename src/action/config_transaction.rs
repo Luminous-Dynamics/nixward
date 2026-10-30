@@ -3043,6 +3043,7 @@ impl ConfigTransaction {
     /// must be the derived, pre-bound rollback command/capability. This method
     /// does not create approval evidence; it verifies that the immutable
     /// envelope describes the command the existing capability authorizes.
+    #[cfg(all(feature = "native", target_os = "linux"))]
     pub(super) fn reserve_authorized_systemd_start_attempt(
         &mut self,
         attempt_id: impl Into<String>,
