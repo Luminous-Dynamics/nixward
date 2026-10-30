@@ -946,10 +946,13 @@ impl ExecutionAuthorization {
         if authority_backed
             && (self.authority_signer_key_id.is_none()
                 || self.authority_challenge_blake3.is_none()
-                || self.authority_replay_key.is_none()
-                || self.authority_subject_blake3.is_none())
+                || self.authority_subject_blake3.is_none()
+                || (!self.rollback_only && self.authority_replay_key.is_none()))
         {
-            return Err("recovery authorization is missing signer, challenge, subject or replay binding".into());
+            return Err("recovery authorization is missing signer, challenge, subject or required replay binding".into());
+        }
+        if self.rollback_only && self.authority_replay_key.is_some() {
+            return Err("rollback-only recovery capability must not reuse the original one-shot replay key".into());
         }
         if matches!(command, NixOSCommand::ActivateSystemClosure { .. })
             && (self.approval_evidence_kind != Some(ApprovalEvidenceKind::ExecutionIntentAuthority)
@@ -4877,6 +4880,56 @@ mod tests {
             ChangeAuthorization::from_verified_approval(&plan, "test-owner", [7; 32]).unwrap();
         let auth = ExecutionAuthorization::from_change_authorization(&plan, &approval).unwrap();
         assert!(auth.validate_for_recovery(&command).is_err());
+    }
+
+    #[test]
+    fn rollback_only_capability_does_not_reuse_original_one_shot_replay_key() {
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate".into(),
+            profile_store_path: Some("/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-nixos-system-candidate".into()),
+            action: SystemActivation::Switch,
+        };
+        let recovery = NixOSCommand::ActivateSystemClosure {
+            store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior".into(),
+            profile_store_path: Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-prior".into()),
+            action: SystemActivation::Switch,
+        };
+        let original = ExecutionAuthorization {
+            command_digest: command.command_digest(),
+            rollback_digest: Some(recovery.command_digest()),
+            authorized_safety: command.safety_level(),
+            issued_at_ms: ExecutionAuthorization::now_ms(),
+            expires_at_ms: ExecutionAuthorization::now_ms().saturating_add(60_000),
+            issuer: "unit-test-authority".into(),
+            evidence_digest: [9; 32],
+            change_plan_digest: Some([7; 32]),
+            approval_evidence_kind: Some(ApprovalEvidenceKind::ExecutionIntentAuthority),
+            execution_intent_digest: Some([8; 32]),
+            realization_plan_digest: Some([6; 32]),
+            realization_installable: Some("github:NixOS/nixpkgs#nixosConfigurations.host".into()),
+            authority_signer_key_id: Some("test-key".into()),
+            authority_challenge_blake3: Some("challenge".into()),
+            authority_replay_key: Some("one-shot-replay-key".into()),
+            authority_subject_blake3: Some("subject".into()),
+            recovery_command: Some(recovery.clone()),
+            automatic_read_only: false,
+            rollback_only: false,
+        };
+
+        assert!(original.validate_for_recovery(&recovery).is_err(),
+            "the original authorization is not itself the rollback command capability");
+
+        let rollback = original.for_rollback(&recovery).unwrap();
+        assert!(rollback.rollback_only);
+        assert!(rollback.authority_replay_key.is_none(),
+            "the original one-shot replay key must not be re-consumed");
+        assert!(rollback.validate_for_recovery(&recovery).is_ok(),
+            "the derived rollback capability retains the signed plan evidence without replay-key reuse");
+
+        let mut replay_key_reintroduced = rollback;
+        replay_key_reintroduced.authority_replay_key = Some("one-shot-replay-key".into());
+        assert!(replay_key_reintroduced.validate_for_recovery(&recovery).is_err(),
+            "a rollback-only capability must reject reintroduction of the original replay key");
     }
 
     #[test]
