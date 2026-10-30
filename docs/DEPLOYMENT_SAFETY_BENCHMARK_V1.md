@@ -117,8 +117,8 @@ A publishable claim requires source SHAs, pinned tool versions, VM image digest,
 ## 7. Qualification gates
 
 1. Build and test the optional `systemd` feature with the locked Rust toolchain.
-2. Resolve unit materialization first: a NixOS-managed static template or a constrained `StartTransientUnit` contract. The current hash-derived unit has no matching template in `nix/module.nix`; plain `StartUnit` cannot create it.
-3. Add a disposable NixOS VM test with systemd 253+ that proves unit creation, fixed runner identity, unique invocation, post-exit evidence retention and manager-restart behavior.
+2. Resolve unit materialization and polkit authorization first. The current hash-derived unit has no matching template in `nix/module.nix`. On systemd 253+, the fixed static template + `StartUnit` route supports unit/verb-scoped polkit authorization; transient-unit authorization metadata is only passed from systemd v257 onward. The existing unprivileged Nixward daemon has no module-defined `manage-units` grant.
+3. Add a disposable headless NixOS VM test on systemd 253+ that proves a scoped authorization can start only the Nixward template instance, while unrelated start/stop/restart/modify operations are denied. Then test fixed runner identity, unique invocation, post-exit evidence retention and manager-restart behavior.
 4. Wire the existing Nixward interlock and transaction capability into the live start path; bind the exact authorized command / worker launch envelope, persist and read back the v8 attempt before manager submission.
 5. Persist manager job / InvocationID, worker observation and runtime/profile observations as append-only, linked records.
 6. Run the fault corpus and the matched baseline workload; independently validate the result bundle.
