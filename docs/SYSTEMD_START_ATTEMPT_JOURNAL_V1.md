@@ -50,6 +50,19 @@ This v1 record binds the transaction, attempt, purpose, canonical unit and plan 
 
 A start intent that exists without conclusive later evidence remains unresolved. Absence of a worker receipt, unit, or JobRemoved signal is not proof that no external action occurred.
 
+## Hard integration blocker: unit materialization
+
+The current adapter calls `Manager.StartUnit` with the canonical per-attempt unit name. The repository's current `nix/module.nix` defines `nixward.service`, but not a matching `nixward-transaction@.service` template or another unit definition corresponding to the generated per-attempt name. systemd documents that `GetUnit` fails for a unit that has not been loaded; `StartUnit` starts a named unit but does not create its definition.
+
+Do not wire the current `submit_start()` path into production until one of these provisioning models is implemented and independently qualified:
+
+1. **NixOS-managed static template.** Add a narrowly privileged `nixward-transaction@.service` with a fixed Nixward runner `ExecStart`. The instance must resolve unambiguously to one validated journal attempt; it must not allow caller-controlled executable, shell command, environment or unit properties.
+2. **D-Bus transient service.** Use `Manager.StartTransientUnit` to create the per-attempt service with a fixed trusted runner and constrained properties. Hash and persist the exact property/ExecStart envelope before submission. Qualify unit-name uniqueness, property signatures, caller authorization, manager restart behavior, and retention after exit. systemd documents that a transient unit is released after it is no longer running or referenced, or at reboot, so the design must explicitly manage and test references if post-exit manager evidence is required.
+
+The static template is the simpler security boundary; the transient-service model maps more naturally to per-attempt unit creation and exact launch properties but has a larger D-Bus and lifecycle surface. The implementation must choose based on a working NixOS VM experiment, not preference. In either model, the worker runner must reload and validate the journal and acquire the existing interlock before launching the approved worker gate. The manager unit itself must not accept arbitrary privileged commands.
+
+Reference: https://www.freedesktop.org/software/systemd/man/260/org.freedesktop.systemd1.html
+
 ## Qualification
 
 The source adds tests for:
