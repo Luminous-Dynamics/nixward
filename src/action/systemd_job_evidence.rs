@@ -1325,7 +1325,7 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
-            .reserve_systemd_start_attempt(
+            .reserve_systemd_start_attempt_for_test(
                 "attempt-joined-0001",
                 ActivationWorkerPurpose::Activation,
                 launch_envelope_for_invocation_test(),
@@ -1370,7 +1370,7 @@ mod tests {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
-            .reserve_systemd_start_attempt(
+            .reserve_systemd_start_attempt_for_test(
                 "attempt-joined-0002",
                 ActivationWorkerPurpose::Activation,
                 launch_envelope_for_invocation_test(),
