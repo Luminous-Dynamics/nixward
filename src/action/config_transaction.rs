@@ -1851,7 +1851,7 @@ pub struct SystemdStartAttemptRecord {
 }
 
 impl SystemdStartAttemptRecord {
-    fn validate_against(&self, transaction: &ConfigTransaction) -> Result<(), String> {
+    pub(super) fn validate_against(&self, transaction: &ConfigTransaction) -> Result<(), String> {
         if self.transaction_id != transaction.transaction_id {
             return Err("systemd start attempt belongs to a different transaction".into());
         }
@@ -4308,6 +4308,15 @@ mod tests {
             "attempt-0001",
             ActivationWorkerPurpose::RecoveryActivation,
         ).is_err(), "purpose/phase mismatch must fail closed");
+    }
+
+    #[test]
+    fn legacy_worker_identity_serialization_omits_absent_systemd_attempt() {
+        let worker = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+        );
+        let value = serde_json::to_value(&worker).unwrap();
+        assert!(value.get("systemd_attempt_id").is_none());
     }
 
     #[test]
