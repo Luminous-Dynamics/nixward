@@ -59,9 +59,25 @@ Do not wire the current `submit_start()` path into production until one of these
 1. **NixOS-managed static template.** Add a narrowly privileged `nixward-transaction@.service` with a fixed Nixward runner `ExecStart`. The instance must resolve unambiguously to one validated journal attempt; it must not allow caller-controlled executable, shell command, environment or unit properties.
 2. **D-Bus transient service.** Use `Manager.StartTransientUnit` to create the per-attempt service with a fixed trusted runner and constrained properties. Hash and persist the exact property/ExecStart envelope before submission. Qualify unit-name uniqueness, property signatures, caller authorization, manager restart behavior, and retention after exit. systemd documents that a transient unit is released after it is no longer running or referenced, or at reboot, so the design must explicitly manage and test references if post-exit manager evidence is required.
 
-The static template is the simpler security boundary; the transient-service model maps more naturally to per-attempt unit creation and exact launch properties but has a larger D-Bus and lifecycle surface. The implementation must choose based on a working NixOS VM experiment, not preference. In either model, the worker runner must reload and validate the journal and acquire the existing interlock before launching the approved worker gate. The manager unit itself must not accept arbitrary privileged commands.
+The static template is currently the safer compatibility choice for the advertised systemd 253+ floor. There is an important polkit version boundary:
 
-Reference: https://www.freedesktop.org/software/systemd/man/260/org.freedesktop.systemd1.html
+- In systemd v253 and v256, `StartTransientUnit` calls the generic `bus_verify_manage_units_async()` authorization path without unit/verb detail. A polkit rule therefore cannot safely scope the grant to the exact transient unit through `action.lookup("unit")`; granting the action would be a broad system-unit management grant.
+- In systemd v257, the transient-unit handler changed to pass the requested unit name and `start` verb through `bus_verify_manage_units_async_impl()`. A narrowly scoped polkit policy can then inspect those details, subject to testing on the exact supported release.
+- The `StartUnit` path loads the named static unit and dispatches through the unit-object method, which calls `bus_verify_manage_units_async_full()` with the unit and verb. This behavior is present in v253. A policy can therefore restrict the Nixward service principal to starting only the fixed Nixward transaction template family, without granting general `manage-units`.
+
+The existing NixOS module runs `nixward-daemon` as the unprivileged `nixward` user with an empty `CapabilityBoundingSet`; it does not define a systemd polkit rule. Systemd documents that system-unit mutation requires `org.freedesktop.systemd1.manage-units`. Production integration must explicitly test the authorization path on a clean headless NixOS VM and prove that the Nixward principal cannot start, stop, restart, or modify unrelated units. Do not add a broad `manage-units` allow rule.
+
+For v253+, prefer a static `nixward-transaction@.service` template with a fixed Nixward runner, exact per-instance unit matching in polkit and a strict journal/attempt/interlock check inside the runner. The instance must not provide an executable or shell command. If transient units are selected, either require systemd 257+ and test the scoped polkit details, or use a separate privileged broker that exposes only a typed, journal-validated start operation. Do not silently depend on newer authorization semantics while claiming a 253+ support floor.
+
+In either model, the worker runner must reload and validate the journal and acquire the existing transaction interlock before launching the approved worker gate. The manager unit itself must not accept arbitrary privileged commands.
+
+Source-level version comparison:
+- systemd v253 `src/core/dbus-manager.c`: `method_start_transient_unit()` calls `bus_verify_manage_units_async()`.
+- systemd v256: same generic authorization call.
+- systemd v257: calls `bus_verify_manage_units_async_impl(m, name, "start", ...)`.
+- systemd v253 `src/core/dbus-unit.c`: unit-object start calls `bus_verify_manage_units_async_full(u, verb, ...)`.
+
+References: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop.systemd1.html and https://github.com/systemd/systemd/issues/17224
 
 ## Qualification
 
