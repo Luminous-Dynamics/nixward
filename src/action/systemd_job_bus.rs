@@ -13,7 +13,8 @@
 //! calling submit_start, then persist the returned StartUnit reply before
 //! waiting for the completion signal.
 
-use std::os::fd::BorrowedFd;
+use std::fs;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -33,6 +34,44 @@ const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
 const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
+
+/// Parse the kernel-reported target PID from a pidfd's fdinfo record.
+/// A regular file/pipe/socket fd has no Pid field and is rejected; an exited
+/// pidfd reports a non-positive/sentinel identity and is rejected as well.
+fn parse_pidfd_target_pid(fdinfo: &str) -> Result<u32, String> {
+    let mut target_pid = None;
+    for line in fdinfo.lines() {
+        let Some(value) = line.strip_prefix("Pid:") else {
+            continue;
+        };
+        if target_pid.is_some() {
+            return Err("pidfd fdinfo contains more than one Pid field".into());
+        }
+        let parsed = value
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| "pidfd fdinfo Pid field is not a positive process ID".to_string())?;
+        if parsed <= 1 {
+            return Err("pidfd fdinfo does not identify a live non-init worker PID".into());
+        }
+        target_pid = Some(parsed);
+    }
+    target_pid.ok_or_else(|| "file descriptor fdinfo has no pidfd Pid field".into())
+}
+
+/// Resolve the exact PID referenced by this borrowed descriptor in the
+/// caller's procfs PID namespace. The borrowed lifetime prevents the owner
+/// from closing/reusing this descriptor while fdinfo is read.
+fn pidfd_target_pid(pidfd: BorrowedFd<'_>) -> Result<u32, String> {
+    let descriptor = pidfd.as_raw_fd();
+    if descriptor < 0 {
+        return Err("pidfd descriptor number is invalid".into());
+    }
+    let fdinfo_path = format!("/proc/self/fdinfo/{descriptor}");
+    let fdinfo = fs::read_to_string(&fdinfo_path)
+        .map_err(|error| format!("failed to read pidfd identity from {fdinfo_path}: {error}"))?;
+    parse_pidfd_target_pid(&fdinfo)
+}
 
 /// Start intent plus the live JobRemoved subscription and exact direct reply.
 ///
@@ -134,6 +173,17 @@ pub(crate) async fn observe_worker_invocation_by_pidfd(
     pidfd: BorrowedFd<'_>,
     expected_worker_pid: u32,
 ) -> Result<SystemdWorkerInvocationEvidence, String> {
+    // GetUnitByPIDFD identifies the owning unit/invocation, but does not
+    // return the PID referenced by the fd. Verify fdinfo's kernel Pid field
+    // first so a pidfd for an auxiliary process in the same cgroup cannot be
+    // substituted for the journal-owned MainPID.
+    let actual_pidfd_target_pid = pidfd_target_pid(pidfd)?;
+    if actual_pidfd_target_pid != expected_worker_pid {
+        return Err(format!(
+            "pidfd refers to PID {actual_pidfd_target_pid}, expected journal-owned worker PID {expected_worker_pid}"
+        ));
+    }
+
     let connection = Connection::system()
         .await
         .map_err(|error| format!("failed to connect to system bus for PIDFD observation: {error}"))?;
@@ -334,6 +384,31 @@ fn parse_job_result(raw: &str) -> JobRemovedResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pidfd_fdinfo_requires_one_live_target_pid() {
+        assert_eq!(
+            parse_pidfd_target_pid("pos:\t0\nflags:\t02000002\nPid:\t4242\nNSpid:\t4242\n"),
+            Ok(4242)
+        );
+    }
+
+    #[test]
+    fn pidfd_fdinfo_rejects_missing_malformed_duplicate_and_sentinel_pid() {
+        for input in [
+            "pos:\t0\nflags:\t02000002\n",
+            "pos:\t0\nPid:\t-1\n",
+            "pos:\t0\nPid:\t0\n",
+            "pos:\t0\nPid:\t1\n",
+            "Pid:\tnot-a-pid\n",
+            "Pid:\t4242\nPid:\t4243\n",
+        ] {
+            assert!(
+                parse_pidfd_target_pid(input).is_err(),
+                "unexpectedly accepted fdinfo: {input:?}"
+            );
+        }
+    }
 
     #[test]
     fn unknown_direct_reply_remains_observable_but_never_proves_completion() {
