@@ -270,6 +270,7 @@ pub fn capture_systemd_worker_invocation_evidence(
     expected_attempt_id: &str,
     expected_purpose: TransactionWorkerPurpose,
     pidfd_unit_name: &str,
+    unit_property_unit_name: &str,
     pidfd_invocation_id: &[u8],
     unit_property_invocation_id: &[u8],
     unit_main_pid: u32,
@@ -286,9 +287,12 @@ pub fn capture_systemd_worker_invocation_evidence(
             "systemd unit MainPID does not match the exact journal-owned worker PID".into(),
         );
     }
-    if pidfd_unit_name != intent.unit_name {
+    if pidfd_unit_name != intent.unit_name
+        || unit_property_unit_name != intent.unit_name
+        || pidfd_unit_name != unit_property_unit_name
+    {
         return Err(
-            "GetUnitByPIDFD resolved the worker into a different systemd unit".into(),
+            "GetUnitByPIDFD unit ID and unit object Id do not both match the canonical attempt unit".into(),
         );
     }
     let pidfd_id = encode_systemd_invocation_id(pidfd_invocation_id)?;
@@ -1192,6 +1196,7 @@ mod tests {
             &intent.attempt_id,
             intent.purpose,
             &intent.unit_name,
+            &intent.unit_name,
             &invocation_id,
             &invocation_id,
             4242,
@@ -1230,6 +1235,8 @@ mod tests {
             &intent.attempt_id,
             intent.purpose,
             "foreign.service",
+            &intent.unit_name,
+            &intent.unit_name,
             &expected,
             &expected,
             4242,
@@ -1241,6 +1248,7 @@ mod tests {
             &intent.transaction_id,
             &intent.attempt_id,
             intent.purpose,
+            &intent.unit_name,
             &intent.unit_name,
             &expected,
             &expected,
@@ -1254,6 +1262,7 @@ mod tests {
             &intent.attempt_id,
             intent.purpose,
             &intent.unit_name,
+            &intent.unit_name,
             &expected,
             &different,
             4242,
@@ -1266,6 +1275,7 @@ mod tests {
             &intent.attempt_id,
             intent.purpose,
             &intent.unit_name,
+            &intent.unit_name,
             &[0u8; 16],
             &[0u8; 16],
             4242,
@@ -1277,6 +1287,7 @@ mod tests {
             "foreign-transaction",
             &intent.attempt_id,
             intent.purpose,
+            &intent.unit_name,
             &intent.unit_name,
             &expected,
             &expected,
@@ -1301,6 +1312,7 @@ mod tests {
             &intent.transaction_id,
             &intent.attempt_id,
             intent.purpose,
+            &intent.unit_name,
             &intent.unit_name,
             &invocation_id,
             &invocation_id,
@@ -1550,6 +1562,7 @@ mod tests {
                 &intent.attempt_id,
                 intent.purpose,
                 unit_name,
+                intent.unit_name.as_str(),
                 &invocation_id,
                 &property_invocation_id,
                 unit_main_pid,
