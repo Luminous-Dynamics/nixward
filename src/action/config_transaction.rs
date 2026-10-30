@@ -3057,6 +3057,13 @@ impl ConfigTransaction {
         if launch_envelope.worker_gate_executable != expected_gate {
             return Err("systemd launch envelope does not name this Nixward package's trusted worker gate".into());
         }
+        let observed_profile = super::generation_manager::GenerationManager::current_system_profile_closure()
+            .map_err(|error| format!("cannot independently observe system profile before systemd attempt reservation: {error}"))?;
+        if observed_profile != expected_current_profile {
+            return Err(format!(
+                "system profile changed before systemd attempt reservation: expected {expected_current_profile}, observed {observed_profile}"
+            ));
+        }
         match purpose {
             ActivationWorkerPurpose::ProfileTransition => {
                 authorization.validate_for(command)?;
