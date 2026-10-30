@@ -13,7 +13,7 @@ The API is intentionally split so the caller owns journal publication. A caller 
 ## Implemented sequence
 
 1. Construct a non-serializable StartIntent from a transaction ID, unique attempt ID, and worker purpose.
-2. Pass its serializable StartIntentEvidence to the caller's durable pre-launch persistence callback. Only success returns PreparedStartIntent, which is the only type accepted by the live adapter. When a write-ahead record is recovered after process restart, call validate_start_intent_evidence and reject any transaction/attempt/purpose/unit mismatch before reconciliation.
+2. Pass its serializable StartIntentEvidence to the caller's durable pre-launch persistence callback. Only success returns PreparedStartIntent, which is the only type accepted by the live adapter. When a write-ahead record is recovered after process restart, first validate the journal and authorization context independently; then call validate_start_intent_evidence_against with the transaction ID, attempt ID and purpose read from that trusted context. The structural-only validate_start_intent_evidence check is insufficient by itself because a coherently rewritten tuple can recompute its own canonical unit name.
 3. Connect to the system bus and create a proxy for org.freedesktop.systemd1.Manager.
 4. Install a JobRemoved signal subscription filtered to the canonical attempt unit, then call Manager.Subscribe(). Failure in either step prevents StartUnit from being called.
 5. Invoke StartUnit with the exact derived unit name and mode fail. The adapter records the actual returned object path; it does not invent a numeric job ID.
