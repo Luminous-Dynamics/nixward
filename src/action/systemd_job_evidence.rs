@@ -314,13 +314,12 @@ pub fn validate_systemd_worker_invocation_against_activation_identity(
 /// Capture the service invocation that owns the exact worker process.
 ///
 /// The caller obtains `pidfd_unit_name` and `pidfd_invocation_id` from
-/// Manager.GetUnitByPIDFD(pidfd), then reads `Id`, `InvocationID`, and
-/// `MainPID` from the returned unit object. Requiring the two invocation ID
-/// observations to agree detects a unit restart/race between those queries.
-/// The PIDFD lookup is essential: this function does not treat a PID-only
-/// GetUnitByPID result as equivalent evidence. The expected worker PID is in
-/// the caller's PID namespace; it must not be compared with systemd's MainPID,
-/// which is reported in the manager's PID namespace.
+/// Manager.GetUnitByPIDFD(pidfd), then reads `Id` and `InvocationID` from
+/// the returned unit object. Requiring the two invocation ID observations
+/// to agree detects a unit restart/race between those queries. The PIDFD
+/// lookup is essential: this function does not treat a PID-only GetUnitByPID
+/// result as equivalent evidence. The expected worker PID is validated in
+/// the caller's PID namespace against the same journal-bound process identity.
 pub fn capture_systemd_worker_invocation_evidence(
     intent: &StartIntentEvidence,
     expected_transaction_id: &str,
@@ -1733,7 +1732,7 @@ mod tests {
             } else {
                 intent.unit_name.as_str()
             };
-            let unit_property_unit_name = if mutation == 4 {
+            let unit_property_unit_name = if mutation == 3 {
                 "foreign.service"
             } else {
                 intent.unit_name.as_str()
