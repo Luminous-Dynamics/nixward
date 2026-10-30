@@ -21,7 +21,7 @@ Transaction schema v9 adds an append-only `systemd_start_attempts` collection. E
 - the transaction plan digest;
 - an immutable launch envelope containing the fixed worker-gate executable, exact payload executable and argument vector, the digest of Nixward's fixed worker environment allowlist, and the expected pre-activation system-profile closure.
 
-The payload argv digest is recomputed from the exact executable and argument vector. Store executable paths are checked for Nix store object identity and complete lexical traversal. The one-time worker-gate release token is deliberately not stored in the envelope; the runner must create it only after acquiring the transaction interlock and confirming durable worker identity. The canonical unit name is recomputed during both record creation and journal load. The stored plan digest must match the transaction's plan digest.
+The payload argv digest is recomputed from the exact executable and argument vector. Store executable paths are checked for Nix store object identity and complete lexical traversal. The environment digest is not caller-selected: validation requires the existing fixed Nixward privileged-worker environment allowlist. The one-time worker-gate release token is deliberately not stored in the envelope; the runner must create it only after acquiring the transaction interlock and confirming durable worker identity. The canonical unit name is recomputed during both record creation and journal load. The stored plan digest must match the transaction's plan digest.
 
 `ConfigTransaction::reserve_systemd_start_attempt()` requires the transaction to be at the exact durable phase for the requested worker purpose. It rejects a second systemd attempt for the same purpose and rejects retrofitting a systemd attempt after a direct-spawn worker identity was already recorded for that purpose. The restriction is intentionally conservative: until a separately qualified resolution protocol exists, an ambiguous attempt cannot be retried by minting a new ID.
 
@@ -41,7 +41,7 @@ The future supervisor integration must perform this sequence while holding the e
 2. Reserve one attempt with `reserve_systemd_start_attempt()`.
 3. Persist the transaction atomically, then read it back and verify the exact attempt record and plan digest.
 4. Construct the matching `StartIntent`; only after the read-back succeeds may its prepared capability be submitted to the systemd adapter.
-5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join.
+5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join, and the process must match the committed gate/payload/argv/environment envelope.
 
 The method only reserves an in-memory record. Calling it is not itself evidence of persistence or permission to issue `StartUnit`. Do not submit until the durable write and independent read-back have succeeded. Invocation validation now takes the loaded `ConfigTransaction` object, locates the attempt record there, and verifies that the exact worker identity is also present in that transaction; it no longer accepts a free-standing expected-attempt string.
 
@@ -53,7 +53,7 @@ A start intent that exists without conclusive later evidence remains unresolved.
 
 ## Hard integration blocker: unit materialization
 
-The current adapter calls `Manager.StartUnit` with the canonical per-attempt unit name. The repository's current `nix/module.nix` defines `nixward.service`, but not a matching `nixward-transaction@.service` template or another unit definition corresponding to the generated per-attempt name. systemd documents that `GetUnit` fails for a unit that has not been loaded; `StartUnit` starts a named unit but does not create its definition.
+The current adapter calls `Manager.StartUnit` with the canonical per-attempt unit name. The launch envelope does not yet change this adapter or create the fixed runner; production submission remains disabled. The repository's current `nix/module.nix` defines `nixward.service`, but not a matching `nixward-transaction@.service` template or another unit definition corresponding to the generated per-attempt name. systemd documents that `GetUnit` fails for a unit that has not been loaded; `StartUnit` starts a named unit but does not create its definition.
 
 Do not wire the current `submit_start()` path into production until one of these provisioning models is implemented and independently qualified:
 
@@ -85,6 +85,8 @@ References: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop
 The source adds tests for:
 - v7/v8-to-v9 loading without fabricated attempt identities, with legacy v8 attempts kept audit-only;
 - exact worker launch-envelope persistence and read-back;
+- fixed-environment enforcement (no caller-selected `PATH` / loader / Nix config);
+- separate exact command checks for profile selection and closure activation;
 - rejection of payload argv, store-path traversal and worker identity drift against the envelope;
 - canonical attempt/unit and plan binding;
 - phase-scoped reservation;
