@@ -3035,12 +3035,96 @@ impl ConfigTransaction {
         Ok(())
     }
 
-    /// Reserve one systemd start intent before submitting StartUnit. The
-    /// caller must durably persist and read back the transaction journal before
-    /// passing the returned evidence to StartIntent::persist_before_submission.
-    /// v1 permits only one systemd attempt per purpose: ambiguous starts cannot
-    /// be retried by inventing another attempt ID.
-    pub fn reserve_systemd_start_attempt(
+    /// Reserve a systemd attempt only after revalidating the exact
+    /// authorization and the corresponding command-stage launch contract.
+    ///
+    /// For initial activation, `command` and `authorization` must be the
+    /// already-verified candidate ChangePlan capability. For recovery, they
+    /// must be the derived, pre-bound rollback command/capability. This method
+    /// does not create approval evidence; it verifies that the immutable
+    /// envelope describes the command the existing capability authorizes.
+    pub(super) fn reserve_authorized_systemd_start_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
+        command: &NixOSCommand,
+        authorization: &ExecutionAuthorization,
+        expected_current_profile: &str,
+    ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        match purpose {
+            ActivationWorkerPurpose::ProfileTransition => {
+                authorization.validate_for(command)?;
+                self.validate_activation_binding(self.transaction_id(), command, authorization)?;
+                let profile_target = match command {
+                    NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    } => path.as_str(),
+                    _ => return Err("profile transition requires the exact authorized system-closure command".into()),
+                };
+                let prebound_profile = match authorization.recovery_command() {
+                    Some(NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    }) => path.as_str(),
+                    _ => return Err("profile transition authorization has no exact predecessor profile binding".into()),
+                };
+                if prebound_profile != expected_current_profile {
+                    return Err("profile transition pre-state differs from the authorization's pre-bound predecessor profile".into());
+                }
+                let nix_env = super::executor::NixOSExecutor::trusted_system_executable("nix-env")?;
+                launch_envelope.validate_for_exact_system_profile_transition(
+                    &nix_env,
+                    profile_target,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::Activation => {
+                authorization.validate_for(command)?;
+                self.validate_activation_binding(self.transaction_id(), command, authorization)?;
+                launch_envelope.validate_for_exact_system_activation_command(
+                    command,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::RecoveryProfileTransition => {
+                authorization.validate_for_recovery(command)?;
+                if authorization.change_plan_digest() != Some(self.plan_digest()?) {
+                    return Err("recovery profile transition authorization is not bound to this transaction plan".into());
+                }
+                let profile_target = match command {
+                    NixOSCommand::ActivateSystemClosure {
+                        profile_store_path: Some(path),
+                        ..
+                    } => path.as_str(),
+                    _ => return Err("recovery profile transition requires an exact predecessor closure command".into()),
+                };
+                let nix_env = super::executor::NixOSExecutor::trusted_system_executable("nix-env")?;
+                launch_envelope.validate_for_exact_system_profile_transition(
+                    &nix_env,
+                    profile_target,
+                    expected_current_profile,
+                )?;
+            }
+            ActivationWorkerPurpose::RecoveryActivation => {
+                authorization.validate_for_recovery(command)?;
+                if authorization.change_plan_digest() != Some(self.plan_digest()?) {
+                    return Err("recovery activation authorization is not bound to this transaction plan".into());
+                }
+                launch_envelope.validate_for_exact_system_activation_command(
+                    command,
+                    expected_current_profile,
+                )?;
+            }
+        }
+        self.reserve_systemd_start_attempt(attempt_id, purpose, launch_envelope)
+    }
+
+    /// Reserve one systemd start intent after the exact authorization/command
+    /// contract has already been checked by the enclosing executor. This raw
+    /// mutation is private to the action module and has no external API surface.
+    fn reserve_systemd_start_attempt(
         &mut self,
         attempt_id: impl Into<String>,
         purpose: ActivationWorkerPurpose,
@@ -3094,6 +3178,16 @@ impl ConfigTransaction {
             purpose: purpose_evidence,
             unit_name,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn reserve_systemd_start_attempt_for_test(
+        &mut self,
+        attempt_id: impl Into<String>,
+        purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
+    ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        self.reserve_systemd_start_attempt(attempt_id, purpose, launch_envelope)
     }
 
     pub fn systemd_start_attempts(&self) -> &[SystemdStartAttemptRecord] {
