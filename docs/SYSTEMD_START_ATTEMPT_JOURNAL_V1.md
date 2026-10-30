@@ -1,6 +1,6 @@
 # Journal-anchored systemd start attempts v1
 
-Status: **journal schema and pure identity join authored; production systemd supervisor integration and execution qualification remain open**
+Status: **journal schema, launch envelope and pure identity join authored; production systemd supervisor integration and execution qualification remain open**
 
 Date: 2026-10-30
 
@@ -12,23 +12,24 @@ This change makes the attempt identity a first-class journal fact.
 
 ## Journal representation
 
-Transaction schema v8 adds an append-only `systemd_start_attempts` collection. Each record binds:
+Transaction schema v9 adds an append-only `systemd_start_attempts` collection. Each record binds:
 
 - transaction ID;
 - attempt ID;
 - worker purpose;
 - canonical systemd unit name derived from the transaction / attempt / purpose tuple;
-- the transaction plan digest.
+- the transaction plan digest;
+- an immutable launch envelope containing the fixed worker-gate executable, exact payload executable and argument vector, the digest of Nixward's fixed worker environment allowlist, and the expected pre-activation system-profile closure.
 
-The canonical unit name is recomputed during both record creation and journal load. The stored plan digest must match the transaction's plan digest.
+The payload argv digest is recomputed from the exact executable and argument vector. Store executable paths are checked for Nix store object identity and complete lexical traversal. The one-time worker-gate release token is deliberately not stored in the envelope; the runner must create it only after acquiring the transaction interlock and confirming durable worker identity. The canonical unit name is recomputed during both record creation and journal load. The stored plan digest must match the transaction's plan digest.
 
 `ConfigTransaction::reserve_systemd_start_attempt()` requires the transaction to be at the exact durable phase for the requested worker purpose. It rejects a second systemd attempt for the same purpose and rejects retrofitting a systemd attempt after a direct-spawn worker identity was already recorded for that purpose. The restriction is intentionally conservative: until a separately qualified resolution protocol exists, an ambiguous attempt cannot be retried by minting a new ID.
 
-`ActivationWorkerIdentity` gains an optional `systemd_attempt_id`. A systemd-bound worker must reference an existing attempt record with the same transaction and purpose. The optional field is retained only for legacy direct-spawn worker identities.
+`ActivationWorkerIdentity` gains an optional `systemd_attempt_id`. A systemd-bound worker must reference an existing attempt record with the same transaction and purpose, and its gate executable, payload executable/argv, and environment digest must match the journaled launch envelope. The optional field is retained only for legacy direct-spawn worker identities.
 
 ## Backward compatibility
 
-The loader accepts the immediately previous v7 schema and upgrades it in memory to v8. It does not infer or synthesize systemd attempt IDs for v7 journals. Existing process records load with `systemd_attempt_id = None`. The next successful journal persistence writes the v8 shape.
+The loader accepts v8 and v7 journals and upgrades them in memory to v9. v8 attempts are retained for audit with `launch_envelope = None`; they cannot accept a newly bound worker or qualify an InvocationID join because their exact pre-start payload contract was not recorded. v7 journals have no systemd attempts and are upgraded without synthesizing IDs. Existing process records retain their original serialization when `systemd_attempt_id` is absent. The next successful persistence writes the v9 shape.
 
 Unsupported schema/version pairs still fail closed.
 
@@ -46,7 +47,7 @@ The method only reserves an in-memory record. Calling it is not itself evidence 
 
 ## Evidence boundary and remaining work
 
-This v1 record binds the transaction, attempt, purpose, canonical unit and plan digest. The approved executable / argv / environment envelope remains in the existing process identity and must be bound to the authorized command before production manager submission is wired. The systemd `InvocationID`, StartUnit reply, JobRemoved signal, worker process receipt and fresh NixOS runtime/profile observations are not yet persisted as one append-only event history by this change.
+This v1 record binds the transaction, attempt, purpose, canonical unit, plan digest and exact worker launch envelope. The production caller must still prove that the envelope is the command selected by the verified ChangePlan and ExecutionAuthorization before reservation; the envelope is an execution identity commitment, not an authorization credential. The systemd `InvocationID`, StartUnit reply, JobRemoved signal, worker process receipt and fresh NixOS runtime/profile observations are not yet persisted as one append-only event history by this change.
 
 A start intent that exists without conclusive later evidence remains unresolved. Absence of a worker receipt, unit, or JobRemoved signal is not proof that no external action occurred.
 
@@ -82,7 +83,9 @@ References: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop
 ## Qualification
 
 The source adds tests for:
-- v7-to-v8 loading without fabricated attempt identities;
+- v7/v8-to-v9 loading without fabricated attempt identities, with legacy v8 attempts kept audit-only;
+- exact worker launch-envelope persistence and read-back;
+- rejection of payload argv, store-path traversal and worker identity drift against the envelope;
 - canonical attempt/unit and plan binding;
 - phase-scoped reservation;
 - rejection of a second attempt for the same purpose;
