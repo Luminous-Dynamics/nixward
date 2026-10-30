@@ -12,7 +12,7 @@
 //! durable journal interlocks, worker receipt validation, and fresh host-state
 //! verification.
 
-use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose, ConfigTransaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -235,7 +235,7 @@ pub fn validate_start_intent_evidence_against(
 /// The invocation ID is stored as 32 lowercase hexadecimal characters (the
 /// canonical encoding of systemd's 16-byte D-Bus `ay` value). A PID alone is
 /// not sufficient: this record must be captured while a pidfd for the exact
-/// worker is available and correlated with the manager's unit/MainPID data.
+/// worker is available and correlated with the manager's unit identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemdWorkerInvocationEvidence {
@@ -279,35 +279,58 @@ fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Join PIDFD-bound systemd invocation evidence to the repository's
-/// existing, fully validated activation worker identity.
+/// Join PIDFD-bound systemd invocation evidence to the actual transaction
+/// journal object, not to a caller-supplied attempt string.
 ///
-/// `expected_attempt_id` must come from the independently loaded durable
-/// attempt record. The worker identity supplies the authoritative transaction,
-/// purpose, PID, boot ID, start time and executable/argv/environment bindings.
-/// This function deliberately does not synthesize an attempt ID from either
-/// evidence record.
-pub fn validate_systemd_worker_invocation_against_activation_identity(
+/// The transaction must already have been loaded and validated under the
+/// existing transaction interlock. The function verifies that the referenced
+/// attempt is present in that journal, that the exact worker identity is itself
+/// present in the journal, and that both bind to the same transaction, purpose,
+/// unit, attempt ID and PID. It does not independently prove that the journal
+/// bytes are durable; callers must use ConfigTransaction::load after publication
+/// and before manager submission.
+pub fn validate_systemd_worker_invocation_against_transaction(
     evidence: &SystemdWorkerInvocationEvidence,
     intent: &StartIntentEvidence,
-    expected_attempt_id: &str,
+    transaction: &ConfigTransaction,
     worker: &ActivationWorkerIdentity,
 ) -> Result<(), String> {
     worker.validate_identity()?;
+    if worker.transaction_id != transaction.transaction_id() {
+        return Err("activation worker identity belongs to a different transaction journal".into());
+    }
+    if !transaction.activation_worker_identities().contains(worker) {
+        return Err("activation worker identity is not present in the validated transaction journal".into());
+    }
+    let expected_attempt_id = worker.systemd_attempt_id.as_deref()
+        .ok_or_else(|| "activation worker identity has no journal-bound systemd attempt ID".to_string())?;
+    let attempt = transaction.systemd_start_attempts().iter()
+        .find(|record| record.attempt_id == expected_attempt_id)
+        .ok_or_else(|| "activation worker attempt ID is absent from the transaction journal".to_string())?;
+    attempt.validate_against(transaction)?;
     let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
+    if attempt.purpose != worker.purpose
+        || attempt.transaction_id != worker.transaction_id
+        || attempt.unit_name != intent.unit_name
+    {
+        return Err("transaction journal attempt does not bind the expected worker purpose, transaction and unit".into());
+    }
     validate_start_intent_evidence_against(
         intent,
-        &worker.transaction_id,
-        expected_attempt_id,
+        &attempt.transaction_id,
+        &attempt.attempt_id,
         expected_purpose,
     )?;
     validate_systemd_worker_invocation_evidence_against(
         evidence,
-        &worker.transaction_id,
-        expected_attempt_id,
+        &attempt.transaction_id,
+        &attempt.attempt_id,
         expected_purpose,
         worker.pid,
     )?;
+    if evidence.unit_name != attempt.unit_name {
+        return Err("systemd invocation evidence unit does not match the journaled canonical attempt unit".into());
+    }
     Ok(())
 }
 
@@ -1234,10 +1257,11 @@ mod tests {
     }
 
     fn activation_worker_identity_for_invocation_test(
+        transaction_id: &str,
         purpose: ActivationWorkerPurpose,
         pid: u32,
+        attempt_id: &str,
     ) -> ActivationWorkerIdentity {
-        let transaction_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
         let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
         let payload_args = vec!["switch".to_string()];
@@ -1252,6 +1276,7 @@ mod tests {
         ActivationWorkerIdentity {
             transaction_id: transaction_id.into(),
             purpose,
+            systemd_attempt_id: Some(attempt_id.into()),
             pid,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -1280,24 +1305,25 @@ mod tests {
     }
 
     #[test]
-    fn systemd_invocation_evidence_joins_the_existing_activation_worker_identity() {
+    fn systemd_invocation_evidence_joins_the_loaded_transaction_and_worker_identity() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
+        let intent = transaction
+            .reserve_systemd_start_attempt("attempt-joined-0001", ActivationWorkerPurpose::Activation)
+            .unwrap();
         let worker = activation_worker_identity_for_invocation_test(
+            transaction.transaction_id(),
             ActivationWorkerPurpose::Activation,
             4242,
+            "attempt-joined-0001",
         );
         worker.validate_identity().unwrap();
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
         let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
-        let intent = StartIntent::new(
-            worker.transaction_id.clone(),
-            "attempt-joined-0001",
-            expected_purpose,
-        )
-        .unwrap()
-        .journal_evidence();
         let invocation_id = [0x5au8; 16];
         let evidence = capture_systemd_worker_invocation_evidence(
             &intent,
-            &worker.transaction_id,
+            transaction.transaction_id(),
             "attempt-joined-0001",
             expected_purpose,
             &intent.unit_name,
@@ -1309,10 +1335,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            validate_systemd_worker_invocation_against_activation_identity(
+            validate_systemd_worker_invocation_against_transaction(
                 &evidence,
                 &intent,
-                "attempt-joined-0001",
+                &transaction,
                 &worker,
             ),
             Ok(())
@@ -1320,23 +1346,24 @@ mod tests {
     }
 
     #[test]
-    fn systemd_invocation_join_rejects_process_or_purpose_drift() {
+    fn systemd_invocation_join_rejects_unjournaled_attempt_and_worker_drift() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
+        let intent = transaction
+            .reserve_systemd_start_attempt("attempt-joined-0002", ActivationWorkerPurpose::Activation)
+            .unwrap();
         let worker = activation_worker_identity_for_invocation_test(
+            transaction.transaction_id(),
             ActivationWorkerPurpose::Activation,
             4242,
-        );
-        let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
-        let intent = StartIntent::new(
-            worker.transaction_id.clone(),
             "attempt-joined-0002",
-            expected_purpose,
-        )
-        .unwrap()
-        .journal_evidence();
+        );
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+        let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
         let invocation_id = [0x6bu8; 16];
         let evidence = capture_systemd_worker_invocation_evidence(
             &intent,
-            &worker.transaction_id,
+            transaction.transaction_id(),
             "attempt-joined-0002",
             expected_purpose,
             &intent.unit_name,
@@ -1349,31 +1376,53 @@ mod tests {
 
         let mut changed_pid = worker.clone();
         changed_pid.pid += 1;
-        assert!(validate_systemd_worker_invocation_against_activation_identity(
+        assert!(validate_systemd_worker_invocation_against_transaction(
             &evidence,
             &intent,
-            "attempt-joined-0002",
+            &transaction,
             &changed_pid,
-        )
-        .is_err());
+        ).is_err());
 
         let mut changed_purpose = worker.clone();
         changed_purpose.purpose = ActivationWorkerPurpose::RecoveryActivation;
-        assert!(validate_systemd_worker_invocation_against_activation_identity(
+        assert!(validate_systemd_worker_invocation_against_transaction(
             &evidence,
             &intent,
-            "attempt-joined-0002",
+            &transaction,
             &changed_purpose,
-        )
-        .is_err());
+        ).is_err());
 
-        assert!(validate_systemd_worker_invocation_against_activation_identity(
+        let foreign_intent = StartIntent::new(
+            transaction.transaction_id().to_string(),
+            "attempt-joined-foreign",
+            expected_purpose,
+        ).unwrap().journal_evidence();
+        let foreign_evidence = capture_systemd_worker_invocation_evidence(
+            &foreign_intent,
+            transaction.transaction_id(),
+            "attempt-joined-foreign",
+            expected_purpose,
+            &foreign_intent.unit_name,
+            &foreign_intent.unit_name,
+            &invocation_id,
+            &invocation_id,
+            worker.pid,
+        ).unwrap();
+        assert!(validate_systemd_worker_invocation_against_transaction(
+            &foreign_evidence,
+            &foreign_intent,
+            &transaction,
+            &worker,
+        ).is_err(), "a coherent but unjournaled caller-supplied attempt must be rejected");
+
+        let mut unanchored = worker.clone();
+        unanchored.systemd_attempt_id = None;
+        assert!(validate_systemd_worker_invocation_against_transaction(
             &evidence,
             &intent,
-            "attempt-joined-foreign",
-            &worker,
-        )
-        .is_err());
+            &transaction,
+            &unanchored,
+        ).is_err(), "an attempt ID omitted from worker identity must be rejected");
     }
 
     #[test]

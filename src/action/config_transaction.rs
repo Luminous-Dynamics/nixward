@@ -1834,6 +1834,80 @@ pub enum ActivationWorkerPurpose {
     RecoveryProfileTransition,
     RecoveryActivation,
 }
+
+/// Durable write-ahead intent for one systemd-managed worker start. An intent
+/// is append-only and deliberately has no "not submitted" terminal marker:
+/// after a crash, absence of manager evidence cannot prove that StartUnit was
+/// never sent. v1 therefore admits at most one systemd attempt per purpose in
+/// a transaction; safe retries require a separately qualified resolution path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemdStartAttemptRecord {
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub purpose: ActivationWorkerPurpose,
+    pub unit_name: String,
+    pub plan_digest: String,
+}
+
+impl SystemdStartAttemptRecord {
+    pub(super) fn validate_against(&self, transaction: &ConfigTransaction) -> Result<(), String> {
+        if self.transaction_id != transaction.transaction_id {
+            return Err("systemd start attempt belongs to a different transaction".into());
+        }
+        if decode_digest(&self.plan_digest).is_err() || self.plan_digest != transaction.plan_digest {
+            return Err("systemd start attempt plan digest does not match the journal transaction".into());
+        }
+        let expected_unit = super::systemd_job_evidence::canonical_attempt_unit_name(
+            &self.transaction_id,
+            &self.attempt_id,
+            super::systemd_job_evidence::TransactionWorkerPurpose::from(self.purpose),
+        )?;
+        if self.unit_name != expected_unit {
+            return Err("systemd start attempt unit name is not canonical for its transaction/attempt/purpose".into());
+        }
+        let phase_is_compatible = match self.purpose {
+            ActivationWorkerPurpose::ProfileTransition => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::ProfileTransitionStarted
+                    | ConfigTransactionPhase::ProfileCommitted
+                    | ConfigTransactionPhase::IndeterminateProfileTransition
+                    | ConfigTransactionPhase::ActivationStarted
+                    | ConfigTransactionPhase::IndeterminateActivation
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::Activated
+                    | ConfigTransactionPhase::BootSelected
+                    | ConfigTransactionPhase::Recovered
+            ),
+            ActivationWorkerPurpose::Activation => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::ActivationStarted
+                    | ConfigTransactionPhase::IndeterminateActivation
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::Activated
+                    | ConfigTransactionPhase::BootSelected
+                    | ConfigTransactionPhase::Recovered
+            ),
+            ActivationWorkerPurpose::RecoveryProfileTransition
+            | ActivationWorkerPurpose::RecoveryActivation => matches!(
+                transaction.phase,
+                ConfigTransactionPhase::RecoveryMutationStarted
+                    | ConfigTransactionPhase::RecoveryObservation
+                    | ConfigTransactionPhase::RecoveryRequired
+                    | ConfigTransactionPhase::Recovered
+            ),
+        };
+        if !phase_is_compatible {
+            return Err("systemd start attempt purpose is incompatible with the persisted transaction phase".into());
+        }
+        Ok(())
+    }
+}
+
 /// Durable audit identity for the exact process that was spawned for activation.
 /// This record is descriptive after restart; only a fresh pidfd + boot/start-time
 /// check can establish whether that same worker is still live.
@@ -1842,6 +1916,10 @@ pub enum ActivationWorkerPurpose {
 pub struct ActivationWorkerIdentity {
     pub transaction_id: String,
     pub purpose: ActivationWorkerPurpose,
+    /// The write-ahead systemd attempt this exact process belongs to. Legacy
+    /// v7 direct-spawn records have no systemd attempt and deserialize as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub systemd_attempt_id: Option<String>,
     pub pid: u32,
     pub boot_id: String,
     pub start_time_ticks: u64,
@@ -1865,6 +1943,13 @@ impl ActivationWorkerIdentity {
     pub fn validate_identity(&self) -> Result<(), String> {
         if decode_digest(&self.transaction_id).is_err() {
             return Err("activation worker transaction id is invalid".into());
+        }
+        if let Some(attempt_id) = self.systemd_attempt_id.as_deref() {
+            super::systemd_job_evidence::canonical_attempt_unit_name(
+                &self.transaction_id,
+                attempt_id,
+                super::systemd_job_evidence::TransactionWorkerPurpose::from(self.purpose),
+            )?;
         }
         if self.pid <= 1 || self.start_time_ticks == 0 {
             return Err("activation worker PID or start-time identity is invalid".into());
@@ -2026,6 +2111,10 @@ pub struct ConfigTransaction {
     candidate_build: Option<CandidateBuildReceipt>,
     #[serde(default)]
     activation_workers: Vec<ActivationWorkerIdentity>,
+    /// Append-only write-ahead intents for systemd-owned worker starts.
+    /// Legacy v7 journals deserialize with an empty collection.
+    #[serde(default)]
+    systemd_start_attempts: Vec<SystemdStartAttemptRecord>,
     phase: ConfigTransactionPhase,
     process_exit_status: Option<i32>,
     observed_runtime_closure: Option<String>,
@@ -2222,8 +2311,10 @@ impl std::fmt::Display for JournalPersistFailure {
 
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
-    pub const VERSION: u16 = 7;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
+    pub const VERSION: u16 = 8;
+    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
+    const PREVIOUS_VERSION: u16 = 7;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2250,6 +2341,7 @@ impl ConfigTransaction {
             candidate_store_path: None,
             candidate_build: None,
             activation_workers: Vec::new(),
+            systemd_start_attempts: Vec::new(),
             phase: ConfigTransactionPhase::Prepared,
             process_exit_status: None,
             observed_runtime_closure: None,
@@ -2260,6 +2352,10 @@ impl ConfigTransaction {
     }
 
     pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
+    #[cfg(test)]
+    pub(super) fn set_phase_for_test(&mut self, phase: ConfigTransactionPhase) {
+        self.phase = phase;
+    }
     pub fn source_digest(&self) -> &str { &self.source_digest }
     pub fn plan_digest(&self) -> Result<[u8; 32], String> { decode_digest(&self.plan_digest) }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
@@ -2734,6 +2830,67 @@ impl ConfigTransaction {
         Ok(())
     }
 
+    /// Reserve one systemd start intent before submitting StartUnit. The
+    /// caller must durably persist and read back the transaction journal before
+    /// passing the returned evidence to StartIntent::persist_before_submission.
+    /// v1 permits only one systemd attempt per purpose: ambiguous starts cannot
+    /// be retried by inventing another attempt ID.
+    pub fn reserve_systemd_start_attempt(
+        &mut self,
+        attempt_id: impl Into<String>,
+        purpose: ActivationWorkerPurpose,
+    ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        if !self.recovery_observed
+            && !matches!(self.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen)
+        {
+            return Err("loaded transaction requires fresh recovery observation before reserving a systemd start".into());
+        }
+        let phase_matches = match purpose {
+            ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
+            ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
+            ActivationWorkerPurpose::RecoveryProfileTransition
+            | ActivationWorkerPurpose::RecoveryActivation => self.phase == ConfigTransactionPhase::RecoveryMutationStarted,
+        };
+        if !phase_matches {
+            return Err("systemd start attempt requires the matching durable transaction phase".into());
+        }
+        if self.activation_workers.iter().any(|worker| worker.purpose == purpose) {
+            return Err("cannot reserve a systemd attempt after a non-systemd worker identity for the same purpose".into());
+        }
+        if self.systemd_start_attempts.iter().any(|existing| existing.purpose == purpose) {
+            return Err("a systemd start attempt already exists for this purpose; ambiguous attempts are not replayable".into());
+        }
+        let attempt_id = attempt_id.into();
+        if self.systemd_start_attempts.iter().any(|existing| existing.attempt_id == attempt_id) {
+            return Err("systemd attempt ID is already reserved in this transaction".into());
+        }
+        let purpose_evidence = super::systemd_job_evidence::TransactionWorkerPurpose::from(purpose);
+        let unit_name = super::systemd_job_evidence::canonical_attempt_unit_name(
+            &self.transaction_id,
+            &attempt_id,
+            purpose_evidence,
+        )?;
+        let record = SystemdStartAttemptRecord {
+            transaction_id: self.transaction_id.clone(),
+            attempt_id: attempt_id.clone(),
+            purpose,
+            unit_name: unit_name.clone(),
+            plan_digest: self.plan_digest.clone(),
+        };
+        record.validate_against(self)?;
+        self.systemd_start_attempts.push(record);
+        Ok(super::systemd_job_evidence::StartIntentEvidence {
+            transaction_id: self.transaction_id.clone(),
+            attempt_id,
+            purpose: purpose_evidence,
+            unit_name,
+        })
+    }
+
+    pub fn systemd_start_attempts(&self) -> &[SystemdStartAttemptRecord] {
+        &self.systemd_start_attempts
+    }
+
     /// Persist one worker identity after it has been captured by pidfd and
     /// before awaiting completion. Receipts are append-only history.
     pub fn bind_activation_worker_identity(
@@ -2743,6 +2900,19 @@ impl ConfigTransaction {
         identity.validate_identity()?;
         if identity.transaction_id != self.transaction_id {
             return Err("activation worker identity belongs to a different transaction".into());
+        }
+        match identity.systemd_attempt_id.as_deref() {
+            Some(attempt_id) => {
+                let attempt = self.systemd_start_attempts.iter().find(|record| record.attempt_id == attempt_id)
+                    .ok_or_else(|| "systemd-bound worker identity has no journaled write-ahead attempt".to_string())?;
+                if attempt.purpose != identity.purpose || attempt.transaction_id != identity.transaction_id {
+                    return Err("systemd-bound worker identity conflicts with its journaled attempt purpose or transaction".into());
+                }
+            }
+            None if self.systemd_start_attempts.iter().any(|record| record.purpose == identity.purpose) => {
+                return Err("worker identity for a systemd-managed purpose must carry its exact attempt ID".into());
+            }
+            None => {}
         }
         match identity.purpose {
             ActivationWorkerPurpose::ProfileTransition if self.phase != ConfigTransactionPhase::ProfileTransitionStarted => {
@@ -3080,9 +3250,17 @@ impl ConfigTransaction {
                     .map_err(|error| format!("failed to read transaction journal: {error}"))?
             }
         };
-        let transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
-        if transaction.schema != Self::SCHEMA || transaction.version != Self::VERSION {
-            return Err("transaction journal schema/version mismatch".into());
+        let mut transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
+        match (transaction.schema.as_str(), transaction.version) {
+            (Self::SCHEMA, Self::VERSION) => {}
+            (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION) => {
+                // The v8 fields are additive. A v7 journal has no systemd
+                // write-ahead attempts and its old process identities remain
+                // explicitly unbound; never synthesize attempt IDs on upgrade.
+                transaction.schema = Self::SCHEMA.into();
+                transaction.version = Self::VERSION;
+            }
+            _ => return Err("transaction journal schema/version mismatch".into()),
         }
         decode_digest(&transaction.transaction_id).map_err(|_| "transaction journal has an invalid transaction id".to_string())?;
         let plan_digest = decode_digest(&transaction.plan_digest)
@@ -3109,16 +3287,40 @@ impl ConfigTransaction {
             }
         }
 
+        for attempt in &transaction.systemd_start_attempts {
+            attempt.validate_against(&transaction)?;
+        }
+        for (index, attempt) in transaction.systemd_start_attempts.iter().enumerate() {
+            if transaction.systemd_start_attempts[..index].iter().any(|prior| {
+                prior.attempt_id == attempt.attempt_id || prior.purpose == attempt.purpose
+            }) {
+                return Err("transaction journal contains duplicate systemd attempt IDs or purposes".into());
+            }
+        }
+
         for worker in &transaction.activation_workers {
             worker.validate_identity()?;
             if worker.transaction_id != transaction.transaction_id {
                 return Err("transaction journal activation worker belongs to a different transaction".into());
             }
+            match worker.systemd_attempt_id.as_deref() {
+                Some(attempt_id) => {
+                    let attempt = transaction.systemd_start_attempts.iter().find(|record| record.attempt_id == attempt_id)
+                        .ok_or_else(|| "transaction journal systemd worker refers to an absent start attempt".to_string())?;
+                    if attempt.purpose != worker.purpose || attempt.transaction_id != worker.transaction_id {
+                        return Err("transaction journal systemd worker conflicts with its write-ahead attempt".into());
+                    }
+                }
+                None if transaction.systemd_start_attempts.iter().any(|record| record.purpose == worker.purpose) => {
+                    return Err("transaction journal mixes a systemd attempt with an unbound worker identity for the same purpose".into());
+                }
+                None => {}
+            }
             match worker.purpose {
-                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::ProfileTransition if !matches!(transaction.phase, ConfigTransactionPhase::ProfileTransitionStarted | ConfigTransactionPhase::ProfileCommitted | ConfigTransactionPhase::IndeterminateProfileTransition | ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has profile worker identity outside the profile/activation lifecycle".into());
                 }
-                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
+                ActivationWorkerPurpose::Activation if !matches!(transaction.phase, ConfigTransactionPhase::ActivationStarted | ConfigTransactionPhase::IndeterminateActivation | ConfigTransactionPhase::RecoveryObservation | ConfigTransactionPhase::RecoveryRequired | ConfigTransactionPhase::RecoveryMutationStarted | ConfigTransactionPhase::Activated | ConfigTransactionPhase::BootSelected | ConfigTransactionPhase::Recovered) => {
                     return Err("transaction journal has activation worker identity before activation began".into());
                 }
                 ActivationWorkerPurpose::RecoveryProfileTransition
@@ -3218,6 +3420,7 @@ mod tests {
         ActivationWorkerIdentity {
             transaction_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             purpose: ActivationWorkerPurpose::Activation,
+            systemd_attempt_id: None,
             pid: 123,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -3273,6 +3476,7 @@ mod tests {
         let identity = ActivationWorkerIdentity {
             transaction_id: transaction.transaction_id().to_string(),
             purpose: ActivationWorkerPurpose::RecoveryProfileTransition,
+            systemd_attempt_id: None,
             pid: 123,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -4063,6 +4267,148 @@ mod tests {
         assert!(tx.advance(ConfigTransactionPhase::ActivationStarted).is_err());
         assert_eq!(tx.phase(), ConfigTransactionPhase::IndeterminateProfileTransition);
     }
+    #[test]
+    fn transaction_journal_upgrades_v7_without_inventing_systemd_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transaction-v7.json");
+        let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        let mut value = serde_json::to_value(&transaction).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into()));
+        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into()));
+        object.remove("systemd_start_attempts");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let mut loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.schema, ConfigTransaction::SCHEMA);
+        assert_eq!(loaded.version, ConfigTransaction::VERSION);
+        assert!(loaded.systemd_start_attempts.is_empty());
+        assert!(loaded.activation_workers.is_empty());
+        loaded.persist_atomic(&path).unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["schema"], ConfigTransaction::SCHEMA);
+        assert_eq!(persisted["version"], ConfigTransaction::VERSION);
+    }
+
+    #[test]
+    fn loaded_transaction_cannot_reserve_systemd_start_before_recovery_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+        let mut loaded = ConfigTransaction::load(&journal).unwrap();
+        assert!(!loaded.recovery_observation_confirmed());
+        assert!(loaded.reserve_systemd_start_attempt(
+            "attempt-after-restart",
+            ActivationWorkerPurpose::Activation,
+        ).is_err(), "a loaded transaction must reconcile before any new systemd start");
+    }
+
+    #[test]
+    fn systemd_start_attempt_is_plan_bound_append_only_and_phase_scoped() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction
+            .reserve_systemd_start_attempt("attempt-0001", ActivationWorkerPurpose::Activation)
+            .unwrap();
+        assert_eq!(intent.transaction_id, transaction.transaction_id);
+        assert_eq!(intent.attempt_id, "attempt-0001");
+        assert_eq!(intent.purpose, super::super::systemd_job_evidence::TransactionWorkerPurpose::Activation);
+        assert_eq!(
+            intent.unit_name,
+            super::super::systemd_job_evidence::canonical_attempt_unit_name(
+                &transaction.transaction_id,
+                "attempt-0001",
+                intent.purpose,
+            ).unwrap()
+        );
+        assert_eq!(transaction.systemd_start_attempts().len(), 1);
+        assert!(transaction.reserve_systemd_start_attempt(
+            "attempt-0002",
+            ActivationWorkerPurpose::Activation,
+        ).is_err(), "a different ID must not replay an unresolved purpose");
+        assert!(transaction.reserve_systemd_start_attempt(
+            "attempt-0001",
+            ActivationWorkerPurpose::RecoveryActivation,
+        ).is_err(), "purpose/phase mismatch must fail closed");
+    }
+
+    #[test]
+    fn legacy_worker_identity_serialization_omits_absent_systemd_attempt() {
+        let worker = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+        );
+        let value = serde_json::to_value(&worker).unwrap();
+        assert!(value.get("systemd_attempt_id").is_none());
+    }
+
+    #[test]
+    fn transaction_journal_round_trips_systemd_start_attempt_and_worker_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction
+            .reserve_systemd_start_attempt("attempt-journal-roundtrip", ActivationWorkerPurpose::Activation)
+            .unwrap();
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut worker = worker_identity_for_test(executable);
+        worker.transaction_id = transaction.transaction_id().to_string();
+        worker.systemd_attempt_id = Some(intent.attempt_id.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+        let loaded = ConfigTransaction::load(&journal).unwrap();
+
+        assert_eq!(loaded.systemd_start_attempts(), transaction.systemd_start_attempts());
+        assert_eq!(loaded.activation_worker_identities(), &[worker]);
+        assert_eq!(
+            loaded.systemd_start_attempts()[0].attempt_id,
+            "attempt-journal-roundtrip"
+        );
+    }
+
+    #[test]
+    fn systemd_worker_identity_must_reference_the_reserved_journal_attempt() {
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        transaction.reserve_systemd_start_attempt(
+            "attempt-0001",
+            ActivationWorkerPurpose::Activation,
+        ).unwrap();
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut identity = worker_identity_for_test(executable);
+        identity.transaction_id = transaction.transaction_id().to_string();
+        identity.systemd_attempt_id = Some("attempt-0001".into());
+        transaction.bind_activation_worker_identity(identity.clone()).unwrap();
+
+        let mut foreign = identity.clone();
+        foreign.systemd_attempt_id = Some("attempt-foreign".into());
+        assert!(transaction.bind_activation_worker_identity(foreign).is_err());
+        let mut unbound = identity;
+        unbound.systemd_attempt_id = None;
+        assert!(transaction.bind_activation_worker_identity(unbound).is_err());
+    }
+
     #[test]
     fn transaction_journal_round_trips_atomically() {
         let dir = tempfile::tempdir().unwrap();

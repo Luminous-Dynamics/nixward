@@ -1,0 +1,94 @@
+# Journal-anchored systemd start attempts v1
+
+Status: **journal schema and pure identity join authored; production systemd supervisor integration and execution qualification remain open**
+
+Date: 2026-10-30
+
+## Problem closed by this layer
+
+The original systemd invocation join accepted an `expected_attempt_id` string, but the existing `ActivationWorkerIdentity` did not carry an attempt ID and `ConfigTransaction` did not persist the start intent. A caller could therefore supply an ID that was consistent across the systemd evidence objects without proving that the same ID had been committed to the transaction journal.
+
+This change makes the attempt identity a first-class journal fact.
+
+## Journal representation
+
+Transaction schema v8 adds an append-only `systemd_start_attempts` collection. Each record binds:
+
+- transaction ID;
+- attempt ID;
+- worker purpose;
+- canonical systemd unit name derived from the transaction / attempt / purpose tuple;
+- the transaction plan digest.
+
+The canonical unit name is recomputed during both record creation and journal load. The stored plan digest must match the transaction's plan digest.
+
+`ConfigTransaction::reserve_systemd_start_attempt()` requires the transaction to be at the exact durable phase for the requested worker purpose. It rejects a second systemd attempt for the same purpose and rejects retrofitting a systemd attempt after a direct-spawn worker identity was already recorded for that purpose. The restriction is intentionally conservative: until a separately qualified resolution protocol exists, an ambiguous attempt cannot be retried by minting a new ID.
+
+`ActivationWorkerIdentity` gains an optional `systemd_attempt_id`. A systemd-bound worker must reference an existing attempt record with the same transaction and purpose. The optional field is retained only for legacy direct-spawn worker identities.
+
+## Backward compatibility
+
+The loader accepts the immediately previous v7 schema and upgrades it in memory to v8. It does not infer or synthesize systemd attempt IDs for v7 journals. Existing process records load with `systemd_attempt_id = None`. The next successful journal persistence writes the v8 shape.
+
+Unsupported schema/version pairs still fail closed.
+
+## Required pre-submission sequence
+
+The future supervisor integration must perform this sequence while holding the existing Nixward transaction interlock:
+
+1. Reload and revalidate the transaction and exact authorization inputs.
+2. Reserve one attempt with `reserve_systemd_start_attempt()`.
+3. Persist the transaction atomically, then read it back and verify the exact attempt record and plan digest.
+4. Construct the matching `StartIntent`; only after the read-back succeeds may its prepared capability be submitted to the systemd adapter.
+5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join.
+
+The method only reserves an in-memory record. Calling it is not itself evidence of persistence or permission to issue `StartUnit`. Do not submit until the durable write and independent read-back have succeeded. Invocation validation now takes the loaded `ConfigTransaction` object, locates the attempt record there, and verifies that the exact worker identity is also present in that transaction; it no longer accepts a free-standing expected-attempt string.
+
+## Evidence boundary and remaining work
+
+This v1 record binds the transaction, attempt, purpose, canonical unit and plan digest. The approved executable / argv / environment envelope remains in the existing process identity and must be bound to the authorized command before production manager submission is wired. The systemd `InvocationID`, StartUnit reply, JobRemoved signal, worker process receipt and fresh NixOS runtime/profile observations are not yet persisted as one append-only event history by this change.
+
+A start intent that exists without conclusive later evidence remains unresolved. Absence of a worker receipt, unit, or JobRemoved signal is not proof that no external action occurred.
+
+## Hard integration blocker: unit materialization
+
+The current adapter calls `Manager.StartUnit` with the canonical per-attempt unit name. The repository's current `nix/module.nix` defines `nixward.service`, but not a matching `nixward-transaction@.service` template or another unit definition corresponding to the generated per-attempt name. systemd documents that `GetUnit` fails for a unit that has not been loaded; `StartUnit` starts a named unit but does not create its definition.
+
+Do not wire the current `submit_start()` path into production until one of these provisioning models is implemented and independently qualified:
+
+1. **NixOS-managed static template.** Add a narrowly privileged `nixward-transaction@.service` with a fixed Nixward runner `ExecStart`. The instance must resolve unambiguously to one validated journal attempt; it must not allow caller-controlled executable, shell command, environment or unit properties.
+2. **D-Bus transient service.** Use `Manager.StartTransientUnit` to create the per-attempt service with a fixed trusted runner and constrained properties. Hash and persist the exact property/ExecStart envelope before submission. Qualify unit-name uniqueness, property signatures, caller authorization, manager restart behavior, and retention after exit. systemd documents that a transient unit is released after it is no longer running or referenced, or at reboot, so the design must explicitly manage and test references if post-exit manager evidence is required.
+
+The static template is currently the safer compatibility choice for the advertised systemd 253+ floor. There is an important polkit version boundary:
+
+- In systemd v253 and v256, `StartTransientUnit` calls the generic `bus_verify_manage_units_async()` authorization path without unit/verb detail. A polkit rule therefore cannot safely scope the grant to the exact transient unit through `action.lookup("unit")`; granting the action would be a broad system-unit management grant.
+- In systemd v257, the transient-unit handler changed to pass the requested unit name and `start` verb through `bus_verify_manage_units_async_impl()`. A narrowly scoped polkit policy can then inspect those details, subject to testing on the exact supported release.
+- The `StartUnit` path loads the named static unit and dispatches through the unit-object method, which calls `bus_verify_manage_units_async_full()` with the unit and verb. This behavior is present in v253. A policy can therefore restrict the Nixward service principal to starting only the fixed Nixward transaction template family, without granting general `manage-units`.
+
+The existing NixOS module runs `nixward-daemon` as the unprivileged `nixward` user with an empty `CapabilityBoundingSet`; it does not define a systemd polkit rule. Systemd documents that system-unit mutation requires `org.freedesktop.systemd1.manage-units`. Production integration must explicitly test the authorization path on a clean headless NixOS VM and prove that the Nixward principal cannot start, stop, restart, or modify unrelated units. Do not add a broad `manage-units` allow rule.
+
+For v253+, prefer a static `nixward-transaction@.service` template with a fixed Nixward runner, exact per-instance unit matching in polkit and a strict journal/attempt/interlock check inside the runner. The instance must not provide an executable or shell command. If transient units are selected, either require systemd 257+ and test the scoped polkit details, or use a separate privileged broker that exposes only a typed, journal-validated start operation. Do not silently depend on newer authorization semantics while claiming a 253+ support floor.
+
+In either model, the worker runner must reload and validate the journal and acquire the existing transaction interlock before launching the approved worker gate. The manager unit itself must not accept arbitrary privileged commands.
+
+Source-level version comparison:
+- systemd v253 `src/core/dbus-manager.c`: `method_start_transient_unit()` calls `bus_verify_manage_units_async()`.
+- systemd v256: same generic authorization call.
+- systemd v257: calls `bus_verify_manage_units_async_impl(m, name, "start", ...)`.
+- systemd v253 `src/core/dbus-unit.c`: unit-object start calls `bus_verify_manage_units_async_full(u, verb, ...)`.
+
+References: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop.systemd1.html and https://github.com/systemd/systemd/issues/17224
+
+## Qualification
+
+The source adds tests for:
+- v7-to-v8 loading without fabricated attempt identities;
+- canonical attempt/unit and plan binding;
+- phase-scoped reservation;
+- rejection of a second attempt for the same purpose;
+- binding a worker identity to the exact journaled attempt;
+- rejection of caller-only, absent, or foreign attempt IDs in the transaction-backed invocation join;
+- rejection when the worker identity supplied to the join is not the identity journaled in that transaction;
+- preservation of the legacy worker identity serialization shape when the optional systemd attempt is absent.
+
+No Cargo, Nix, D-Bus, systemd VM, crash-injection, or power-loss test is claimed in the authoring environment. The next gates are the systemd-feature Nix derivation from PR #103, followed by a disposable NixOS VM that tests all manager and crash boundaries.
