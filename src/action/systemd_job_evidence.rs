@@ -1543,7 +1543,7 @@ mod tests {
         fn pidfd_invocation_binding_rejects_single_field_conflicts(
             transaction_id in "[a-z0-9_-]{1,32}",
             attempt_id in "[a-z0-9_-]{1,32}",
-            mutation in 0u8..4
+            mutation in 0u8..5
         ) {
             let intent = StartIntent::new(
                 &transaction_id,
@@ -1551,7 +1551,12 @@ mod tests {
                 TransactionWorkerPurpose::Activation
             ).unwrap().journal_evidence();
             let invocation_id = [0x5au8; 16];
-            let unit_name = if mutation == 0 {
+            let pidfd_unit_name = if mutation == 0 {
+                "foreign.service"
+            } else {
+                intent.unit_name.as_str()
+            };
+            let unit_property_unit_name = if mutation == 4 {
                 "foreign.service"
             } else {
                 intent.unit_name.as_str()
@@ -1562,19 +1567,19 @@ mod tests {
             } else {
                 invocation_id
             };
-            let expected_transaction = if mutation == 3 {
-                "foreign-transaction"
+            let expected_transaction_id = if mutation == 3 {
+                format!("{transaction_id}-foreign")
             } else {
-                intent.transaction_id.as_str()
+                transaction_id.clone()
             };
 
             prop_assert!(capture_systemd_worker_invocation_evidence(
                 &intent,
-                expected_transaction,
+                &expected_transaction_id,
                 &intent.attempt_id,
                 intent.purpose,
-                unit_name,
-                intent.unit_name.as_str(),
+                pidfd_unit_name,
+                unit_property_unit_name,
                 &invocation_id,
                 &property_invocation_id,
                 unit_main_pid,
