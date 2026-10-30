@@ -60,6 +60,12 @@ On systemd older than 253, Nixward must not silently treat `GetUnitByPID()` as e
 
 After a supervisor restart, `GetUnitByInvocationID()` can be used to look for the exact invocation where the manager still retains it. A missing unit or missing invocation lookup is not proof that the process never ran: manager unit objects can be unloaded, and the transaction must continue through worker-receipt and fresh host-state reconciliation.
 
+## Restart decision gate
+
+The captured InvocationID is not merely stored metadata. Recovery must require it before resuming observation of an ambiguous attempt. The name-level classifier in `transaction_supervision.rs` is only a preliminary unit lookup; the new `decide_worker_start_recovery_with_invocation()` classifier requires the manager unit and exact InvocationID to agree. See [SYSTEMD_INVOCATION_RECOVERY_DECISION_V1.md](SYSTEMD_INVOCATION_RECOVERY_DECISION_V1.md).
+
+A canonical unit match alone returns a request to query invocation identity, not permission to resume observation. A missing, conflicting, unavailable or unsupported invocation remains held. If an invocation ID was persisted but canonical name lookup says absent, query by the persisted InvocationID before classifying the unit as gone.
+
 ## Evidence ceilings
 
 This evidence proves only that, at the time of capture, the pidfd-referenced process was resolved by systemd to the recorded unit and service invocation, and that the service's MainPID agreed with the journal-bound worker PID.
