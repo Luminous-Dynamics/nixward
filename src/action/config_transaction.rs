@@ -1859,32 +1859,6 @@ impl SystemdWorkerLaunchEnvelope {
         environment_digest: impl Into<String>,
         expected_system_profile: impl Into<String>,
     ) -> Result<Self, String> {
-        let envelope = Self {
-            worker_gate_executable: worker_gate_executable.into(),
-            payload_argv_digest: activation_argv_digest(
-                &payload_executable.into(),
-                &payload_args,
-            ),
-            payload_executable: String::new(),
-            payload_args,
-            environment_digest: environment_digest.into(),
-            expected_system_profile: expected_system_profile.into(),
-        };
-        // Construct the payload string once without accepting a caller-supplied
-        // digest that could disagree with the exact argument vector.
-        let mut envelope = envelope;
-        envelope.payload_executable = envelope.payload_executable;
-        envelope.validate()?;
-        Ok(envelope)
-    }
-
-    pub fn from_parts(
-        worker_gate_executable: impl Into<String>,
-        payload_executable: impl Into<String>,
-        payload_args: Vec<String>,
-        environment_digest: impl Into<String>,
-        expected_system_profile: impl Into<String>,
-    ) -> Result<Self, String> {
         let worker_gate_executable = worker_gate_executable.into();
         let payload_executable = payload_executable.into();
         let payload_argv_digest = activation_argv_digest(&payload_executable, &payload_args);
