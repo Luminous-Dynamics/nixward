@@ -1,6 +1,6 @@
 # Systemd invocation to activation-worker identity bridge v1
 
-Status: **pure identity join implemented; durable attempt schema and production supervisor wiring remain separate**
+Status: **pure identity join and v8 journal attempt anchor implemented; production supervisor wiring remains separate**
 
 Date: 2026-10-30
 
@@ -10,8 +10,9 @@ Nixward currently has two identity records with different responsibilities:
 
 - `ConfigTransaction::ActivationWorkerIdentity` records the process identity and approved execution envelope: transaction ID, purpose, PID, boot ID, process start-time ticks, worker-gate executable/image, gate argv digest, payload executable/argv digest, release-challenge digest and environment digest.
 - `SystemdWorkerInvocationEvidence` records the canonical attempt unit and systemd's 128-bit InvocationID, joined to the worker PID.
+- `ConfigTransaction::systemd_start_attempts` now stores the write-ahead transaction / attempt / purpose / unit / plan-digest tuple. A systemd-bound `ActivationWorkerIdentity` must refer back to that exact attempt ID. Legacy direct-spawn identities remain explicitly unbound after the v7-to-v8 in-memory migration.
 
-Neither record should replace the other. The first describes the exact process and approved payload; the second describes the systemd service invocation that owns the process.
+Neither process nor manager record should replace the other. The process record describes the exact executable, argv, environment, PID, boot and start-time identity; the manager record describes the service invocation that owns the process. The journal now anchors their common attempt identifier, but the live supervisor has not yet been wired to persist and read back that record before submission.
 
 ## Explicit purpose mapping
 
