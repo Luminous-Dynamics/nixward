@@ -1835,6 +1835,143 @@ pub enum ActivationWorkerPurpose {
     RecoveryActivation,
 }
 
+/// Exact immutable execution contract committed before a systemd unit is
+/// submitted. It contains no release token: the runner creates a fresh token
+/// after it has acquired the transaction interlock and persisted worker
+/// identity. The environment itself is a fixed Nixward allowlist whose digest
+/// is checked against the worker process; callers cannot pass arbitrary env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemdWorkerLaunchEnvelope {
+    pub worker_gate_executable: String,
+    pub payload_executable: String,
+    pub payload_args: Vec<String>,
+    pub payload_argv_digest: String,
+    pub environment_digest: String,
+    pub expected_system_profile: String,
+}
+
+impl SystemdWorkerLaunchEnvelope {
+    pub fn new(
+        worker_gate_executable: impl Into<String>,
+        payload_executable: impl Into<String>,
+        payload_args: Vec<String>,
+        environment_digest: impl Into<String>,
+        expected_system_profile: impl Into<String>,
+    ) -> Result<Self, String> {
+        let envelope = Self {
+            worker_gate_executable: worker_gate_executable.into(),
+            payload_argv_digest: activation_argv_digest(
+                &payload_executable.into(),
+                &payload_args,
+            ),
+            payload_executable: String::new(),
+            payload_args,
+            environment_digest: environment_digest.into(),
+            expected_system_profile: expected_system_profile.into(),
+        };
+        // Construct the payload string once without accepting a caller-supplied
+        // digest that could disagree with the exact argument vector.
+        let mut envelope = envelope;
+        envelope.payload_executable = envelope.payload_executable;
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn from_parts(
+        worker_gate_executable: impl Into<String>,
+        payload_executable: impl Into<String>,
+        payload_args: Vec<String>,
+        environment_digest: impl Into<String>,
+        expected_system_profile: impl Into<String>,
+    ) -> Result<Self, String> {
+        let worker_gate_executable = worker_gate_executable.into();
+        let payload_executable = payload_executable.into();
+        let payload_argv_digest = activation_argv_digest(&payload_executable, &payload_args);
+        let envelope = Self {
+            worker_gate_executable,
+            payload_executable,
+            payload_args,
+            payload_argv_digest,
+            environment_digest: environment_digest.into(),
+            expected_system_profile: expected_system_profile.into(),
+        };
+        envelope.validate()?;
+        Ok(envelope)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_store_backed_executable("worker gate executable", &self.worker_gate_executable)?;
+        validate_store_backed_executable("payload executable", &self.payload_executable)?;
+        if self.payload_args.len() > 128
+            || self.payload_args.iter().any(|argument| argument.contains('\\0'))
+            || self.payload_args.iter().map(String::len).sum::<usize>() > 64 * 1024
+        {
+            return Err("systemd worker payload arguments exceed the canonical limits or contain NUL".into());
+        }
+        if activation_argv_digest(&self.payload_executable, &self.payload_args)
+            != self.payload_argv_digest
+        {
+            return Err("systemd worker launch envelope payload digest does not bind its exact argv".into());
+        }
+        decode_digest(&self.environment_digest)
+            .map_err(|_| "systemd worker launch envelope environment digest is invalid".to_string())?;
+        if !super::execution_intent::is_valid_nix_store_path(&self.expected_system_profile) {
+            return Err("systemd worker launch envelope expected profile is not a canonical Nix store path".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_worker_identity(
+        &self,
+        worker: &ActivationWorkerIdentity,
+    ) -> Result<(), String> {
+        self.validate()?;
+        worker.validate_identity()?;
+        if worker.executable != self.worker_gate_executable
+            || worker.payload_executable != self.payload_executable
+            || worker.payload_args != self.payload_args
+            || worker.payload_argv_digest != self.payload_argv_digest
+            || worker.environment_digest != self.environment_digest
+            || worker.process_image != self.worker_gate_executable
+        {
+            return Err("systemd worker process identity does not match the precommitted launch envelope".into());
+        }
+        Ok(())
+    }
+}
+
+/// Validate a canonical executable below one immutable Nix store object.
+/// The complete suffix is checked; prefix-only validation would admit traversal.
+fn validate_store_backed_executable(label: &str, value: &str) -> Result<(), String> {
+    const PREFIX: &str = "/nix/store/";
+    if !value.starts_with(PREFIX) {
+        return Err(format!("{label} is not an absolute Nix store executable"));
+    }
+    let relative = value.strip_prefix(PREFIX)
+        .ok_or_else(|| format!("{label} escaped the Nix store"))?;
+    let mut components = relative.split('/');
+    let store_component = components.next()
+        .ok_or_else(|| format!("{label} has no Nix store object"))?;
+    let store_path = format!("{PREFIX}{store_component}");
+    if !super::execution_intent::is_valid_nix_store_path(&store_path) {
+        return Err(format!("{label} has an invalid Nix store object identity"));
+    }
+    let suffix = components.collect::<Vec<_>>();
+    if suffix.is_empty() || suffix.iter().any(|component| {
+        component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.chars().any(char::is_control)
+    }) {
+        return Err(format!("{label} has empty, traversal, or control path components"));
+    }
+    if format!("{PREFIX}{store_component}/{}", suffix.join("/")) != value {
+        return Err(format!("{label} is not in canonical lexical form"));
+    }
+    Ok(())
+}
+
 /// Durable write-ahead intent for one systemd-managed worker start. An intent
 /// is append-only and deliberately has no "not submitted" terminal marker:
 /// after a crash, absence of manager evidence cannot prove that StartUnit was
@@ -1848,6 +1985,10 @@ pub struct SystemdStartAttemptRecord {
     pub purpose: ActivationWorkerPurpose,
     pub unit_name: String,
     pub plan_digest: String,
+    /// Absent only on migrated v8 attempts, which remain auditable but are
+    /// not eligible for execution or successful InvocationID validation.
+    #[serde(default)]
+    pub launch_envelope: Option<SystemdWorkerLaunchEnvelope>,
 }
 
 impl SystemdStartAttemptRecord {
@@ -1865,6 +2006,9 @@ impl SystemdStartAttemptRecord {
         )?;
         if self.unit_name != expected_unit {
             return Err("systemd start attempt unit name is not canonical for its transaction/attempt/purpose".into());
+        }
+        if let Some(envelope) = self.launch_envelope.as_ref() {
+            envelope.validate()?;
         }
         let phase_is_compatible = match self.purpose {
             ActivationWorkerPurpose::ProfileTransition => matches!(
@@ -2311,10 +2455,12 @@ impl std::fmt::Display for JournalPersistFailure {
 
 
 impl ConfigTransaction {
-    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
-    pub const VERSION: u16 = 8;
-    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
-    const PREVIOUS_VERSION: u16 = 7;
+    pub const SCHEMA: &'static str = "luminous-nixward-config-transaction-v9";
+    pub const VERSION: u16 = 9;
+    const PREVIOUS_SCHEMA: &'static str = "luminous-nixward-config-transaction-v8";
+    const PREVIOUS_VERSION: u16 = 8;
+    const LEGACY_SCHEMA: &'static str = "luminous-nixward-config-transaction-v7";
+    const LEGACY_VERSION: u16 = 7;
 
     fn compute_transaction_id(
         plan_digest: &[u8; 32],
@@ -2839,12 +2985,15 @@ impl ConfigTransaction {
         &mut self,
         attempt_id: impl Into<String>,
         purpose: ActivationWorkerPurpose,
+        launch_envelope: SystemdWorkerLaunchEnvelope,
     ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
         if !self.recovery_observed
             && !matches!(self.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen)
         {
             return Err("loaded transaction requires fresh recovery observation before reserving a systemd start".into());
         }
+        let launch_envelope = launch_envelope;
+        launch_envelope.validate()?;
         let phase_matches = match purpose {
             ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
             ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
@@ -2876,6 +3025,7 @@ impl ConfigTransaction {
             purpose,
             unit_name: unit_name.clone(),
             plan_digest: self.plan_digest.clone(),
+            launch_envelope: Some(launch_envelope),
         };
         record.validate_against(self)?;
         self.systemd_start_attempts.push(record);
@@ -2908,6 +3058,9 @@ impl ConfigTransaction {
                 if attempt.purpose != identity.purpose || attempt.transaction_id != identity.transaction_id {
                     return Err("systemd-bound worker identity conflicts with its journaled attempt purpose or transaction".into());
                 }
+                attempt.launch_envelope.as_ref()
+                    .ok_or_else(|| "migrated systemd attempt has no executable launch envelope and cannot accept a worker".to_string())?
+                    .validate_worker_identity(&identity)?;
             }
             None if self.systemd_start_attempts.iter().any(|record| record.purpose == identity.purpose) => {
                 return Err("worker identity for a systemd-managed purpose must carry its exact attempt ID".into());
@@ -3253,10 +3406,12 @@ impl ConfigTransaction {
         let mut transaction: Self = serde_json::from_slice(&encoded).map_err(|error| format!("invalid transaction journal: {error}"))?;
         match (transaction.schema.as_str(), transaction.version) {
             (Self::SCHEMA, Self::VERSION) => {}
-            (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION) => {
-                // The v8 fields are additive. A v7 journal has no systemd
-                // write-ahead attempts and its old process identities remain
-                // explicitly unbound; never synthesize attempt IDs on upgrade.
+            (Self::PREVIOUS_SCHEMA, Self::PREVIOUS_VERSION)
+            | (Self::LEGACY_SCHEMA, Self::LEGACY_VERSION) => {
+                // v8 attempts predate the immutable launch envelope. Preserve
+                // them for audit, but their absent envelope makes them
+                // ineligible for worker binding or terminal InvocationID proof.
+                // v7 journals are upgraded without fabricating attempts.
                 transaction.schema = Self::SCHEMA.into();
                 transaction.version = Self::VERSION;
             }
@@ -3310,6 +3465,9 @@ impl ConfigTransaction {
                     if attempt.purpose != worker.purpose || attempt.transaction_id != worker.transaction_id {
                         return Err("transaction journal systemd worker conflicts with its write-ahead attempt".into());
                     }
+                    attempt.launch_envelope.as_ref()
+                        .ok_or_else(|| "transaction journal systemd worker has no precommitted launch envelope".to_string())?
+                        .validate_worker_identity(worker)?;
                 }
                 None if transaction.systemd_start_attempts.iter().any(|record| record.purpose == worker.purpose) => {
                     return Err("transaction journal mixes a systemd attempt with an unbound worker identity for the same purpose".into());
