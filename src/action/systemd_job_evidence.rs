@@ -235,7 +235,7 @@ pub fn validate_start_intent_evidence_against(
 /// The invocation ID is stored as 32 lowercase hexadecimal characters (the
 /// canonical encoding of systemd's 16-byte D-Bus `ay` value). A PID alone is
 /// not sufficient: this record must be captured while a pidfd for the exact
-/// worker is available and correlated with the manager's unit/MainPID data.
+/// worker is available and correlated with the manager's unit identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemdWorkerInvocationEvidence {
@@ -283,10 +283,10 @@ fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
 /// existing, fully validated activation worker identity.
 ///
 /// `expected_attempt_id` must come from the independently loaded durable
-/// attempt record. The worker identity supplies the authoritative transaction,
-/// purpose, PID, boot ID, start time and executable/argv/environment bindings.
-/// This function deliberately does not synthesize an attempt ID from either
-/// evidence record.
+/// ConfigTransaction::systemd_start_attempts record. The worker identity must
+/// carry that same attempt ID; ConfigTransaction validates the cross-reference
+/// when the worker identity is journaled or loaded. This function does not
+/// synthesize an attempt ID from either systemd evidence record.
 pub fn validate_systemd_worker_invocation_against_activation_identity(
     evidence: &SystemdWorkerInvocationEvidence,
     intent: &StartIntentEvidence,
@@ -294,6 +294,9 @@ pub fn validate_systemd_worker_invocation_against_activation_identity(
     worker: &ActivationWorkerIdentity,
 ) -> Result<(), String> {
     worker.validate_identity()?;
+    if worker.systemd_attempt_id.as_deref() != Some(expected_attempt_id) {
+        return Err("activation worker identity does not carry the independently journaled systemd attempt ID".into());
+    }
     let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
     validate_start_intent_evidence_against(
         intent,
@@ -1236,6 +1239,7 @@ mod tests {
     fn activation_worker_identity_for_invocation_test(
         purpose: ActivationWorkerPurpose,
         pid: u32,
+        attempt_id: &str,
     ) -> ActivationWorkerIdentity {
         let transaction_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
@@ -1252,6 +1256,7 @@ mod tests {
         ActivationWorkerIdentity {
             transaction_id: transaction_id.into(),
             purpose,
+            systemd_attempt_id: Some(attempt_id.into()),
             pid,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -1284,6 +1289,7 @@ mod tests {
         let worker = activation_worker_identity_for_invocation_test(
             ActivationWorkerPurpose::Activation,
             4242,
+            "attempt-joined-0001",
         );
         worker.validate_identity().unwrap();
         let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
@@ -1324,6 +1330,7 @@ mod tests {
         let worker = activation_worker_identity_for_invocation_test(
             ActivationWorkerPurpose::Activation,
             4242,
+            "attempt-joined-0002",
         );
         let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
         let intent = StartIntent::new(
@@ -1374,6 +1381,16 @@ mod tests {
             &worker,
         )
         .is_err());
+
+        let mut unanchored = worker.clone();
+        unanchored.systemd_attempt_id = None;
+        assert!(validate_systemd_worker_invocation_against_activation_identity(
+            &evidence,
+            &intent,
+            "attempt-joined-0002",
+            &unanchored,
+        )
+        .is_err(), "a caller-supplied expected ID cannot substitute for a journal-bound worker ID");
     }
 
     #[test]
