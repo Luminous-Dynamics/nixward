@@ -1912,14 +1912,21 @@ impl SystemdWorkerLaunchEnvelope {
         expected_current_system_profile: &str,
     ) -> Result<(), String> {
         self.validate()?;
-        let (store_path, action) = match command {
-            NixOSCommand::ActivateSystemClosure { store_path, action, .. } => {
-                (store_path.as_str(), *action)
+        let (store_path, profile_store_path, action) = match command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                action,
+            } => (store_path.as_str(), profile_store_path.as_str(), *action),
+            NixOSCommand::ActivateSystemClosure { .. } => {
+                return Err("system activation command has no exact system-profile target".into());
             }
             _ => return Err("systemd launch envelope is restricted to exact system-closure activation".into()),
         };
-        if !super::execution_intent::is_valid_nix_store_path(store_path) {
-            return Err("authorized system activation command has an invalid store closure".into());
+        if !super::execution_intent::is_valid_nix_store_path(store_path)
+            || !super::execution_intent::is_valid_nix_store_path(profile_store_path)
+        {
+            return Err("authorized system activation command has an invalid store closure or profile target".into());
         }
         let expected_executable = format!("{store_path}/bin/switch-to-configuration");
         let expected_args = vec![match action {
@@ -1932,8 +1939,44 @@ impl SystemdWorkerLaunchEnvelope {
         {
             return Err("systemd launch envelope payload does not match the exact authorized system activation command".into());
         }
-        if self.expected_system_profile != expected_current_system_profile {
-            return Err("systemd launch envelope pre-state profile does not match the independently observed transaction pre-state".into());
+        if self.expected_system_profile != expected_current_system_profile
+            || profile_store_path != expected_current_system_profile
+        {
+            return Err("systemd launch envelope profile guard does not match the exact selected profile before activation".into());
+        }
+        Ok(())
+    }
+
+    /// Validate the separate nix-env profile-selection operation that runs
+    /// before switch-to-configuration. The caller must derive the target from
+    /// verified activation/recovery authorization and obtain the trusted nix-env
+    /// path from the running NixOS closure; this method validates the command.
+    pub fn validate_for_exact_system_profile_transition(
+        &self,
+        trusted_nix_env_executable: &str,
+        target_profile: &str,
+        expected_current_profile: &str,
+    ) -> Result<(), String> {
+        self.validate()?;
+        validate_store_backed_executable("trusted nix-env executable", trusted_nix_env_executable)?;
+        if !super::execution_intent::is_valid_nix_store_path(target_profile)
+            || !super::execution_intent::is_valid_nix_store_path(expected_current_profile)
+        {
+            return Err("system profile transition target or pre-state is not a canonical Nix store path".into());
+        }
+        let expected_args = vec![
+            "-p".to_string(),
+            "/nix/var/nix/profiles/system".to_string(),
+            "--set".to_string(),
+            target_profile.to_string(),
+        ];
+        if self.payload_executable != trusted_nix_env_executable
+            || self.payload_args != expected_args
+        {
+            return Err("systemd launch envelope does not match the exact authorized nix-env profile transition".into());
+        }
+        if self.expected_system_profile != expected_current_profile {
+            return Err("systemd launch envelope profile guard does not match the observed pre-transition profile".into());
         }
         Ok(())
     }
