@@ -3561,6 +3561,25 @@ mod tests {
         ).unwrap()
     }
 
+    fn worker_identity_for_launch_envelope_for_test(
+        envelope: &SystemdWorkerLaunchEnvelope,
+    ) -> ActivationWorkerIdentity {
+        let mut worker = worker_identity_for_test(&envelope.worker_gate_executable);
+        worker.payload_executable = envelope.payload_executable.clone();
+        worker.payload_args = envelope.payload_args.clone();
+        worker.payload_argv_digest = envelope.payload_argv_digest.clone();
+        worker.environment_digest = envelope.environment_digest.clone();
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            worker.payload_executable.clone(),
+            worker.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(worker.payload_args.iter().cloned());
+        worker.argv_digest = activation_argv_digest(&worker.executable, &gate_args);
+        worker.validate_identity().unwrap();
+        worker
+    }
+
     fn worker_identity_for_test(executable: &str) -> ActivationWorkerIdentity {
         let payload_args = vec!["switch".to_string()];
         let release_challenge_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
@@ -4444,8 +4463,8 @@ mod tests {
     }
 
     #[test]
-    fn systemd_launch_envelope_rejects_payload_drift_and_path_traversal() {
-        let mut envelope = launch_envelope_for_test(
+    fn systemd_launch_envelope_rejects_payload_drift_and_worker_identity_drift() {
+        let envelope = launch_envelope_for_test(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
             "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -4461,15 +4480,33 @@ mod tests {
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/../bin/evil".into();
         assert!(traversing_gate.validate().is_err(), "gate path traversal must fail closed");
 
-        let mut changed_environment = envelope.clone();
-        changed_environment.environment_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into();
-        let mut worker = worker_identity_for_test(
-            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
-        );
-        assert!(changed_environment.validate_worker_identity(&worker).is_err());
-        worker.environment_digest = changed_environment.environment_digest.clone();
-        assert!(changed_environment.validate_worker_identity(&worker).is_err(),
-            "changing both the envelope and worker must still not bypass the journal's precommitted digest");
+        let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction.reserve_systemd_start_attempt(
+            "attempt-envelope-drift",
+            ActivationWorkerPurpose::Activation,
+            envelope.clone(),
+        ).unwrap();
+        let mut worker = worker_identity_for_launch_envelope_for_test(&envelope);
+        worker.transaction_id = transaction.transaction_id().to_string();
+        worker.systemd_attempt_id = Some(intent.attempt_id.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
+
+        let mut drifted_worker = worker;
+        drifted_worker.payload_args.push("unexpected-operation".into());
+        drifted_worker.payload_argv_digest =
+            activation_argv_digest(&drifted_worker.payload_executable, &drifted_worker.payload_args);
+        let mut gate_args = vec![
+            "--nixward-worker-gate-v1".to_string(),
+            drifted_worker.payload_executable.clone(),
+            drifted_worker.release_challenge_digest.clone(),
+        ];
+        gate_args.extend(drifted_worker.payload_args.iter().cloned());
+        drifted_worker.argv_digest = activation_argv_digest(&drifted_worker.executable, &gate_args);
+        assert!(drifted_worker.validate_identity().is_ok(),
+            "negative control must be a structurally valid worker identity");
+        assert!(transaction.bind_activation_worker_identity(drifted_worker).is_err(),
+            "a worker whose exact command differs from the precommitted envelope must be rejected");
     }
 
     #[test]
