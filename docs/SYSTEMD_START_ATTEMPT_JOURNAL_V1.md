@@ -38,7 +38,7 @@ Unsupported schema/version pairs still fail closed.
 The future supervisor integration must perform this sequence while holding the existing Nixward transaction interlock:
 
 1. Reload and revalidate the transaction and exact authorization inputs.
-2. Reserve one attempt with `reserve_systemd_start_attempt()`.
+2. Derive the fixed launch envelope, then call `reserve_authorized_systemd_start_attempt()` with the exact command and verified `ExecutionAuthorization`. The raw append method is private.
 3. Persist the transaction atomically, then read it back and verify the exact attempt record and plan digest.
 4. Construct the matching `StartIntent`; only after the read-back succeeds may its prepared capability be submitted to the systemd adapter.
 5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join, and the process must match the committed gate/payload/argv/environment envelope.
