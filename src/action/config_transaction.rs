@@ -4674,6 +4674,10 @@ mod tests {
         let loaded = ConfigTransaction::load(&journal).unwrap();
 
         assert_eq!(loaded.systemd_start_attempts(), transaction.systemd_start_attempts());
+        assert_eq!(
+            loaded.systemd_start_attempts()[0].launch_envelope,
+            transaction.systemd_start_attempts()[0].launch_envelope,
+        );
         assert_eq!(loaded.activation_worker_identities(), &[worker]);
         assert_eq!(
             loaded.systemd_start_attempts()[0].attempt_id,
