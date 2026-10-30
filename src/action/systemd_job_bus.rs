@@ -155,8 +155,9 @@ pub async fn submit_start(
 ///
 /// This sends the caller's borrowed pidfd as a D-Bus UNIX_FD (`h`) argument
 /// to Manager.GetUnitByPIDFD. The returned InvocationID is then independently
-/// compared with the unit object's InvocationID property, while the Service
-/// object's MainPID is compared with the journal-owned worker PID.
+/// compared with the unit object's InvocationID property. The pidfd's
+/// target PID is checked in the caller's PID namespace; systemd's MainPID is
+/// deliberately not compared because it may be in a different namespace.
 ///
 /// The function has no mutation side effects. It does not persist the returned
 /// record or authorize a transaction; the caller must hold the existing
@@ -174,8 +175,9 @@ pub(crate) async fn observe_worker_invocation_by_pidfd(
 ) -> Result<SystemdWorkerInvocationEvidence, String> {
     // GetUnitByPIDFD identifies the owning unit/invocation, but does not
     // return the PID referenced by the fd. Verify fdinfo's kernel Pid field
-    // first so a pidfd for an auxiliary process in the same cgroup cannot be
-    // substituted for the journal-owned MainPID.
+    // first so the descriptor is bound to the expected process in the caller's
+    // PID namespace. The same numeric PID must not be compared with systemd's
+    // MainPID because the manager may run in a different PID namespace.
     let actual_pidfd_target_pid = pidfd_target_pid(pidfd)?;
     if actual_pidfd_target_pid != expected_worker_pid {
         return Err(format!(
@@ -208,9 +210,8 @@ pub(crate) async fn observe_worker_invocation_by_pidfd(
             )
         })?;
 
-    // InvocationID is a Unit property; MainPID belongs to Service. Query them
-    // through their respective interfaces on the exact path returned by the
-    // PIDFD lookup, not by resolving the unit name a second time.
+    // Query Id and InvocationID through the Unit interface on the exact path
+    // returned by the PIDFD lookup, not by resolving the unit name again.
     let unit = Proxy::new(
         &connection,
         SYSTEMD_SERVICE,
