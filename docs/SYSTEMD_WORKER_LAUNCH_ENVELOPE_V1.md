@@ -72,11 +72,11 @@ A future static-template runner must execute this sequence while holding the exi
 1. Load and validate the transaction journal; perform fresh recovery observations when the transaction was loaded after restart.
 2. Revalidate the exact signed ChangePlan / machine binding / execution-intent realization / ExecutionAuthorization.
 3. Derive the launch envelope from the trusted executor builders. Do not let an IPC caller choose the executable, argument vector, environment, or profile guard independently.
-4. Call `reserve_authorized_systemd_start_attempt()` with the exact command and `ExecutionAuthorization`; it revalidates the plan/candidate or rollback binding and checks that the envelope matches the authorized command stage. The raw append method is private to the action module (with a `cfg(test)` helper for pure fixtures).
+4. Call `reserve_authorized_systemd_start_attempt()` with the exact command and `ExecutionAuthorization`; it revalidates the plan/candidate or rollback binding, requires the gate executable to be the installed Nixward gate, independently observes the current system profile, and checks that the envelope matches the authorized command stage. The raw append method is private to the action module (with a `cfg(test)` helper for pure fixtures).
 5. Persist the transaction atomically.
 6. Reload the journal and compare the exact attempt and envelope with the expected values.
 7. Only then submit the prepared systemd start request for the fixed template instance.
-8. The static unit runner reloads the same journal, validates the attempt and unit instance, acquires the same interlock, observes the expected pre-release profile, captures and persists the exact PIDFD-bound worker identity, and only then generates/writes the one-time release token.
+8. The static unit runner reloads the same journal, validates the attempt and unit instance, acquires the same interlock, re-observes and compares the expected pre-release profile immediately before worker release, captures and persists the exact PIDFD-bound worker identity, and only then generates/writes the one-time release token.
 9. Observe systemd job completion, worker exit receipt and fresh runtime/profile state. Only the complete event history may reach terminal success.
 
 The current code implements the envelope, pure validators, authorization-aware reservation seam, transaction storage, migration behavior, and pure tests. It does not yet implement steps 2–9 as a live systemd path. In particular, the existing executor still uses direct-spawn supervision; the new systemd envelope builders are not yet called by production execution.
