@@ -2352,6 +2352,10 @@ impl ConfigTransaction {
     }
 
     pub fn phase(&self) -> ConfigTransactionPhase { self.phase }
+    #[cfg(test)]
+    pub(super) fn set_phase_for_test(&mut self, phase: ConfigTransactionPhase) {
+        self.phase = phase;
+    }
     pub fn source_digest(&self) -> &str { &self.source_digest }
     pub fn plan_digest(&self) -> Result<[u8; 32], String> { decode_digest(&self.plan_digest) }
     pub fn transaction_id(&self) -> &str { &self.transaction_id }
