@@ -4792,7 +4792,7 @@ mod tests {
         worker.transaction_id = transaction.transaction_id().to_string();
         worker.systemd_attempt_id = Some(intent.attempt_id.clone());
         worker.systemd_invocation_id = Some("ab".repeat(16));
-        transaction.bind_activation_worker_identity(worker.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
 
         let mut drifted_worker = worker;
         drifted_worker.payload_args.push("unexpected-operation".into());
@@ -4853,6 +4853,55 @@ mod tests {
         worker.systemd_invocation_id = Some("cd".repeat(16));
         assert!(loaded.bind_activation_worker_identity(worker).is_err(),
             "a migrated v8 attempt must not accept a new worker without its precommitted launch envelope");
+    }
+
+    #[test]
+    fn transaction_journal_upgrades_v9_systemd_worker_without_invocation_id_for_audit_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let intent = transaction.reserve_systemd_start_attempt(
+            "attempt-v9-without-invocation",
+            ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+            ),
+        ).unwrap();
+        let mut worker = worker_identity_for_launch_envelope_for_test(
+            transaction.systemd_start_attempts()[0].launch_envelope.as_ref().unwrap(),
+        );
+        worker.transaction_id = transaction.transaction_id().to_string();
+        worker.systemd_attempt_id = Some(intent.attempt_id.clone());
+        worker.systemd_invocation_id = Some("5a".repeat(16));
+        transaction.bind_activation_worker_identity(worker).unwrap();
+
+        let mut value = serde_json::to_value(&transaction).unwrap();
+        value["schema"] = serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into());
+        value["version"] = serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into());
+        value["activation_workers"][0].as_object_mut().unwrap().remove("systemd_invocation_id");
+        let path = dir.path().join("transaction-v9.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let mut loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.schema, ConfigTransaction::SCHEMA);
+        assert_eq!(loaded.version, ConfigTransaction::VERSION);
+        assert_eq!(loaded.activation_worker_identities().len(), 1);
+        let legacy_worker = loaded.activation_worker_identities()[0].clone();
+        assert!(legacy_worker.systemd_invocation_id.is_none());
+        assert!(
+            loaded.bind_activation_worker_identity(legacy_worker).is_err(),
+            "a migrated v9 systemd worker without a durable InvocationID must remain audit-only"
+        );
     }
 
     #[test]
@@ -4966,7 +5015,7 @@ mod tests {
         worker.transaction_id = transaction.transaction_id().to_string();
         worker.systemd_attempt_id = Some(intent.attempt_id.clone());
         worker.systemd_invocation_id = Some("ab".repeat(16));
-        transaction.bind_activation_worker_identity(worker.clone());
+        transaction.bind_activation_worker_identity(worker.clone()).unwrap();
 
         let journal = dir.path().join("transaction.json");
         transaction.persist_atomic(&journal).unwrap();
