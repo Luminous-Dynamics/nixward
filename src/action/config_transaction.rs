@@ -2836,6 +2836,11 @@ impl ConfigTransaction {
         attempt_id: impl Into<String>,
         purpose: ActivationWorkerPurpose,
     ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        if !self.recovery_observed
+            && !matches!(self.phase, ConfigTransactionPhase::Prepared | ConfigTransactionPhase::InputFrozen)
+        {
+            return Err("loaded transaction requires fresh recovery observation before reserving a systemd start".into());
+        }
         let phase_matches = match purpose {
             ActivationWorkerPurpose::ProfileTransition => self.phase == ConfigTransactionPhase::ProfileTransitionStarted,
             ActivationWorkerPurpose::Activation => self.phase == ConfigTransactionPhase::ActivationStarted,
@@ -4279,6 +4284,30 @@ mod tests {
         let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted["schema"], ConfigTransaction::SCHEMA);
         assert_eq!(persisted["version"], ConfigTransaction::VERSION);
+    }
+
+    #[test]
+    fn loaded_transaction_cannot_reserve_systemd_start_before_recovery_observation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        let journal = dir.path().join("transaction.json");
+        transaction.persist_atomic(&journal).unwrap();
+        let mut loaded = ConfigTransaction::load(&journal).unwrap();
+        assert!(!loaded.recovery_observation_confirmed());
+        assert!(loaded.reserve_systemd_start_attempt(
+            "attempt-after-restart",
+            ActivationWorkerPurpose::Activation,
+        ).is_err(), "a loaded transaction must reconcile before any new systemd start");
     }
 
     #[test]
