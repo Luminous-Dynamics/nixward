@@ -266,7 +266,7 @@ fn encode_systemd_invocation_id(bytes: &[u8]) -> Result<String, String> {
     Ok(encoded)
 }
 
-fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
+pub(super) fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
     if value.len() != 32
         || !value
             .bytes()
@@ -334,6 +334,11 @@ pub fn validate_systemd_worker_invocation_against_transaction(
         expected_purpose,
         worker.pid,
     )?;
+    let journaled_invocation_id = worker.systemd_invocation_id.as_deref()
+        .ok_or_else(|| "journaled systemd worker receipt has no PIDFD-observed InvocationID".to_string())?;
+    if journaled_invocation_id != evidence.invocation_id {
+        return Err("systemd InvocationID evidence does not match the InvocationID persisted with the journaled worker identity".into());
+    }
     if evidence.unit_name != attempt.unit_name {
         return Err("systemd invocation evidence unit does not match the journaled canonical attempt unit".into());
     }
@@ -1277,6 +1282,7 @@ mod tests {
         purpose: ActivationWorkerPurpose,
         pid: u32,
         attempt_id: &str,
+        invocation_id: [u8; 16],
     ) -> ActivationWorkerIdentity {
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate";
         let payload_executable = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration";
@@ -1293,6 +1299,7 @@ mod tests {
             transaction_id: transaction_id.into(),
             purpose,
             systemd_attempt_id: Some(attempt_id.into()),
+            systemd_invocation_id: Some(invocation_id.iter().map(|byte| format!("{byte:02x}")).collect()),
             pid,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
             start_time_ticks: 42,
@@ -1336,6 +1343,7 @@ mod tests {
             ActivationWorkerPurpose::Activation,
             4242,
             "attempt-joined-0001",
+            [0x5a; 16],
         );
         worker.validate_identity().unwrap();
         transaction.bind_activation_worker_identity(worker.clone()).unwrap();
@@ -1363,6 +1371,19 @@ mod tests {
             ),
             Ok(())
         );
+
+        let mut manager_drift = evidence.clone();
+        manager_drift.invocation_id = "6b".repeat(16);
+        assert!(
+            validate_systemd_worker_invocation_against_transaction(
+                &manager_drift,
+                &intent,
+                &transaction,
+                &worker,
+            )
+            .is_err(),
+            "an InvocationID not persisted with the worker receipt must fail closed"
+        );
     }
 
     #[test]
@@ -1381,6 +1402,7 @@ mod tests {
             ActivationWorkerPurpose::Activation,
             4242,
             "attempt-joined-0002",
+            [0x6b; 16],
         );
         transaction.bind_activation_worker_identity(worker.clone()).unwrap();
         let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);

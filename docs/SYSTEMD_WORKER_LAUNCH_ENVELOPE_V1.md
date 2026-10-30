@@ -53,7 +53,7 @@ Recovery uses its own exact pre-bound predecessor closure/profile and action. It
 
 ## Journal binding
 
-Transaction schema v9 stores the envelope inside the append-only `systemd_start_attempts` record. Record validation checks the transaction ID, plan digest, canonical attempt unit, worker purpose, lifecycle phase and envelope shape.
+Transaction schema v10 stores the envelope inside the append-only `systemd_start_attempts` record. The envelope was introduced in v9; v10 additionally stores the PIDFD-observed 128-bit systemd `InvocationID` alongside the exact worker process identity. Record validation checks the transaction ID, plan digest, canonical attempt unit, worker purpose, lifecycle phase and envelope shape.
 
 After launch, `ActivationWorkerIdentity` must match the envelope's:
 - gate executable and observed inert gate process image;
@@ -61,9 +61,9 @@ After launch, `ActivationWorkerIdentity` must match the envelope's:
 - exact payload argument vector and its digest;
 - fixed worker environment digest.
 
-The invocation validator additionally requires the exact worker identity and attempt to exist in the same validated transaction journal, then checks the systemd unit and 128-bit InvocationID observations against that attempt.
+The invocation validator additionally requires the exact worker identity and attempt to exist in the same validated transaction journal, then checks the systemd unit, worker PID and 128-bit InvocationID observation against the value persisted with that worker identity.
 
-An absent envelope is not silently synthesized. v8 attempts are migrated to v9 for audit with `launch_envelope = None`; they cannot accept a new worker identity or qualify a successful systemd InvocationID join. v7 direct-spawn worker identities retain their previous serialized shape when `systemd_attempt_id` is absent.
+An absent envelope or InvocationID is not silently synthesized. v9 worker records missing `systemd_invocation_id` are migrated for audit but cannot qualify a complete systemd/process join. v8 attempts are migrated with `launch_envelope = None`; they cannot accept a new worker identity. v7 direct-spawn worker identities retain their previous serialized shape when both optional systemd fields are absent.
 
 ## Required pre-submission order
 
@@ -83,6 +83,6 @@ The current code implements the envelope, pure validators, authorization-aware r
 
 ## Qualification and limits
 
-Authored negative controls cover payload argument mutation, worker identity drift despite internally recomputed argv digests, gate path traversal, arbitrary environment digest rejection, mismatched switch/test/boot actions, wrong profile guards, profile-target drift and v8 audit-only migration.
+Authored negative controls cover payload argument mutation, worker identity drift despite internally recomputed argv digests, gate path traversal, arbitrary environment digest rejection, mismatched switch/test/boot actions, wrong profile guards, profile-target drift, v8 audit-only migration and v9 worker receipts without fabricated InvocationIDs.
 
 No Cargo/Nix/rustfmt/Clippy/D-Bus/systemd VM/crash/power-loss test has run in this authoring environment. The envelope's presence does not prove the caller verified authorization, the manager launched the expected static unit, the runner obeyed the interlock, or the resulting NixOS state is correct. Those are separate integration and VM qualification gates.

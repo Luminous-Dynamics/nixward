@@ -1,6 +1,6 @@
 # Systemd invocation to activation-worker identity bridge v1
 
-Status: **pure identity join and v9 journal launch envelope implemented; production supervisor wiring remains separate**
+Status: **pure identity join and v10 worker receipt with persisted systemd InvocationID implemented; production supervisor wiring remains separate**
 
 Date: 2026-10-30
 
@@ -9,8 +9,8 @@ Date: 2026-10-30
 Nixward currently has two identity records with different responsibilities:
 
 - `ConfigTransaction::ActivationWorkerIdentity` records the process identity and approved execution envelope: transaction ID, purpose, PID, boot ID, process start-time ticks, worker-gate executable/image, gate argv digest, payload executable/argv digest, release-challenge digest and environment digest.
-- `SystemdWorkerInvocationEvidence` records the canonical attempt unit and systemd's 128-bit InvocationID, joined to the worker PID.
-- `ConfigTransaction::systemd_start_attempts` stores the write-ahead transaction / attempt / purpose / unit / plan-digest tuple and a v9 immutable `SystemdWorkerLaunchEnvelope`. A systemd-bound `ActivationWorkerIdentity` must refer back to that exact attempt ID and match its gate executable, payload executable/argv, and fixed privileged-worker environment digest. Legacy v7 direct-spawn identities remain explicitly unbound; v8 attempts without an envelope are retained for audit only.
+- `SystemdWorkerInvocationEvidence` captures the canonical attempt unit and systemd's 128-bit InvocationID, joined to the exact worker PID via GetUnitByPIDFD.
+- `ConfigTransaction::systemd_start_attempts` stores the write-ahead transaction / attempt / purpose / unit / plan-digest tuple and the immutable launch envelope introduced in v9. In v10, `ActivationWorkerIdentity` also persists the 128-bit systemd `InvocationID` observed through GetUnitByPIDFD; a new systemd-bound identity must carry both the exact attempt ID and invocation ID. Legacy v7 direct-spawn identities remain explicitly unbound; v8 attempts without an envelope and v9 worker records without an invocation ID are retained for audit only.
 
 Neither process nor manager record should replace the other. The process record describes the exact executable, argv, environment, PID, boot and start-time identity; the manager record describes the service invocation that owns the process. The journal now anchors their common attempt identifier, but the live supervisor has not yet been wired to persist and read back that record before submission.
 
@@ -33,9 +33,9 @@ The exhaustive `From` implementations make a future enum addition a compile-time
 2. Requires the exact worker identity to be present in the supplied `ConfigTransaction` object.
 3. Locates the worker's attempt ID in that same transaction's `systemd_start_attempts` collection and validates the record against the transaction ID, plan digest, canonical unit and current lifecycle phase.
 4. Validates the worker process identity against the journaled launch envelope (fixed gate, payload executable/argv and environment digest).
-5. Compares the `StartIntentEvidence`, systemd `InvocationID`, purpose, unit and exact worker PID against the journaled record.
+5. Compares the `StartIntentEvidence`, systemd `InvocationID`, purpose, unit and exact worker PID against the journaled attempt and the invocation ID persisted alongside the exact worker receipt.
 
-The validator no longer accepts a free-standing expected-attempt string. Its transaction argument must be the validated journal object obtained after publication/read-back under the existing interlock. The worker's optional `systemd_attempt_id` is omitted from serialization when absent, preserving the legacy v7 direct-spawn identity wire shape and its worker-observation digest.
+The validator no longer accepts a free-standing expected-attempt string. Its transaction argument must be the validated journal object obtained after publication/read-back under the existing interlock. Both optional systemd fields are omitted from serialization when absent, preserving the legacy v7 direct-spawn identity wire shape and worker-observation digest. A migrated v9 systemd worker receipt without `systemd_invocation_id` remains readable but cannot qualify the manager/process join.
 
 ## Evidence limits
 
@@ -44,7 +44,7 @@ This bridge proves that the independently validated process identity and the ind
 It does not:
 - obtain or validate a pidfd itself;
 - prove that the process remains live after the capture;
-- persist either record;
+- persist the StartUnit reply and JobRemoved lifecycle as one append-only manager-event history (the InvocationID itself is persisted with the worker identity in v10);
 - acquire the cross-process Nixward transaction interlock;
 - authorize the start;
 - validate the process-exit receipt;

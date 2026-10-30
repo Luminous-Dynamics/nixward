@@ -1,6 +1,6 @@
 # Journal-anchored systemd start attempts v1
 
-Status: **journal schema, launch envelope and pure identity join authored; production systemd supervisor integration and execution qualification remain open**
+Status: **v10 journal schema, immutable launch envelope, PIDFD-bound worker receipt and persisted InvocationID join authored; production systemd supervisor integration and execution qualification remain open**
 
 Date: 2026-10-30
 
@@ -12,7 +12,7 @@ This change makes the attempt identity a first-class journal fact.
 
 ## Journal representation
 
-Transaction schema v9 adds an append-only `systemd_start_attempts` collection. Each record binds:
+Transaction schema v10 retains the append-only `systemd_start_attempts` collection introduced in v8/v9. Each record binds:
 
 - transaction ID;
 - attempt ID;
@@ -25,11 +25,11 @@ The payload argv digest is recomputed from the exact executable and argument vec
 
 `ConfigTransaction::reserve_authorized_systemd_start_attempt()` is the production-facing method. It requires the verified `ExecutionAuthorization` and exact `NixOSCommand`, checks the transaction's plan/candidate binding (or the pre-bound rollback capability), checks that the gate executable is the installed Nixward worker gate, independently observes the current system profile, and validates the correct launch shape for profile selection, closure activation or recovery before it calls the private raw append. The raw `reserve_systemd_start_attempt()` method is private to the action module; a test-only helper is compiled only under `cfg(test)`. Reservation also requires the exact durable lifecycle phase, rejects a second systemd attempt for the same purpose, and rejects retrofitting a systemd attempt after a direct-spawn worker identity was already recorded. The restriction is intentionally conservative: until a separately qualified resolution protocol exists, an ambiguous attempt cannot be retried by minting a new ID.
 
-`ActivationWorkerIdentity` gains an optional `systemd_attempt_id`. A systemd-bound worker must reference an existing attempt record with the same transaction and purpose, and its gate executable, payload executable/argv, and environment digest must match the journaled launch envelope. The optional field is retained only for legacy direct-spawn worker identities.
+`ActivationWorkerIdentity` carries optional `systemd_attempt_id` and `systemd_invocation_id` fields. A new systemd-bound worker must persist both: the attempt ID references the precommitted record, while the 128-bit InvocationID is captured through the PIDFD-to-unit manager API and stored beside that exact process identity. The gate executable, payload executable/argv, fixed environment digest and manager invocation ID must all match during transaction-backed validation. Both optional fields are omitted when absent, preserving the legacy direct-spawn receipt wire shape.
 
 ## Backward compatibility
 
-The loader accepts v8 and v7 journals and upgrades them in memory to v9. v8 attempts are retained for audit with `launch_envelope = None`; they cannot accept a newly bound worker or qualify an InvocationID join because their exact pre-start payload contract was not recorded. v7 journals have no systemd attempts and are upgraded without synthesizing IDs. Existing process records retain their original serialization when `systemd_attempt_id` is absent. The next successful persistence writes the v9 shape.
+The loader accepts v9, v8 and v7 journals and upgrades them in memory to v10. A v9 attempt can retain its launch envelope, but a historical systemd worker receipt without `systemd_invocation_id` is audit-only and cannot qualify the complete manager/process join. v8 attempts are retained with `launch_envelope = None`; they cannot accept a newly bound worker because their exact pre-start payload contract was not recorded. v7 journals have no systemd attempts and are upgraded without synthesizing IDs. Existing direct-spawn process records retain their original serialization when both optional systemd fields are absent. The next successful persistence writes the v10 shape.
 
 Unsupported schema/version pairs still fail closed.
 
@@ -41,13 +41,13 @@ The future supervisor integration must perform this sequence while holding the e
 2. Derive the fixed launch envelope, then call `reserve_authorized_systemd_start_attempt()` with the exact command and verified `ExecutionAuthorization`. The raw append method is private.
 3. Persist the transaction atomically, then read it back and verify the exact attempt record and plan digest.
 4. Construct the matching `StartIntent`; only after the read-back succeeds may its prepared capability be submitted to the systemd adapter.
-5. After launch, capture the exact process identity and set its `systemd_attempt_id` to the reserved attempt. The journal will reject a missing, foreign, or purpose-confused join, and the process must match the committed gate/payload/argv/environment envelope.
+5. After launch, capture the exact process identity and systemd invocation via PIDFD, set both `systemd_attempt_id` and `systemd_invocation_id`, then persist and read back the worker identity before releasing the one-time gate token. The journal rejects missing, foreign, malformed or purpose-confused identity joins, and the process must match the committed gate/payload/argv/environment envelope.
 
 The authorization-aware method only reserves an in-memory record after a fresh profile observation. Calling it is not itself evidence of persistence or permission to issue `StartUnit`. Do not submit until the durable write and independent read-back have succeeded. Invocation validation now takes the loaded `ConfigTransaction` object, locates the attempt record there, and verifies that the exact worker identity is also present in that transaction; it no longer accepts a free-standing expected-attempt string.
 
 ## Evidence boundary and remaining work
 
-This v1 record binds the transaction, attempt, purpose, canonical unit, plan digest and exact worker launch envelope. The production caller must still prove that the envelope is the command selected by the verified ChangePlan and ExecutionAuthorization before reservation; the envelope is an execution identity commitment, not an authorization credential. The systemd `InvocationID`, StartUnit reply, JobRemoved signal, worker process receipt and fresh NixOS runtime/profile observations are not yet persisted as one append-only event history by this change.
+This v1 record binds the transaction, attempt, purpose, canonical unit, plan digest and exact worker launch envelope. The production caller must still prove that the envelope is the command selected by the verified ChangePlan and ExecutionAuthorization before reservation; the envelope is an execution identity commitment, not an authorization credential. The systemd `InvocationID` is now persisted alongside the worker identity in v10. The StartUnit reply, JobRemoved signal, process exit receipt and fresh NixOS runtime/profile observations are still not persisted as one append-only, ordered event history by this change; they remain separate evidence gates that the future runner must join.
 
 A start intent that exists without conclusive later evidence remains unresolved. Absence of a worker receipt, unit, or JobRemoved signal is not proof that no external action occurred.
 
@@ -83,7 +83,7 @@ References: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop
 ## Qualification
 
 The source adds tests for:
-- v7/v8-to-v9 loading without fabricated attempt identities, with legacy v8 attempts kept audit-only;
+- v7/v8/v9-to-v10 loading without fabricated attempt or InvocationID identities, with v8 attempts and v9 worker receipts missing InvocationIDs kept audit-only;
 - exact worker launch-envelope persistence and read-back;
 - fixed-environment enforcement (no caller-selected `PATH` / loader / Nix config);
 - separate exact command checks for profile selection and closure activation;
