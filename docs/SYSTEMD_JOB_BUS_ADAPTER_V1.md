@@ -28,6 +28,12 @@ StartIntent → PreparedStartIntent → SubscribedStart → SubmittedStart → P
 
 This chain constrains in-process call order. It is not a security boundary: the persistence callbacks must actually write the intended journal records, and persisted evidence still requires the repository's integrity, identity and authorization checks.
 
+## PIDFD-bound invocation observation
+
+The crate-private `observe_worker_invocation_by_pidfd()` helper first reads the kernel `Pid:` field from `/proc/self/fdinfo/<fd>` and requires it to equal the expected worker PID; it then performs a read-only `GetUnitByPIDFD` request using a zvariant UNIX_FD wrapper, queries the returned unit object's `Id` and `InvocationID` properties and its Service `MainPID`, and delegates the field-level consistency checks to the pure evidence layer. This prevents a pidfd for an auxiliary process in the same unit from being substituted.
+
+This helper does not create a pidfd, persist the evidence, acquire the transaction lock, or wire itself into the transaction supervisor. It must be called with a pidfd for the exact live process and independently trusted transaction/attempt/purpose/PID inputs. If systemd does not implement `GetUnitByPIDFD` (version < 253), the caller must hold; it must not substitute a PID-only lookup.
+
 ## Important recovery limits
 
 - StartUnit may have been accepted even when the method reply is lost. The adapter emits Unknown and must not resubmit that attempt. If the existing signal stream remains live, a matching JobRemoved event is retained with HoldForReconciliation; it is supplemental evidence, not a substitute for the lost direct reply.
