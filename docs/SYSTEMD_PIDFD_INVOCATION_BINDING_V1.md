@@ -10,7 +10,6 @@ The systemd Manager D-Bus API exposes:
 
 - `GetUnitByPIDFD(h pidfd) -> (o unit, s unit_id, ay invocation_id)`
 - A unit `InvocationID` property represented as a 16-byte `ay` value.
-- A service `MainPID` property.
 
 `GetUnitByPIDFD()` was added in systemd 253. The API documentation explicitly contrasts it with PID-only `GetUnitByPID()`: using a pidfd is safer because UNIX PIDs can be recycled. See the [systemd 262 Manager API](https://www.freedesktop.org/software/systemd/man/262/org.freedesktop.systemd1.html), especially the Manager methods, Unit properties and version history. The [systemd InvocationID documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd-id128.html) describes it as the identifier for the current service invocation.
 
@@ -24,12 +23,14 @@ The proposed capture path is:
 2. Independently resolve the expected transaction ID, attempt ID, purpose, canonical unit name and worker PID. Do not derive these expected values from the evidence record being checked.
 3. Validate the existing worker PID/boot-ID/start-time tuple and obtain a pidfd for that exact live process.
 4. Call `Manager.GetUnitByPIDFD(pidfd)`. Preserve the returned unit object path, primary unit ID and 16-byte invocation ID.
-5. Read `Id`, `InvocationID` and `MainPID` from the returned unit object.
-6. Require the returned unit ID and unit `Id` to equal the expected canonical unit name; require both invocation-ID byte arrays to be identical and nonzero; require `MainPID` to equal the expected journal-owned worker PID.
+5. Read `Id` and `InvocationID` from the returned Unit object.
+6. Require the returned unit ID and unit `Id` to equal the expected canonical unit name; require both invocation-ID byte arrays to be identical and nonzero.
 7. Persist the resulting `SystemdWorkerInvocationEvidence` in the same append-only transaction-attempt record as the start intent, manager reply and existing worker identity.
 8. Before accepting the record after restart, validate the complete record against the independently loaded journal/authorization/worker identity. The helper in this PR does not perform that persistence or loading itself.
 
 The duplicate InvocationID read is deliberate. A unit could restart between the pidfd lookup and the property query. If the returned invocation ID and the unit's current property differ, the observer has raced a restart and must hold rather than bind the worker to a different unit invocation.
+
+The `Pid:` field in `/proc/self/fdinfo/<fd>` is expressed in the PID namespace of the procfs instance, not necessarily the PID namespace used by the systemd manager. It is therefore checked only against the worker PID recorded by Nixward in that same caller namespace. Nixward deliberately does not compare that numeric PID with systemd's `MainPID`, which may be reported in the manager's namespace. The PIDFD-based `GetUnitByPIDFD` result itself provides the process-to-unit/invocation association. If fdinfo reports `Pid: 0` because the target is outside the procfs namespace's visible PID hierarchy, the observer fails closed.
 
 ## Evidence record
 
@@ -49,7 +50,6 @@ The PID is not independently sufficient. It is retained as a join key to the exi
 The pure contract rejects:
 
 - a PIDFD-resolved unit different from the canonical attempt unit;
-- a unit `MainPID` different from the expected worker PID;
 - invocation ID values that are not exactly 16 bytes;
 - unset all-zero invocation IDs;
 - disagreement between `GetUnitByPIDFD` and the unit `InvocationID` property;
