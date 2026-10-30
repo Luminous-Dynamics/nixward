@@ -1139,7 +1139,7 @@ impl NixOSExecutor {
         hasher.finalize().to_hex().to_string()
     }
 
-    fn activation_worker_environment_digest() -> String {
+    pub(super) fn activation_worker_environment_digest() -> String {
         Self::environment_digest(Self::activation_worker_environment())
     }
     pub fn new() -> Self {
@@ -1673,7 +1673,7 @@ impl NixOSExecutor {
     }
 
     #[cfg(all(feature = "native", target_os = "linux"))]
-    fn trusted_worker_gate_executable() -> Result<String, String> {
+    pub(super) fn trusted_worker_gate_executable() -> Result<String, String> {
         let current = std::env::current_exe()
             .map_err(|error| format!("failed to resolve current Nixward executable: {error}"))?
             .canonicalize()
