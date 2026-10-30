@@ -55,7 +55,7 @@ pub use config_transaction::{
     ActivationDisposition, CandidateBuildReceipt, ConfigTransaction, ConfigTransactionPhase, FrozenConfigSource,
     ProfileTransitionDisposition, RecoveryObservation, SourceEntryKind, SourceManifestEntry,
     SourceRealizationLease, SourceRealizationLeaseState, SystemdStartAttemptRecord,
-    classify_activation_post_state,
+    SystemdWorkerLaunchEnvelope, classify_activation_post_state,
 };
 #[cfg(feature = "native")]
 pub use config_transaction::NixSourceRealizer;
