@@ -1619,6 +1619,7 @@ impl NixOSExecutor {
         let identity = super::config_transaction::ActivationWorkerIdentity {
             transaction_id: transaction_id.to_string(),
             purpose,
+            systemd_attempt_id: None,
             pid,
             boot_id: boot_after,
             start_time_ticks: start_after,
@@ -4496,6 +4497,7 @@ mod tests {
         let identity = ActivationWorkerIdentity {
             transaction_id: "d".repeat(64),
             purpose: ActivationWorkerPurpose::Activation,
+            systemd_attempt_id: None,
             pid,
             boot_id,
             start_time_ticks,
@@ -4546,6 +4548,7 @@ mod tests {
         let worker = ActivationWorkerIdentity {
             transaction_id: "d".repeat(64),
             purpose: ActivationWorkerPurpose::Activation,
+            systemd_attempt_id: None,
             pid,
             boot_id,
             start_time_ticks,
@@ -4614,6 +4617,7 @@ mod tests {
         let worker = ActivationWorkerIdentity {
             transaction_id: "d".repeat(64),
             purpose: ActivationWorkerPurpose::Activation,
+            systemd_attempt_id: None,
             pid,
             boot_id,
             start_time_ticks,
