@@ -943,6 +943,10 @@ impl ExecutionAuthorization {
                     | ApprovalEvidenceKind::ExecutionIntentAuthority
             )
         );
+        // The original execution consumes the one-shot replay key. A
+        // rollback capability is derived from that already-consumed approval,
+        // so it must retain signer/challenge/subject and execution-intent
+        // bindings without replaying (or carrying) the original key.
         if authority_backed
             && (self.authority_signer_key_id.is_none()
                 || self.authority_challenge_blake3.is_none()
@@ -4918,6 +4922,11 @@ mod tests {
 
         assert!(original.validate_for_recovery(&recovery).is_err(),
             "the original authorization is not itself the rollback command capability");
+
+        let mut missing_replay_key = original.clone();
+        missing_replay_key.authority_replay_key = None;
+        assert!(missing_replay_key.validate_for(&command).is_err(),
+            "an original execution capability must retain its one-shot replay key");
 
         let rollback = original.for_rollback(&recovery).unwrap();
         assert!(rollback.rollback_only);
