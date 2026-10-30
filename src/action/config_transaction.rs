@@ -4265,8 +4265,8 @@ mod tests {
         let transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
         let mut value = serde_json::to_value(&transaction).unwrap();
         let object = value.as_object_mut().unwrap();
-        object.insert("schema".into(), serde_json::Value::String(Self::PREVIOUS_SCHEMA.into()));
-        object.insert("version".into(), serde_json::Value::Number(Self::PREVIOUS_VERSION.into()));
+        object.insert("schema".into(), serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into()));
+        object.insert("version".into(), serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into()));
         object.remove("systemd_start_attempts");
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
