@@ -12,7 +12,7 @@
 //! durable journal interlocks, worker receipt validation, and fresh host-state
 //! verification.
 
-use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose};
+use super::config_transaction::{ActivationWorkerIdentity, ActivationWorkerPurpose, ConfigTransaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -279,38 +279,58 @@ fn validate_encoded_systemd_invocation_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Join PIDFD-bound systemd invocation evidence to the repository's
-/// existing, fully validated activation worker identity.
+/// Join PIDFD-bound systemd invocation evidence to the actual transaction
+/// journal object, not to a caller-supplied attempt string.
 ///
-/// `expected_attempt_id` must come from the independently loaded durable
-/// ConfigTransaction::systemd_start_attempts record. The worker identity must
-/// carry that same attempt ID; ConfigTransaction validates the cross-reference
-/// when the worker identity is journaled or loaded. This function does not
-/// synthesize an attempt ID from either systemd evidence record.
-pub fn validate_systemd_worker_invocation_against_activation_identity(
+/// The transaction must already have been loaded and validated under the
+/// existing transaction interlock. The function verifies that the referenced
+/// attempt is present in that journal, that the exact worker identity is itself
+/// present in the journal, and that both bind to the same transaction, purpose,
+/// unit, attempt ID and PID. It does not independently prove that the journal
+/// bytes are durable; callers must use ConfigTransaction::load after publication
+/// and before manager submission.
+pub fn validate_systemd_worker_invocation_against_transaction(
     evidence: &SystemdWorkerInvocationEvidence,
     intent: &StartIntentEvidence,
-    expected_attempt_id: &str,
+    transaction: &ConfigTransaction,
     worker: &ActivationWorkerIdentity,
 ) -> Result<(), String> {
     worker.validate_identity()?;
-    if worker.systemd_attempt_id.as_deref() != Some(expected_attempt_id) {
-        return Err("activation worker identity does not carry the independently journaled systemd attempt ID".into());
+    if worker.transaction_id != transaction.transaction_id() {
+        return Err("activation worker identity belongs to a different transaction journal".into());
     }
+    if !transaction.activation_worker_identities().contains(worker) {
+        return Err("activation worker identity is not present in the validated transaction journal".into());
+    }
+    let expected_attempt_id = worker.systemd_attempt_id.as_deref()
+        .ok_or_else(|| "activation worker identity has no journal-bound systemd attempt ID".to_string())?;
+    let attempt = transaction.systemd_start_attempts().iter()
+        .find(|record| record.attempt_id == expected_attempt_id)
+        .ok_or_else(|| "activation worker attempt ID is absent from the transaction journal".to_string())?;
+    attempt.validate_against(transaction)?;
     let expected_purpose = TransactionWorkerPurpose::from(worker.purpose);
+    if attempt.purpose != worker.purpose
+        || attempt.transaction_id != worker.transaction_id
+        || attempt.unit_name != intent.unit_name
+    {
+        return Err("transaction journal attempt does not bind the expected worker purpose, transaction and unit".into());
+    }
     validate_start_intent_evidence_against(
         intent,
-        &worker.transaction_id,
-        expected_attempt_id,
+        &attempt.transaction_id,
+        &attempt.attempt_id,
         expected_purpose,
     )?;
     validate_systemd_worker_invocation_evidence_against(
         evidence,
-        &worker.transaction_id,
-        expected_attempt_id,
+        &attempt.transaction_id,
+        &attempt.attempt_id,
         expected_purpose,
         worker.pid,
     )?;
+    if evidence.unit_name != attempt.unit_name {
+        return Err("systemd invocation evidence unit does not match the journaled canonical attempt unit".into());
+    }
     Ok(())
 }
 
