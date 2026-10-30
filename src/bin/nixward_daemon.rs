@@ -1794,18 +1794,59 @@ equivalents of what this daemon does continuously."
     std::process::exit(0);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonCommand {
+    Run,
+    Help,
+    Version,
+}
+
+/// Parse the daemon's intentionally small command surface.
+///
+/// A future privileged worker mode must be added as an explicit enum variant
+/// and dispatch branch. Unknown arguments must never fall through to the normal
+/// long-running daemon: doing so can turn a malformed systemd ExecStart into a
+/// healthy-looking but entirely different process.
+fn parse_daemon_args<I>(args: I) -> Result<DaemonCommand, String>
+where
+    I: IntoIterator<Item = std::ffi::OsString>,
+{
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Ok(DaemonCommand::Run);
+    };
+    if let Some(extra) = args.next() {
+        return Err(format!(
+            "nixward-daemon accepts at most one option; unexpected argument: {}",
+            extra.to_string_lossy()
+        ));
+    }
+
+    let first = first.into_string().map_err(|value| {
+        format!(
+            "nixward-daemon arguments must be valid UTF-8; rejected: {}",
+            value.to_string_lossy()
+        )
+    })?;
+    match first.as_str() {
+        "--help" | "-h" => Ok(DaemonCommand::Help),
+        "--version" | "-V" => Ok(DaemonCommand::Version),
+        _ => Err(format!("unsupported nixward-daemon argument: {first}")),
+    }
+}
+
 fn main() -> ! {
-    // A real gap found while smoke-testing the symthaea-nix -> nixward
-    // rename: this binary had no arg handling whatsoever, so `--help`
-    // silently started the real daemon instead of printing usage.
-    for arg in std::env::args().skip(1) {
-        match arg.as_str() {
-            "--help" | "-h" => print_help_and_exit(),
-            "--version" | "-V" => {
-                println!("nixward-daemon {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
-            _ => {}
+    match parse_daemon_args(std::env::args_os().skip(1)) {
+        Ok(DaemonCommand::Run) => {}
+        Ok(DaemonCommand::Help) => print_help_and_exit(),
+        Ok(DaemonCommand::Version) => {
+            println!("nixward-daemon {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("nixward-daemon: {error}");
+            eprintln!("Try 'nixward-daemon --help' for supported options.");
+            std::process::exit(2);
         }
     }
 
@@ -2237,6 +2278,55 @@ fn main() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn daemon_args(values: &[&str]) -> Vec<std::ffi::OsString> {
+        values.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    #[test]
+    fn daemon_cli_defaults_to_normal_daemon_only_for_empty_arguments() {
+        assert_eq!(
+            parse_daemon_args(Vec::<std::ffi::OsString>::new()),
+            Ok(DaemonCommand::Run)
+        );
+    }
+
+    #[test]
+    fn daemon_cli_accepts_only_explicit_help_and_version_aliases() {
+        for (arguments, expected) in [
+            (&["--help"][..], DaemonCommand::Help),
+            (&["-h"][..], DaemonCommand::Help),
+            (&["--version"][..], DaemonCommand::Version),
+            (&["-V"][..], DaemonCommand::Version),
+        ] {
+            assert_eq!(parse_daemon_args(daemon_args(arguments)), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn daemon_cli_rejects_unknown_future_worker_modes_until_explicitly_wired() {
+        let error = parse_daemon_args(daemon_args(&["systemd-transaction-worker"]))
+            .expect_err("unknown worker mode must not fall through to the ordinary daemon");
+        assert!(error.contains("unsupported"));
+        assert!(error.contains("systemd-transaction-worker"));
+    }
+
+    #[test]
+    fn daemon_cli_rejects_extra_arguments_instead_of_ignoring_them() {
+        let error = parse_daemon_args(daemon_args(&["--help", "unexpected"]))
+            .expect_err("mixed control flags and payload arguments must be rejected");
+        assert!(error.contains("at most one option"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_cli_rejects_non_utf8_arguments() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = parse_daemon_args([std::ffi::OsString::from_vec(vec![0xff])])
+            .expect_err("non-UTF-8 mode names must be rejected");
+        assert!(error.contains("valid UTF-8"));
+    }
 
     fn test_config() -> DaemonConfig {
         DaemonConfig {
