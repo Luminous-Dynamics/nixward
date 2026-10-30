@@ -1837,7 +1837,7 @@ impl NixOSExecutor {
         let envelope = super::config_transaction::SystemdWorkerLaunchEnvelope::new(
             worker_gate,
             executable,
-            args.into_iter().map(String::from).collect(),
+            args,
             Self::activation_worker_environment_digest(),
             expected_current_profile,
         )?;
