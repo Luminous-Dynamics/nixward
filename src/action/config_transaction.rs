@@ -4977,7 +4977,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_worker_identity_serialization_omits_absent_systemd_attempt() {
+    fn legacy_worker_identity_serialization_omits_absent_systemd_fields() {
         let worker = worker_identity_for_test(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
         );
