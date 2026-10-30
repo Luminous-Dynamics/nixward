@@ -1877,9 +1877,12 @@ impl SystemdWorkerLaunchEnvelope {
     pub fn validate(&self) -> Result<(), String> {
         validate_store_backed_executable("worker gate executable", &self.worker_gate_executable)?;
         validate_store_backed_executable("payload executable", &self.payload_executable)?;
+        let total_argument_bytes = self.payload_args.iter().try_fold(0usize, |total, argument| {
+            total.checked_add(argument.len())
+        }).ok_or_else(|| "systemd worker payload argument size overflowed".to_string())?;
         if self.payload_args.len() > 128
             || self.payload_args.iter().any(|argument| argument.contains('\\0'))
-            || self.payload_args.iter().map(String::len).sum::<usize>() > 64 * 1024
+            || total_argument_bytes > 64 * 1024
         {
             return Err("systemd worker payload arguments exceed the canonical limits or contain NUL".into());
         }
@@ -3439,9 +3442,13 @@ impl ConfigTransaction {
                     if attempt.purpose != worker.purpose || attempt.transaction_id != worker.transaction_id {
                         return Err("transaction journal systemd worker conflicts with its write-ahead attempt".into());
                     }
-                    attempt.launch_envelope.as_ref()
-                        .ok_or_else(|| "transaction journal systemd worker has no precommitted launch envelope".to_string())?
-                        .validate_worker_identity(worker)?;
+                    if let Some(envelope) = attempt.launch_envelope.as_ref() {
+                        envelope.validate_worker_identity(worker)?;
+                    }
+                    // A migrated v8 attempt has no launch envelope. Keep its
+                    // already-persisted process receipt readable for audit, but
+                    // the InvocationID validator will refuse to treat it as a
+                    // fully qualified execution contract.
                 }
                 None if transaction.systemd_start_attempts.iter().any(|record| record.purpose == worker.purpose) => {
                     return Err("transaction journal mixes a systemd attempt with an unbound worker identity for the same purpose".into());
@@ -4434,6 +4441,79 @@ mod tests {
         let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(persisted["schema"], ConfigTransaction::SCHEMA);
         assert_eq!(persisted["version"], ConfigTransaction::VERSION);
+    }
+
+    #[test]
+    fn systemd_launch_envelope_rejects_payload_drift_and_path_traversal() {
+        let mut envelope = launch_envelope_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+            "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+        envelope.validate().unwrap();
+
+        let mut changed_argv = envelope.clone();
+        changed_argv.payload_args.push("unexpected-operation".into());
+        assert!(changed_argv.validate().is_err(), "payload argv mutation must invalidate its committed digest");
+
+        let mut traversing_gate = envelope.clone();
+        traversing_gate.worker_gate_executable =
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/../bin/evil".into();
+        assert!(traversing_gate.validate().is_err(), "gate path traversal must fail closed");
+
+        let mut changed_environment = envelope.clone();
+        changed_environment.environment_digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into();
+        let mut worker = worker_identity_for_test(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
+        );
+        assert!(changed_environment.validate_worker_identity(&worker).is_err());
+        worker.environment_digest = changed_environment.environment_digest.clone();
+        assert!(changed_environment.validate_worker_identity(&worker).is_err(),
+            "changing both the envelope and worker must still not bypass the journal's precommitted digest");
+    }
+
+    #[test]
+    fn transaction_journal_upgrades_v8_attempt_without_launch_envelope_for_audit_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_root = dir.path().join("source");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
+        let mut transaction = ConfigTransaction::new(
+            [1; 32],
+            [2; 32],
+            decode_digest(&source.root_digest).unwrap(),
+        );
+        transaction.frozen_source = Some(source);
+        transaction.phase = ConfigTransactionPhase::ActivationStarted;
+        transaction.reserve_systemd_start_attempt(
+            "attempt-v8-without-launch",
+            ActivationWorkerPurpose::Activation,
+            launch_envelope_for_test(
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
+                "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            ),
+        ).unwrap();
+
+        let mut value = serde_json::to_value(&transaction).unwrap();
+        value["schema"] = serde_json::Value::String(ConfigTransaction::PREVIOUS_SCHEMA.into());
+        value["version"] = serde_json::Value::Number(ConfigTransaction::PREVIOUS_VERSION.into());
+        value["systemd_start_attempts"][0].as_object_mut().unwrap().remove("launch_envelope");
+        let path = dir.path().join("transaction-v8.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let mut loaded = ConfigTransaction::load(&path).unwrap();
+        assert_eq!(loaded.schema, ConfigTransaction::SCHEMA);
+        assert_eq!(loaded.systemd_start_attempts().len(), 1);
+        assert!(loaded.systemd_start_attempts()[0].launch_envelope.is_none());
+
+        let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
+        let mut worker = worker_identity_for_test(executable);
+        worker.transaction_id = loaded.transaction_id().to_string();
+        worker.systemd_attempt_id = Some("attempt-v8-without-launch".into());
+        assert!(loaded.bind_activation_worker_identity(worker).is_err(),
+            "a migrated v8 attempt must not accept a new worker without its precommitted launch envelope");
     }
 
     #[test]
