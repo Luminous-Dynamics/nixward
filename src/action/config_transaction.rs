@@ -3632,7 +3632,6 @@ mod tests {
     fn launch_envelope_for_test(
         worker_gate_executable: &str,
         payload_executable: &str,
-        _environment_digest: &str,
     ) -> SystemdWorkerLaunchEnvelope {
         SystemdWorkerLaunchEnvelope::new(
             worker_gate_executable,
@@ -4549,7 +4548,6 @@ mod tests {
         let envelope = launch_envelope_for_test(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
             "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         );
         let command = NixOSCommand::ActivateSystemClosure {
             store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration".into(),
@@ -4617,7 +4615,6 @@ mod tests {
         let envelope = launch_envelope_for_test(
             "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
             "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         );
         envelope.validate().unwrap();
 
@@ -4679,8 +4676,7 @@ mod tests {
             launch_envelope_for_test(
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
                 "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            ),
+                ),
         ).unwrap();
 
         let mut value = serde_json::to_value(&transaction).unwrap();
@@ -4727,8 +4723,7 @@ mod tests {
             launch_envelope_for_test(
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixward-worker-gate/bin/nixward-worker-gate",
                 "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-switch-to-configuration/bin/switch-to-configuration",
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            ),
+                ),
         ).is_err(), "a loaded transaction must reconcile before any new systemd start");
     }
 
@@ -4743,8 +4738,7 @@ mod tests {
                 launch_envelope_for_test(
                     "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
                     "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                ),
+                        ),
             )
             .unwrap();
         assert_eq!(intent.transaction_id, transaction.transaction_id);
@@ -4765,8 +4759,7 @@ mod tests {
             launch_envelope_for_test(
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            ),
+                ),
         ).is_err(), "a different ID must not replay an unresolved purpose");
         assert!(transaction.reserve_systemd_start_attempt(
             "attempt-0001",
@@ -4774,8 +4767,7 @@ mod tests {
             launch_envelope_for_test(
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
                 "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            ),
+                ),
         ).is_err(), "purpose/phase mismatch must fail closed");
     }
 
@@ -4809,8 +4801,7 @@ mod tests {
                 launch_envelope_for_test(
                     "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
                     "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration",
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                ),
+                        ),
             )
             .unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
@@ -4845,8 +4836,7 @@ mod tests {
             launch_envelope_for_test(
                 executable,
                 executable,
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            ),
+                ),
         ).unwrap();
         let executable = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-switch-to-configuration/bin/switch-to-configuration";
         let mut identity = worker_identity_for_test(executable);
