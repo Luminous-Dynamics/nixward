@@ -13,21 +13,26 @@
 //! calling submit_start, then persist the returned StartUnit reply before
 //! waiting for the completion signal.
 
+use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{Fd, OwnedObjectPath};
 use zbus::{Connection, Proxy, proxy::SignalStream};
 
 use super::systemd_job_evidence::{
     JobRemovedEvidence, JobRemovedResult, ManagerStartReply, PersistedStart,
     PreparedStartIntent, StartJobCorrelation, StartReplyDisposition, SubmittedStart,
-    SystemdStartEvidence, classify_start_reply, correlate_job_removed,
+    SystemdStartEvidence, SystemdWorkerInvocationEvidence, TransactionWorkerPurpose,
+    StartIntentEvidence, capture_systemd_worker_invocation_evidence,
+    classify_start_reply, correlate_job_removed,
 };
 
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
 const SYSTEMD_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
+const SYSTEMD_UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
+const SYSTEMD_SERVICE_INTERFACE: &str = "org.freedesktop.systemd1.Service";
 
 /// Start intent plus the live JobRemoved subscription and exact direct reply.
 ///
@@ -106,6 +111,99 @@ pub async fn submit_start(
             }
         })
         .await)
+}
+
+/// Resolve a live pidfd to its exact systemd service invocation.
+///
+/// This sends the caller's borrowed pidfd as a D-Bus UNIX_FD (`h`) argument
+/// to Manager.GetUnitByPIDFD. The returned InvocationID is then independently
+/// compared with the unit object's InvocationID property, while the Service
+/// object's MainPID is compared with the journal-owned worker PID.
+///
+/// The function has no mutation side effects. It does not persist the returned
+/// record or authorize a transaction; the caller must hold the existing
+/// transaction interlock and publish the evidence in the unified attempt
+/// journal. A Manager.UnknownMethod/unsupported response (systemd < 253) is an
+/// explicit error and must be handled as a safe hold, never as permission to
+/// fall back to PID-only GetUnitByPID.
+pub(crate) async fn observe_worker_invocation_by_pidfd(
+    intent: &StartIntentEvidence,
+    expected_transaction_id: &str,
+    expected_attempt_id: &str,
+    expected_purpose: TransactionWorkerPurpose,
+    pidfd: BorrowedFd<'_>,
+    expected_worker_pid: u32,
+) -> Result<SystemdWorkerInvocationEvidence, String> {
+    let connection = Connection::system()
+        .await
+        .map_err(|error| format!("failed to connect to system bus for PIDFD observation: {error}"))?;
+    let manager = Proxy::new(
+        &connection,
+        SYSTEMD_SERVICE,
+        SYSTEMD_PATH,
+        SYSTEMD_MANAGER_INTERFACE,
+    )
+    .await
+    .map_err(|error| format!("failed to create systemd manager proxy for PIDFD observation: {error}"))?;
+
+    // zvariant::Fd preserves the D-Bus UNIX_FD type and transfers the open
+    // descriptor out-of-band. Do not serialize the raw integer as a u32 PID.
+    let fd_argument = Fd::from(pidfd);
+    let (unit_path, pidfd_unit_id, pidfd_invocation_id):
+        (OwnedObjectPath, String, Vec<u8>) = manager
+        .call("GetUnitByPIDFD", &(fd_argument,))
+        .await
+        .map_err(|error| {
+            format!(
+                "systemd Manager.GetUnitByPIDFD failed (requires systemd 253+; do not downgrade to PID-only lookup): {error}"
+            )
+        })?;
+
+    // InvocationID is a Unit property; MainPID belongs to Service. Query them
+    // through their respective interfaces on the exact path returned by the
+    // PIDFD lookup, not by resolving the unit name a second time.
+    let unit = Proxy::new(
+        &connection,
+        SYSTEMD_SERVICE,
+        unit_path.as_str(),
+        SYSTEMD_UNIT_INTERFACE,
+    )
+    .await
+    .map_err(|error| format!("failed to create unit proxy from PIDFD result: {error}"))?;
+    let unit_property_id: String = unit
+        .get_property("Id")
+        .await
+        .map_err(|error| format!("failed to read PIDFD-resolved unit Id: {error}"))?;
+    let unit_property_invocation_id: Vec<u8> = unit
+        .get_property("InvocationID")
+        .await
+        .map_err(|error| format!("failed to read PIDFD-resolved unit InvocationID: {error}"))?;
+
+    let service = Proxy::new(
+        &connection,
+        SYSTEMD_SERVICE,
+        unit_path.as_str(),
+        SYSTEMD_SERVICE_INTERFACE,
+    )
+    .await
+    .map_err(|error| format!("failed to create service proxy from PIDFD-resolved unit: {error}"))?;
+    let unit_main_pid: u32 = service
+        .get_property("MainPID")
+        .await
+        .map_err(|error| format!("failed to read PIDFD-resolved service MainPID: {error}"))?;
+
+    capture_systemd_worker_invocation_evidence(
+        intent,
+        expected_transaction_id,
+        expected_attempt_id,
+        expected_purpose,
+        &pidfd_unit_id,
+        &unit_property_id,
+        &pidfd_invocation_id,
+        &unit_property_invocation_id,
+        unit_main_pid,
+        expected_worker_pid,
+    )
 }
 
 /// Decide whether signal observation is appropriate after the direct reply.
