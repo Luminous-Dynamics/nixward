@@ -117,6 +117,43 @@
 
         checks.nixward-cli = self.packages.${system}.nixward;
 
+        # Compile and execute the library test suite with the optional systemd
+        # feature enabled. The production package intentionally skips tests
+        # (doCheck = false); without this separate derivation, the zbus adapter
+        # is not even compiled by the normal nixward-cli check.
+        checks.systemd-feature-tests =
+          pkgs.rustPlatform.buildRustPackage {
+            pname = "nixward-systemd-feature-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            # systemd already implies native. Disable implicit defaults so this
+            # check records exactly which optional feature it qualifies.
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "systemd" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "systemd" ];
+
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/systemd-feature-tests-passed"
+            '';
+          };
+
         # Validate the shared supervisor temporal corpus during nix flake check.
         # A separate pure Nix reference model replays each vector, providing a
         # cross-language semantic check without compiling the Rust test binary.
