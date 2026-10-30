@@ -1197,8 +1197,8 @@ mod tests {
                 TransactionWorkerPurpose::Activation
             ).unwrap().journal_evidence();
             let rewritten = StartIntent::new(
-                &format!("{transaction_id}-foreign"),
-                &format!("{attempt_id}-foreign"),
+                format!("{transaction_id}-foreign"),
+                format!("{attempt_id}-foreign"),
                 TransactionWorkerPurpose::RecoveryActivation
             ).unwrap().journal_evidence();
 
