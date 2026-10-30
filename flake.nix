@@ -24,6 +24,10 @@
         rustToolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
         rustChannel = rustToolchainToml.toolchain.channel;
         rustToolchain = pkgs.rust-bin.stable.${rustChannel}.default;
+        rustToolchainPlatform = pkgs.makeRustPlatform {
+          rustc = rustToolchain;
+          cargo = rustToolchain;
+        };
 
         commonBuildInputs = with pkgs; [
           pkg-config
@@ -40,7 +44,7 @@
         ];
 
         mkNixwardPackage = { name, features, binName ? name }:
-          pkgs.rustPlatform.buildRustPackage {
+          rustToolchainPlatform.buildRustPackage {
             pname = name;
             version = "0.1.0";
             src = ./.;
@@ -122,7 +126,7 @@
         # (doCheck = false); without this separate derivation, the zbus adapter
         # is not even compiled by the normal nixward-cli check.
         checks.systemd-feature-tests =
-          pkgs.rustPlatform.buildRustPackage {
+          rustToolchainPlatform.buildRustPackage {
             pname = "nixward-systemd-feature-tests";
             version = "0.1.0";
             src = ./.;
