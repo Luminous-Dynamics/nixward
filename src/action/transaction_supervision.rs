@@ -128,7 +128,7 @@ pub fn decide_reconciliation(
     }
 }
 
-/// Durable progress recorded around a systemd StartTransientUnit request.
+/// Durable progress recorded around a systemd StartUnit request for the fixed static template.
 ///
 /// SubmissionMayHaveOccurred must be persisted before the D-Bus request is sent.
 /// This intentionally means a crash just before send is treated as ambiguous;
@@ -190,9 +190,11 @@ pub enum WorkerStartInvocationRecoveryDecision {
 ///
 /// A matching canonical unit name is only a preliminary observation. For any
 /// attempt whose manager submission may have happened, observation may resume
-/// only after the exact systemd invocation ID has been independently bound to
-/// the expected PIDFD/unit/MainPID identity. Missing, unavailable, conflicting,
-/// or unsupported invocation evidence never becomes an automatic retry.
+/// only after `GetUnitByPIDFD` binds the caller's pidfd to the expected unit and
+/// InvocationID, and the returned unit ID agrees with the unit object's `Id`.
+/// Validate the pidfd's caller-namespace PID independently; never compare it
+/// numerically with systemd's manager-namespace `MainPID`. Missing, unavailable,
+/// conflicting, or unsupported invocation evidence never becomes an automatic retry.
 pub fn decide_worker_start_recovery_with_invocation(
     intent: WorkerStartIntent,
     manager: ManagerUnitObservation,
@@ -277,7 +279,7 @@ pub fn decide_worker_start_recovery_with_invocation(
 ///
 /// None of these outcomes authorizes a system mutation. In particular, a lost
 /// manager response followed by an absent unit requires target-state reconciliation,
-/// not an automatic second StartTransientUnit call.
+/// not an automatic second StartUnit call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerStartRecoveryDecision {
     SubmitInitialStartAfterDurablePreflight,
@@ -293,7 +295,8 @@ pub enum WorkerStartRecoveryDecision {
 /// ambiguous submission: `ObserveExistingMatchingUnit` establishes only a
 /// canonical unit-name match. Callers must additionally use
 /// `decide_worker_start_recovery_with_invocation` with independently validated
-/// PIDFD/unit/MainPID InvocationID evidence before resuming worker observation.
+/// PIDFD, unit-object ID and InvocationID evidence before resuming worker observation.
+/// The pidfd target's caller-namespace PID is not compared numerically with `MainPID`.
 pub fn decide_worker_start_recovery(
     intent: WorkerStartIntent,
     manager: ManagerUnitObservation,
