@@ -4860,7 +4860,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source_root = dir.path().join("source");
         std::fs::create_dir(&source_root).unwrap();
-        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\\n").unwrap();
+        std::fs::write(source_root.join("configuration.nix"), "{ config = {}; }\n").unwrap();
         let source = FrozenConfigSource::capture(&source_root, "configuration.nix").unwrap();
         let mut transaction = ConfigTransaction::new(
             [1; 32],
