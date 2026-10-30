@@ -18,15 +18,16 @@ These layers answer different questions. Passing one does not establish the guar
 
 ## Added property-based tests
 
-The module now uses the repository's existing proptest dev-dependency for five properties, each configured for 512 generated cases (2,560 generated cases per normal run):
+The module now uses the repository's existing proptest dev-dependency for six properties, each configured for 512 generated cases (3,072 generated cases per normal run):
 
 - **One-field job identity mutation:** alter only the job ID, only the object path, or only the unit name. A partial identity collision must hold for reconciliation, never be accepted as completion and never be discarded as wholly unrelated.
 - **Unknown direct reply:** after a lost/unknown StartUnit response, a subsequently presented signal cannot retroactively establish a known acknowledgement. The result remains hold-for-reconciliation.
 - **Non-done and unknown manager results:** canceled, timeout, failed, dependency, skipped, and the forward-compatible unknown result are never classified as completed start jobs.
 - **Recovered intent identity mutation:** independently alter transaction ID, attempt ID, purpose or the derived unit name. Recovered write-ahead evidence is rejected unless all four fields bind to the same canonical attempt identity.
+- **Coherent recovered identity rewrite:** change transaction ID, attempt ID and purpose together, then recompute a valid canonical unit name. The rewritten tuple passes the internal-consistency check but must fail when compared with an independently validated transaction/attempt/purpose anchor.
 - **Canonical naming:** generated non-hex identifiers produce a stable unit name with a fixed prefix and exactly 64 lowercase hexadecimal digest characters, without embedding raw identifiers.
 
-The deterministic cases also cover explicit manager rejection, malformed/non-canonical job paths, failed pre-launch persistence, failed subscription, reply persistence failure, unknown reply, numeric ID/path inconsistency, and exact job/path/unit correlation. The live adapter installs a unit-filtered JobRemoved match before Manager.Subscribe() and StartUnit. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
+The deterministic cases also cover explicit manager rejection, malformed/non-canonical job paths, failed pre-launch persistence, failed subscription, reply persistence failure, unknown reply, numeric ID/path inconsistency, and exact job/path/unit correlation. The live adapter installs a unit-filtered JobRemoved match before Manager.Subscribe() and StartUnit. The anchor validator does not authenticate the journal or authorize the attempt; its expected identity must come from an independently validated durable transaction/authorization context. Property cases are mutation tests over a pure model; they are not live D-Bus tests and do not prove that the data supplied by a real adapter is authentic.
 
 ## Qualification corpus for the eventual adapter
 

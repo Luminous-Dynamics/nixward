@@ -175,6 +175,37 @@ pub fn validate_start_intent_evidence(
     Ok(())
 }
 
+/// Validate recovered intent against an identity obtained independently from
+/// the already-validated transaction/authorization context.
+///
+/// The expected tuple must not be reconstructed from `evidence`: doing so
+/// would let a coherently rewritten transaction/attempt/purpose/unit tuple
+/// validate itself. This check establishes identity binding, not journal
+/// integrity or authorization; callers must validate those sources first.
+pub fn validate_start_intent_evidence_against(
+    evidence: &StartIntentEvidence,
+    expected_transaction_id: &str,
+    expected_attempt_id: &str,
+    expected_purpose: TransactionWorkerPurpose,
+) -> Result<(), String> {
+    validate_start_intent_evidence(evidence)?;
+    let expected_unit = canonical_attempt_unit_name(
+        expected_transaction_id,
+        expected_attempt_id,
+        expected_purpose,
+    )?;
+    if evidence.transaction_id != expected_transaction_id
+        || evidence.attempt_id != expected_attempt_id
+        || evidence.purpose != expected_purpose
+        || evidence.unit_name != expected_unit
+    {
+        return Err(
+            "recovered start intent does not match the independently validated transaction/attempt identity".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Non-serializable authority to proceed past the pre-launch write-ahead
 /// barrier. Its constructor is private and only persistence success returns it.
 #[derive(Debug, PartialEq, Eq)]
@@ -1011,6 +1042,43 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn coherent_rewrite_of_recovered_identity_fails_independent_binding() {
+        let trusted = StartIntent::new(
+            "tx-trusted",
+            "attempt-trusted",
+            TransactionWorkerPurpose::Activation,
+        )
+        .unwrap()
+        .journal_evidence();
+
+        let rewritten = StartIntent::new(
+            "tx-foreign",
+            "attempt-foreign",
+            TransactionWorkerPurpose::RecoveryActivation,
+        )
+        .unwrap()
+        .journal_evidence();
+
+        // The rewritten tuple is internally canonical and therefore passes
+        // the structural check. It must not pass the independent anchor check.
+        assert_eq!(validate_start_intent_evidence(&rewritten), Ok(()));
+        assert!(validate_start_intent_evidence_against(
+            &rewritten,
+            &trusted.transaction_id,
+            &trusted.attempt_id,
+            trusted.purpose,
+        )
+        .is_err());
+        assert!(validate_start_intent_evidence_against(
+            &trusted,
+            &trusted.transaction_id,
+            &trusted.attempt_id,
+            trusted.purpose,
+        )
+        .is_ok());
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -1115,5 +1183,33 @@ mod tests {
             prop_assert!(!digest.contains(transaction_id.as_str()));
             prop_assert!(!digest.contains(attempt_id.as_str()));
         }
+        
+        /// A canonical, coherently rewritten tuple must still match an
+        /// independently sourced transaction/attempt/purpose anchor.
+        #[test]
+        fn coherent_recovered_identity_rewrite_fails_anchor_binding(
+            transaction_id in "[a-z0-9_-]{1,32}",
+            attempt_id in "[a-z0-9_-]{1,32}"
+        ) {
+            let trusted = StartIntent::new(
+                &transaction_id,
+                &attempt_id,
+                TransactionWorkerPurpose::Activation
+            ).unwrap().journal_evidence();
+            let rewritten = StartIntent::new(
+                format!("{transaction_id}-foreign"),
+                format!("{attempt_id}-foreign"),
+                TransactionWorkerPurpose::RecoveryActivation
+            ).unwrap().journal_evidence();
+
+            prop_assert_eq!(validate_start_intent_evidence(&rewritten), Ok(()));
+            prop_assert!(validate_start_intent_evidence_against(
+                &rewritten,
+                &trusted.transaction_id,
+                &trusted.attempt_id,
+                trusted.purpose
+            ).is_err());
+        }
+
     }
 }
