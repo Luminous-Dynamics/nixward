@@ -1307,7 +1307,7 @@ mod tests {
     #[test]
     fn systemd_invocation_evidence_joins_the_loaded_transaction_and_worker_identity() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
-        transaction.phase = super::super::config_transaction::ConfigTransactionPhase::ActivationStarted;
+        transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
             .reserve_systemd_start_attempt("attempt-joined-0001", ActivationWorkerPurpose::Activation)
             .unwrap();
@@ -1348,7 +1348,7 @@ mod tests {
     #[test]
     fn systemd_invocation_join_rejects_unjournaled_attempt_and_worker_drift() {
         let mut transaction = ConfigTransaction::new([1; 32], [2; 32], [3; 32]);
-        transaction.phase = super::super::config_transaction::ConfigTransactionPhase::ActivationStarted;
+        transaction.set_phase_for_test(super::super::config_transaction::ConfigTransactionPhase::ActivationStarted);
         let intent = transaction
             .reserve_systemd_start_attempt("attempt-joined-0002", ActivationWorkerPurpose::Activation)
             .unwrap();
