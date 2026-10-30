@@ -3052,6 +3052,10 @@ impl ConfigTransaction {
         authorization: &ExecutionAuthorization,
         expected_current_profile: &str,
     ) -> Result<super::systemd_job_evidence::StartIntentEvidence, String> {
+        let expected_gate = super::executor::NixOSExecutor::trusted_worker_gate_executable()?;
+        if launch_envelope.worker_gate_executable != expected_gate {
+            return Err("systemd launch envelope does not name this Nixward package's trusted worker gate".into());
+        }
         match purpose {
             ActivationWorkerPurpose::ProfileTransition => {
                 authorization.validate_for(command)?;
