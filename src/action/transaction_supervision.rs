@@ -236,6 +236,14 @@ pub fn decide_worker_start_recovery_with_invocation(
                     WorkerStartInvocationRecoveryDecision::HoldOnInvocationIdentityConflict
                 }
                 ManagerInvocationObservation::NotQueried
+                    if intent == WorkerStartIntent::UnitInvocationIdentityPersisted =>
+                {
+                    // The canonical name lookup can miss an unloaded unit. Use
+                    // the persisted InvocationID lookup before concluding it
+                    // is absent and reconciling the host.
+                    WorkerStartInvocationRecoveryDecision::QueryUnitInvocationIdentity
+                }
+                ManagerInvocationObservation::NotQueried
                 | ManagerInvocationObservation::Missing
                 | ManagerInvocationObservation::Unavailable => {
                     WorkerStartInvocationRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
@@ -446,6 +454,26 @@ mod tests {
                 assert_eq!(actual, expected, "unsafe start-recovery result for {intent:?} × {manager:?}");
             }
         }
+    }
+
+    #[test]
+    fn persisted_invocation_is_queried_even_when_canonical_unit_lookup_is_absent() {
+        assert_eq!(
+            decide_worker_start_recovery_with_invocation(
+                WorkerStartIntent::UnitInvocationIdentityPersisted,
+                ManagerUnitObservation::Absent,
+                ManagerInvocationObservation::NotQueried,
+            ),
+            WorkerStartInvocationRecoveryDecision::QueryUnitInvocationIdentity
+        );
+        assert_eq!(
+            decide_worker_start_recovery_with_invocation(
+                WorkerStartIntent::SubmissionMayHaveOccurred,
+                ManagerUnitObservation::Absent,
+                ManagerInvocationObservation::NotQueried,
+            ),
+            WorkerStartInvocationRecoveryDecision::ReconcileTargetBeforeAnyNewAttempt
+        );
     }
 
     #[test]
