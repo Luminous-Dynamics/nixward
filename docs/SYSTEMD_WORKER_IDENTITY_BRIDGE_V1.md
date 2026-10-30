@@ -27,14 +27,14 @@ The exhaustive `From` implementations make a future enum addition a compile-time
 
 ## Join validation
 
-`validate_systemd_worker_invocation_against_activation_identity()`:
+`validate_systemd_worker_invocation_against_transaction()`:
 
-1. Runs the existing `ActivationWorkerIdentity::validate_identity()`, including its process boot/start-time and executable/argv/environment checks.
-2. Maps the existing worker purpose to the systemd evidence purpose.
-3. Validates the recovered `StartIntentEvidence` against the worker's transaction and purpose plus an independently supplied `expected_attempt_id`.
-4. Validates the systemd invocation evidence against the same transaction, attempt, purpose and exact worker PID.
+1. Validates the process identity, including boot/start-time and executable/argv/environment bindings.
+2. Requires the exact worker identity to be present in the supplied `ConfigTransaction` object.
+3. Locates the worker's attempt ID in that same transaction's `systemd_start_attempts` collection and validates the record against the transaction ID, plan digest, canonical unit and current lifecycle phase.
+4. Compares the `StartIntentEvidence`, systemd `InvocationID`, purpose, unit and exact worker PID against the journaled record.
 
-The expected attempt ID must come from the independently loaded durable attempt record. This helper never infers it from the systemd evidence or the process receipt. The older `ActivationWorkerIdentity` schema remains unchanged; adding attempt ID, unit name and InvocationID to one authoritative versioned attempt record is still part of Issue #96.
+The validator no longer accepts a free-standing expected-attempt string. Its transaction argument must be the validated journal object obtained after publication/read-back under the existing interlock. The worker's optional `systemd_attempt_id` is omitted from serialization when absent, preserving the legacy v7 direct-spawn identity wire shape and its worker-observation digest.
 
 ## Evidence limits
 
@@ -49,4 +49,4 @@ It does not:
 - validate the process-exit receipt;
 - prove NixOS runtime/profile post-state.
 
-The live PIDFD capture must still verify `GetUnitByPIDFD`, the returned unit ID, the unit object's `Id`/ `InvocationID`, and `MainPID`. Recovery must apply the invocation-aware decision contract before resuming observation.
+The live PIDFD capture must still verify `GetUnitByPIDFD`, the returned unit ID, the unit object's `Id` and `InvocationID`, and the caller-namespace pidfd target identity. Do not compare that PID numerically with systemd's manager-namespace `MainPID`: those values are not namespace-invariant. Recovery must apply the invocation-aware decision contract before resuming observation.
