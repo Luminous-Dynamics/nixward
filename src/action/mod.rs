@@ -33,7 +33,11 @@ pub mod systemd_job_evidence;
 #[allow(dead_code)]
 #[cfg(feature = "systemd")]
 pub(crate) mod systemd_job_bus;
+#[allow(dead_code)]
 pub(crate) mod supervisor_admission;
+#[cfg(feature = "native")]
+#[allow(dead_code)]
+pub(crate) mod supervisor_admission_store;
 pub mod transaction_supervision;
 pub mod transaction_supervision_trace;
 pub mod worker_environment;
