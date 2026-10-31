@@ -187,6 +187,26 @@ pub struct RecoveryEvidence {
     pub machine_binding_digest: String,
     pub recovery_attempt_id: String,
     pub authorization_digest: String,
+    /// The recovery attempt's own systemd job and process attribution.
+    pub job_id: u32,
+    pub job_object_path: String,
+    pub unit_name: String,
+    pub job_result: String,
+    pub manager_boot_id: String,
+    pub job_new_at_ns: u64,
+    pub job_removed_at_ns: u64,
+    pub invocation_id: String,
+    pub pid: u32,
+    pub process_start_ticks: u64,
+    pub pidfd_mapped_unit_id: String,
+    pub pidfd_mapped_invocation_id: String,
+    pub identity_observed_at_ns: u64,
+    pub identity_persisted_at_ns: u64,
+    pub payload_released_at_ns: u64,
+    pub payload_release_persisted_at_ns: u64,
+    pub worker_exited_at_ns: u64,
+    pub receipt_persisted_at_ns: u64,
+    pub unit_snapshot: UnitSnapshot,
     pub receipt_digest: String,
     pub exit_code: i32,
     pub completed_at_ns: u64,
@@ -631,9 +651,35 @@ fn validate_recovery(e: &SystemdExecutionEvidence, job: &CorrelatedJob, f: &mut 
         || !is_digest(&recovery.authorization_digest)
         || !is_digest(&recovery.receipt_digest)
         || recovery.exit_code != 0
+        || recovery.job_id == 0
+        || !recovery.job_object_path.starts_with("/org/freedesktop/systemd1/job/")
+        || !nonempty(&recovery.unit_name)
+        || recovery.job_result != "done"
+        || recovery.manager_boot_id != e.binding.kernel_boot_id
+        || !nonempty(&recovery.invocation_id)
+        || recovery.pid == 0
+        || recovery.process_start_ticks == 0
+        || recovery.pidfd_mapped_unit_id != recovery.unit_name
+        || recovery.pidfd_mapped_invocation_id != recovery.invocation_id
+        || recovery.job_new_at_ns <= job.job_removed_at_ns
+        || recovery.job_removed_at_ns <= recovery.job_new_at_ns
+        || recovery.identity_observed_at_ns < recovery.job_new_at_ns
+        || recovery.identity_observed_at_ns >= recovery.worker_exited_at_ns
+        || recovery.identity_persisted_at_ns < recovery.identity_observed_at_ns
+        || recovery.payload_released_at_ns <= recovery.identity_persisted_at_ns
+        || recovery.payload_release_persisted_at_ns < recovery.payload_released_at_ns
+        || recovery.worker_exited_at_ns <= recovery.payload_release_persisted_at_ns
+        || recovery.job_removed_at_ns < recovery.worker_exited_at_ns
+        || recovery.receipt_persisted_at_ns < recovery.worker_exited_at_ns
+        || recovery.completed_at_ns < recovery.receipt_persisted_at_ns
         || recovery.completed_at_ns <= job.job_removed_at_ns
+        || recovery.unit_snapshot.unit_name != recovery.unit_name
+        || recovery.unit_snapshot.invocation_id != recovery.invocation_id
+        || recovery.unit_snapshot.manager_boot_id != e.binding.kernel_boot_id
+        || recovery.unit_snapshot.observed_at_ns <= recovery.job_removed_at_ns
+        || recovery.unit_snapshot.result != "success"
     {
-        f.violation("recovery authorization, attempt, receipt, exit status or timestamp is invalid");
+        f.violation("recovery authorization, own job/worker attribution, receipt, exit status or timestamp is invalid");
         return false;
     }
     let predecessor = &e.plan.predecessor_store_path;
@@ -944,6 +990,48 @@ mod tests {
         value["unexpected_trust_me"] = serde_json::json!(true);
         assert!(evaluate_json(&serde_json::to_string(&value).unwrap()).is_err());
     }
+
+    #[test]
+    fn recovery_without_its_own_worker_attribution_is_not_verified() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.manager_events[1].result = Some("failed".into());
+        e.process_receipt.as_mut().unwrap().exit_code = 1;
+        e.unit_snapshot.as_mut().unwrap().result = "exit-code".into();
+        let mut recovery = RecoveryEvidence {
+            authorized: true, transaction_id: "txn-1".into(), original_attempt_id: "attempt-1".into(),
+            admission_commit_id: "commit-1".into(), plan_digest: digest('3'), machine_binding_digest: digest('4'),
+            recovery_attempt_id: "recovery-attempt-2".into(), authorization_digest: digest('6'),
+            job_id: 0, job_object_path: String::new(), unit_name: String::new(), job_result: "done".into(),
+            manager_boot_id: "boot-id-001".into(), job_new_at_ns: 232, job_removed_at_ns: 255,
+            invocation_id: String::new(), pid: 0, process_start_ticks: 0,
+            pidfd_mapped_unit_id: String::new(), pidfd_mapped_invocation_id: String::new(),
+            identity_observed_at_ns: 233, identity_persisted_at_ns: 234,
+            payload_released_at_ns: 235, payload_release_persisted_at_ns: 236,
+            worker_exited_at_ns: 250, receipt_persisted_at_ns: 260,
+            unit_snapshot: UnitSnapshot {
+                unit_name: "nixward-recovery@attempt-2.service".into(), invocation_id: "recovery-invocation-88".into(),
+                manager_boot_id: "boot-id-001".into(), observed_at_ns: 261, active_state: "inactive".into(),
+                sub_state: "dead".into(), result: "success".into(),
+            },
+            receipt_digest: digest('7'), exit_code: 0, completed_at_ns: 270,
+        };
+        recovery.job_new_at_ns = 232;
+        e.recovery = Some(recovery);
+        let predecessor = e.plan.predecessor_store_path.clone();
+        let state = e.post_state.as_mut().unwrap();
+        state.selected_profile_store_path = predecessor.clone();
+        state.running_system_store_path = predecessor.clone();
+        state.boot_default_store_path = predecessor.clone();
+        state.observed_at_ns = 280;
+        for item in &mut e.health_observations {
+            item.target_store_path = predecessor.clone();
+            item.observed_at_ns = 290;
+        }
+        let result = eval(&e);
+        assert_eq!(result.classification, TerminalClassification::ReconciliationRequired);
+        assert!(result.violations.iter().any(|item| item.contains("own job/worker attribution")));
+    }
+
     #[test]
     fn negative_job_result_requires_authorized_and_observed_recovery() {
         let mut e = valid_evidence(NixosOperation::Switch);
@@ -954,7 +1042,22 @@ mod tests {
             authorized: true, transaction_id: "txn-1".into(), original_attempt_id: "attempt-1".into(),
             admission_commit_id: "commit-1".into(), plan_digest: digest('3'), machine_binding_digest: digest('4'),
             recovery_attempt_id: "recovery-attempt-2".into(), authorization_digest: digest('6'),
-            receipt_digest: digest('7'), exit_code: 0, completed_at_ns: 230,
+            job_id: 88, job_object_path: "/org/freedesktop/systemd1/job/88".into(),
+            unit_name: "nixward-recovery@attempt-2.service".into(), job_result: "done".into(),
+            manager_boot_id: "boot-id-001".into(), job_new_at_ns: 232, job_removed_at_ns: 255,
+            invocation_id: "recovery-invocation-88".into(), pid: 881, process_start_ticks: 9901,
+            pidfd_mapped_unit_id: "nixward-recovery@attempt-2.service".into(),
+            pidfd_mapped_invocation_id: "recovery-invocation-88".into(),
+            identity_observed_at_ns: 233, identity_persisted_at_ns: 234,
+            payload_released_at_ns: 235, payload_release_persisted_at_ns: 236,
+            worker_exited_at_ns: 250, receipt_persisted_at_ns: 260,
+            unit_snapshot: UnitSnapshot {
+                unit_name: "nixward-recovery@attempt-2.service".into(),
+                invocation_id: "recovery-invocation-88".into(), manager_boot_id: "boot-id-001".into(),
+                observed_at_ns: 261, active_state: "inactive".into(), sub_state: "dead".into(),
+                result: "success".into(),
+            },
+            receipt_digest: digest('7'), exit_code: 0, completed_at_ns: 270,
         });
         let predecessor = e.plan.predecessor_store_path.clone();
         let state = e.post_state.as_mut().unwrap();
