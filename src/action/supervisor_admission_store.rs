@@ -526,6 +526,8 @@ pub(crate) enum AdmissionStoreError {
     ReleasePolicyDecisionRequired,
     #[error("policy release decision cannot downgrade stop/recovery to preserve")]
     ReleasePolicyDecisionDowngrade,
+    #[error("a newly revoked or no-longer-authorized signer cannot preserve an unreleased barrier")]
+    ReleaseSignerRevoked,
     #[error("authority policy epoch {epoch} may be durable but read-back failed: {detail}")]
     PolicyEpochReadBackUncertain { epoch: u64, detail: String },
     #[error("unsupported supervisor admission schema version {0}")]
@@ -1938,7 +1940,11 @@ impl SupervisorAdmissionStore {
         if stored.len() != decisions.len() {
             return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
         }
+        let mut seen = std::collections::BTreeSet::new();
         for decision in decisions {
+            if !seen.insert(decision.release_id.as_str()) {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            }
             let Some((_, disposition, digest)) =
                 stored.iter().find(|(release_id, _, _)| release_id == &decision.release_id)
             else {
@@ -1956,6 +1962,50 @@ impl SupervisorAdmissionStore {
             }
         }
         Ok(())
+    }
+
+
+    fn next_policy_revokes_or_disallows_barrier(
+        transaction: &rusqlite::Transaction<'_>,
+        next_policy: &AuthorityPolicyEpochRecord,
+        release_id: &str,
+    ) -> Result<bool, AdmissionStoreError> {
+        let (signer_key_id, authority_audience, admission_commit_id): (String, String, String) =
+            transaction.query_row(
+                "SELECT signer_key_id, authority_audience, commit_id FROM payload_release_barriers WHERE release_id = ?1",
+                [release_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        if next_policy.emergency_revoked_key_ids.contains(&signer_key_id) {
+            return Ok(true);
+        }
+        let admission = Self::load_by_commit(transaction, &admission_commit_id)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let provenance: serde_json::Value = serde_json::from_slice(&admission.authority_provenance)
+            .map_err(|_| AdmissionStoreError::InconsistentStorage)?;
+        let issuer = provenance.get("issuer").and_then(serde_json::Value::as_str)
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let policy_json: serde_json::Value = serde_json::from_slice(&next_policy.policy_json)
+            .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let keys = policy_json.get("keys").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let Some(key) = keys.iter().find(|key| {
+            key.get("key_id").and_then(serde_json::Value::as_str) == Some(signer_key_id.as_str())
+                && key.get("issuer").and_then(serde_json::Value::as_str) == Some(issuer)
+        }) else {
+            return Ok(true);
+        };
+        if key.get("revoked").and_then(serde_json::Value::as_bool) != Some(false) {
+            return Ok(true);
+        }
+        let actions = key.get("allowed_actions").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        if !actions.iter().any(|value| value.as_str() == Some("change")) {
+            return Ok(true);
+        }
+        let audiences = policy_json.get("allowed_audiences").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        Ok(!audiences.iter().any(|value| value.as_str() == Some(authority_audience.as_str())))
     }
 
     fn append_release_policy_decisions(
@@ -1998,6 +2048,15 @@ impl SupervisorAdmissionStore {
             )?;
             if prior_stop && decision.disposition == StoredReleaseDisposition::PreserveExistingBarrier {
                 return Err(AdmissionStoreError::ReleasePolicyDecisionDowngrade);
+            }
+            if decision.disposition == StoredReleaseDisposition::PreserveExistingBarrier
+                && Self::next_policy_revokes_or_disallows_barrier(
+                    transaction,
+                    next_policy,
+                    &decision.release_id,
+                )?
+            {
+                return Err(AdmissionStoreError::ReleaseSignerRevoked);
             }
             let digest = Self::release_decision_digest(
                 &decision.release_id,
@@ -3545,6 +3604,39 @@ mod tests {
         assert!(!retry.was_created());
         assert_eq!(retry.record(), barrier.record());
         store.begin_payload_release_attempt(&barrier.record().release_id, 1300).unwrap();
+    }
+
+
+    #[test]
+    fn emergency_revocation_cannot_be_overridden_by_preserve_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec!["owner-1".into()]),
+                &[StoredReleasePolicyDecision {
+                    release_id: barrier.record().release_id.clone(),
+                    disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+                }],
+            ),
+            Err(AdmissionStoreError::ReleaseSignerRevoked)
+        ));
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), policy);
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec!["owner-1".into()]),
+                &[StoredReleasePolicyDecision {
+                    release_id: barrier.record().release_id,
+                    disposition: StoredReleaseDisposition::StopOrRecoveryRequired,
+                }],
+            ),
+            Ok(AuthorityPolicyEpochOutcome::Created(_))
+        ));
     }
 
     #[test]
