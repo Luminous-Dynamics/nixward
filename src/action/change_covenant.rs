@@ -549,6 +549,9 @@ impl ChangeAuthorization {
         if receipt.policy_epoch() == 0 {
             return Err("verified authority receipt has no policy epoch".into());
         }
+        if receipt.action().as_str() != "change" {
+            return Err("verified authority receipt is not a change authorization".into());
+        }
         receipt.provenance().validate_integrity().map_err(|error| error.to_string())?;
         Self::decode_authority_digest("evidence", receipt.evidence_blake3())
     }

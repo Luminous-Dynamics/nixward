@@ -177,10 +177,12 @@ fn default_max_ttl_ms() -> u64 {
 
 impl AuthorityTrustPolicy {
     pub fn validate(&self) -> Result<(), AuthorityError> {
+        if self.policy_epoch == Some(0) {
+            return Err(AuthorityError::InvalidPolicyEpoch);
+        }
         if self.schema_version != AUTHORITY_SCHEMA_VERSION
             || self.kind != AUTHORITY_POLICY_KIND
             || self.policy_id.trim().is_empty()
-            || self.policy_epoch == Some(0)
             || self.max_ttl_ms == 0
         {
             return Err(AuthorityError::UntrustedSigner);
@@ -435,7 +437,7 @@ impl AuthorityProvenanceRecord {
 
     /// Fail closed before payload release if the policy changed, the signer was
     /// emergency-revoked, or the original approval window has expired.
-    pub fn validate_release_at(
+    fn validate_release_at(
         &self,
         current_policy_epoch: u64,
         emergency_revoked_key_ids: &std::collections::BTreeSet<String>,
@@ -883,6 +885,16 @@ mod tests {
         reverified
             .validate_release_at(1, &std::collections::BTreeSet::new(), 1_020_000)
             .unwrap();
+    }
+
+    #[test]
+    fn policy_epoch_is_covered_by_the_policy_digest() {
+        let signing = SigningKey::from_bytes(&[25u8; 32]);
+        let mut first = policy(&signing);
+        let first_digest = first.digest().unwrap();
+        first.policy_epoch = Some(2);
+        let second_digest = first.digest().unwrap();
+        assert_ne!(first_digest, second_digest);
     }
 
     #[test]

@@ -24,7 +24,7 @@ The local `policy_epoch` is optional in a legacy policy so read-only verificatio
 
 A deserialized `AuthorityProvenanceRecord` is not a capability. First run its integrity checks, then load the exact archived policy identified by policy ID/digest/epoch and call `reverify_historical_provenance`. Historical re-verification uses the original verifier timestamp; it does not treat historical validity as current release permission.
 
-Immediately before payload release, call `VerifiedAuthorityReceipt::validate_release_at` with the current machine-local policy epoch, emergency-revocation set, and current clock. It fails closed on policy-epoch drift, signer revocation or expiry. This deliberately requires fresh authorization after a policy change unless a future, separately reviewed policy explicitly supports safe permit migration.
+Immediately before payload release, first re-verify the stored provenance under its exact archived policy to mint a new `VerifiedAuthorityReceipt`, then call `VerifiedAuthorityReceipt::validate_release_at` with the current machine-local policy epoch, emergency-revocation set, and current clock. The raw `AuthorityProvenanceRecord` intentionally exposes no release-eligibility method. It fails closed on policy-epoch drift, signer revocation or expiry. This deliberately requires fresh authorization after a policy change unless a future, separately reviewed policy explicitly supports safe permit migration.
 
 After payload release, the admission record remains a historical fact. Any stop, compensation or recovery operation requires a separate authority policy; a policy update must not rewrite the old verification record.
 
