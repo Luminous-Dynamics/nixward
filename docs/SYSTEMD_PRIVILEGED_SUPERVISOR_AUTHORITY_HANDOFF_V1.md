@@ -255,3 +255,13 @@ The correct path is integration, not a premature all-in-one claim: demonstrate a
 8. Enable production execution only after exact-head Rust tests, Nix feature check, clean VM fault corpus and independent negative controls pass.
 
 **Stop conditions:** no root unit, polkit rule, general manage-units grant, or production StartUnit wiring while the supervisor cannot independently verify approval proof and persist/recover the permit + replay state. No claim of request-independent supervision until cancellation tests prove the root supervisor continues to own the operation.
+
+
+## References
+
+Reviewed 2026-10-31. These sources define the comparison envelope; they do not establish Nixward's benchmark results.
+
+- Colmena describes itself as a stateless NixOS deployment tool with parallel deployment: https://github.com/nix-community/colmena
+- Colmena's parallelism manual documents bounded deployment concurrency (default 10) and experimental parallel evaluation: https://colmena.cli.rs/unstable/features/parallelism.html
+- deploy-rs documents multi-profile deployment, concurrent targets and magic rollback via a post-deploy connectivity confirmation: https://github.com/serokell/deploy-rs
+- systemd's D-Bus API documents GetUnitByPIDFD and why it is safer than PID-only lookup because PIDs can be recycled: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop.systemd1.html
