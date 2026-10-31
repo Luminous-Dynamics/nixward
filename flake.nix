@@ -608,6 +608,33 @@
             '';
           };
 
+
+        # Structural contract check for the pure NixOS activation observer.
+        checks.activation-observer-fixture =
+          let
+            fixture = builtins.fromJSON (builtins.readFile ./docs/fixtures/nixos-activation-trace-v1.template.json);
+            schema = builtins.fromJSON (builtins.readFile ./docs/schemas/nixos-activation-trace-v1.schema.json);
+            steps = fixture.plan.steps;
+            modes = schema.properties.plan.properties.mode.enum;
+            eventLimit = schema.properties.events.maxItems;
+          in
+            assert fixture.schema == "luminous-nixward-activation-trace-v1";
+            assert fixture.version == 1;
+            assert fixture.plan.schema == fixture.schema;
+            assert builtins.length steps >= 3;
+            assert (builtins.head steps).kind == "check_inhibitors";
+            assert (builtins.elemAt steps 1).kind == "validate_closure";
+            assert (builtins.elemAt steps 2).kind == "switch_to_configuration";
+            assert (builtins.elemAt steps (builtins.length steps - 1)).kind == "probe_post_state";
+            assert builtins.elem "switch" modes;
+            assert builtins.elem "test" modes;
+            assert builtins.elem "boot" modes;
+            assert builtins.elem "dry_activate" modes;
+            assert eventLimit == 2048;
+            pkgs.runCommand "nixward-activation-observer-fixture" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
