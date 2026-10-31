@@ -372,12 +372,12 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
                 }
                 records_verified += 1;
                 verified_manifest.push(json!({
-                    "trial_id": meta.trial_id,
-                    "record_sha256": meta.record_sha256,
-                    "scenario_id": meta.scenario,
-                    "baseline_id": meta.baseline,
+                    "trial_id": meta.trial_id.clone(),
+                    "record_sha256": meta.record_sha256.clone(),
+                    "scenario_id": meta.scenario.clone(),
+                    "baseline_id": meta.baseline.clone(),
                     "trial_index": meta.index,
-                    "baseline_status": meta.baseline_status
+                    "baseline_status": meta.baseline_status.clone()
                 }));
                 *counts.entry((meta.scenario.clone(), meta.baseline.clone())).or_default() += 1;
                 if meta.baseline_status == "available-baseline" {
