@@ -1212,6 +1212,24 @@ mod tests {
 
 
     #[test]
+    fn refuses_schema_v1_database_without_authority_provenance_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        legacy.pragma_update(None, "user_version", 1_i64).unwrap();
+        drop(legacy);
+
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::UnsupportedSchema(1))
+        ));
+    }
+
+    #[test]
     fn admission_rejects_missing_authority_provenance() {
         let mut req = request("tx-empty-authority", "attempt-empty-authority", 0x51, 0x52, 0x53);
         req.authority_provenance.clear();
