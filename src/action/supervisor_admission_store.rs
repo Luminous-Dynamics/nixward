@@ -238,6 +238,9 @@ pub(crate) struct AdmissionRequest {
     pub expected_authority_subject: String,
     /// Derived from the machine-local Holon identity, never caller-selected.
     pub expected_authority_holon_id: String,
+    /// Current policy identity read from the machine-local trust-policy owner.
+    pub expected_authority_policy_digest: String,
+    pub expected_authority_policy_epoch: u64,
     /// Exact input bytes retained by AuthorityVerifier.
     pub approval_material: Vec<u8>,
     pub permit_wire: Vec<u8>,
@@ -763,6 +766,8 @@ impl SupervisorAdmissionStore {
         }
         if !Self::valid_digest(&request.expected_authority_subject)
             || !Self::valid_digest(&request.expected_authority_holon_id)
+            || !Self::valid_digest(&request.expected_authority_policy_digest)
+            || request.expected_authority_policy_epoch == 0
             || receipt.subject_blake3() != request.expected_authority_subject
             || receipt.holon_id() != request.expected_authority_holon_id
         {
@@ -771,8 +776,12 @@ impl SupervisorAdmissionStore {
         if receipt.replay_key() != request.replay_key {
             return Err(AdmissionStoreError::InvalidAuthorityReceipt("replay-key binding"));
         }
-        if receipt.policy_epoch() == 0 || !Self::valid_digest(receipt.policy_digest()) {
-            return Err(AdmissionStoreError::InvalidAuthorityReceipt("policy digest/epoch"));
+        if receipt.policy_epoch() == 0
+            || receipt.policy_epoch() != request.expected_authority_policy_epoch
+            || !Self::valid_digest(receipt.policy_digest())
+            || receipt.policy_digest() != request.expected_authority_policy_digest
+        {
+            return Err(AdmissionStoreError::InvalidAuthorityReceipt("current policy digest/epoch"));
         }
         if receipt.verified_at_ms() > request.created_at_ms
             || receipt.expires_at_ms() < request.created_at_ms
@@ -1380,6 +1389,8 @@ mod tests {
     ) -> AdmissionRequest {
         let (authority_receipt, approval_material, expected_authority_subject, expected_authority_holon_id) =
             verified_receipt(replay_byte, plan_byte, machine_byte);
+        let expected_authority_policy_digest = authority_receipt.policy_digest().to_string();
+        let expected_authority_policy_epoch = authority_receipt.policy_epoch();
         AdmissionRequest {
             transaction_id: transaction_id.into(),
             attempt_id: attempt_id.into(),
@@ -1388,6 +1399,8 @@ mod tests {
             machine_binding_digest: hex_digest(machine_byte),
             expected_authority_subject,
             expected_authority_holon_id,
+            expected_authority_policy_digest,
+            expected_authority_policy_epoch,
             approval_material,
             permit_wire: format!("permit:{attempt_id}").into_bytes(),
             event_payload: format!(
@@ -1519,12 +1532,50 @@ mod tests {
         ));
     }
 
+
+    #[test]
+    fn current_policy_epoch_and_digest_must_match_the_verified_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+
+        let mut epoch_drift = request("tx-epoch", "attempt-epoch", 0x11, 0x22, 0x33);
+        epoch_drift.expected_authority_policy_epoch += 1;
+        assert!(matches!(
+            store.admit(&epoch_drift),
+            Err(AdmissionStoreError::InvalidAuthorityReceipt("current policy digest/epoch"))
+        ));
+
+        let mut digest_drift = request("tx-digest", "attempt-digest", 0x12, 0x22, 0x33);
+        digest_drift.expected_authority_policy_digest = hex_digest(0x77);
+        assert!(matches!(
+            store.admit(&digest_drift),
+            Err(AdmissionStoreError::InvalidAuthorityReceipt("current policy digest/epoch"))
+        ));
+    }
+
+    #[test]
+    fn approval_material_must_be_the_exact_verified_proof_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let mut request = request("tx-proof", "attempt-proof", 0x13, 0x22, 0x33);
+        request.approval_material[0] ^= 1;
+        assert!(matches!(
+            store.admit(&request),
+            Err(AdmissionStoreError::InvalidAuthorityReceipt("exact proof bytes"))
+        ));
+    }
+
     #[test]
     fn schema_v1_with_existing_admissions_requires_fresh_authorization() {
         let temp = tempfile::tempdir().unwrap();
         let store = store_in(&temp);
         let parent = store.path().parent().unwrap();
         std::fs::create_dir_all(parent).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let connection = Connection::open(store.path()).unwrap();
         connection.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
         connection.pragma_update(None, "user_version", 1).unwrap();
@@ -1533,6 +1584,11 @@ mod tests {
              INSERT INTO admission_commits(commit_id) VALUES ('legacy-admission');"
         ).unwrap();
         drop(connection);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(store.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
 
         assert!(matches!(
             store.connect(),
@@ -1621,6 +1677,11 @@ mod tests {
         let recovered = reopened.admit(&request).unwrap();
         assert!(!recovered.was_created());
         assert_eq!(recovered.record().attempt_id, "attempt-a1");
+        assert_eq!(
+            recovered.record().authority_provenance,
+            request.authority_receipt.provenance().clone()
+        );
+        assert_eq!(recovered.record().authority_provenance_digest, first.record().authority_provenance_digest);
     }
 
     #[test]
