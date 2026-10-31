@@ -489,7 +489,11 @@
                 then 30
                 else 100
               )
-              && (if scenario.category == "fault" || scenario.category == "concurrency" || scenario.category == "storage"
+              && (if builtins.elem scenario.trial_class [
+                    "fault-correctness"
+                    "concurrency-correctness"
+                    "storage-correctness"
+                  ]
                   then builtins.isAttrs scenario.fault_injection
                     && builtins.isString scenario.fault_injection.boundary
                     && builtins.isString scenario.fault_injection.action
@@ -513,12 +517,13 @@
               "sqlite-precommit-failure-matrix"
               "sqlite-commit-ack-lost"
               "sqlite-wal-growth-checkpoint"
+              "fleet-throughput-baseline"
             ];
           in
             assert corpus.schema == "org.luminousdynamics.nixward.deployment-transaction-benchmark-corpus";
             assert corpus.version == 1;
             assert corpus.status == "proposed-not-executed";
-            assert builtins.length scenarios == 18;
+            assert builtins.length scenarios == 19;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
             assert builtins.all (id: builtins.elem id ids) requiredIds;
             assert builtins.all validScenario scenarios;

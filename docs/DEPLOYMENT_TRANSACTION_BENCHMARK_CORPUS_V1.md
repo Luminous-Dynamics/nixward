@@ -18,8 +18,9 @@ Baseline roles are intentionally different:
 
 ## Scenarios
 
-The 18 scenarios cover:
+The 19 scenarios cover:
 - no-op admission and normal exact-closure switch;
+- Colmena and deploy-rs fleet-throughput baselines at concurrency limits of 1, 5 and 10, without making an unsupported Nixward fleet claim;
 - NixOS test vs boot semantics;
 - successful activation and failed activation reconciliation;
 - lost StartUnit response and missing/reordered JobRemoved;
@@ -35,7 +36,7 @@ Each scenario includes preconditions, an explicit fault boundary where relevant,
 
 - Clean functional latency baselines and explicitly tagged performance profiles start at 30 trials.
 - Fault, concurrency and storage correctness screens start at 100 trials per scenario.
-- Use at least 1,000 trials for stable p99 estimates where tail latency is a release claim.
+- Use at least 1,000 trials for stable p99 estimates where tail latency is a release claim. The fleet-throughput baseline is a clean performance profile (minimum 30 repetitions) and must keep the Nixward fleet result explicitly unavailable until a comparable scheduler exists.
 - Preserve raw data, all excluded trials and reasons, fault seeds, source SHAs and the exact VM/storage configuration.
 - Separate build, closure copy, profile selection, activation, admission, worker attribution, post-state observation and reconciliation.
 - Report safe holds independently from successful recovery. A correct hold is not a successful recovery.

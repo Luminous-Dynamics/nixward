@@ -771,6 +771,47 @@
       ],
       "min_trials": 30,
       "trial_class": "performance"
+    },
+    {
+      "id": "fleet-throughput-baseline",
+      "category": "concurrency",
+      "comparison_group": "fleet-scheduler",
+      "operation_mode": "remote-deploy",
+      "supported_baselines": [
+        "colmena",
+        "deploy-rs"
+      ],
+      "preconditions": [
+        "Use the same pinned candidate closure, Nixpkgs revision, VM/node image, hardware class, network bandwidth/latency and cache state for each tool.",
+        "Run matched fleet sizes and concurrency caps of 1, 5, and 10 nodes.",
+        "Record Colmena deployment limit and evaluation strategy.",
+        "Record deploy-rs target selection, profilesOrder, autoRollback, magicRollback and connection confirmation settings.",
+        "Do not include Nixward in the throughput ranking until it has a fleet scheduler with equivalent concurrency semantics."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Per-node build/evaluation/copy/activation timings",
+        "Fleet wall-clock completion and effective concurrency",
+        "Per-node success/failure and partial-failure classification",
+        "Rollback completion and connectivity-confirmation outcomes",
+        "Network/cache utilization and operator interventions"
+      ],
+      "expected_disposition": "baseline_metrics_recorded_no_nixward_fleet_claim",
+      "forbidden_claims": [
+        "Nixward is faster at fleet deployment without an implemented matched scheduler.",
+        "Single-host activation latency is equivalent to fleet throughput.",
+        "A fleet run with different caches, closures, or network conditions is a matched comparison.",
+        "A partially failed fleet run is scored only by the fastest successful nodes."
+      ],
+      "metric_tags": [
+        "fleet_throughput",
+        "activation_parallelism",
+        "per_node_latency",
+        "partial_failure_recovery",
+        "operator_intervention"
+      ],
+      "min_trials": 30,
+      "trial_class": "performance"
     }
   ]
 }
