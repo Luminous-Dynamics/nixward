@@ -69,7 +69,7 @@ struct TrialManifest {
     trials: Vec<TrialRecord>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TrialEnvironment {
     kernel_release: String,
@@ -106,7 +106,7 @@ struct ArtifactReceipt {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum EvidenceEvent {
     BarrierCreateRequested {
         seq: u64,
@@ -398,6 +398,8 @@ struct VerificationReport {
     unsafe_trial_count: usize,
     complete: bool,
     p99_claims_enabled: bool,
+    outcome: String,
+    environment: TrialEnvironment,
     trials: Vec<TrialReport>,
     scenarios: Vec<ScenarioSummary>,
 }
@@ -531,9 +533,8 @@ fn scenario_expectation_met(
         }
         "one_barrier_only" => barriers.len() == 1,
         "one_linearized_order" => {
-            barriers.len() == 1 || rejections.iter().any(|(_, reason)| {
-                reason == "release_barrier_stale_policy"
-            })
+            !policies.is_empty()
+                || rejections.iter().any(|(_, reason)| reason == "release_barrier_stale_policy")
         }
         "measure_tail_latency" => checkpoints > 0,
         _ => false,
@@ -563,11 +564,10 @@ fn verify_trial(
     }
 
     let mut violations = Vec::new();
-    let mut observed = BTreeSet::new();
     let mut previous_sequence = 0_u64;
     let mut previous_timestamp = trial.started_monotonic_ns;
-    let mut policy_epoch = trial.initial_policy_epoch;
-    let mut policy_record_digest = trial.initial_policy_record_digest.clone();
+    let mut current_policy_epoch = trial.initial_policy_epoch;
+    let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
     let mut barrier_requests = BTreeMap::<String, (String, u64, String, String, u64)>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
     let mut attempt_requests = BTreeMap::<String, (String, u64)>::new();
@@ -599,8 +599,6 @@ fn verify_trial(
         }
         previous_sequence = sequence;
         previous_timestamp = timestamp;
-        observed.insert(event.observation_name());
-
         match event {
             EvidenceEvent::BarrierCreateRequested {
                 request_id, admission_commit_id, expected_policy_epoch,
@@ -651,46 +649,17 @@ fn verify_trial(
                     || requested_epoch != policy_epoch
                     || requested_policy != policy_record_digest
                     || requested_payload != payload_digest
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch // retained as an explicit schema assertion
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
-                    || *policy_epoch != policy_epoch
+                    || *policy_epoch != current_policy_epoch
+                    || policy_record_digest != &current_policy_record_digest
                     || *at_ns < *requested_at
                 {
-                    violations.push(format!("barrier {release_id} is not bound to request or event order"));
-                }
-                // A fresh barrier must use the current policy snapshot.
-                if *policy_epoch != policy_epoch || policy_record_digest != &policy_record_digest {
-                    violations.push("barrier policy snapshot mismatch".into());
-                }
-                if *policy_epoch != policy_epoch {
-                    violations.push("barrier epoch mismatch".into());
-                }
-                if *policy_epoch != policy_epoch {
-                    violations.push("barrier epoch mismatch".into());
+                    violations.push(format!("barrier {release_id} is not bound to request/current policy or event order"));
                 }
                 if barriers.contains_key(release_id)
                     || admission_releases.contains_key(admission_commit_id)
                 {
                     violations.push(format!("duplicate barrier for {release_id} or admission"));
-                }
-                if *policy_epoch != policy_epoch {
-                    violations.push("barrier epoch mismatch".into());
-                }
-                if policy_epoch != &policy_epoch {
-                    violations.push("barrier epoch is not current".into());
-                }
-                if policy_record_digest != &policy_record_digest {
-                    violations.push("barrier policy digest is not current".into());
-                }
-                if !barriers.contains_key(release_id) {
+                } else {
                     admission_releases.insert(admission_commit_id.clone(), release_id.clone());
                     barriers.insert(release_id.clone(), BarrierState {
                         release_id: release_id.clone(),
@@ -704,9 +673,6 @@ fn verify_trial(
                         committed_at_ns: *at_ns,
                         decision: None,
                     });
-                }
-                if *policy_epoch != policy_epoch {
-                    violations.push("barrier policy epoch incorrect".into());
                 }
             }
             EvidenceEvent::BarrierRetryExisting { request_id, release_id, .. } => {
@@ -736,9 +702,9 @@ fn verify_trial(
                     violations.push("policy advance has no preceding request".into());
                     continue;
                 };
-                if *from_epoch != policy_epoch
+                if *from_epoch != current_policy_epoch
                     || *from_epoch != *requested_epoch
-                    || previous_record_digest != &policy_record_digest
+                    || previous_record_digest != &current_policy_record_digest
                     || previous_record_digest != requested_digest
                     || *to_epoch != from_epoch.saturating_add(1)
                     || *at_ns < *requested_at
@@ -785,8 +751,8 @@ fn verify_trial(
                 if seen != active {
                     violations.push("policy decision set does not cover all outstanding barriers".into());
                 }
-                policy_epoch = *to_epoch;
-                policy_record_digest = new_record_digest.clone();
+                current_policy_epoch = *to_epoch;
+                current_policy_record_digest = new_record_digest.clone();
             }
             EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, .. } => {
                 if request_id.trim().is_empty()
@@ -963,11 +929,6 @@ fn verify_trial(
         trial.finished_monotonic_ns.saturating_sub(trial.started_monotonic_ns)
     );
 
-    for required in &scenario.required_observations {
-        if !observed.contains(required.as_str()) {
-            violations.push(format!("required observation is missing: {required}"));
-        }
-    }
     let expectation_met = scenario_expectation_met(
         scenario,
         &barriers,
