@@ -667,6 +667,8 @@ fn scenario_expectation_met(
             rejections.iter().any(|rejection| {
                 rejection.reason_code == expected
                     && rejection.operation == expected_operation
+                    && !rejection.request_id.trim().is_empty()
+                    && !rejection.target_id.trim().is_empty()
             })
         }
         "preserve_historical_barrier" => policies
@@ -688,6 +690,8 @@ fn scenario_expectation_met(
                 || rejections.iter().any(|rejection| {
                     rejection.reason_code == "release_barrier_stale_policy"
                         && rejection.operation == "create_payload_release_barrier"
+                        && !rejection.request_id.trim().is_empty()
+                        && !rejection.target_id.trim().is_empty()
                 })
         }
         "measure_tail_latency" => checkpoints > 0,
@@ -1237,15 +1241,15 @@ fn verify_trial(
         }
         if let EvidenceEvent::ReleaseAttemptReserved { request_id, at_ns, .. } = event {
             if let Some((_, start_at, _)) = attempt_requests.get(request_id) {
-                if at_ns >= start_at {
-                    measurements.attempt_latency_ns.push(at_ns - start_at);
+                if *at_ns >= *start_at {
+                    measurements.attempt_latency_ns.push(*at_ns - *start_at);
                 }
             }
         }
         if let EvidenceEvent::PolicyAdvanced { request_id, at_ns, .. } = event {
             if let Some((_, _, start_at)) = policy_requests.get(request_id) {
-                if at_ns >= start_at {
-                    measurements.policy_advance_latency_ns.push(at_ns - start_at);
+                if *at_ns >= *start_at {
+                    measurements.policy_advance_latency_ns.push(*at_ns - *start_at);
                 }
             }
         }
