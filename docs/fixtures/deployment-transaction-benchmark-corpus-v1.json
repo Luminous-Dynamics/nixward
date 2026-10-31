@@ -746,10 +746,7 @@
         "Record WAL size and checkpoint mode/frequency.",
         "Do not change synchronous=FULL during the primary safety run."
       ],
-      "fault_injection": {
-        "boundary": "wal-growth-and-checkpoint",
-        "action": "run-repeated-transaction-workload"
-      },
+      "fault_injection": null,
       "required_observations": [
         "Commit and checkpoint timings",
         "WAL size over time",
