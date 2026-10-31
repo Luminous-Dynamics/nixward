@@ -4,7 +4,7 @@
 //! It verifies hashes, evidence completeness, corpus pinning, matched trial
 //! identity and trial floors. It does not run deployments or prove semantics.
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -149,6 +149,7 @@ fn validate_record(
     {
         return Err("unsupported trial-record schema/version".into());
     }
+    str_field(record, "trial_id")?;
     let scenario_id = str_field(record, "scenario_id")?.to_string();
     let baseline_id = str_field(record, "baseline_id")?.to_string();
     let scenario = scenarios.get(&scenario_id)
@@ -183,6 +184,9 @@ fn validate_record(
             .ok_or_else(|| format!("missing or empty evidence field {field}"))?;
         if value == "n/a" || value == "not-applicable" {
             return Err(format!("evidence.{field} needs an explicit not-applicable reason"));
+        }
+        if field == "scenario_corpus_sha256" && value != corpus_sha {
+            return Err("evidence.scenario_corpus_sha256 does not match exact corpus bytes".into());
         }
         if value.starts_with("not-applicable:") && value["not-applicable:".len()..].trim().is_empty() {
             return Err(format!("evidence.{field} has an empty not-applicable reason"));
@@ -243,6 +247,9 @@ fn validate_record(
 
     let counters = record.get("safety_counters").and_then(Value::as_object)
         .ok_or("safety_counters must be an object")?;
+    if counters.len() != SAFETY_COUNTERS.len() {
+        return Err("safety_counters must contain exactly the normative counters".into());
+    }
     for counter in SAFETY_COUNTERS {
         let value = counters.get(*counter).and_then(Value::as_u64)
             .ok_or_else(|| format!("missing/invalid safety counter {counter}"))?;
@@ -313,6 +320,9 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
             return Err(format!("duplicate scenario ID {id}"));
         }
         let class = str_field(scenario, "trial_class")?;
+        if !["clean-baseline", "fault-correctness", "concurrency-correctness", "storage-correctness", "performance"].contains(&class) {
+            return Err(format!("scenario {id} has unknown trial_class {class}"));
+        }
         let minimum = scenario.get("min_trials").and_then(Value::as_u64).ok_or("scenario min_trials invalid")?;
         let floor = if class == "clean-baseline" || class == "performance" { 30 } else { 100 };
         if minimum < floor {
@@ -336,6 +346,7 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
     let root = canonical_artifact_root(artifact_root_path)?;
 
     let mut errors = Vec::new();
+    let mut records_verified = 0u64;
     let mut trial_ids = BTreeSet::new();
     let mut trial_keys = BTreeSet::new();
     let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
@@ -353,6 +364,7 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
                     errors.push(format!("trial {id}: duplicate scenario/baseline/index"));
                     continue;
                 }
+                records_verified += 1;
                 *counts.entry((meta.scenario.clone(), meta.baseline.clone())).or_default() += 1;
                 if meta.baseline_status == "available-baseline" {
                     matched.entry((meta.scenario.clone(), meta.index)).or_default()
@@ -409,7 +421,7 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
         "status": status,
         "corpus_sha256": corpus_sha,
         "records_seen": records.len(),
-        "records_verified": records.len() - errors.len().min(records.len()),
+        "records_verified": records_verified,
         "errors": errors,
         "trial_floors": floors,
         "matched_trials": comparisons,
@@ -588,6 +600,34 @@ mod tests {
         let bytes = serde_json::to_vec(&json!([a,b])).unwrap();
         let report = audit(&corpus, &bytes, temp.path(), false).unwrap();
         assert_eq!(report["status"], "invalid");
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_non_monotonic_phases() {
+        let temp = tempfile::tempdir().unwrap();
+        let corpus = test_corpus();
+        let mut record = make_record(&corpus, temp.path(), "baseline-a", 0, "warm");
+        record["artifacts"][0]["path"] = Value::String("../outside.log".into());
+        record["record_sha256"] = Value::String(record_digest(&record).unwrap());
+        let bytes = serde_json::to_vec(&json!([record])).unwrap();
+        assert_eq!(audit(&corpus, &bytes, temp.path(), false).unwrap()["status"], "invalid");
+
+        let mut record = make_record(&corpus, temp.path(), "baseline-a", 1, "warm");
+        record["phase_timestamps_ns"][1]["monotonic_ns"] = Value::from(9);
+        record["record_sha256"] = Value::String(record_digest(&record).unwrap());
+        let bytes = serde_json::to_vec(&json!([record])).unwrap();
+        assert_eq!(audit(&corpus, &bytes, temp.path(), false).unwrap()["status"], "invalid");
+    }
+
+    #[test]
+    fn rejects_missing_required_evidence_even_with_recomputed_record_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let corpus = test_corpus();
+        let mut record = make_record(&corpus, temp.path(), "baseline-a", 0, "warm");
+        record["evidence"].as_object_mut().unwrap().remove("source_sha");
+        record["record_sha256"] = Value::String(record_digest(&record).unwrap());
+        let bytes = serde_json::to_vec(&json!([record])).unwrap();
+        assert_eq!(audit(&corpus, &bytes, temp.path(), false).unwrap()["status"], "invalid");
     }
 
     #[test]
