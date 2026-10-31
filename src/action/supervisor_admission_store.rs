@@ -346,14 +346,15 @@ impl SupervisorAdmissionStore {
                 }
                 Component::Prefix(prefix) => current.push(prefix.as_os_str()),
             }
-            if !current.exists() {
-                continue;
-            }
-            let metadata = std::fs::symlink_metadata(&current)?;
-            if metadata.file_type().is_symlink() {
-                return Err(AdmissionStoreError::SymlinkPath(
-                    current.display().to_string(),
-                ));
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(AdmissionStoreError::SymlinkPath(
+                        current.display().to_string(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AdmissionStoreError::Filesystem(error)),
             }
         }
         Ok(())
@@ -392,27 +393,30 @@ impl SupervisorAdmissionStore {
             }
         }
 
-        if self.path.exists() {
-            let metadata = std::fs::symlink_metadata(&self.path)?;
-            if metadata.file_type().is_symlink() {
-                return Err(AdmissionStoreError::SymlinkPath(
-                    self.path.display().to_string(),
-                ));
-            }
-            if !metadata.file_type().is_file() {
-                return Err(AdmissionStoreError::InvalidInput(
-                    "database path is not a regular file",
-                ));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o077 != 0 {
-                    return Err(AdmissionStoreError::InsecureFile(
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(AdmissionStoreError::SymlinkPath(
                         self.path.display().to_string(),
                     ));
                 }
+                if !metadata.file_type().is_file() {
+                    return Err(AdmissionStoreError::InvalidInput(
+                        "database path is not a regular file",
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o077 != 0 {
+                        return Err(AdmissionStoreError::InsecureFile(
+                            self.path.display().to_string(),
+                        ));
+                    }
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AdmissionStoreError::Filesystem(error)),
         }
         Ok(())
     }
@@ -631,6 +635,13 @@ impl SupervisorAdmissionStore {
                 })?;
                 if at_ms < 0 {
                     return Err(rusqlite::Error::IntegralValueOutOfRange(15, at_ms));
+                }
+                if !Self::valid_digest(&digest) {
+                    return Err(rusqlite::Error::InvalidColumnType(
+                        14,
+                        "resolution_digest".into(),
+                        rusqlite::types::Type::Text,
+                    ));
                 }
                 AdmissionState::Resolved {
                     resolution_digest: digest,
@@ -907,7 +918,7 @@ impl SupervisorAdmissionStore {
             }
             AdmissionState::Unresolved => {}
         }
-        transaction.execute(
+        let changed = transaction.execute(
             r#"
             UPDATE transaction_attempts
             SET state = 'resolved', resolution_digest = ?2, resolved_at_ms = ?3
@@ -915,6 +926,9 @@ impl SupervisorAdmissionStore {
             "#,
             params![commit_id, resolution_digest, resolved_at_ms],
         )?;
+        if changed != 1 {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -1240,6 +1254,50 @@ mod tests {
             let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn detects_a_missing_child_record_instead_of_accepting_partial_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let record = store.admit(&request("tx-a", "attempt-a1", 0x11, 0x22, 0x33)).unwrap();
+
+        let connection = store.connect().unwrap();
+        connection.execute_batch(
+            "DROP TRIGGER authority_replays_immutable_delete;",
+        ).unwrap();
+        connection.execute(
+            "DELETE FROM authority_replays WHERE replay_key = ?1",
+            [&record.record().replay_key],
+        ).unwrap();
+
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
+        assert!(matches!(
+            store.admit(&request("tx-b", "attempt-b1", 0x44, 0x55, 0x66)),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_dangling_symlink_database_path() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let parent = store.path().parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let link = parent.join("admission.sqlite3");
+        let missing_target = parent.join("missing-target.sqlite3");
+        symlink(&missing_target, &link).unwrap();
+
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::SymlinkPath(_))
+        ));
     }
 
     #[cfg(unix)]
