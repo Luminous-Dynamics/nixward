@@ -245,6 +245,8 @@ enum EvidenceEvent {
         seq: u64,
         at_ns: u64,
         operation: String,
+        request_id: String,
+        target_id: String,
         reason_code: String,
     },
     CheckpointCompleted {
@@ -617,13 +619,38 @@ fn expected_rejection_code(disposition: &str) -> Option<&'static str> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RejectionState {
+    operation: String,
+    request_id: String,
+    target_id: String,
+    reason_code: String,
+}
+
+fn expected_rejection_operation(disposition: &str) -> Option<&'static str> {
+    match disposition {
+        "reject_conflict" | "reject_unauthorized" | "reject_revoked"
+        | "reject_stale_policy" | "reject_stale_barrier" =>
+            Some("create_payload_release_barrier"),
+        "reject_preserve" | "reject_policy_update" | "reject_downgrade" =>
+            Some("advance_authority_policy_epoch"),
+        "reject_second_attempt" => Some("begin_payload_release_attempt"),
+        "reject_foreign_receipt" | "reject_receipt_conflict" =>
+            Some("acknowledge_payload_release"),
+        "reject_in_flight" => Some("record_resolution"),
+        "detect_corruption" => Some("verify_integrity"),
+        "refuse_legacy" => Some("open_store"),
+        _ => None,
+    }
+}
+
 fn scenario_expectation_met(
     scenario: &ScenarioDefinition,
     barriers: &BTreeMap<String, BarrierState>,
     attempts: &BTreeMap<String, AttemptState>,
     receipts: &BTreeMap<String, ReceiptState>,
     uncertain: &BTreeSet<String>,
-    rejections: &[(String, String)],
+    rejections: &[RejectionState],
     retries: &[(String, String)],
     checkpoints: usize,
     policies: &[PolicyDecision],
@@ -636,7 +663,11 @@ fn scenario_expectation_met(
         }
         value if expected_rejection_code(value).is_some() => {
             let expected = expected_rejection_code(value).unwrap();
-            rejections.iter().any(|(_, reason)| reason == expected)
+            let expected_operation = expected_rejection_operation(disposition).unwrap();
+            rejections.iter().any(|rejection| {
+                rejection.reason_code == expected
+                    && rejection.operation == expected_operation
+            })
         }
         "preserve_historical_barrier" => policies
             .iter()
@@ -654,7 +685,10 @@ fn scenario_expectation_met(
         "one_barrier_only" => barriers.len() == 1,
         "one_linearized_order" => {
             !policies.is_empty()
-                || rejections.iter().any(|(_, reason)| reason == "release_barrier_stale_policy")
+                || rejections.iter().any(|rejection| {
+                    rejection.reason_code == "release_barrier_stale_policy"
+                        && rejection.operation == "create_payload_release_barrier"
+                })
         }
         "measure_tail_latency" => checkpoints > 0,
         _ => false,
@@ -728,7 +762,7 @@ fn verify_trial(
     let mut uncertain = BTreeSet::new();
     let mut receipts = BTreeMap::<String, ReceiptState>::new();
     let mut resolutions = BTreeSet::new();
-    let mut rejections = Vec::<(String, String)>::new();
+    let mut rejections = Vec::<RejectionState>::new();
     let mut policy_decisions_seen = Vec::<PolicyDecision>::new();
     let mut measurements = TrialMeasurements::default();
     let mut checkpoint_count = 0_usize;
@@ -1133,8 +1167,40 @@ fn verify_trial(
                     violations.push("resolution does not match exact receipt".into());
                 }
             }
-            EvidenceEvent::OperationRejected { operation, reason_code, .. } => {
-                rejections.push((operation.clone(), reason_code.clone()));
+            EvidenceEvent::OperationRejected {
+                operation, request_id, target_id, reason_code, ..
+            } => {
+                let target_matches = match operation.as_str() {
+                    "create_payload_release_barrier" => barrier_requests.get(request_id)
+                        .is_some_and(|request| request.admission_commit_id == *target_id),
+                    "advance_authority_policy_epoch" => policy_requests.get(request_id)
+                        .is_some_and(|(_, record_digest, _)| record_digest == target_id),
+                    "begin_payload_release_attempt" => attempt_requests.get(request_id)
+                        .is_some_and(|(release_id, _, _)| release_id == target_id),
+                    "acknowledge_payload_release" => request_id == &format!("ack:{target_id}")
+                        && barriers.contains_key(target_id),
+                    "record_resolution" => request_id == &format!("resolve:{target_id}")
+                        && barriers.contains_key(target_id),
+                    "verify_integrity" => request_id == &format!("integrity:{target_id}")
+                        && barriers.contains_key(target_id),
+                    "open_store" => request_id == &format!("open-store:{}", trial.trial_id)
+                        && ["schema-v1", "schema-v2", "schema-v3"].contains(&target_id.as_str()),
+                    _ => false,
+                };
+                if operation.trim().is_empty()
+                    || request_id.trim().is_empty()
+                    || target_id.trim().is_empty()
+                    || reason_code.trim().is_empty()
+                    || !target_matches
+                {
+                    violations.push("operation rejection is not bound to a known request and exact target".into());
+                }
+                rejections.push(RejectionState {
+                    operation: operation.clone(),
+                    request_id: request_id.clone(),
+                    target_id: target_id.clone(),
+                    reason_code: reason_code.clone(),
+                });
             }
             EvidenceEvent::CheckpointCompleted { duration_ns, wal_bytes, .. } => {
                 checkpoint_count += 1;
@@ -1698,6 +1764,63 @@ mod tests {
         let expired = verify_trial(&trial, &retry_scenario, Path::new(".")).unwrap();
         assert!(!expired.report.valid);
         assert!(expired.report.violations.iter().any(|value| value.contains("expired")));
+    }
+
+
+    #[test]
+    fn unrelated_failure_cannot_satisfy_expected_scenario_rejection() {
+        let (mut trial, _) = clean_trial();
+        trial.finished_monotonic_ns = 300;
+        trial.events.push(EvidenceEvent::OperationRejected {
+            seq: 9,
+            at_ns: 220,
+            operation: "verify_integrity".into(),
+            request_id: format!("integrity:{}", test_release_id()),
+            target_id: test_release_id(),
+            reason_code: "release_barrier_conflict".into(),
+        });
+        rehash(&mut trial);
+        let scenario = ScenarioDefinition {
+            id: "changed-payload-same-admission".into(),
+            trial_class: "fault".into(),
+            expected_disposition: "reject_conflict".into(),
+            minimum_trials: 100,
+            fault_boundary: "before_barrier_commit".into(),
+            required_observations: vec![],
+        };
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("expected disposition reject_conflict")
+        }));
+    }
+
+    #[test]
+    fn rejects_unrelated_target_even_when_reason_code_matches() {
+        let (mut trial, _) = clean_trial();
+        trial.finished_monotonic_ns = 300;
+        trial.events.push(EvidenceEvent::OperationRejected {
+            seq: 9,
+            at_ns: 220,
+            operation: "create_payload_release_barrier".into(),
+            request_id: "barrier-request-1".into(),
+            target_id: digest('f'),
+            reason_code: "release_barrier_conflict".into(),
+        });
+        rehash(&mut trial);
+        let scenario = ScenarioDefinition {
+            id: "changed-payload-same-admission".into(),
+            trial_class: "fault".into(),
+            expected_disposition: "reject_conflict".into(),
+            minimum_trials: 100,
+            fault_boundary: "before_barrier_commit".into(),
+            required_observations: vec![],
+        };
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("not bound to a known request and exact target")
+        }));
     }
 
     #[test]
