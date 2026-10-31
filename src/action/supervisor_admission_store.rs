@@ -1970,13 +1970,14 @@ impl SupervisorAdmissionStore {
         next_policy: &AuthorityPolicyEpochRecord,
         release_id: &str,
     ) -> Result<bool, AdmissionStoreError> {
-        let (signer_key_id, authority_audience, admission_commit_id): (String, String, String) =
+        let (signer_key_id, authority_audience, admission_commit_id, barrier_policy_id): (String, String, String, String) =
             transaction.query_row(
-                "SELECT signer_key_id, authority_audience, commit_id FROM payload_release_barriers WHERE release_id = ?1",
+                "SELECT signer_key_id, authority_audience, commit_id, policy_id FROM payload_release_barriers WHERE release_id = ?1",
                 [release_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
-        if next_policy.emergency_revoked_key_ids.contains(&signer_key_id) {
+        if next_policy.policy_id != barrier_policy_id
+            || next_policy.emergency_revoked_key_ids.contains(&signer_key_id) {
             return Ok(true);
         }
         let admission = Self::load_by_commit(transaction, &admission_commit_id)?
@@ -3394,7 +3395,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
         let first = store.create_payload_release_barrier(&request).unwrap();
-        let retry = store.create_payload_release_barrier(&request).unwrap();
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        let retry = reopened.create_payload_release_barrier(&request).unwrap();
         assert!(first.was_created());
         assert!(!retry.was_created());
         assert_eq!(first.record(), retry.record());
@@ -3450,6 +3452,21 @@ mod tests {
         assert!(matches!(
             store.create_payload_release_barrier(&request),
             Err(AdmissionStoreError::ReleaseBarrierUnauthorized)
+        ));
+    }
+
+
+    #[test]
+    fn expired_barrier_cannot_start_release_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.begin_payload_release_attempt(
+                &barrier.record().release_id,
+                request.expires_at_ms + 1
+            ),
+            Err(AdmissionStoreError::ReleaseBarrierExpired)
         ));
     }
 
