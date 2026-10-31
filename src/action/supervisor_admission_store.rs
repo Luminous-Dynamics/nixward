@@ -3242,6 +3242,333 @@ mod tests {
     }
 
 
+
+    #[test]
+    fn creates_and_reloads_release_barrier_bound_to_admission_and_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let result = store.create_payload_release_barrier(&request).unwrap();
+        assert!(result.was_created());
+        let record = result.record().clone();
+        assert_eq!(record.commit_id, admission.commit_id);
+        assert_eq!(record.attempt_id, admission.attempt_id);
+        assert_eq!(record.policy_epoch, policy.epoch);
+        assert_eq!(record.policy_record_digest, policy.record_digest);
+        assert_eq!(record.authority_provenance_digest, admission.authority_provenance_digest);
+        assert_eq!(record.authority_subject_digest, admission.plan_digest);
+        assert_eq!(record.payload_digest, request.payload_digest);
+        assert!(matches!(
+            store.payload_release_state(&record.release_id).unwrap(),
+            PayloadReleaseStoreState::BarrierCommitted(_)
+        ));
+        store.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn exact_barrier_retry_after_lost_ack_returns_existing_historical_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let first = store.create_payload_release_barrier(&request).unwrap();
+        let retry = store.create_payload_release_barrier(&request).unwrap();
+        assert!(first.was_created());
+        assert!(!retry.was_created());
+        assert_eq!(first.record(), retry.record());
+    }
+
+    #[test]
+    fn changed_payload_or_authority_binding_on_existing_barrier_is_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let first = store.create_payload_release_barrier(&request).unwrap();
+
+        let mut changed = request.clone();
+        changed.payload_digest = "aa".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&changed),
+            Err(AdmissionStoreError::ReleaseBarrierConflict)
+        ));
+
+        let mut changed_subject = request;
+        changed_subject.expected_authority_subject_digest = "bb".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&changed_subject),
+            Err(AdmissionStoreError::ReleaseBarrierConflict)
+        ));
+        assert_eq!(
+            store.payload_release_state(&first.record().release_id).unwrap(),
+            PayloadReleaseStoreState::BarrierCommitted(first.record().clone())
+        );
+    }
+
+    #[test]
+    fn stale_policy_epoch_or_record_digest_cannot_create_new_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store
+            .advance_authority_policy_epoch(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec![]),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierStalePolicy)
+        ));
+    }
+
+    #[test]
+    fn emergency_revoked_signer_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) =
+            release_ready_fixture(&temp, vec!["owner-1".into()]);
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierUnauthorized)
+        ));
+    }
+
+    #[test]
+    fn expired_authority_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, mut request) = release_ready_fixture(&temp, vec![]);
+        request.now_ms = request.expires_at_ms + 1;
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierExpired)
+        ));
+    }
+
+    #[test]
+    fn unbound_authority_subject_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, mut request) = release_ready_fixture(&temp, vec![]);
+        request.expected_authority_subject_digest = "cc".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierUnauthorized)
+        ));
+    }
+
+    #[test]
+    fn release_attempt_is_at_most_once_across_store_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1400),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        assert!(matches!(
+            reopened.payload_release_state(&release_id).unwrap(),
+            PayloadReleaseStoreState::Attempted {
+                started_at_ms: 1300,
+                uncertain_at_ms: None,
+                ..
+            }
+        ));
+        reopened.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn uncertain_attempt_never_resends_and_late_exact_receipt_reconciles() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        store.mark_payload_release_uncertain(&release_id, 1600).unwrap();
+
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1700),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        assert!(matches!(
+            reopened.mark_payload_release_uncertain(&release_id, 1700),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyUncertain)
+        ));
+
+        // The worker receipt was durably produced before the supervisor's
+        // timeout observation, so its timestamp may be earlier than 1600.
+        reopened.acknowledge_payload_release(
+            &release_id,
+            &request.payload_digest,
+            "nixward-payload-release.service",
+            "invocation-1",
+            &"dd".repeat(32),
+            1500,
+        ).unwrap();
+        assert!(matches!(
+            reopened.payload_release_state(&release_id).unwrap(),
+            PayloadReleaseStoreState::Acknowledged {
+                started_at_ms: 1300,
+                acknowledged_at_ms: 1500,
+                ..
+            }
+        ));
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1800),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        reopened.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn foreign_payload_receipt_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        assert!(matches!(
+            store.acknowledge_payload_release(
+                &release_id,
+                &"ee".repeat(32),
+                "nixward-payload-release.service",
+                "invocation-1",
+                &"dd".repeat(32),
+                1500,
+            ),
+            Err(AdmissionStoreError::ReleaseReceiptConflict)
+        ));
+    }
+
+    #[test]
+    fn policy_update_with_outstanding_barrier_requires_explicit_disposition() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec![]),
+            ),
+            Err(AdmissionStoreError::ReleasePolicyDecisionRequired)
+        ));
+        assert_eq!(
+            store.current_authority_policy_epoch().unwrap().unwrap(),
+            policy
+        );
+    }
+
+    #[test]
+    fn preserve_decision_and_policy_advance_commit_atomically_with_existing_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let decision = StoredReleasePolicyDecision {
+            release_id: barrier.record().release_id.clone(),
+            disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+        };
+        store.advance_authority_policy_epoch_with_release_decisions(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec!["owner-2".into()]),
+            &[decision],
+        ).unwrap();
+
+        // The exact old barrier remains retrievable, but no new policy epoch
+        // can be silently substituted into its immutable identity.
+        let retry = store.create_payload_release_barrier(&request).unwrap();
+        assert!(!retry.was_created());
+        assert_eq!(retry.record(), barrier.record());
+        store.begin_payload_release_attempt(&barrier.record().release_id, 1300).unwrap();
+    }
+
+    #[test]
+    fn stop_recovery_decision_blocks_release_and_cannot_be_downgraded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+
+        store.advance_authority_policy_epoch_with_release_decisions(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec!["owner-1".into()]),
+            &[StoredReleasePolicyDecision {
+                release_id: release_id.clone(),
+                disposition: StoredReleaseDisposition::StopOrRecoveryRequired,
+            }],
+        ).unwrap();
+
+        assert!(matches!(
+            store.begin_payload_release_attempt(&release_id, 1300),
+            Err(AdmissionStoreError::ReleaseAttemptBlocked)
+        ));
+        let current = store.current_authority_policy_epoch().unwrap().unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                current.epoch,
+                &current.record_digest,
+                &policy_request(3, vec![]),
+                &[StoredReleasePolicyDecision {
+                    release_id,
+                    disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+                }],
+            ),
+            Err(AdmissionStoreError::ReleasePolicyDecisionDowngrade)
+        ));
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), current);
+    }
+
+    #[test]
+    fn policy_advance_wins_before_barrier_and_stale_barrier_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store.advance_authority_policy_epoch(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec![]),
+        ).unwrap();
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierStalePolicy)
+        ));
+    }
+
+    #[test]
+    fn resolved_admission_cannot_start_a_reserved_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        store.record_resolution(
+            &admission.commit_id,
+            &"ff".repeat(32),
+            1250,
+        ).unwrap();
+        assert!(matches!(
+            store.begin_payload_release_attempt(&barrier.record().release_id, 1300),
+            Err(AdmissionStoreError::ReleaseAttemptBlocked)
+        ));
+    }
+
+    #[test]
+    fn exact_receipt_retry_requires_the_same_receipt_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        store.acknowledge_payload_release(
+            &release_id, &request.payload_digest, "nixward-payload-release.service",
+            "invocation-1", &"dd".repeat(32), 1500,
+        ).unwrap();
+        assert!(matches!(
+            store.acknowledge_payload_release(
+                &release_id, &request.payload_digest, "nixward-payload-release.service",
+                "invocation-1", &"ee".repeat(32), 1500,
+            ),
+            Err(AdmissionStoreError::ReleaseReceiptConflict)
+        ));
+    }
+
     #[test]
     fn refuses_schema_v1_database_without_authority_provenance_migration() {
         let temp = tempfile::tempdir().unwrap();
