@@ -1681,7 +1681,12 @@ mod tests {
             recovered.record().authority_provenance,
             request.authority_receipt.provenance().clone()
         );
-        assert_eq!(recovered.record().authority_provenance_digest, first.record().authority_provenance_digest);
+        let expected_provenance_wire =
+            serde_json::to_vec(request.authority_receipt.provenance()).unwrap();
+        assert_eq!(
+            recovered.record().authority_provenance_digest,
+            SupervisorAdmissionStore::digest(&expected_provenance_wire)
+        );
     }
 
     #[test]
