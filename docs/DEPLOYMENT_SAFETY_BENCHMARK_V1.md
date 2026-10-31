@@ -117,7 +117,7 @@ A publishable claim requires source SHAs, pinned tool versions, VM image digest,
 
 ## 7. Qualification gates
 
-1. Build and test the optional `systemd` feature with the locked Rust toolchain.
+1. Build and test the optional `systemd` library feature and the separate `nixward-worker-gate` binary test target with the locked Rust toolchain. The binary target is tested explicitly because the library-only feature check does not execute `src/bin/nixward_worker_gate.rs` tests; the latter includes the fixed payload-environment scrub negative control.
 2. Resolve unit materialization and polkit authorization first. The current hash-derived unit has no matching template in `nix/module.nix`. On systemd 253+, the fixed static template + `StartUnit` route supports unit/verb-scoped polkit authorization; transient-unit authorization metadata is only passed from systemd v257 onward. The existing unprivileged Nixward daemon has no module-defined `manage-units` grant.
 3. Add a disposable headless NixOS VM test on systemd 253+ that proves a scoped authorization can start only the Nixward template instance, while unrelated start/stop/restart/modify operations are denied. Then test fixed runner identity, unique invocation, post-exit evidence retention and manager-restart behavior.
 4. Wire the existing Nixward interlock and transaction capability into the live start path; bind the exact authorized command / worker launch envelope, call the authorization-aware reservation API with the already-verified plan/command capability, then persist and read back the v9 attempt plus immutable launch envelope before manager submission.
