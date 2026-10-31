@@ -561,6 +561,35 @@
             '';
           };
 
+
+        # Compile and test the pure systemd/NixOS semantic evidence verifier.
+        checks.systemd-semantic-evidence-verifier-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-systemd-semantic-evidence-verifier-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoBuildFlags = [ "-p" "nixward" "--bin" "nixward-systemd-evidence-verify" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/systemd-semantic-evidence-verifier-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

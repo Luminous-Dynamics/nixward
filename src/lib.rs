@@ -69,6 +69,8 @@ pub mod guest_realization;
 
 /// Detached cryptographic authority challenges and trust policies.
 pub mod authority_signature;
+/// Pure systemd and NixOS transaction semantic evidence verification.
+pub mod systemd_evidence;
 pub mod owner_root;
 pub mod release_integrity;
 
