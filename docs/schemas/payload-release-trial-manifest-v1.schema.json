@@ -839,6 +839,8 @@
                     "seq",
                     "at_ns",
                     "operation",
+                    "request_id",
+                    "target_id",
                     "reason_code"
                   ],
                   "properties": {
@@ -854,10 +856,25 @@
                       "minimum": 0
                     },
                     "operation": {
+                      "enum": [
+                        "create_payload_release_barrier",
+                        "advance_authority_policy_epoch",
+                        "begin_payload_release_attempt",
+                        "acknowledge_payload_release",
+                        "record_resolution",
+                        "verify_integrity",
+                        "open_store"
+                      ]
+                    },
+                    "reason_code": {
                       "type": "string",
                       "minLength": 1
                     },
-                    "reason_code": {
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target_id": {
                       "type": "string",
                       "minLength": 1
                     }

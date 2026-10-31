@@ -28,7 +28,7 @@ Event sequences are typed and ordered. The verifier requires contiguous sequence
 
 Each artifact receipt is relative to the artifact root, includes an artifact kind and SHA-256 over the exact file bytes. Absolute paths, parent traversal and symlink escapes are rejected. Scenarios that require raw evidence must include artifact kinds `raw_sqlite` and `supervisor_log`.
 
-Unknown fields are rejected. There is deliberately no `passed`, `success` or runner-supplied percentile property in the manifest or event schema.
+Unknown fields are rejected. There is deliberately no `passed`, `success` or runner-supplied percentile property in the manifest or event schema. Rejection events must identify the canonical operation, request ID and target: barrier creation reuses the barrier-request ID and admission commit ID; policy advancement reuses the policy-request ID and expected policy-record digest; attempt reservation reuses the attempt-request ID and release ID. Receipt, resolution and integrity observations use `ack:<release-id>`, `resolve:<release-id>` and `integrity:<release-id>` request IDs respectively. Legacy schema refusal uses `open-store:<trial-id>` and a target of `schema-v1`, `schema-v2` or `schema-v3`.
 
 ## Independent derivation
 
@@ -46,4 +46,4 @@ Latency is derived only from matching request and commit events. The report sepa
 
 ## Test status
 
-The binary contains deterministic negative controls for duplicate release attempts, payload write before attempt reservation, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, percentile suppression, path traversal, wall-clock rollback, release-ID mutation and unknown runner-summary fields. Cargo tests and the Nix test target are authored but not executed in this environment.
+The binary contains deterministic negative controls for duplicate release attempts, payload write before attempt reservation, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, percentile suppression, path traversal, wall-clock rollback, release-ID mutation, wrong-operation and wrong-target rejection events, and unknown runner-summary fields. Cargo tests and the Nix test target are authored but not executed in this environment.
