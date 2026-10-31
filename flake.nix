@@ -361,6 +361,78 @@
               touch $out
             '';
 
+        # Independently replay supervisor admission recovery vectors in pure Nix.
+        # The Rust library test consumes the same corpus; neither model is a
+        # substitute for SQLite/fsync or disposable-systemd-VM qualification.
+        checks.supervisor-admission-qualification-vectors =
+          let
+            corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/supervisor-admission-qualification-v1.json);
+            vectors = corpus.vectors;
+            ids = map (vector: vector.id) vectors;
+            referenceAdmission = import ./nix/supervisor-admission-trace.nix {
+              inherit (corpus) identities;
+            };
+            slots = [
+              "replay_consumption"
+              "verified_permit"
+              "attempt_reservation"
+              "journal_entry"
+            ];
+            validIdentity = identity:
+              builtins.isAttrs identity
+              && builtins.isString identity.transaction_id
+              && identity.transaction_id != ""
+              && builtins.isString identity.attempt_id
+              && identity.attempt_id != ""
+              && builtins.isString identity.replay_key
+              && builtins.match "[0-9a-f]{64}" identity.replay_key != null
+              && builtins.isString identity.plan_digest
+              && builtins.match "[0-9a-f]{64}" identity.plan_digest != null
+              && builtins.isString identity.machine_binding_digest
+              && builtins.match "[0-9a-f]{64}" identity.machine_binding_digest != null
+              && builtins.isString identity.permit_digest
+              && builtins.match "[0-9a-f]{64}" identity.permit_digest != null
+              && builtins.isString identity.commit_id
+              && builtins.match "[0-9a-f]{64}" identity.commit_id != null;
+            validVector = vector:
+              builtins.isString vector.id
+              && builtins.isAttrs vector.intent
+              && builtins.isAttrs vector.proof
+              && builtins.isAttrs vector.snapshot
+              && builtins.isBool vector.snapshot.unresolved_attempt
+              && builtins.all
+                (slot:
+                  let key = vector.snapshot.${slot};
+                  in key == null || (builtins.isString key && builtins.hasAttr key corpus.identities))
+                slots
+              && builtins.isString vector.expected_decision;
+            matchesReferenceModel = vector:
+              referenceAdmission vector == vector.expected_decision;
+            validDecisions = [
+              "reject_invalid_intent"
+              "reject_invalid_proof"
+              "commit_admission_atomically"
+              "resume_existing_attempt"
+              "reject_replay_conflict"
+              "hold_unresolved_attempt"
+              "hold_inconsistent_persistence"
+            ];
+          in
+            assert corpus.schema == "org.luminousdynamics.nixward.supervisor-admission-vectors";
+            assert corpus.version == 1;
+            assert builtins.length vectors == 20;
+            assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
+            assert builtins.all (id: id != "") ids;
+            assert builtins.all validIdentity (builtins.attrValues corpus.identities);
+            assert builtins.all validVector vectors;
+            assert builtins.all
+              (vector: builtins.elem vector.expected_decision validDecisions)
+              vectors;
+            assert builtins.all matchesReferenceModel vectors;
+            pkgs.runCommand "nixward-supervisor-admission-qualification-vectors" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
