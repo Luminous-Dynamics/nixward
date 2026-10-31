@@ -30,12 +30,12 @@ const MAX_PERMIT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const AUTHORITY_POLICY_SCHEMA_VERSION: u64 = 1;
 const AUTHORITY_POLICY_KIND: &str = "symthaea-authority-trust-policy-v1";
-const AUTHORITY_POLICY_DIGEST_DOMAIN: &[u8] = b"symthaea-authority-policy-v1\\0";
+const AUTHORITY_POLICY_DIGEST_DOMAIN: &[u8] = b"symthaea-authority-policy-v1\0";
 const POLICY_EMERGENCY_REVOCATION_DOMAIN: &[u8] =
-    b"nixward-authority-emergency-revocations-v1\\0";
+    b"nixward-authority-emergency-revocations-v1\0";
 const POLICY_UPDATE_PROVENANCE_DOMAIN: &[u8] =
-    b"nixward-authority-policy-update-provenance-v1\\0";
-const POLICY_EPOCH_RECORD_DOMAIN: &[u8] = b"nixward-authority-policy-epoch-record-v1\\0";
+    b"nixward-authority-policy-update-provenance-v1\0";
+const POLICY_EPOCH_RECORD_DOMAIN: &[u8] = b"nixward-authority-policy-epoch-record-v1\0";
 const GENESIS_POLICY_RECORD_DIGEST: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -972,6 +972,36 @@ impl SupervisorAdmissionStore {
         Ok(())
     }
 
+    fn verify_policy_epoch_history(
+        connection: &Connection,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement =
+            connection.prepare("SELECT epoch FROM authority_policy_epochs ORDER BY epoch")?;
+        let epochs = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let mut expected_epoch = 1_i64;
+        let mut previous_digest = GENESIS_POLICY_RECORD_DIGEST.to_string();
+        for epoch in epochs {
+            if epoch != expected_epoch || epoch <= 0 {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+            let record = Self::load_policy_epoch_by_number(connection, epoch as u64)?
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+            if record.previous_record_digest != previous_digest {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+            previous_digest = record.record_digest;
+            expected_epoch = expected_epoch
+                .checked_add(1)
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        }
+        Self::check_policy_epoch_pointer(connection)?;
+        Ok(())
+    }
+
     /// Initialize the local policy archive at epoch 1. The caller is responsible
     /// for performing the trusted owner-enrollment/bootstrap ceremony first.
     pub(crate) fn initialize_authority_policy_epoch(
@@ -1323,6 +1353,7 @@ impl SupervisorAdmissionStore {
         if rows.next()?.is_some() {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
+        Self::check_policy_epoch_pointer(connection)?;
         Ok(())
     }
 
@@ -1707,6 +1738,7 @@ impl SupervisorAdmissionStore {
                 return Err(AdmissionStoreError::InconsistentStorage);
             }
         }
+        Self::verify_policy_epoch_history(&connection)?;
         Ok(())
     }
 
