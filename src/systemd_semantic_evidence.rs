@@ -517,6 +517,9 @@ fn validate_worker_and_receipt(e: &SystemdExecutionEvidence, job_new_at_ns: u64,
     if receipt.exited_at_ns <= release.persisted_at_ns || receipt.persisted_at_ns < receipt.exited_at_ns {
         f.violation("process receipt timestamps do not follow payload release");
     }
+    if worker.identity_observed_at_ns >= receipt.exited_at_ns {
+        f.violation("PIDFD-to-unit identity was not observed while the worker process was alive");
+    }
     Some(receipt.exit_code)
 }
 
@@ -897,6 +900,36 @@ mod tests {
         e.payload_release.as_mut().unwrap().persisted_at_ns = 165;
         assert_eq!(eval(&e).classification, TerminalClassification::ReconciliationRequired);
     }
+    #[test]
+    fn pidfd_identity_must_be_observed_before_worker_exit() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.worker_identity.as_mut().unwrap().identity_observed_at_ns = 191;
+        e.worker_identity.as_mut().unwrap().identity_persisted_at_ns = 192;
+        e.payload_release.as_mut().unwrap().released_at_ns = 193;
+        e.payload_release.as_mut().unwrap().persisted_at_ns = 194;
+        let result = eval(&e);
+        assert_ne!(result.classification, TerminalClassification::VerifiedSuccess);
+        assert!(result.violations.iter().any(|item| item.contains("while the worker process was alive")));
+    }
+
+    #[test]
+    fn worker_health_failure_is_not_terminal_success() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.health_observations[1].passed = false;
+        let result = eval(&e);
+        assert_eq!(result.classification, TerminalClassification::ReconciliationRequired);
+        assert!(result.violations.iter().any(|item| item.contains("health check service-health failed")));
+    }
+
+    #[test]
+    fn job_removed_unit_mismatch_is_not_success() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.manager_events[1].unit_name = "foreign-worker.service".into();
+        let result = eval(&e);
+        assert_eq!(result.classification, TerminalClassification::ReconciliationRequired);
+        assert!(result.violations.iter().any(|item| item.contains("unit identity is inconsistent")));
+    }
+
     #[test]
     fn duplicate_startunit_calls_force_safe_hold() {
         let mut e = valid_evidence(NixosOperation::Switch);
