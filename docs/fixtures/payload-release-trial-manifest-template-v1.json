@@ -13,7 +13,8 @@
     "mount_options": "REPLACE_WITH_MOUNT_OPTIONS",
     "device_model": "REPLACE_WITH_DEVICE_MODEL",
     "device_firmware": "REPLACE_WITH_DEVICE_FIRMWARE",
-    "cpu_model": "REPLACE_WITH_CPU_MODEL"
+    "cpu_model": "REPLACE_WITH_CPU_MODEL",
+    "boot_id": "REPLACE_WITH_KERNEL_BOOT_ID"
   },
   "trials": []
 }
