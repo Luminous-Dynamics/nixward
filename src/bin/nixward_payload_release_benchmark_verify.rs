@@ -325,6 +325,21 @@ enum PolicyDisposition {
 }
 
 #[derive(Debug, Clone)]
+struct BarrierRequestState {
+    admission_commit_id: String,
+    expected_policy_id: String,
+    expected_policy_epoch: u64,
+    expected_policy_digest: String,
+    expected_policy_record_digest: String,
+    signer_key_id: String,
+    authority_subject_digest: String,
+    authority_audience: String,
+    payload_digest: String,
+    expires_at_ms: u64,
+    wall_time_ms: u64,
+    requested_at_ns: u64,
+}
+
 struct BarrierState {
     release_id: String,
     admission_commit_id: String,
@@ -662,7 +677,7 @@ fn verify_trial(
     let mut current_policy_epoch = trial.initial_policy_epoch;
     let mut current_policy_digest = trial.initial_policy_digest.clone();
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
-    let mut barrier_requests = BTreeMap::<String, (String, u64, String, String, u64)>::new();
+    let mut barrier_requests = BTreeMap::<String, BarrierRequestState>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
     let mut attempt_requests = BTreeMap::<String, (String, u64)>::new();
     let mut barriers = BTreeMap::<String, BarrierState>::new();
@@ -695,60 +710,97 @@ fn verify_trial(
         previous_timestamp = timestamp;
         match event {
             EvidenceEvent::BarrierCreateRequested {
-                request_id, admission_commit_id, expected_policy_epoch,
-                expected_policy_record_digest, payload_digest, at_ns, ..
+                request_id, admission_commit_id, expected_policy_id,
+                expected_policy_epoch, expected_policy_digest, expected_policy_record_digest,
+                signer_key_id, expected_authority_subject_digest, expected_authority_audience,
+                payload_digest, expires_at_ms, wall_time_ms, at_ns, ..
             } => {
                 if request_id.trim().is_empty()
                     || !valid_hex(admission_commit_id, 64)
+                    || expected_policy_id.trim().is_empty()
+                    || *expected_policy_epoch == 0
+                    || !valid_hex(expected_policy_digest, 64)
                     || !valid_hex(expected_policy_record_digest, 64)
+                    || signer_key_id.trim().is_empty()
+                    || !valid_hex(expected_authority_subject_digest, 64)
+                    || !["nixward-change-v1", "nixward-execution-intent-v1"].contains(&expected_authority_audience.as_str())
                     || !valid_hex(payload_digest, 64)
-                    || barrier_requests.insert(
-                        request_id.clone(),
-                        (
-                            admission_commit_id.clone(),
-                            *expected_policy_epoch,
-                            expected_policy_record_digest.clone(),
-                            payload_digest.clone(),
-                            *at_ns,
-                        ),
-                    ).is_some()
+                    || *expires_at_ms == 0
+                    || *wall_time_ms > *expires_at_ms
+                    || barrier_requests.insert(request_id.clone(), BarrierRequestState {
+                        admission_commit_id: admission_commit_id.clone(),
+                        expected_policy_id: expected_policy_id.clone(),
+                        expected_policy_epoch: *expected_policy_epoch,
+                        expected_policy_digest: expected_policy_digest.clone(),
+                        expected_policy_record_digest: expected_policy_record_digest.clone(),
+                        signer_key_id: signer_key_id.clone(),
+                        authority_subject_digest: expected_authority_subject_digest.clone(),
+                        authority_audience: expected_authority_audience.clone(),
+                        payload_digest: payload_digest.clone(),
+                        expires_at_ms: *expires_at_ms,
+                        wall_time_ms: *wall_time_ms,
+                        requested_at_ns: *at_ns,
+                    }).is_some()
                 {
-                    violations.push("malformed or duplicate barrier request".into());
+                    violations.push("malformed, expired or duplicate barrier request".into());
                 }
             }
             EvidenceEvent::BarrierCommitted {
-                request_id, release_id, admission_commit_id, attempt_id,
+                request_id, release_id, admission_commit_id, transaction_id, attempt_id,
+                replay_key, permit_digest, plan_digest, machine_binding_digest,
                 policy_id, policy_epoch, policy_digest, policy_record_digest,
                 signer_key_id, authority_provenance_digest, authority_subject_digest,
-                authority_audience, payload_digest, at_ns, ..
+                authority_audience, payload_digest, expires_at_ms, wall_time_ms, at_ns, ..
             } => {
-                let Some((requested_commit, requested_epoch, requested_policy, requested_payload, requested_at)) =
-                    barrier_requests.get(request_id)
-                else {
+                let Some(request) = barrier_requests.get(request_id) else {
                     violations.push("barrier commit has no preceding request".into());
                     continue;
                 };
                 if !valid_hex(release_id, 64)
+                    || !valid_hex(admission_commit_id, 64)
+                    || transaction_id.trim().is_empty()
+                    || attempt_id.trim().is_empty()
+                    || !valid_hex(replay_key, 64)
+                    || !valid_hex(permit_digest, 64)
+                    || !valid_hex(plan_digest, 64)
+                    || !valid_hex(machine_binding_digest, 64)
                     || !valid_hex(policy_digest, 64)
                     || !valid_hex(policy_record_digest, 64)
                     || !valid_hex(authority_provenance_digest, 64)
                     || !valid_hex(authority_subject_digest, 64)
                     || !valid_hex(payload_digest, 64)
-                    || !valid_hex(admission_commit_id, 64)
-                    || attempt_id.trim().is_empty()
                     || policy_id.trim().is_empty()
                     || signer_key_id.trim().is_empty()
                     || authority_audience.trim().is_empty()
-                    || requested_commit != admission_commit_id
-                    || requested_epoch != policy_epoch
-                    || requested_policy != policy_record_digest
-                    || requested_payload != payload_digest
+                    || admission_commit_id != &request.admission_commit_id
+                    || policy_id != &request.expected_policy_id
+                    || *policy_epoch != request.expected_policy_epoch
+                    || policy_digest != &request.expected_policy_digest
+                    || policy_record_digest != &request.expected_policy_record_digest
+                    || signer_key_id != &request.signer_key_id
+                    || authority_subject_digest != &request.authority_subject_digest
+                    || authority_audience != &request.authority_audience
+                    || payload_digest != &request.payload_digest
+                    || *expires_at_ms != request.expires_at_ms
+                    || *wall_time_ms < request.wall_time_ms
+                    || *wall_time_ms > *expires_at_ms
                     || *policy_epoch != current_policy_epoch
+                    || policy_id != &current_policy_id
                     || policy_digest != &current_policy_digest
                     || policy_record_digest != &current_policy_record_digest
-                    || *at_ns < *requested_at
+                    || *at_ns < request.requested_at_ns
                 {
-                    violations.push(format!("barrier {release_id} is not bound to request/current policy or event order"));
+                    violations.push(format!("barrier {release_id} is not bound to exact request/current policy or expiry"));
+                }
+                let expected_release_id = derive_release_id(
+                    transaction_id, attempt_id, admission_commit_id, replay_key,
+                    permit_digest, plan_digest, machine_binding_digest,
+                    authority_provenance_digest, signer_key_id, authority_subject_digest,
+                    authority_audience, payload_digest, policy_id, *policy_epoch,
+                    policy_digest, policy_record_digest, *expires_at_ms,
+                );
+                if expected_release_id != *release_id {
+                    violations.push(format!("deterministic release ID mismatch for {release_id}"));
                 }
                 if barriers.contains_key(release_id)
                     || admission_releases.contains_key(admission_commit_id)
@@ -759,20 +811,49 @@ fn verify_trial(
                     barriers.insert(release_id.clone(), BarrierState {
                         release_id: release_id.clone(),
                         admission_commit_id: admission_commit_id.clone(),
+                        transaction_id: transaction_id.clone(),
                         attempt_id: attempt_id.clone(),
+                        replay_key: replay_key.clone(),
+                        permit_digest: permit_digest.clone(),
+                        plan_digest: plan_digest.clone(),
+                        machine_binding_digest: machine_binding_digest.clone(),
+                        authority_provenance_digest: authority_provenance_digest.clone(),
+                        authority_subject_digest: authority_subject_digest.clone(),
+                        authority_audience: authority_audience.clone(),
                         policy_id: policy_id.clone(),
+                        policy_digest: policy_digest.clone(),
                         signer_key_id: signer_key_id.clone(),
                         policy_epoch: *policy_epoch,
                         policy_record_digest: policy_record_digest.clone(),
                         payload_digest: payload_digest.clone(),
+                        expires_at_ms: *expires_at_ms,
+                        barrier_wall_time_ms: *wall_time_ms,
                         committed_at_ns: *at_ns,
                         decision: None,
                     });
                 }
             }
             EvidenceEvent::BarrierRetryExisting { request_id, release_id, .. } => {
-                if !barrier_requests.contains_key(request_id) || !barriers.contains_key(release_id) {
+                let Some(request) = barrier_requests.get(request_id) else {
+                    violations.push("historical barrier retry has no matching request".into());
+                    continue;
+                };
+                let Some(barrier) = barriers.get(release_id) else {
                     violations.push("historical barrier retry does not name an existing release".into());
+                    continue;
+                };
+                if request.admission_commit_id != barrier.admission_commit_id
+                    || request.expected_policy_id != barrier.policy_id
+                    || request.expected_policy_epoch != barrier.policy_epoch
+                    || request.expected_policy_digest != barrier.policy_digest
+                    || request.expected_policy_record_digest != barrier.policy_record_digest
+                    || request.signer_key_id != barrier.signer_key_id
+                    || request.authority_subject_digest != barrier.authority_subject_digest
+                    || request.authority_audience != barrier.authority_audience
+                    || request.payload_digest != barrier.payload_digest
+                    || request.expires_at_ms != barrier.expires_at_ms
+                {
+                    violations.push("historical barrier retry changed original immutable identity".into());
                 }
                 retries.push((request_id.clone(), release_id.clone()));
             }
@@ -791,7 +872,9 @@ fn verify_trial(
             }
             EvidenceEvent::PolicyAdvanced {
                 request_id, from_epoch, to_epoch, previous_record_digest,
-                new_policy_id, new_policy_digest, new_record_digest, emergency_revoked_signers, decisions, at_ns, ..
+                new_policy_id, new_policy_digest, new_record_digest,
+                new_policy_allowed_signers, new_policy_allowed_audiences, new_policy_allowed_actions,
+                emergency_revoked_signers, decisions, at_ns, ..
             } => {
                 let Some((requested_epoch, requested_digest, requested_at)) = policy_requests.get(request_id) else {
                     violations.push("policy advance has no preceding request".into());
@@ -830,8 +913,12 @@ fn verify_trial(
                         if new_policy_id != &barrier.policy_id {
                             violations.push("policy identity changed while preserving barrier".into());
                         }
-                        if emergency_revoked_signers.contains(&barrier.signer_key_id) {
-                            violations.push("emergency-revoked signer was preserved".into());
+                        if emergency_revoked_signers.contains(&barrier.signer_key_id)
+                            || !new_policy_allowed_signers.contains(&barrier.signer_key_id)
+                            || !new_policy_allowed_audiences.contains(&barrier.authority_audience)
+                            || !new_policy_allowed_actions.iter().any(|action| action == "change")
+                        {
+                            violations.push("revoked or no-longer-authorized signer/action/audience was preserved".into());
                         }
                     }
                     if barrier.decision == Some(PolicyDisposition::StopOrRecoveryRequired)
@@ -851,16 +938,21 @@ fn verify_trial(
                 current_policy_digest = new_policy_digest.clone();
                 current_policy_record_digest = new_record_digest.clone();
             }
-            EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, .. } => {
+            EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, wall_time_ms, .. } => {
+                let Some(barrier) = barriers.get(release_id) else {
+                    violations.push("release-attempt request names an unknown barrier".into());
+                    continue;
+                };
                 if request_id.trim().is_empty()
-                    || !barriers.contains_key(release_id)
+                    || *wall_time_ms < barrier.barrier_wall_time_ms
+                    || *wall_time_ms > barrier.expires_at_ms
                     || attempt_requests.insert(request_id.clone(), (release_id.clone(), *at_ns)).is_some()
                 {
-                    violations.push("malformed or duplicate attempt request".into());
+                    violations.push("malformed, expired or duplicate attempt request".into());
                 }
             }
             EvidenceEvent::ReleaseAttemptReserved {
-                request_id, release_id, attempt_id, payload_digest, at_ns, ..
+                request_id, release_id, attempt_id, payload_digest, at_ns, wall_time_ms, ..
             } => {
                 let Some((requested_release, requested_at)) = attempt_requests.get(request_id) else {
                     violations.push("attempt reservation has no preceding request".into());
@@ -873,6 +965,8 @@ fn verify_trial(
                 if requested_release != release_id
                     || *at_ns < *requested_at
                     || *at_ns < barrier.committed_at_ns
+                    || *wall_time_ms < barrier.barrier_wall_time_ms
+                    || *wall_time_ms > barrier.expires_at_ms
                     || attempt_id != &barrier.attempt_id
                     || payload_digest != &barrier.payload_digest
                     || barrier.decision == Some(PolicyDisposition::StopOrRecoveryRequired)
