@@ -509,6 +509,67 @@ impl SupervisorAdmissionStore {
         hasher.update(value);
     }
 
+    fn derive_commit_id(
+        transaction_id: &str,
+        attempt_id: &str,
+        replay_key: &str,
+        plan_digest: &str,
+        machine_binding_digest: &str,
+        approval_proof_digest: &str,
+        permit_digest: &str,
+        event_digest: &str,
+    ) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-supervisor-admission-commit-v1\0");
+        for value in [
+            transaction_id.as_bytes(),
+            attempt_id.as_bytes(),
+            replay_key.as_bytes(),
+            plan_digest.as_bytes(),
+            machine_binding_digest.as_bytes(),
+            approval_proof_digest.as_bytes(),
+            permit_digest.as_bytes(),
+            event_digest.as_bytes(),
+        ] {
+            Self::update_hash_field(&mut hasher, value);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn validate_record_content(record: &AdmissionRecord) -> Result<(), AdmissionStoreError> {
+        if !Self::valid_token(&record.transaction_id)
+            || !Self::valid_token(&record.attempt_id)
+            || !Self::valid_digest(&record.replay_key)
+            || !Self::valid_digest(&record.plan_digest)
+            || !Self::valid_digest(&record.machine_binding_digest)
+            || !Self::valid_digest(&record.approval_proof_digest)
+            || !Self::valid_digest(&record.permit_digest)
+            || !Self::valid_digest(&record.event_digest)
+            || !Self::valid_digest(&record.commit_id)
+            || Self::digest(&record.approval_material) != record.approval_proof_digest
+            || Self::digest(&record.permit_wire) != record.permit_digest
+            || Self::digest(&record.event_payload) != record.event_digest
+            || Self::derive_commit_id(
+                &record.transaction_id,
+                &record.attempt_id,
+                &record.replay_key,
+                &record.plan_digest,
+                &record.machine_binding_digest,
+                &record.approval_proof_digest,
+                &record.permit_digest,
+                &record.event_digest,
+            ) != record.commit_id
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        if let AdmissionState::Resolved { resolution_digest, .. } = &record.state {
+            if !Self::valid_digest(resolution_digest) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+        Ok(())
+    }
+
     fn validate_request(request: &AdmissionRequest) -> Result<DerivedBindings, AdmissionStoreError> {
         if !Self::valid_token(&request.transaction_id) {
             return Err(AdmissionStoreError::InvalidInput("transaction ID"));
@@ -543,21 +604,16 @@ impl SupervisorAdmissionStore {
         let permit_digest = Self::digest(&request.permit_wire);
         let event_digest = Self::digest(&request.event_payload);
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nixward-supervisor-admission-commit-v1\0");
-        for value in [
-            request.transaction_id.as_bytes(),
-            request.attempt_id.as_bytes(),
-            request.replay_key.as_bytes(),
-            request.plan_digest.as_bytes(),
-            request.machine_binding_digest.as_bytes(),
-            approval_proof_digest.as_bytes(),
-            permit_digest.as_bytes(),
-            event_digest.as_bytes(),
-        ] {
-            Self::update_hash_field(&mut hasher, value);
-        }
-        let commit_id = hasher.finalize().to_hex().to_string();
+        let commit_id = Self::derive_commit_id(
+            &request.transaction_id,
+            &request.attempt_id,
+            &request.replay_key,
+            &request.plan_digest,
+            &request.machine_binding_digest,
+            &approval_proof_digest,
+            &permit_digest,
+            &event_digest,
+        );
 
         Ok(DerivedBindings {
             approval_proof_digest,
@@ -643,6 +699,13 @@ impl SupervisorAdmissionStore {
                         rusqlite::types::Type::Text,
                     ));
                 }
+                if !Self::valid_digest(&digest) {
+                    return Err(rusqlite::Error::InvalidColumnType(
+                        14,
+                        "resolution_digest".into(),
+                        rusqlite::types::Type::Text,
+                    ));
+                }
                 AdmissionState::Resolved {
                     resolution_digest: digest,
                     resolved_at_ms: at_ms as u64,
@@ -681,27 +744,39 @@ impl SupervisorAdmissionStore {
         connection: &Connection,
         commit_id: &str,
     ) -> Result<Option<AdmissionRecord>, AdmissionStoreError> {
-        Ok(connection
+        let record = connection
             .query_row(SELECT_ADMISSION_BY_COMMIT, [commit_id], Self::map_record)
-            .optional()?)
+            .optional()?;
+        if let Some(record) = &record {
+            Self::validate_record_content(record)?;
+        }
+        Ok(record)
     }
 
     fn load_by_replay(
         connection: &Connection,
         replay_key: &str,
     ) -> Result<Option<AdmissionRecord>, AdmissionStoreError> {
-        Ok(connection
+        let record = connection
             .query_row(SELECT_ADMISSION_BY_REPLAY, [replay_key], Self::map_record)
-            .optional()?)
+            .optional()?;
+        if let Some(record) = &record {
+            Self::validate_record_content(record)?;
+        }
+        Ok(record)
     }
 
     fn load_unresolved_by_transaction(
         connection: &Connection,
         transaction_id: &str,
     ) -> Result<Option<AdmissionRecord>, AdmissionStoreError> {
-        Ok(connection
+        let record = connection
             .query_row(SELECT_UNRESOLVED_BY_TRANSACTION, [transaction_id], Self::map_record)
-            .optional()?)
+            .optional()?;
+        if let Some(record) = &record {
+            Self::validate_record_content(record)?;
+        }
+        Ok(record)
     }
 
     fn matches_request(
@@ -942,7 +1017,21 @@ impl SupervisorAdmissionStore {
         if quick_check != "ok" {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
-        Self::check_join_invariants(&connection)
+        Self::check_join_invariants(&connection)?;
+
+        let mut statement = connection.prepare(
+            "SELECT commit_id FROM admission_commits ORDER BY commit_id"
+        )?;
+        let commit_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for commit_id in commit_ids {
+            if Self::load_by_commit(&connection, &commit_id)?.is_none() {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1254,6 +1343,31 @@ mod tests {
             let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn detects_payload_tampering_even_when_joined_rows_still_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let record = store.admit(&request("tx-a", "attempt-a1", 0x11, 0x22, 0x33)).unwrap();
+
+        let connection = store.connect().unwrap();
+        connection.execute_batch(
+            "DROP TRIGGER admission_events_immutable_update;",
+        ).unwrap();
+        connection.execute(
+            "UPDATE admission_events SET event_payload = ?2 WHERE commit_id = ?1",
+            params![record.record().commit_id, b"tampered event".as_slice()],
+        ).unwrap();
+
+        assert!(matches!(
+            store.admit(&request("tx-b", "attempt-b1", 0x44, 0x55, 0x66)),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
     }
 
     #[test]
