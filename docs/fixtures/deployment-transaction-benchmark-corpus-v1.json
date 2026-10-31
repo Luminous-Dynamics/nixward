@@ -1,0 +1,758 @@
+{
+  "schema": "org.luminousdynamics.nixward.deployment-transaction-benchmark-corpus",
+  "version": 1,
+  "status": "proposed-not-executed",
+  "baseline_registry": [
+    {
+      "id": "nixos-rebuild",
+      "status": "available-baseline",
+      "role": "native-local-build-and-activation",
+      "notes": "Run build, test, switch, and boot as distinct operation modes. Do not collapse their semantics."
+    },
+    {
+      "id": "colmena",
+      "status": "available-baseline",
+      "role": "fleet-scheduler",
+      "notes": "Run single-node correctness first; measure fleet concurrency separately at 1, 5, and 10."
+    },
+    {
+      "id": "deploy-rs",
+      "status": "available-baseline",
+      "role": "remote-multi-profile-deployment",
+      "notes": "Record autoRollback and magicRollback settings; include post-activation connectivity confirmation."
+    },
+    {
+      "id": "nixward-direct",
+      "status": "available-baseline",
+      "role": "existing-direct-spawn-transaction-path",
+      "notes": "Pin exact source SHA and journal/receipt schema."
+    },
+    {
+      "id": "nixward-systemd-gated",
+      "status": "gated-not-yet-qualified",
+      "role": "future-systemd-supervised-transaction-path",
+      "notes": "Do not run or score until authority, persistence, and disposable-VM gates pass."
+    },
+    {
+      "id": "sqlite-admission",
+      "status": "prototype-only",
+      "role": "admission-storage-microbenchmark",
+      "notes": "Temporary-database prototype only; do not treat it as privileged production storage."
+    }
+  ],
+  "global_safety_invariants": [
+    "false_terminal_success_count == 0",
+    "duplicate_mutation_for_unresolved_attempt_count == 0",
+    "unauthorized_or_replayed_admission_count == 0",
+    "foreign_transaction_attempt_worker_or_invocation_acceptance_count == 0",
+    "payload_release_before_durable_admission_and_worker_identity_count == 0",
+    "successful_terminal_dispositions_have_complete_evidence_chain == 100_percent",
+    "safe_hold_is_not_counted_as_successful_recovery"
+  ],
+  "trial_evidence_fields": [
+    "nixward_commit_sha",
+    "benchmark_harness_sha",
+    "scenario_corpus_sha256",
+    "nixpkgs_revision_and_flake_lock_sha256",
+    "candidate_closure_store_path_and_digest",
+    "vm_image_digest",
+    "kernel_version",
+    "systemd_version",
+    "sqlite_version_and_compile_options",
+    "filesystem_mount_options_and_storage_cache_policy",
+    "transaction_id_attempt_id_plan_digest_machine_binding_digest",
+    "replay_key_digest_permit_digest",
+    "systemd_unit_job_id_invocation_id_when_applicable",
+    "worker_pidfd_identity_and_process_start_tuple_when_applicable",
+    "fault_seed_and_exact_injection_boundary",
+    "monotonic_phase_timestamps",
+    "manager_events_journal_snapshots_process_receipts",
+    "independent_runtime_and_profile_observations",
+    "stdout_stderr_exit_status_and_artifact_digests",
+    "raw_trial_record_digest_and_terminal_classification"
+  ],
+  "comparison_rules": [
+    "Pin identical Nixpkgs revision, flake lock, closure, VM image, kernel, systemd, cache and network conditions for matched trials.",
+    "Compare nixos-rebuild switch, test and boot as separate semantic operation modes.",
+    "Do not treat Colmena fleet concurrency as a single-host activation latency baseline.",
+    "Record deploy-rs autoRollback and magicRollback settings; do not disable normal rollback for convenience.",
+    "Only run nixward-systemd-gated after authority, store, and disposable-VM qualification; it is not an available baseline yet.",
+    "Never infer exactly-once execution from a local journal; use at-most-once submission per unresolved attempt and reconciliation."
+  ],
+  "scenarios": [
+    {
+      "id": "noop-admission",
+      "category": "functional",
+      "comparison_group": "admission-overhead",
+      "operation_mode": "admission-only",
+      "supported_baselines": [
+        "nixward-direct",
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Disposable host is at pinned pre-state.",
+        "Approval/intent is valid but operation has no host mutation.",
+        "The same request identity is used across all retry trials."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Admission commit identity",
+        "Four-record joined read-back",
+        "No systemd submission",
+        "No host state change"
+      ],
+      "expected_disposition": "validated_no_mutation",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "admission_commit",
+        "readback",
+        "control_plane_overhead"
+      ],
+      "min_trials": 30
+    },
+    {
+      "id": "service-configuration-switch",
+      "category": "functional",
+      "comparison_group": "local-switch",
+      "operation_mode": "nixos-switch",
+      "supported_baselines": [
+        "nixos-rebuild",
+        "colmena",
+        "deploy-rs",
+        "nixward-direct",
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Identical prebuilt closure and Nixpkgs revision are pinned.",
+        "Disposable VM has a known current profile and runtime.",
+        "Exact plan, approval, service change, and postconditions are recorded."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Selected system profile",
+        "Running system closure",
+        "Expected service unit state",
+        "Worker receipt if Nixward is used",
+        "Fresh post-state"
+      ],
+      "expected_disposition": "validated_terminal_success",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "build",
+        "copy",
+        "activation",
+        "control_plane",
+        "post_state"
+      ],
+      "min_trials": 30
+    },
+    {
+      "id": "test-does-not-change-boot-default",
+      "category": "functional",
+      "comparison_group": "local-test",
+      "operation_mode": "nixos-test",
+      "supported_baselines": [
+        "nixos-rebuild",
+        "nixward-direct"
+      ],
+      "preconditions": [
+        "Predecessor boot default profile is independently recorded.",
+        "Candidate closure is prebuilt and pinned.",
+        "The operation is explicitly test, not switch."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Candidate runtime active",
+        "Boot default remains predecessor",
+        "Running/selected profile distinction"
+      ],
+      "expected_disposition": "validated_terminal_success",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "activation",
+        "boot_profile_invariant",
+        "post_state"
+      ],
+      "min_trials": 30
+    },
+    {
+      "id": "boot-only-does-not-activate",
+      "category": "functional",
+      "comparison_group": "local-boot",
+      "operation_mode": "nixos-boot",
+      "supported_baselines": [
+        "nixos-rebuild"
+      ],
+      "preconditions": [
+        "Predecessor runtime and boot default are independently recorded.",
+        "Candidate closure is prebuilt and pinned.",
+        "The operation is explicitly boot, not switch."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Candidate boot profile selected",
+        "Running closure remains predecessor",
+        "No service activation inferred"
+      ],
+      "expected_disposition": "validated_terminal_success",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "profile_selection",
+        "boot_profile_invariant",
+        "post_state"
+      ],
+      "min_trials": 30
+    },
+    {
+      "id": "successful-exact-closure-activation",
+      "category": "functional",
+      "comparison_group": "local-activation",
+      "operation_mode": "nixos-switch",
+      "supported_baselines": [
+        "nixos-rebuild",
+        "colmena",
+        "deploy-rs",
+        "nixward-direct",
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Exact candidate closure, profile transition, and action are pinned.",
+        "Candidate and predecessor postconditions are unambiguous.",
+        "Build/copy phase is separated from activation timing."
+      ],
+      "fault_injection": null,
+      "required_observations": [
+        "Exact profile transition",
+        "Exact worker/job identity where applicable",
+        "Process receipt",
+        "Fresh runtime/profile post-state",
+        "Terminal disposition"
+      ],
+      "expected_disposition": "validated_terminal_success",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "activation",
+        "receipt",
+        "post_state",
+        "evidence_completeness"
+      ],
+      "min_trials": 30
+    },
+    {
+      "id": "failed-activation-predecessor-reconcile",
+      "category": "fault",
+      "comparison_group": "rollback",
+      "operation_mode": "nixos-switch",
+      "supported_baselines": [
+        "nixos-rebuild",
+        "deploy-rs",
+        "nixward-direct",
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Disposable VM has a pinned predecessor and candidate closure.",
+        "Faulting candidate is deterministic and cannot affect external systems.",
+        "Recovery action is separately authorized where policy requires."
+      ],
+      "fault_injection": {
+        "boundary": "activation-before-post-state",
+        "action": "inject deterministic service activation failure"
+      },
+      "required_observations": [
+        "Candidate activation failure evidence",
+        "Rollback attempt identity if any",
+        "Observed predecessor runtime/profile or explicit hold",
+        "No success from rollback exit alone"
+      ],
+      "expected_disposition": "validated_recovery_or_safe_hold",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "recovery_time",
+        "rollback_outcome",
+        "operator_intervention",
+        "safe_hold"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "lost-startunit-reply",
+      "category": "fault",
+      "comparison_group": "manager-ambiguity",
+      "operation_mode": "systemd-supervised",
+      "supported_baselines": [
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Systemd path has passed authority/persistence/VM entry gates.",
+        "StartUnit request is delivered to the local manager.",
+        "Only the method reply is dropped from the supervisor's view."
+      ],
+      "fault_injection": {
+        "boundary": "manager-request-accepted-before-reply",
+        "action": "drop D-Bus method reply"
+      },
+      "required_observations": [
+        "Durable submission barrier",
+        "Same canonical unit and attempt",
+        "Manager re-query",
+        "No second StartUnit for unresolved attempt",
+        "Final receipt/post-state or hold"
+      ],
+      "expected_disposition": "hold_then_reconcile_without_duplicate_submission",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "manager_latency",
+        "duplicate_submission",
+        "reconciliation_time",
+        "safe_hold"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "jobremoved-missing-or-reordered",
+      "category": "fault",
+      "comparison_group": "manager-ambiguity",
+      "operation_mode": "systemd-supervised",
+      "supported_baselines": [
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "A fixed unit start was accepted and InvocationID was observed.",
+        "The manager signal stream is controlled by a test proxy or fixture.",
+        "The worker lifecycle is independently observable."
+      ],
+      "fault_injection": {
+        "boundary": "jobremoved-event-delivery",
+        "action": "drop-or-reorder-jobremoved-signals"
+      },
+      "required_observations": [
+        "Exact unit and InvocationID query",
+        "Signal order recorded",
+        "No false terminal classification",
+        "Receipt and post-state or hold"
+      ],
+      "expected_disposition": "hold_then_reconcile_without_false_terminal_result",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "signal_gap",
+        "invocation_attribution",
+        "reconciliation_time"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "supervisor-crash-before-release",
+      "category": "fault",
+      "comparison_group": "supervisor-lifecycle",
+      "operation_mode": "systemd-supervised",
+      "supported_baselines": [
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Admission commit and worker identity are persisted.",
+        "Payload release token has not been issued.",
+        "The systemd worker gate is running but blocked."
+      ],
+      "fault_injection": {
+        "boundary": "after-worker-identity-before-release",
+        "action": "SIGKILL-supervisor"
+      },
+      "required_observations": [
+        "Supervisor restart finds same admission",
+        "No payload release before revalidation",
+        "Expired or mismatched permit is held",
+        "No new attempt is minted"
+      ],
+      "expected_disposition": "held_or_resumed_same_attempt_without_payload_release",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "restart_time",
+        "payload_release_count",
+        "safe_hold"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "supervisor-crash-after-release",
+      "category": "fault",
+      "comparison_group": "supervisor-lifecycle",
+      "operation_mode": "systemd-supervised",
+      "supported_baselines": [
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Worker identity and release are durably recorded.",
+        "Payload is a harmless deterministic test helper.",
+        "Supervisor dies after the gate releases the payload."
+      ],
+      "fault_injection": {
+        "boundary": "after-payload-release",
+        "action": "SIGKILL-supervisor"
+      },
+      "required_observations": [
+        "Systemd keeps owning worker lifecycle",
+        "Restart reconciles same attempt",
+        "No duplicate execution",
+        "Receipt and independent target observation"
+      ],
+      "expected_disposition": "resume_same_attempt_or_hold",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "worker_attribution",
+        "duplicate_execution",
+        "reconciliation_time"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "manager-restart-during-worker",
+      "category": "fault",
+      "comparison_group": "manager-lifecycle",
+      "operation_mode": "systemd-supervised",
+      "supported_baselines": [
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Worker payload has started and exact invocation identity is persisted.",
+        "Disposable VM supports controlled systemd manager restart/re-exec.",
+        "Host boot ID remains unchanged."
+      ],
+      "fault_injection": {
+        "boundary": "worker-active-manager-restart",
+        "action": "restart-or-reexecute-systemd-manager"
+      },
+      "required_observations": [
+        "Manager restart recorded",
+        "No PID-only attribution fallback",
+        "Persisted unit/invocation/process evidence rejoined",
+        "No second mutation"
+      ],
+      "expected_disposition": "resume_same_attempt_or_hold",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "manager_restart_recovery",
+        "identity_conflicts",
+        "reconciliation_time"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "host-reboot-during-activation",
+      "category": "fault",
+      "comparison_group": "host-reboot",
+      "operation_mode": "nixos-switch",
+      "supported_baselines": [
+        "nixos-rebuild",
+        "nixward-direct",
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Disposable VM snapshot and boot ID are recorded.",
+        "Controlled reboot occurs after profile selection and before completion.",
+        "Predecessor and candidate boot/runtime outcomes are independently observable."
+      ],
+      "fault_injection": {
+        "boundary": "profile-selected-before-activation-complete",
+        "action": "reboot-disposable-vm"
+      },
+      "required_observations": [
+        "New boot ID observed",
+        "Old PIDFD is not reused as evidence",
+        "Current boot/runtime/profile measured",
+        "Unresolved attempt remains held until classified"
+      ],
+      "expected_disposition": "validated_recovery_or_safe_hold",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "reboot_recovery_time",
+        "profile_post_state",
+        "operator_intervention"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "network-loss-during-remote-confirmation",
+      "category": "fault",
+      "comparison_group": "remote-rollback",
+      "operation_mode": "remote-deploy",
+      "supported_baselines": [
+        "deploy-rs",
+        "colmena",
+        "nixward-systemd-gated"
+      ],
+      "preconditions": [
+        "Remote target has a known pre-state and candidate closure.",
+        "Network loss occurs after activation but before confirmation.",
+        "The remote tool's normal rollback policy remains enabled and recorded."
+      ],
+      "fault_injection": {
+        "boundary": "post-activation-before-connectivity-confirmation",
+        "action": "drop-controller-network"
+      },
+      "required_observations": [
+        "Connectivity observation",
+        "Remote profile/runtime state",
+        "Rollback or hold evidence",
+        "No inference from controller timeout alone"
+      ],
+      "expected_disposition": "validated_recovery_or_safe_hold",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "confirmation_latency",
+        "rollback_outcome",
+        "operator_intervention"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "concurrent-independent-transactions",
+      "category": "concurrency",
+      "comparison_group": "admission-concurrency",
+      "operation_mode": "admission-only",
+      "supported_baselines": [
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Two distinct transaction IDs have independent valid test inputs.",
+        "Both admission requests start concurrently against one temporary database.",
+        "The same pinned SQLite build and durability mode are used."
+      ],
+      "fault_injection": {
+        "boundary": "concurrent-admission-begin",
+        "action": "barrier-release-two-independent-writers"
+      },
+      "required_observations": [
+        "Two distinct commit IDs",
+        "Two distinct attempt IDs",
+        "Both joins complete",
+        "No cross-transaction identity leakage"
+      ],
+      "expected_disposition": "both_admissions_created_and_verified",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "writer_throughput",
+        "commit_latency",
+        "busy_timeout_rate"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "concurrent-same-transaction-different-replay",
+      "category": "concurrency",
+      "comparison_group": "admission-concurrency",
+      "operation_mode": "admission-only",
+      "supported_baselines": [
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Two fresh replay keys target the same transaction ID.",
+        "Both attempts are otherwise valid and begin simultaneously.",
+        "No prior unresolved attempt exists."
+      ],
+      "fault_injection": {
+        "boundary": "concurrent-unresolved-attempt-reservation",
+        "action": "barrier-release-two-writers"
+      },
+      "required_observations": [
+        "Exactly one winner",
+        "One loser receives unresolved-attempt hold",
+        "One unresolved attempt remains",
+        "No duplicate permit or journal event"
+      ],
+      "expected_disposition": "one_created_one_held",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "race_winner_count",
+        "duplicate_attempt_count",
+        "lock_wait"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "sqlite-precommit-failure-matrix",
+      "category": "storage",
+      "comparison_group": "admission-storage",
+      "operation_mode": "storage-only",
+      "supported_baselines": [
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Temporary database begins empty and has pinned schema version.",
+        "Failure is injected after each logical row write and before commit.",
+        "Same replay key and request are retained for reopen/retry."
+      ],
+      "fault_injection": {
+        "boundary": "each-insert-and-precommit",
+        "action": "inject-storage-error-after-each-write"
+      },
+      "required_observations": [
+        "No partial durable admission after precommit rollback",
+        "Integrity scan passes after reopen",
+        "Retry creates one complete admission",
+        "No worker-facing permit is returned before read-back"
+      ],
+      "expected_disposition": "all_precommit_failures_leave_no_admission",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "rollback_latency",
+        "retry_latency",
+        "database_integrity"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "sqlite-commit-ack-lost",
+      "category": "storage",
+      "comparison_group": "admission-storage",
+      "operation_mode": "storage-only",
+      "supported_baselines": [
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Database commit succeeds before acknowledgement is dropped.",
+        "Process/store instance is discarded and DB is reopened.",
+        "Retry retains the exact replay/plan/machine/approval binding."
+      ],
+      "fault_injection": {
+        "boundary": "after-commit-before-acknowledgement",
+        "action": "drop-admission-commit-ack"
+      },
+      "required_observations": [
+        "Original commit ID returned",
+        "Original attempt and permit returned",
+        "No new permit/attempt",
+        "Full integrity scan passes"
+      ],
+      "expected_disposition": "existing_same_admission_returned",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "lost_ack_recovery_latency",
+        "duplicate_attempt_count"
+      ],
+      "min_trials": 100
+    },
+    {
+      "id": "sqlite-wal-growth-checkpoint",
+      "category": "storage",
+      "comparison_group": "admission-performance",
+      "operation_mode": "storage-only",
+      "supported_baselines": [
+        "sqlite-admission"
+      ],
+      "preconditions": [
+        "Use representative database size and repeated admission/resolution workload.",
+        "Record WAL size and checkpoint mode/frequency.",
+        "Do not change synchronous=FULL during the primary safety run."
+      ],
+      "fault_injection": {
+        "boundary": "wal-growth-and-checkpoint",
+        "action": "run-repeated-transaction-workload"
+      },
+      "required_observations": [
+        "Commit and checkpoint timings",
+        "WAL size over time",
+        "Read latency as WAL grows",
+        "No incomplete/corrupt committed admission"
+      ],
+      "expected_disposition": "integrity_preserved_under_checkpoint_policy",
+      "forbidden_claims": [
+        "A command exit code alone proves the intended host state.",
+        "Missing manager reply, signal, or receipt proves that no mutation occurred.",
+        "A safe hold is a successful recovery.",
+        "A queued workflow or unverified future systemd path is a passing baseline."
+      ],
+      "metric_tags": [
+        "commit_p50_p95_p99",
+        "checkpoint_p50_p95_p99",
+        "wal_size",
+        "read_latency"
+      ],
+      "min_trials": 30
+    }
+  ]
+}

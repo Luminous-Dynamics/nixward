@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/deployment-transaction-benchmark-v1.schema.json",
+  "title": "Nixward deployment transaction benchmark corpus v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "status",
+    "baseline_registry",
+    "global_safety_invariants",
+    "trial_evidence_fields",
+    "comparison_rules",
+    "scenarios"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.deployment-transaction-benchmark-corpus"
+    },
+    "version": {
+      "const": 1
+    },
+    "status": {
+      "const": "proposed-not-executed"
+    },
+    "baseline_registry": {
+      "type": "array",
+      "minItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "role",
+          "notes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "available-baseline",
+              "gated-not-yet-qualified",
+              "prototype-only"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "notes": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "global_safety_invariants": {
+      "type": "array",
+      "minItems": 7,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "trial_evidence_fields": {
+      "type": "array",
+      "minItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "comparison_rules": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 18,
+      "uniqueItems": false,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "category",
+          "comparison_group",
+          "operation_mode",
+          "supported_baselines",
+          "preconditions",
+          "fault_injection",
+          "required_observations",
+          "expected_disposition",
+          "forbidden_claims",
+          "metric_tags",
+          "min_trials"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "category": {
+            "enum": [
+              "functional",
+              "fault",
+              "concurrency",
+              "storage"
+            ]
+          },
+          "comparison_group": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operation_mode": {
+            "type": "string",
+            "minLength": 1
+          },
+          "supported_baselines": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "preconditions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "fault_injection": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "boundary",
+                  "action"
+                ],
+                "properties": {
+                  "boundary": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "action": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
+          },
+          "required_observations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "expected_disposition": {
+            "type": "string",
+            "minLength": 1
+          },
+          "forbidden_claims": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "metric_tags": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "min_trials": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}
