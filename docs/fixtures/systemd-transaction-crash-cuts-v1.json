@@ -1,0 +1,347 @@
+{
+  "schema": "org.luminousdynamics.nixward.systemd-crash-cut-matrix",
+  "version": 1,
+  "status": "research_only_vm_qualification_plan",
+  "claim_ceiling": "Fault-injection specification only. No systemd VM execution, host power-loss guarantee, durable-journal qualification, or privileged worker qualification is claimed by this corpus.",
+  "prerequisites": [
+    "Exact Nixward commit, Cargo.lock, flake.lock, Nixpkgs revision, kernel and systemd version recorded",
+    "NixOS-declared test-only static worker template with a fixed store-path executable",
+    "Harmless worker that does not perform NixOS activation or mutate host configuration",
+    "Mock participant with its own test-only effect ledger and idempotency behavior",
+    "Nixward existing transaction journal/interlock is the only Nixward transaction authority"
+  ],
+  "cuts": [
+    {
+      "id": "C001",
+      "fault_class": "process_crash",
+      "cut_after": "before_attempt_intent_publication",
+      "inject": "Kill the supervisor before the existing Nixward journal accepts the attempt-intent append.",
+      "durable_prefix": "No attempt-intent or submission-barrier record exists.",
+      "manager_state": "No StartUnit call is permitted by the program-order contract; verify with an instrumented D-Bus fake.",
+      "expected_disposition": "no_attempt",
+      "allowed_action": "Return to authorization/preflight; create no worker until a new durable attempt intent is published.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": true,
+      "required_evidence": [
+        "journal scan proves no attempt record",
+        "D-Bus call counter is zero"
+      ],
+      "safety_invariant": "No manager start and no participant effect can precede the durable attempt-intent barrier."
+    },
+    {
+      "id": "C002",
+      "fault_class": "process_crash",
+      "cut_after": "attempt_intent_and_write_ahead_barrier_durable_before_bus_connect",
+      "inject": "Kill Nixward after the journal confirms durable intent/barrier publication but before system-bus connection.",
+      "durable_prefix": "Attempt ID, transaction ID, purpose, canonical unit identity and write-ahead barrier are durable.",
+      "manager_state": "No call is issued in the injected test; after restart, an absent unit is not authoritative proof that no invocation occurred.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Read-only journal and manager reconciliation; require authoritative attempt-specific no-start proof before a fresh attempt.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "exact journal bytes and digest",
+        "canonical unit query",
+        "manager observation provenance"
+      ],
+      "safety_invariant": "A durable barrier commits the system to reconciliation; missing unit state is not a no-effect proof."
+    },
+    {
+      "id": "C003",
+      "fault_class": "process_crash",
+      "cut_after": "job_removed_match_and_manager_subscribe_before_startunit",
+      "inject": "Crash after JobRemoved match and Manager.Subscribe succeed but before StartUnit is invoked.",
+      "durable_prefix": "Attempt intent/barrier exists; no direct manager reply is persisted.",
+      "manager_state": "A process-local signal subscription is lost on crash; post-restart manager state may be absent or unknown.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Reconcile the exact attempt; do not resubmit the same attempt from recovered in-memory assumptions.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "journal barrier",
+        "subscription setup trace",
+        "post-restart manager query"
+      ],
+      "safety_invariant": "Subscription success is not start acknowledgement or proof of non-execution."
+    },
+    {
+      "id": "C004",
+      "fault_class": "process_crash",
+      "cut_after": "systemd_accepted_startunit_before_direct_reply_persisted",
+      "inject": "Drop the D-Bus method reply after systemd has enqueued the canonical attempt unit, then kill the supervisor.",
+      "durable_prefix": "Write-ahead barrier exists; direct returned job object path is absent from the journal.",
+      "manager_state": "Systemd may have a queued/running/completed job; JobRemoved may already have been emitted.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Query canonical unit and reconcile available job, InvocationID and process evidence; never replay the attempt.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "D-Bus request/response fault record",
+        "unit/job state",
+        "InvocationID/process observations",
+        "journal prefix"
+      ],
+      "safety_invariant": "Lost StartUnit response never authorizes a second StartUnit call."
+    },
+    {
+      "id": "C005",
+      "fault_class": "process_crash",
+      "cut_after": "direct_startunit_reply_persisted_before_job_removed",
+      "inject": "Kill supervisor after exact StartUnit object path is durably recorded but before JobRemoved observation.",
+      "durable_prefix": "Attempt intent, barrier and exact direct job object path are durable.",
+      "manager_state": "The matching job may still be running, queued or already terminal.",
+      "expected_disposition": "incomplete",
+      "allowed_action": "Resume read-only observation for the exact returned object path; no new manager start.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "persisted direct reply",
+        "exact manager job/unit query",
+        "matching JobRemoved when available"
+      ],
+      "safety_invariant": "An acknowledged start can only be observed/reconciled, never implicitly restarted."
+    },
+    {
+      "id": "C006",
+      "fault_class": "process_crash",
+      "cut_after": "job_removed_observed_before_signal_receipt_persisted",
+      "inject": "Deliver the matching JobRemoved event, then crash before the caller publishes the signal receipt.",
+      "durable_prefix": "Direct StartUnit reply is durable; JobRemoved receipt is not.",
+      "manager_state": "Job may already have been unloaded; absence after restart is inconclusive.",
+      "expected_disposition": "incomplete",
+      "allowed_action": "Query retained manager metadata and continue reconciliation; do not infer completion solely from unit absence.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "exact returned job object path",
+        "signal capture trace if available",
+        "manager unit/job query"
+      ],
+      "safety_invariant": "Observed-but-unpersisted signal data cannot advance the durable transaction state."
+    },
+    {
+      "id": "C007",
+      "fault_class": "process_crash",
+      "cut_after": "worker_invocation_created_before_identity_receipt_persisted",
+      "inject": "Start harmless one-shot worker, then kill supervisor before InvocationID and process identity are durably bound to the attempt.",
+      "durable_prefix": "Manager start reply/job evidence exists; worker identity receipt is absent.",
+      "manager_state": "Unit may be activating/running/exited; invocation and PID may exist.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Reconcile systemd InvocationID, cgroup/process identity and journal; payload must remain unreleased without durable identity binding.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "InvocationID",
+        "unit cgroup/process identity",
+        "journal prefix",
+        "worker payload-release marker"
+      ],
+      "safety_invariant": "No mutating payload is released before exact worker identity has been durably bound."
+    },
+    {
+      "id": "C008",
+      "fault_class": "process_crash",
+      "cut_after": "worker_identity_receipt_durable_before_payload_release",
+      "inject": "Persist exact worker invocation/process identity, then kill the supervisor before the one-shot release capability is consumed.",
+      "durable_prefix": "Attempt, manager reply and worker identity are durable; payload-release event is absent.",
+      "manager_state": "Worker is present but must be blocked at the release gate.",
+      "expected_disposition": "incomplete",
+      "allowed_action": "Revalidate exact attempt, grant, plan, unit invocation and process identity before any same-attempt continuation.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "worker identity receipt",
+        "no payload-release marker",
+        "current authorization and plan binding"
+      ],
+      "safety_invariant": "Worker existence is not permission to release a payload; release is a separate durably gated transition."
+    },
+    {
+      "id": "C009",
+      "fault_class": "process_crash",
+      "cut_after": "payload_released_during_worker_execution",
+      "inject": "Release harmless worker payload, then SIGKILL worker/supervisor at deterministic instruction/marker points while mock participant effect is in flight.",
+      "durable_prefix": "Payload-release event is durable; terminal process/participant receipt may be absent.",
+      "manager_state": "Unit can be failed, stopped or absent; external effect may or may not have committed.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Reconcile same attempt against participant ledger and independent postcondition; do not issue a duplicate effect.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "payload-release receipt",
+        "participant admission/effect ledger",
+        "worker exit/InvocationID",
+        "independent service probe"
+      ],
+      "safety_invariant": "After payload release, effect ambiguity is resolved by participant evidence, not by retry."
+    },
+    {
+      "id": "C010",
+      "fault_class": "process_crash",
+      "cut_after": "worker_exit_before_process_receipt_persisted",
+      "inject": "Allow harmless worker to exit, then kill supervisor before durable process-exit receipt publication.",
+      "durable_prefix": "Payload-release event is durable; process receipt is absent.",
+      "manager_state": "Unit may be inactive/unloaded; systemd exit metadata may or may not remain queryable.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Reconcile exact InvocationID, cgroup, exit status and participant effect; retain unknown if the receipt cannot be established.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "unit invocation metadata",
+        "process status/exit evidence",
+        "participant effect ledger",
+        "journal prefix"
+      ],
+      "safety_invariant": "Missing process receipt cannot be replaced by an agent/tool success claim."
+    },
+    {
+      "id": "C011",
+      "fault_class": "process_crash",
+      "cut_after": "process_receipt_durable_before_fresh_target_observation",
+      "inject": "Persist process receipt and exit status, then kill supervisor before observing running closure and selected profile.",
+      "durable_prefix": "Process disposition receipt is durable; target postcondition evidence is absent.",
+      "manager_state": "Worker unit is terminal; target state is not yet proved.",
+      "expected_disposition": "incomplete",
+      "allowed_action": "Perform fresh read-only running-closure and selected-profile observations; no mutation is needed to claim success.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "process receipt",
+        "fresh current system closure identity",
+        "fresh selected profile identity"
+      ],
+      "safety_invariant": "Process exit is not host-state success."
+    },
+    {
+      "id": "C012",
+      "fault_class": "process_crash",
+      "cut_after": "fresh_target_observation_before_terminal_commit",
+      "inject": "Capture a positive fresh target observation, then kill supervisor before terminal-success journal commit.",
+      "durable_prefix": "Process receipt and target-observation evidence exist; terminal commit is absent.",
+      "manager_state": "Worker is terminal; target may drift after the observation.",
+      "expected_disposition": "incomplete",
+      "allowed_action": "Revalidate observation freshness and target identity, then commit only if all existing terminal gates still hold.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "process receipt",
+        "timestamped target observation",
+        "freshness window",
+        "terminal commit record absence"
+      ],
+      "safety_invariant": "A non-durable terminal claim is not terminal success; re-observe before commit."
+    },
+    {
+      "id": "C013",
+      "fault_class": "systemd_manager_restart",
+      "cut_after": "manager_restart_with_unresolved_attempt",
+      "inject": "Restart or re-exec the test VM's systemd manager while a harmless transaction unit is queued/running; do not alter the Nixward journal.",
+      "durable_prefix": "Nixward journal contains exact attempt and latest persisted manager/process receipts.",
+      "manager_state": "Job signal stream is lost; unit/invocation/process state must be re-queried.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Reconcile journal with surviving unit/cgroup and process state; no duplicate unit or payload.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "before/after manager instance evidence",
+        "unit state",
+        "InvocationID",
+        "process cgroup",
+        "journal"
+      ],
+      "safety_invariant": "Manager restart cannot erase uncertainty or reset the durable attempt identity."
+    },
+    {
+      "id": "C014",
+      "fault_class": "vm_reboot",
+      "cut_after": "abrupt_vm_poweroff_after_write_ahead_barrier",
+      "inject": "Abruptly terminate the disposable VM process after barrier publication, then boot from its captured virtual disk image.",
+      "durable_prefix": "Whatever the guest filesystem actually persisted must be recovered from disk; host-side harness records poweroff boundary.",
+      "manager_state": "All in-memory manager and process state is lost on boot.",
+      "expected_disposition": "indeterminate",
+      "allowed_action": "Run full journal and participant reconciliation before any mutation; no automatic replay.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "pre-cut host harness marker",
+        "virtual disk image digest",
+        "post-boot journal bytes",
+        "mock participant ledger",
+        "target observation"
+      ],
+      "safety_invariant": "A VM poweroff test only qualifies the exact hypervisor/storage configuration and does not prove physical-device power-loss semantics."
+    },
+    {
+      "id": "C015",
+      "fault_class": "storage_error",
+      "cut_after": "journal_tempfile_write_fsync_rename_directory_fsync",
+      "inject": "Inject deterministic I/O errors at each journal publication stage using a disposable VM block device configured for the selected error model.",
+      "durable_prefix": "For each cut, record whether temp bytes, renamed final file and directory entry survive restart; never infer durability from a successful write syscall alone.",
+      "manager_state": "No StartUnit call may occur unless the exact write-ahead publication contract reports durable success.",
+      "expected_disposition": "rejected",
+      "allowed_action": "Fail closed before manager mutation when durable publication cannot be confirmed; retain recoverable orphan temp artifacts for audit.",
+      "same_attempt_replay": false,
+      "new_attempt_allowed": false,
+      "required_evidence": [
+        "injected I/O error position",
+        "write/fsync/rename return values",
+        "journal directory listing",
+        "file and directory fsync evidence",
+        "reboot image digest"
+      ],
+      "safety_invariant": "A partial or non-durable write-ahead record never authorizes StartUnit."
+    }
+  ],
+  "controls": [
+    {
+      "id": "P001",
+      "kind": "positive_control",
+      "expected_disposition": "validated_terminal_success",
+      "requirement": "Normal harmless worker completes; durable process receipt and fresh runtime/profile observation are persisted; terminal claim matches all exact identities."
+    },
+    {
+      "id": "N001",
+      "kind": "negative_control",
+      "expected_disposition": "indeterminate",
+      "requirement": "StartUnit reply is lost after enqueue; absent unit after reboot must not authorize a retry."
+    },
+    {
+      "id": "N002",
+      "kind": "negative_control",
+      "expected_disposition": "rejected",
+      "requirement": "Duplicate StartUnit or payload-release request for the same attempt must be denied by mode=fail and the existing journal interlock."
+    },
+    {
+      "id": "N003",
+      "kind": "negative_control",
+      "expected_disposition": "rejected",
+      "requirement": "Payload release with a mismatched transaction, attempt, unit, InvocationID, executable digest or authorization must be denied."
+    },
+    {
+      "id": "N004",
+      "kind": "negative_control",
+      "expected_disposition": "indeterminate",
+      "requirement": "Missing or stale external target observation cannot be promoted to terminal success."
+    }
+  ],
+  "result_dimensions": [
+    "journal_durability",
+    "manager_job_correlation",
+    "invocation_identity",
+    "process_disposition",
+    "payload_release",
+    "participant_effect",
+    "target_postcondition",
+    "recovery_action",
+    "duplicate_execution_count"
+  ],
+  "promotion_gates": [
+    "No production activation payload in v1 VM campaign",
+    "Zero duplicate worker or participant effects in canonical faults",
+    "No manager start before durable write-ahead publication",
+    "No payload release before durable exact worker identity binding",
+    "No new attempt after ambiguity without authoritative no-effect proof and fresh authorization",
+    "No terminal success without durable process receipt and fresh target observation",
+    "Exact Nixpkgs, kernel, systemd, Nixward, VM and storage fault-model pins retained in every receipt"
+  ]
+}

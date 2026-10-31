@@ -284,6 +284,69 @@
               touch $out
             '';
 
+        # Structural guard for the systemd transaction crash-cut campaign.
+        # This validates the corpus declarations only; it does not run systemd,
+        # a NixOS VM, storage faults, or establish durability semantics.
+        checks.systemd-transaction-crash-cut-corpus =
+          let
+            corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/systemd-transaction-crash-cuts-v1.json);
+            cuts = corpus.cuts;
+            cutIds = map (cut: cut.id) cuts;
+            controls = corpus.controls;
+            controlIds = map (control: control.id) controls;
+            dispositions = [
+              "no_attempt"
+              "incomplete"
+              "indeterminate"
+              "rejected"
+              "validated_terminal_success"
+            ];
+            requiredCutIds = [
+              "C001" "C002" "C003" "C004" "C005"
+              "C006" "C007" "C008" "C009" "C010"
+              "C011" "C012" "C013" "C014" "C015"
+            ];
+            requiredControls = [ "P001" "N001" "N002" "N003" "N004" ];
+            validCut = cut:
+              builtins.isString cut.id
+              && builtins.isString cut.fault_class
+              && builtins.isString cut.cut_after
+              && builtins.isString cut.inject
+              && builtins.isString cut.durable_prefix
+              && builtins.isString cut.manager_state
+              && builtins.elem cut.expected_disposition dispositions
+              && builtins.isString cut.allowed_action
+              && cut.same_attempt_replay == false
+              && builtins.isBool cut.new_attempt_allowed
+              && cut.new_attempt_allowed == (cut.id == "C001")
+              && builtins.isList cut.required_evidence
+              && builtins.length cut.required_evidence >= 2
+              && builtins.all builtins.isString cut.required_evidence
+              && builtins.isString cut.safety_invariant
+              && builtins.stringLength cut.safety_invariant >= 20;
+            validControl = control:
+              builtins.isString control.id
+              && builtins.elem control.kind [ "positive_control" "negative_control" ]
+              && builtins.elem control.expected_disposition dispositions
+              && builtins.isString control.requirement;
+          in
+            assert corpus.schema == "org.luminousdynamics.nixward.systemd-crash-cut-matrix";
+            assert corpus.version == 1;
+            assert corpus.status == "research_only_vm_qualification_plan";
+            assert builtins.length cuts == 15;
+            assert builtins.length cutIds == builtins.length (pkgs.lib.unique cutIds);
+            assert builtins.all (id: builtins.elem id cutIds) requiredCutIds;
+            assert builtins.all validCut cuts;
+            assert builtins.length controls == 5;
+            assert builtins.length controlIds == builtins.length (pkgs.lib.unique controlIds);
+            assert builtins.all (id: builtins.elem id controlIds) requiredControls;
+            assert builtins.all validControl controls;
+            assert builtins.length corpus.result_dimensions >= 5;
+            assert builtins.length corpus.promotion_gates >= 7;
+            pkgs.runCommand "nixward-systemd-transaction-crash-cut-corpus" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

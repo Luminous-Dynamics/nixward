@@ -1011,6 +1011,80 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn crash_cut_corpus_is_complete_and_replay_forbidding() {
+        // Structural guard for the qualification plan only. This test does not
+        // execute systemd, inject process crashes, or establish disk durability.
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../docs/fixtures/systemd-transaction-crash-cuts-v1.json"
+        ))
+        .expect("crash-cut corpus must be valid JSON");
+
+        assert_eq!(
+            corpus["schema"].as_str(),
+            Some("org.luminousdynamics.nixward.systemd-crash-cut-matrix")
+        );
+        assert_eq!(corpus["version"].as_u64(), Some(1));
+        assert_eq!(
+            corpus["status"].as_str(),
+            Some("research_only_vm_qualification_plan")
+        );
+
+        let cuts = corpus["cuts"].as_array().expect("cuts must be an array");
+        assert_eq!(cuts.len(), 15, "v1 must retain all 15 declared crash cuts");
+
+        let mut ids = std::collections::HashSet::new();
+        for cut in cuts {
+            let id = cut["id"].as_str().expect("every cut needs an ID");
+            assert!(ids.insert(id.to_owned()), "duplicate crash-cut ID: {id}");
+            assert_eq!(
+                cut["same_attempt_replay"].as_bool(),
+                Some(false),
+                "{id}: an ambiguous transaction attempt must never be replayed"
+            );
+            assert!(
+                cut["required_evidence"]
+                    .as_array()
+                    .is_some_and(|items| items.len() >= 2),
+                "{id}: at least two evidence sources/items must be specified"
+            );
+            assert!(
+                cut["safety_invariant"]
+                    .as_str()
+                    .is_some_and(|text| text.len() >= 20),
+                "{id}: safety invariant is missing or underspecified"
+            );
+
+            let new_attempt_allowed = cut["new_attempt_allowed"]
+                .as_bool()
+                .expect("new_attempt_allowed must be a boolean");
+            assert_eq!(
+                new_attempt_allowed,
+                id == "C001",
+                "{id}: only a crash before durable intent publication can permit a fresh attempt"
+            );
+            assert!(
+                cut["expected_disposition"].as_str().is_some(),
+                "{id}: expected disposition must be explicit"
+            );
+        }
+
+        for required in [
+            "C001", "C002", "C003", "C004", "C005", "C006", "C007", "C008",
+            "C009", "C010", "C011", "C012", "C013", "C014", "C015",
+        ] {
+            assert!(ids.contains(required), "missing required crash cut {required}");
+        }
+
+        let controls = corpus["controls"]
+            .as_array()
+            .expect("controls must be an array");
+        assert!(controls.len() >= 5);
+        assert!(controls.iter().any(|control| control["id"] == "P001"));
+        assert!(controls.iter().any(|control| control["id"] == "N001"));
+        assert!(controls.iter().any(|control| control["id"] == "N004"));
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
