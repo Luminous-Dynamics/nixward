@@ -137,6 +137,7 @@ impl ActivationPlan {
             || !valid_digest(&self.pre_state.boot_default_generation_digest)
             || !valid_digest(&self.pre_state.state_digest)
             || !valid_token(&self.pre_state.boot_id)
+            || !valid_token(&self.target.system_closure_path)
             || !self.target.system_closure_path.starts_with("/nix/store/")
             || self.target.system_closure_path.contains("/../")
             || self.target.system_closure_path.contains('\0')
@@ -188,14 +189,25 @@ impl ActivationPlan {
             return Err("activation plan must start with inhibitor/closure preflight and end with a post-state probe".into());
         }
 
-        let has_switch = self.steps.iter().any(|step| step.kind == ActivationStepKind::SwitchToConfiguration);
-        let has_dry_preview = self.steps.iter().any(|step| step.kind == ActivationStepKind::DryActivationPreview);
+        let switch_count = self.steps.iter()
+            .filter(|step| step.kind == ActivationStepKind::SwitchToConfiguration).count();
+        let dry_preview_count = self.steps.iter()
+            .filter(|step| step.kind == ActivationStepKind::DryActivationPreview).count();
+        let inhibitor_count = self.steps.iter()
+            .filter(|step| step.kind == ActivationStepKind::CheckInhibitors).count();
+        let closure_check_count = self.steps.iter()
+            .filter(|step| step.kind == ActivationStepKind::ValidateClosure).count();
+        let post_probe_count = self.steps.iter()
+            .filter(|step| step.kind == ActivationStepKind::ProbePostState).count();
+        if inhibitor_count != 1 || closure_check_count != 1 || post_probe_count != 1 {
+            return Err("activation plan must contain exactly one inhibitor check, closure validation and post-state probe".into());
+        }
         match self.mode {
-            ActivationMode::DryActivate if !has_dry_preview || has_switch => {
+            ActivationMode::DryActivate if dry_preview_count != 1 || switch_count != 0 => {
                 return Err("dry-activate plans require a preview step and cannot dispatch activation".into());
             }
             ActivationMode::Switch | ActivationMode::Test | ActivationMode::Boot
-                if !has_switch || has_dry_preview =>
+                if switch_count != 1 || dry_preview_count != 0 =>
             {
                 return Err("switch/test/boot plans require exactly the activation dispatch step".into());
             }
@@ -309,7 +321,9 @@ pub struct ActivationPostState {
     pub boot_default_generation_digest: String,
     pub boot_id: String,
     pub state_digest: String,
-    pub boot_healthy: bool,
+    /// Health of the current running OS; this does not assert that a future
+    /// boot into the selected default generation has succeeded.
+    pub running_system_healthy: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,7 +343,7 @@ pub struct ActivationEvaluation {
     pub total_steps: usize,
     pub running_generation_matches_target: bool,
     pub boot_default_matches_target: bool,
-    pub boot_healthy: bool,
+    pub running_system_healthy: bool,
     pub blockers: Vec<String>,
 }
 
@@ -462,12 +476,12 @@ impl ActivationTrace {
         if !boot_default_matches {
             blockers.push("boot default does not match the activation-mode postcondition".into());
         }
-        if !post_state.boot_healthy {
+        if !post_state.running_system_healthy {
             blockers.push("post-state health probe did not establish a healthy running system".into());
         }
 
         let outcome = if unresolved || failed || compensated
-            || !running_matches || !boot_default_matches || !post_state.boot_healthy
+            || !running_matches || !boot_default_matches || !post_state.running_system_healthy
             || post_probe.is_none()
             || !blockers.is_empty()
         {
@@ -488,7 +502,7 @@ impl ActivationTrace {
             total_steps: self.plan.steps.len(),
             running_generation_matches_target: running_matches,
             boot_default_matches_target: boot_default_matches,
-            boot_healthy: post_state.boot_healthy,
+            running_system_healthy: post_state.running_system_healthy,
             blockers,
         })
     }
@@ -732,7 +746,7 @@ mod tests {
             boot_default_generation_digest: boot_default,
             boot_id: plan.pre_state.boot_id.clone(),
             state_digest: digest('b'),
-            boot_healthy: true,
+            running_system_healthy: true,
         }
     }
 
@@ -767,6 +781,27 @@ mod tests {
             at += 10;
         }
         (trace, post)
+    }
+
+
+    #[test]
+    fn duplicate_dispatch_step_is_rejected() {
+        let mut p = plan(ActivationMode::Switch);
+        p.steps.insert(3, PlannedActivationStep {
+            step_id: "activation-dispatch-duplicate".into(),
+            kind: ActivationStepKind::SwitchToConfiguration,
+        });
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn boot_mode_reports_boot_default_write_without_claiming_future_boot_health() {
+        let (trace, post) = complete_trace(ActivationMode::Boot);
+        let result = trace.evaluate(&post).unwrap();
+        assert_eq!(result.outcome, ActivationOutcome::Verified);
+        assert!(result.boot_default_matches_target);
+        assert!(!result.running_generation_matches_target);
+        assert!(result.running_system_healthy);
     }
 
     #[test]
@@ -910,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_target_or_host_binding_is_rejected() {
+    fn malformed_generation_digest_is_rejected() {
         let mut p = plan(ActivationMode::Switch);
         p.target.system_closure_digest = digest('f');
         assert!(p.validate().is_ok());
