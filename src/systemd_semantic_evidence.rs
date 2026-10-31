@@ -67,6 +67,10 @@ pub struct AdmissionEvidence {
 #[serde(deny_unknown_fields)]
 pub struct DispatchEvidence {
     pub subscription_boot_id: String,
+    /// Completion of Manager.Subscribe(); systemd emits job signals only to subscribers.
+    pub manager_subscribe_completed_at_ns: u64,
+    /// Completion of the D-Bus match rule for JobNew and JobRemoved.
+    pub job_signal_match_installed_at_ns: u64,
     pub subscription_established_at_ns: u64,
     pub start_request_at_ns: u64,
     pub start_reply_at_ns: Option<u64>,
@@ -386,8 +390,16 @@ fn validate_dispatch(e: &SystemdExecutionEvidence, f: &mut Findings) -> Option<C
     if d.subscription_boot_id != *boot || !nonempty(&d.subscription_boot_id) {
         f.violation("JobRemoved subscription belongs to a different or unknown manager boot");
     }
-    if d.subscription_established_at_ns <= e.admission.readback_at_ns {
-        f.violation("JobRemoved subscription was not established after durable admission read-back");
+    if d.manager_subscribe_completed_at_ns <= e.admission.readback_at_ns
+        || d.job_signal_match_installed_at_ns <= e.admission.readback_at_ns
+        || d.subscription_established_at_ns <= e.admission.readback_at_ns
+    {
+        f.violation("Manager.Subscribe and JobNew/JobRemoved match must be established after durable admission read-back");
+    }
+    if d.subscription_established_at_ns < d.manager_subscribe_completed_at_ns
+        || d.subscription_established_at_ns < d.job_signal_match_installed_at_ns
+    {
+        f.violation("subscription establishment precedes Manager.Subscribe or signal-match installation");
     }
     if d.start_request_at_ns <= d.subscription_established_at_ns {
         f.violation("StartUnit request occurred before the JobRemoved subscription was established");
@@ -819,7 +831,8 @@ mod tests {
                 machine_binding_digest: digest('4'), committed_at_ns: 100, readback_at_ns: 110,
             },
             dispatch: DispatchEvidence {
-                subscription_boot_id: boot.clone(), subscription_established_at_ns: 120,
+                subscription_boot_id: boot.clone(), manager_subscribe_completed_at_ns: 118,
+                job_signal_match_installed_at_ns: 119, subscription_established_at_ns: 120,
                 start_request_at_ns: 130, start_reply_at_ns: Some(145),
                 returned_job_object_path: Some("/org/freedesktop/systemd1/job/77".into()),
                 requested_unit_name: "nixward-worker@attempt-1.service".into(),
@@ -914,6 +927,21 @@ mod tests {
         e.safety_fence = SafetyFence { actions_fenced: true, fenced_at_ns: Some(150) };
         assert_eq!(eval(&e).classification, TerminalClassification::SafeHold);
     }
+    #[test]
+    fn systemd_manager_subscribe_and_signal_match_must_precede_startunit() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.dispatch.manager_subscribe_completed_at_ns = 131;
+        let result = eval(&e);
+        assert_ne!(result.classification, TerminalClassification::VerifiedSuccess);
+        assert!(result.violations.iter().any(|item| item.contains("Manager.Subscribe")));
+        
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.dispatch.job_signal_match_installed_at_ns = 131;
+        let result = eval(&e);
+        assert_ne!(result.classification, TerminalClassification::VerifiedSuccess);
+        assert!(result.violations.iter().any(|item| item.contains("Manager.Subscribe") || item.contains("signal-match")));
+    }
+
     #[test]
     fn subscription_must_precede_startunit() {
         let mut e = valid_evidence(NixosOperation::Switch);
