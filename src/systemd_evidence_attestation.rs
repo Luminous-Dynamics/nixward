@@ -239,7 +239,10 @@ impl VerifiedEvidenceCapture {
     pub fn manifest(&self) -> &EvidenceCaptureManifest { &self.manifest }
     pub fn raw_artifacts(&self) -> &BTreeMap<String, Vec<u8>> { &self.raw_artifacts }
     pub fn evaluate_semantics(&self) -> Result<SemanticEvaluation, String> {
-        evaluate(&self.semantic_evidence).map_err(|error| error.to_string())
+        let mut result = evaluate(&self.semantic_evidence).map_err(|error| error.to_string())?;
+        result.operational_qualification =
+            "signed-capture-verified-host-root-and-kernel-integrity-unverified".into();
+        Ok(result)
     }
     pub fn into_parts(self) -> (EvidenceCaptureManifest, SystemdExecutionEvidence, BTreeMap<String, Vec<u8>>) {
         (self.manifest, self.semantic_evidence, self.raw_artifacts)
@@ -496,9 +499,24 @@ mod tests {
         let (signed, policy, artifacts, semantic, _) = fixture();
         let verified = verify_capture(&signed, &policy, artifacts, &semantic).unwrap();
         assert_eq!(verified.manifest().capture_id, "capture-1");
+        let evaluation = verified.evaluate_semantics().unwrap();
         assert_eq!(
-            verified.evaluate_semantics().unwrap().classification,
+            evaluation.classification,
             crate::systemd_semantic_evidence::TerminalClassification::SafeHold
+        );
+        assert_eq!(
+            evaluation.operational_qualification,
+            "signed-capture-verified-host-root-and-kernel-integrity-unverified"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_ed25519_capture_signature() {
+        let (mut signed, policy, artifacts, semantic, _) = fixture();
+        signed.signature_hex = "00".repeat(64);
+        assert_eq!(
+            verify_capture(&signed, &policy, artifacts, &semantic).unwrap_err(),
+            CaptureVerificationError::InvalidSignature
         );
     }
 
