@@ -26,6 +26,8 @@ const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
 const MAX_AUTHORITY_POLICY_BYTES: usize = 1024 * 1024;
 const MAX_POLICY_UPDATE_PROVENANCE_BYTES: usize = 64 * 1024;
+const MAX_EMERGENCY_REVOCATION_IDS: usize = 4096;
+const MAX_EMERGENCY_REVOCATION_BYTES: usize = 64 * 1024;
 const MAX_PERMIT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const AUTHORITY_POLICY_SCHEMA_VERSION: u64 = 1;
@@ -726,6 +728,48 @@ impl SupervisorAdmissionStore {
         {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
+
+        let mut policy_columns = connection.prepare("PRAGMA table_info(authority_policy_epochs)")?;
+        let policy_rows = policy_columns.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut policy_names = std::collections::BTreeMap::new();
+        for column in policy_rows {
+            let (name, not_null) = column?;
+            policy_names.insert(name, not_null);
+        }
+        for required in [
+            "epoch",
+            "policy_id",
+            "policy_digest",
+            "policy_json",
+            "emergency_revocation_digest",
+            "emergency_revoked_key_ids_json",
+            "previous_record_digest",
+            "update_provenance_digest",
+            "update_provenance",
+            "created_at_ms",
+            "record_digest",
+        ] {
+            if policy_names.get(required) != Some(&1) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+
+        let mut current_columns = connection.prepare("PRAGMA table_info(authority_policy_current)")?;
+        let current_rows = current_columns.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut current_names = std::collections::BTreeMap::new();
+        for column in current_rows {
+            let (name, not_null) = column?;
+            current_names.insert(name, not_null);
+        }
+        for required in ["singleton", "epoch", "record_digest"] {
+            if current_names.get(required) != Some(&1) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
         Ok(())
     }
 
@@ -770,8 +814,13 @@ impl SupervisorAdmissionStore {
         {
             return Err(AdmissionStoreError::InvalidInput("authority policy epoch request"));
         }
+        let _epoch_sql = i64::try_from(request.epoch)
+            .map_err(|_| AdmissionStoreError::InvalidInput("authority policy epoch"))?;
         let created_at_ms = i64::try_from(request.created_at_ms)
             .map_err(|_| AdmissionStoreError::InvalidInput("authority policy creation timestamp"))?;
+        if request.emergency_revoked_key_ids.len() > MAX_EMERGENCY_REVOCATION_IDS {
+            return Err(AdmissionStoreError::InvalidInput("emergency revocation count"));
+        }
 
         let policy: serde_json::Value = serde_json::from_slice(&request.policy_json)
             .map_err(|_| AdmissionStoreError::InvalidInput("authority policy JSON"))?;
@@ -801,6 +850,9 @@ impl SupervisorAdmissionStore {
 
         let emergency_json = serde_json::to_vec(&request.emergency_revoked_key_ids)
             .map_err(|_| AdmissionStoreError::InvalidInput("emergency revocation JSON"))?;
+        if emergency_json.len() > MAX_EMERGENCY_REVOCATION_BYTES {
+            return Err(AdmissionStoreError::InvalidInput("emergency revocation bytes"));
+        }
         let policy_digest =
             Self::digest_domain(AUTHORITY_POLICY_DIGEST_DOMAIN, &request.policy_json);
         let emergency_revocation_digest =
