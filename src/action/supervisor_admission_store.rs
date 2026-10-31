@@ -512,6 +512,8 @@ pub(crate) enum AdmissionStoreError {
     ReleaseBarrierExpired,
     #[error("payload release attempt has already been durably reserved; resend is forbidden")]
     ReleaseAttemptAlreadyStarted,
+    #[error("payload release attempt has already been marked uncertain")]
+    ReleaseAttemptAlreadyUncertain,
     #[error("payload release is blocked by a stop/recovery policy decision")]
     ReleaseAttemptBlocked,
     #[error("payload release attempt has no committed barrier")]
@@ -2031,6 +2033,9 @@ impl SupervisorAdmissionStore {
         if request.now_ms > request.expires_at_ms {
             return Err(AdmissionStoreError::ReleaseBarrierExpired);
         }
+        if request.now_ms > request.expires_at_ms {
+            return Err(AdmissionStoreError::ReleaseBarrierExpired);
+        }
         Self::validate_release_authority_provenance(&admission, &current, request)?;
 
         let release_id = Self::derive_payload_release_id(
@@ -2200,7 +2205,7 @@ impl SupervisorAdmissionStore {
             |row| row.get(0),
         )?;
         if existing {
-            return Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted);
+            return Err(AdmissionStoreError::ReleaseAttemptAlreadyUncertain);
         }
         let has_receipt: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM payload_release_receipts WHERE release_id = ?1)",
@@ -2264,14 +2269,17 @@ impl SupervisorAdmissionStore {
         if acknowledged_at_ms < started as u64 {
             return Err(AdmissionStoreError::ReleaseReceiptConflict);
         }
-        let existing: Option<(String, String, String, i64)> = transaction.query_row(
-            "SELECT payload_digest, worker_unit, invocation_id, acknowledged_at_ms FROM payload_release_receipts WHERE release_id = ?1",
+        let acknowledged_at_i64 = i64::try_from(acknowledged_at_ms)
+            .map_err(|_| AdmissionStoreError::InvalidInput("receipt timestamp"))?;
+        let existing: Option<(String, String, String, String, i64)> = transaction.query_row(
+            "SELECT payload_digest, worker_unit, invocation_id, receipt_digest, acknowledged_at_ms FROM payload_release_receipts WHERE release_id = ?1",
             [release_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional()?;
-        if let Some((old_payload, old_unit, old_invocation, old_at)) = existing {
+        if let Some((old_payload, old_unit, old_invocation, old_receipt_digest, old_at)) = existing {
             if old_payload == payload_digest && old_unit == worker_unit
-                && old_invocation == invocation_id && old_at == acknowledged_at_ms as i64
+                && old_invocation == invocation_id && old_receipt_digest == receipt_digest
+                && old_at == acknowledged_at_i64
             {
                 transaction.commit()?;
                 return Ok(());
@@ -2291,8 +2299,7 @@ impl SupervisorAdmissionStore {
             "#,
             params![
                 release_id, payload_digest, worker_unit, invocation_id, receipt_digest,
-                i64::try_from(acknowledged_at_ms)
-                    .map_err(|_| AdmissionStoreError::InvalidInput("receipt timestamp"))?,
+                acknowledged_at_i64,
                 receipt_record_digest,
             ],
         )?;
