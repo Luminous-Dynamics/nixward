@@ -1934,7 +1934,7 @@ mod tests {
         let store = store_in(&temp);
         let request = policy_request(1, vec![]);
         let outcome = store.initialize_authority_policy_epoch(&request).unwrap();
-        assert!(matches!(outcome, AuthorityPolicyEpochOutcome::Created(_)));
+        assert!(matches!(&outcome, AuthorityPolicyEpochOutcome::Created(_)));
         let created = outcome.record();
         assert_eq!(created.epoch, 1);
         assert_eq!(created.previous_record_digest, GENESIS_POLICY_RECORD_DIGEST);
@@ -2023,8 +2023,8 @@ mod tests {
         let request = policy_request(2, vec!["owner-1".into()]);
         let created = store.advance_authority_policy_epoch(1, &first_record.record_digest, &request).unwrap();
         let retried = store.advance_authority_policy_epoch(1, &first_record.record_digest, &request).unwrap();
-        assert!(matches!(created, AuthorityPolicyEpochOutcome::Created(_)));
-        assert!(matches!(retried, AuthorityPolicyEpochOutcome::Existing(_)));
+        assert!(matches!(&created, AuthorityPolicyEpochOutcome::Created(_)));
+        assert!(matches!(&retried, AuthorityPolicyEpochOutcome::Existing(_)));
         assert_eq!(created.record(), retried.record());
     }
 
