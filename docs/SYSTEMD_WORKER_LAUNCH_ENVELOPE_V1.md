@@ -29,6 +29,8 @@ Store paths are validated through their store object and the complete lexical su
 
 The environment digest is not caller-selectable. Validation compares it to the digest produced by the existing fixed Nixward worker environment definition. The launch envelope does not accept arbitrary environment key/value pairs. This avoids turning a constrained worker-launch API into a privileged environment injection interface.
 
+The canonical eight-variable allowlist is shared in `src/action/worker_environment.rs`; the executor derives its worker identity digest from those same pairs. The worker gate also clears its own inherited environment and reapplies the allowlist to the payload `Command` immediately before `exec`. The payload therefore does not inherit additional variables from a future systemd unit manager or from a different launcher. The test suite includes a subprocess negative control that injects an ambient poison variable and checks that the payload process receives exactly the eight allowlisted entries plus the test marker. This is source-authored coverage; it has not been executed in this environment.
+
 The one-time release token is intentionally absent from the journal. The trusted runner must generate it only after it has acquired the transaction interlock, validated the journal and captured/persisted the exact worker identity.
 
 ## Two different operations, two different envelopes

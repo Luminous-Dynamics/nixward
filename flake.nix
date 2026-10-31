@@ -158,6 +158,42 @@
             '';
           };
 
+        # Compile and execute the worker-gate binary's own unit-test harness.
+        # The library-only systemd-feature-tests derivation does not run
+        # src/bin/nixward_worker_gate.rs tests, so keep this target explicit.
+        # In particular, this exercises the final payload-environment scrub
+        # negative control rather than merely compiling the shared library.
+        checks.worker-gate-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-worker-gate-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+
+            cargoBuildFlags = [ "-p" "nixward" "--bin" "nixward-worker-gate" ];
+            cargoTestFlags = [ "-p" "nixward" "--bin" "nixward-worker-gate" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/worker-gate-tests-passed"
+            '';
+          };
+
         # Validate the shared supervisor temporal corpus during nix flake check.
         # A separate pure Nix reference model replays each vector, providing a
         # cross-language semantic check without compiling the Rust test binary.

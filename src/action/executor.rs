@@ -1124,16 +1124,7 @@ impl NixOSExecutor {
     /// Explicit environment for privileged transaction workers. Ambient Nix, loader,
     /// shell, locale and PATH variables are intentionally not inherited.
     fn activation_worker_environment() -> &'static [(&'static str, &'static str)] {
-        &[
-            ("HOME", "/root"),
-            ("LANG", "C"),
-            ("LC_ALL", "C"),
-            ("NIX_USER_CONF_FILES", "/dev/null"),
-            ("PATH", "/run/current-system/sw/bin:/run/current-system/sw/sbin:/run/wrappers/bin"),
-            ("SYSTEMD_COLORS", "0"),
-            ("TERM", "dumb"),
-            ("XDG_CONFIG_HOME", "/var/empty"),
-        ]
+        super::worker_environment::pairs()
     }
 
     fn environment_digest(pairs: &[(&str, &str)]) -> String {

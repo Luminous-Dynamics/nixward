@@ -198,7 +198,13 @@ where
     // token must match and the parent must close the pipe (EOF) first. Use direct
     // exec semantics—never a shell or PATH lookup.
     release_then(&mut stdin.lock(), &expected_digest, || {
-        let error = Command::new(&target).args(payload_args).exec();
+        // The systemd unit manager has its own service environment. Reapply
+        // the exact same allowlist used by the direct-spawn executor so the
+        // precommitted environment digest describes the payload, not the
+        // ambient manager or launcher environment.
+        let mut command = Command::new(&target);
+        nixward::action::worker_environment::configure_payload_environment(&mut command);
+        let error = command.args(payload_args).exec();
         Err(format!("worker gate could not exec the bound payload: {error}"))
     })
 }
@@ -361,5 +367,53 @@ mod tests {
         let token = [0x12u8; 32];
         assert!(read_release(&mut Cursor::new(token.to_vec()), &release_digest(&token).to_uppercase()).is_err());
         assert!(read_release(&mut Cursor::new(token.to_vec()), "not-a-digest").is_err());
+    }
+
+    const ENVIRONMENT_PROBE_MARKER: &str = "NIXWARD_WORKER_ENV_PROBE";
+
+    #[test]
+    fn worker_environment_probe_child() {
+        // This test is also executed as a subprocess by the parent test below.
+        // In normal cargo test runs, leave the harness environment untouched.
+        if std::env::var_os(ENVIRONMENT_PROBE_MARKER).is_none() {
+            return;
+        }
+
+        let mut expected = std::collections::BTreeMap::new();
+        for (name, value) in nixward::action::worker_environment::pairs() {
+            expected.insert((*name).to_string(), (*value).to_string());
+        }
+        expected.insert(ENVIRONMENT_PROBE_MARKER.to_string(), "1".to_string());
+
+        let actual = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(actual, expected, "payload process must receive only the fixed allowlist");
+        assert!(
+            std::env::var_os("NIXWARD_GATE_ENV_POISON").is_none(),
+            "ambient launcher variables must not survive the gate"
+        );
+    }
+
+    #[test]
+    fn payload_environment_is_reapplied_and_ambient_variables_are_removed() {
+        let executable = std::env::current_exe().expect("test executable path");
+        let mut command = Command::new(executable);
+        command.env("NIXWARD_GATE_ENV_POISON", "must-not-survive");
+        nixward::action::worker_environment::configure_payload_environment(&mut command);
+        // This marker is added after the production sanitizer solely to select
+        // the child-side probe; all other variables must exactly match the
+        // canonical eight-variable payload environment.
+        command.env(ENVIRONMENT_PROBE_MARKER, "1");
+        command.args([
+            "--exact",
+            "tests::worker_environment_probe_child",
+            "--nocapture",
+        ]);
+        let output = command.output().expect("spawn environment probe child");
+        assert!(
+            output.status.success(),
+            "environment probe child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
