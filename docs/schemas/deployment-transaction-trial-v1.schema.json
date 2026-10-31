@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/deployment-transaction-trial-v1.schema.json",
+  "title": "Nixward deployment transaction trial evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema","version","trial_id","scenario_id","baseline_id","comparison_group","operation_mode","trial_index","trial_seed","corpus_sha256","evidence","match_fingerprint","observation_labels","phase_timestamps_ns","safety_counters","safe_hold","scored_as_success","terminal_evidence_complete","terminal_disposition","artifacts","record_sha256"],
+  "properties": {
+    "schema": {"const":"org.luminousdynamics.nixward.deployment-transaction-trial"},
+    "version": {"const":1},
+    "trial_id": {"type":"string","minLength":1},
+    "scenario_id": {"type":"string","minLength":1},
+    "baseline_id": {"type":"string","minLength":1},
+    "comparison_group": {"type":"string","minLength":1},
+    "operation_mode": {"type":"string","minLength":1},
+    "trial_index": {"type":"integer","minimum":0},
+    "trial_seed": {"type":"string","minLength":1},
+    "corpus_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "evidence": {"type":"object","minProperties":1,"additionalProperties":{"type":"string","minLength":1}},
+    "match_fingerprint": {
+      "type":"object","additionalProperties":false,
+      "required":["nixpkgs_revision","flake_lock_sha256","candidate_closure_digest","vm_image_digest","kernel_version","systemd_version","filesystem_mount_options","storage_cache_policy","network_profile","operation_mode","concurrency","cache_state"],
+      "properties": {
+        "nixpkgs_revision":{"type":"string","minLength":1},
+        "flake_lock_sha256":{"type":"string","minLength":1},
+        "candidate_closure_digest":{"type":"string","minLength":1},
+        "vm_image_digest":{"type":"string","minLength":1},
+        "kernel_version":{"type":"string","minLength":1},
+        "systemd_version":{"type":"string","minLength":1},
+        "filesystem_mount_options":{"type":"string","minLength":1},
+        "storage_cache_policy":{"type":"string","minLength":1},
+        "network_profile":{"type":"string","minLength":1},
+        "operation_mode":{"type":"string","minLength":1},
+        "concurrency":{"type":"string","minLength":1},
+        "cache_state":{"type":"string","minLength":1}
+      }
+    },
+    "observation_labels":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},
+    "phase_timestamps_ns":{"type":"array","minItems":2,"items":{"type":"object","additionalProperties":false,"required":["phase","monotonic_ns"],"properties":{"phase":{"type":"string","minLength":1},"monotonic_ns":{"type":"integer","minimum":0}}}},
+    "safety_counters":{"type":"object","additionalProperties":false,"required":["false_terminal_success_count","duplicate_mutation_for_unresolved_attempt_count","unauthorized_or_replayed_admission_count","foreign_transaction_attempt_worker_or_invocation_acceptance_count","payload_release_before_durable_admission_and_worker_identity_count"],"properties":{
+      "false_terminal_success_count":{"type":"integer","minimum":0},
+      "duplicate_mutation_for_unresolved_attempt_count":{"type":"integer","minimum":0},
+      "unauthorized_or_replayed_admission_count":{"type":"integer","minimum":0},
+      "foreign_transaction_attempt_worker_or_invocation_acceptance_count":{"type":"integer","minimum":0},
+      "payload_release_before_durable_admission_and_worker_identity_count":{"type":"integer","minimum":0}
+    }},
+    "safe_hold":{"type":"boolean"},
+    "scored_as_success":{"type":"boolean"},
+    "terminal_evidence_complete":{"type":"boolean"},
+    "terminal_disposition":{"type":"string","minLength":1},
+    "artifacts":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["path","sha256","byte_length"],"properties":{"path":{"type":"string","minLength":1},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"byte_length":{"type":"integer","minimum":1}}}},
+    "record_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+  }
+}
