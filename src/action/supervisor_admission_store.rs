@@ -1515,7 +1515,7 @@ impl SupervisorAdmissionStore {
         expires_at_ms: u64,
     ) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nixward-payload-release-id-v1\\0");
+        hasher.update(b"nixward-payload-release-id-v1\0");
         let epoch_bytes = policy.epoch.to_le_bytes();
         let expiry_bytes = expires_at_ms.to_le_bytes();
         for value in [
