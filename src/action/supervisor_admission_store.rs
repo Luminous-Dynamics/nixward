@@ -1010,6 +1010,47 @@ impl SupervisorAdmissionStore {
                 return Err(AdmissionStoreError::InconsistentStorage);
             }
         }
+
+        const RELEASE_TABLE_COLUMNS: [(&str, &[&str]); 5] = [
+            ("payload_release_barriers", &[
+                "release_id", "commit_id", "transaction_id", "attempt_id", "replay_key",
+                "permit_digest", "plan_digest", "machine_binding_digest",
+                "authority_provenance_digest", "policy_id", "policy_epoch",
+                "policy_digest", "policy_record_digest", "signer_key_id",
+                "authority_subject_digest", "authority_audience", "payload_digest",
+                "expires_at_ms", "barrier_committed_at_ms", "barrier_digest",
+            ]),
+            ("payload_release_attempts", &[
+                "release_id", "attempt_id", "started_at_ms", "attempt_digest",
+            ]),
+            ("payload_release_uncertain", &[
+                "release_id", "observed_at_ms", "uncertainty_digest",
+            ]),
+            ("payload_release_receipts", &[
+                "release_id", "payload_digest", "worker_unit", "invocation_id",
+                "receipt_digest", "acknowledged_at_ms", "receipt_record_digest",
+            ]),
+            ("payload_release_policy_decisions", &[
+                "decision_id", "release_id", "policy_epoch", "policy_record_digest",
+                "disposition", "decision_digest", "created_at_ms",
+            ]),
+        ];
+        for (table, required_columns) in RELEASE_TABLE_COLUMNS {
+            let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })?;
+            let mut actual = std::collections::BTreeMap::new();
+            for row in rows {
+                let (name, not_null) = row?;
+                actual.insert(name, not_null);
+            }
+            for required in required_columns {
+                if actual.get(*required) != Some(&1) {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3600,6 +3641,27 @@ mod tests {
         assert!(matches!(
             store.begin_payload_release_attempt(&barrier.record().release_id, 1300),
             Err(AdmissionStoreError::ReleaseAttemptBlocked)
+        ));
+    }
+
+    #[test]
+    fn full_integrity_detects_payload_release_barrier_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let connection = store.connect().unwrap();
+        connection.execute(
+            "DROP TRIGGER payload_release_barriers_immutable_update",
+            [],
+        ).unwrap();
+        connection.execute(
+            "UPDATE payload_release_barriers SET payload_digest = ?1 WHERE release_id = ?2",
+            params!["ab".repeat(32), barrier.record().release_id],
+        ).unwrap();
+        drop(connection);
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InconsistentStorage)
         ));
     }
 
