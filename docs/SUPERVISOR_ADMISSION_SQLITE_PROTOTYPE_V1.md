@@ -1,8 +1,10 @@
 # Supervisor admission SQLite prototype v1
 
-Status: **non-privileged storage prototype; not a supervisor, verifier, or production execution path**
+Status: **non-privileged storage prototype; v2 binds opaque authority provenance but is not a supervisor or production execution path**
 
 Date: 2026-10-31
+
+Schema: **v2**. Existing schema-v1 databases are refused with an unsupported-schema error. They must be explicitly reconciled/re-admitted under verified authority; this prototype does not fabricate provenance or silently upgrade old permits.
 
 Related work:
 - Issue #111: supervisor-owned atomic admission store
@@ -14,21 +16,21 @@ Related work:
 
 This change introduces an isolated SQLite storage prototype behind the Rust native feature. It is exercised only with temporary databases in tests. It adds no daemon command, service unit, D-Bus method, polkit policy, root-owned path, StartUnit call, or mutation executor.
 
-The store accepts opaque approval material, permit wire bytes, and an admission event payload. It computes content digests and persists them. It does not verify approval signatures, signer trust, freshness, machine binding, permit signatures, or the caller's right to request admission. Those remain responsibilities of a future independent supervisor.
+The store accepts opaque approval material, serialized authority provenance, permit wire bytes, and an admission event payload. It computes content digests and persists these payloads. It does not parse or verify provenance, approval signatures, signer trust, policy-epoch ownership, freshness, machine binding, permit signatures, or caller admission rights. Only a trusted supervisor may construct the request from a runtime receipt minted by the authority verifier. Those remain responsibilities of a future independent supervisor.
 
-The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates the four durable records.
+The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates all five durable records.
 
 ## Storage model
 
 One SQLite database is the authoritative prototype store. A single BEGIN IMMEDIATE transaction writes:
 
-1. admission_commits: exact transaction, attempt, plan, machine, approval-material digest and bytes, permit digest and bytes, event digest, and commit ID.
+1. admission_commits: exact transaction, attempt, plan, machine, approval-material digest/bytes, authority-provenance digest/bytes, permit digest/bytes, event digest, and commit ID.
 2. authority_replays: globally unique replay key and its exact intent binding.
 3. supervisor_permits: unique permit digest / attempt binding.
 4. transaction_attempts: unique attempt ID and unresolved/resolved state.
 5. admission_events: the immutable admission event payload and digest.
 
-The commit ID is a domain-separated BLAKE3 digest over the admission's stable identity and content digests. It is not a signature or authorization token. The attempt ID must be generated once by the supervisor and reused when reconciling an ambiguous acknowledgement.
+The v2 commit ID is a domain-separated BLAKE3 digest over the admission's stable identity and content digests, including authority-provenance digest. It is not a signature or authorization token. The attempt ID must be generated once by the supervisor and reused when reconciling an ambiguous acknowledgement.
 
 Database constraints enforce:
 - primary/unique replay-key, attempt-ID, permit-digest and commit-ID bindings;
@@ -48,8 +50,8 @@ The write path takes an IMMEDIATE transaction, checks the joined storage invaria
 
 Outcomes:
 - no replay and no unresolved attempt: insert all records and commit once;
-- same replay key with the same transaction, plan, machine and approval-material digest: return the original persisted attempt and permit, even if the caller proposes new attempt/permit bytes;
-- same replay key with changed intent or approval material: reject replay conflict;
+- same replay key with the same transaction, plan, machine, approval-material digest and authority-provenance digest: return the original persisted attempt and permit, even if the caller proposes new attempt/permit bytes;
+- same replay key with changed intent, approval material or authority provenance: reject replay conflict;
 - a different replay key while the transaction has an unresolved attempt: reject/hold;
 - replay lookup and unresolved-transaction lookup pointing at different commits: hold inconsistent storage;
 - failed commit read-back: return an explicit uncertain outcome; the caller must not submit a worker and must retry by the same replay key.
@@ -59,9 +61,11 @@ A resolved attempt remains in the audit history. A later fresh replay key may cr
 ## Fault tests
 
 The Rust unit tests exercise:
-- successful write of all four records and exact joined read-back;
+- successful write of all five records and exact joined read-back;
+- missing authority provenance rejection;
 - idempotent retry after a committed transaction's acknowledgement is lost;
 - changed plan/machine replay rejection;
+- changed authority provenance on the same replay key rejection;
 - unresolved transaction exclusion;
 - one-way resolution and subsequent new attempt;
 - injected errors after each individual table insert and immediately before commit, followed by reopen and retry;
@@ -69,7 +73,9 @@ The Rust unit tests exercise:
 - concurrent same-replay requests (one creation, one existing result);
 - concurrent different-replay requests for one transaction (one creation, one hold);
 - concurrent independent transactions;
-- WAL/FULL/foreign-key settings, private database file mode, and symlink path rejection.
+- WAL/FULL/foreign-key settings, private database file mode, and symlink path rejection;
+- v1 database refusal without authority-provenance migration;
+- authority-provenance tamper detection during full integrity scan.
 
 The failpoints are private test hooks, not environment variables or production IPC controls. They test application transaction rollback and process reopen behavior; they do not simulate kernel crash, storage-controller cache loss, filesystem corruption, or physical power loss. A SQLite COMMIT error is surfaced as an uncertain outcome with the deterministic commit ID; the caller must stop and reconcile by the same replay key rather than submitting or generating a new attempt.
 
@@ -98,3 +104,12 @@ After safety tests, measure admission transaction + joined read-back separately 
 - raw trial artifacts, seeds, database size, WAL size, filesystem, kernel and storage configuration.
 
 Do not weaken synchronous=FULL, uniqueness constraints, or read-back to hit a latency target.
+
+
+## Authority provenance v2
+
+Every new v2 `AdmissionRequest` must carry a non-empty serialized authority-provenance record, bounded to 64 KiB. The store computes its BLAKE3 digest, includes that digest in the v2 commit ID, persists bytes and digest in the same immutable `admission_commits` row, includes them in joined reads, and compares them on replay retry. A retry with the same replay key but changed provenance bytes is a replay conflict.
+
+This is deliberately a storage-integrity rule, not a cryptographic trust decision. The future supervisor must construct the bytes by serializing its verifier-minted runtime-only `VerifiedAuthorityReceipt`. The store does not accept a boolean or infer that the bytes are genuine. The supervisor remains responsible for signature verification and current policy epoch, emergency revocation and expiry checks before payload release.
+
+Schema v1 is refused rather than auto-migrated. Existing v1 rows did not contain versioned verifier provenance; filling that gap with a placeholder would silently upgrade an old approval into a new capability. A future explicit migration/re-admission procedure must preserve the historical row as non-releasable audit data and obtain fresh authority before a new admission.

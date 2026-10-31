@@ -20,9 +20,10 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4e58_5744; // "NXWD"
 const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
+const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
 const MAX_PERMIT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS admission_commits (
     machine_binding_digest TEXT NOT NULL,
     approval_proof_digest TEXT NOT NULL,
     approval_material BLOB NOT NULL CHECK(length(approval_material) > 0),
+    authority_provenance_digest TEXT NOT NULL CHECK(length(authority_provenance_digest) = 64),
+    authority_provenance BLOB NOT NULL CHECK(length(authority_provenance) > 0),
     permit_digest TEXT NOT NULL UNIQUE,
     permit_wire BLOB NOT NULL CHECK(length(permit_wire) > 0),
     event_digest TEXT NOT NULL,
@@ -156,7 +159,8 @@ SELECT
     a.plan_digest, a.machine_binding_digest, a.approval_proof_digest,
     a.approval_material, a.permit_digest, a.permit_wire, a.event_digest,
     e.event_payload, a.created_at_ms, t.state, t.resolution_digest,
-    t.resolved_at_ms
+    t.resolved_at_ms,
+    a.authority_provenance_digest, a.authority_provenance
 FROM admission_commits AS a
 JOIN authority_replays AS r ON r.commit_id = a.commit_id
 JOIN supervisor_permits AS p ON p.commit_id = a.commit_id
@@ -171,7 +175,8 @@ SELECT
     a.plan_digest, a.machine_binding_digest, a.approval_proof_digest,
     a.approval_material, a.permit_digest, a.permit_wire, a.event_digest,
     e.event_payload, a.created_at_ms, t.state, t.resolution_digest,
-    t.resolved_at_ms
+    t.resolved_at_ms,
+    a.authority_provenance_digest, a.authority_provenance
 FROM authority_replays AS r
 JOIN admission_commits AS a ON a.commit_id = r.commit_id
 JOIN supervisor_permits AS p ON p.commit_id = a.commit_id
@@ -186,7 +191,8 @@ SELECT
     a.plan_digest, a.machine_binding_digest, a.approval_proof_digest,
     a.approval_material, a.permit_digest, a.permit_wire, a.event_digest,
     e.event_payload, a.created_at_ms, t.state, t.resolution_digest,
-    t.resolved_at_ms
+    t.resolved_at_ms,
+    a.authority_provenance_digest, a.authority_provenance
 FROM transaction_attempts AS t
 JOIN admission_commits AS a ON a.commit_id = t.commit_id
 JOIN authority_replays AS r ON r.commit_id = a.commit_id
@@ -209,6 +215,8 @@ pub(crate) struct AdmissionRequest {
     pub plan_digest: String,
     pub machine_binding_digest: String,
     pub approval_material: Vec<u8>,
+    /// Serialized verifier provenance. This module stores/hashes it but does not trust or verify it.
+    pub authority_provenance: Vec<u8>,
     pub permit_wire: Vec<u8>,
     pub event_payload: Vec<u8>,
     pub created_at_ms: u64,
@@ -234,6 +242,8 @@ pub(crate) struct AdmissionRecord {
     pub machine_binding_digest: String,
     pub approval_proof_digest: String,
     pub approval_material: Vec<u8>,
+    pub authority_provenance_digest: String,
+    pub authority_provenance: Vec<u8>,
     pub permit_digest: String,
     pub permit_wire: Vec<u8>,
     pub event_digest: String,
@@ -480,7 +490,7 @@ impl SupervisorAdmissionStore {
 
         let version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > SCHEMA_VERSION {
+        if version != 0 && version != SCHEMA_VERSION {
             return Err(AdmissionStoreError::UnsupportedSchema(version));
         }
         if application_id == 0 {
@@ -545,6 +555,20 @@ impl SupervisorAdmissionStore {
         if user_object_count != REQUIRED.len() as i64 {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
+        let mut columns = connection.prepare("PRAGMA table_info(admission_commits)")?;
+        let column_rows = columns.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut names = std::collections::BTreeMap::new();
+        for column in column_rows {
+            let (name, not_null) = column?;
+            names.insert(name, not_null);
+        }
+        if names.get("authority_provenance_digest") != Some(&1)
+            || names.get("authority_provenance") != Some(&1)
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
         Ok(())
     }
 
@@ -579,11 +603,12 @@ impl SupervisorAdmissionStore {
         plan_digest: &str,
         machine_binding_digest: &str,
         approval_proof_digest: &str,
+        authority_provenance_digest: &str,
         permit_digest: &str,
         event_digest: &str,
     ) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nixward-supervisor-admission-commit-v1\0");
+        hasher.update(b"nixward-supervisor-admission-commit-v2\0");
         for value in [
             transaction_id.as_bytes(),
             attempt_id.as_bytes(),
@@ -591,6 +616,7 @@ impl SupervisorAdmissionStore {
             plan_digest.as_bytes(),
             machine_binding_digest.as_bytes(),
             approval_proof_digest.as_bytes(),
+            authority_provenance_digest.as_bytes(),
             permit_digest.as_bytes(),
             event_digest.as_bytes(),
         ] {
@@ -606,6 +632,10 @@ impl SupervisorAdmissionStore {
             || !Self::valid_digest(&record.plan_digest)
             || !Self::valid_digest(&record.machine_binding_digest)
             || !Self::valid_digest(&record.approval_proof_digest)
+            || !Self::valid_digest(&record.authority_provenance_digest)
+            || record.authority_provenance.is_empty()
+            || record.authority_provenance.len() > MAX_AUTHORITY_PROVENANCE_BYTES
+            || Self::digest(&record.authority_provenance) != record.authority_provenance_digest
             || !Self::valid_digest(&record.permit_digest)
             || !Self::valid_digest(&record.event_digest)
             || !Self::valid_digest(&record.commit_id)
@@ -619,6 +649,7 @@ impl SupervisorAdmissionStore {
                 &record.plan_digest,
                 &record.machine_binding_digest,
                 &record.approval_proof_digest,
+                &record.authority_provenance_digest,
                 &record.permit_digest,
                 &record.event_digest,
             ) != record.commit_id
@@ -654,6 +685,11 @@ impl SupervisorAdmissionStore {
         {
             return Err(AdmissionStoreError::InvalidInput("approval material length"));
         }
+        if request.authority_provenance.is_empty()
+            || request.authority_provenance.len() > MAX_AUTHORITY_PROVENANCE_BYTES
+        {
+            return Err(AdmissionStoreError::InvalidInput("authority provenance length"));
+        }
         if request.permit_wire.is_empty() || request.permit_wire.len() > MAX_PERMIT_BYTES {
             return Err(AdmissionStoreError::InvalidInput("permit wire length"));
         }
@@ -664,6 +700,7 @@ impl SupervisorAdmissionStore {
             .map_err(|_| AdmissionStoreError::InvalidInput("creation timestamp"))?;
 
         let approval_proof_digest = Self::digest(&request.approval_material);
+        let authority_provenance_digest = Self::digest(&request.authority_provenance);
         let permit_digest = Self::digest(&request.permit_wire);
         let event_digest = Self::digest(&request.event_payload);
 
@@ -674,12 +711,14 @@ impl SupervisorAdmissionStore {
             &request.plan_digest,
             &request.machine_binding_digest,
             &approval_proof_digest,
+            &authority_provenance_digest,
             &permit_digest,
             &event_digest,
         );
 
         Ok(DerivedBindings {
             approval_proof_digest,
+            authority_provenance_digest,
             permit_digest,
             event_digest,
             commit_id,
@@ -800,6 +839,8 @@ impl SupervisorAdmissionStore {
             event_payload: row.get(11)?,
             created_at_ms: created_at_raw as u64,
             state,
+            authority_provenance_digest: row.get(16)?,
+            authority_provenance: row.get(17)?,
         })
     }
 
@@ -852,6 +893,7 @@ impl SupervisorAdmissionStore {
             && record.plan_digest == request.plan_digest
             && record.machine_binding_digest == request.machine_binding_digest
             && record.approval_proof_digest == bindings.approval_proof_digest
+            && record.authority_provenance_digest == bindings.authority_provenance_digest
     }
 
     fn admit_inner<F>(
@@ -904,8 +946,8 @@ impl SupervisorAdmissionStore {
                 commit_id, transaction_id, attempt_id, replay_key,
                 plan_digest, machine_binding_digest, approval_proof_digest,
                 approval_material, permit_digest, permit_wire, event_digest,
-                created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                created_at_ms, authority_provenance_digest, authority_provenance
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 bindings.commit_id,
@@ -920,6 +962,8 @@ impl SupervisorAdmissionStore {
                 request.permit_wire,
                 bindings.event_digest,
                 bindings.created_at_ms,
+                bindings.authority_provenance_digest,
+                request.authority_provenance,
             ],
         )?;
         checkpoint(WriteStage::CommitRow)?;
@@ -1000,6 +1044,8 @@ impl SupervisorAdmissionStore {
             || record.plan_digest != request.plan_digest
             || record.machine_binding_digest != request.machine_binding_digest
             || record.approval_proof_digest != bindings.approval_proof_digest
+            || record.authority_provenance_digest != bindings.authority_provenance_digest
+            || record.authority_provenance != request.authority_provenance
             || record.permit_digest != bindings.permit_digest
             || record.event_digest != bindings.event_digest
             || record.approval_material != request.approval_material
@@ -1124,6 +1170,7 @@ impl SupervisorAdmissionStore {
 #[derive(Debug)]
 struct DerivedBindings {
     approval_proof_digest: String,
+    authority_provenance_digest: String,
     permit_digest: String,
     event_digest: String,
     commit_id: String,
@@ -1149,6 +1196,7 @@ mod tests {
             plan_digest: (0..32).map(|_| format!("{plan_byte:02x}")).collect(),
             machine_binding_digest: (0..32).map(|_| format!("{machine_byte:02x}")).collect(),
             approval_material: format!("signed-approval:{transaction_id}:{replay_byte}").into_bytes(),
+            authority_provenance: format!("authority-provenance-v1:{transaction_id}:{replay_byte}").into_bytes(),
             permit_wire: format!("permit:{attempt_id}").into_bytes(),
             event_payload: format!(
                 "{{\"kind\":\"supervisor_admission_committed\",\"transaction\":\"{transaction_id}\",\"attempt\":\"{attempt_id}\"}}"
@@ -1160,6 +1208,66 @@ mod tests {
 
     fn store_in(temp: &tempfile::TempDir) -> SupervisorAdmissionStore {
         SupervisorAdmissionStore::new(temp.path().join("supervisor/admission.sqlite3"))
+    }
+
+
+    #[test]
+    fn refuses_schema_v1_database_without_authority_provenance_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        legacy.pragma_update(None, "user_version", 1_i64).unwrap();
+        drop(legacy);
+
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::UnsupportedSchema(1))
+        ));
+    }
+
+    #[test]
+    fn admission_rejects_missing_authority_provenance() {
+        let mut req = request("tx-empty-authority", "attempt-empty-authority", 0x51, 0x52, 0x53);
+        req.authority_provenance.clear();
+        assert!(matches!(
+            SupervisorAdmissionStore::validate_request(&req),
+            Err(AdmissionStoreError::InvalidInput("authority provenance length"))
+        ));
+    }
+
+    #[test]
+    fn same_replay_with_changed_authority_provenance_is_a_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = request("tx-authority-replay", "attempt-authority-first", 0x61, 0x62, 0x63);
+        store.admit(&first).unwrap();
+
+        let mut changed = first.clone();
+        changed.authority_provenance.push(b'!');
+        changed.attempt_id = "attempt-authority-second".into();
+        changed.permit_wire = b"new-permit".to_vec();
+        assert!(matches!(store.admit(&changed), Err(AdmissionStoreError::ReplayConflict)));
+    }
+
+    #[test]
+    fn integrity_scan_detects_authority_provenance_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let req = request("tx-authority-tamper", "attempt-authority-tamper", 0x71, 0x72, 0x73);
+        let record = store.admit(&req).unwrap().record().clone();
+
+        let connection = store.connect().unwrap();
+        connection.execute("DROP TRIGGER admission_commits_immutable_update", []).unwrap();
+        connection.execute(
+            "UPDATE admission_commits SET authority_provenance = ?1 WHERE commit_id = ?2",
+            params![b"tampered-authority-provenance".as_slice(), record.commit_id],
+        ).unwrap();
+        drop(connection);
+        assert!(matches!(store.verify_integrity(), Err(AdmissionStoreError::InconsistentStorage)));
     }
 
     #[test]
@@ -1187,6 +1295,11 @@ mod tests {
             SupervisorAdmissionStore::digest(&request.event_payload)
         );
         assert_eq!(record.approval_material, request.approval_material);
+        assert_eq!(record.authority_provenance, request.authority_provenance);
+        assert_eq!(
+            record.authority_provenance_digest,
+            SupervisorAdmissionStore::digest(&request.authority_provenance)
+        );
         assert_eq!(record.permit_wire, request.permit_wire);
         assert_eq!(record.event_payload, request.event_payload);
         assert_eq!(record.state, AdmissionState::Unresolved);
