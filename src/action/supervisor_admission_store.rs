@@ -3176,6 +3176,72 @@ mod tests {
     }
 
 
+    fn release_ready_fixture(
+        temp: &tempfile::TempDir,
+        revoked: Vec<String>,
+    ) -> (
+        SupervisorAdmissionStore,
+        AdmissionRecord,
+        AuthorityPolicyEpochRecord,
+        PayloadReleaseBarrierRequest,
+    ) {
+        let store = store_in(temp);
+        let policy_request = policy_request(1, revoked);
+        let policy = store
+            .initialize_authority_policy_epoch(&policy_request)
+            .unwrap()
+            .record()
+            .clone();
+
+        let mut admission_request = request(
+            "tx-payload-release",
+            "attempt-payload-release",
+            0x81,
+            0x82,
+            0x83,
+        );
+        admission_request.authority_provenance = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "nixward-authority-provenance-v1",
+            "policy_id": policy.policy_id,
+            "policy_digest": policy.policy_digest,
+            "policy_epoch": policy.epoch,
+            "issuer": "owner-root",
+            "signer_key_id": "owner-1",
+            "action": "change",
+            "audience": "nixward-change-v1",
+            "subject_blake3": admission_request.plan_digest,
+            "holon_id": "33".repeat(32),
+            "challenge_blake3": "44".repeat(32),
+            "replay_key": admission_request.replay_key,
+            "signature_evidence_blake3": "55".repeat(32),
+            "signed_proof_blake3": "66".repeat(32),
+            "signed_proof_json": [1, 2, 3, 4],
+            "issued_at_ms": 1000,
+            "expires_at_ms": 5000,
+            "verified_at_ms": 1100
+        })).unwrap();
+
+        let admission = store
+            .admit(&admission_request)
+            .unwrap()
+            .record()
+            .clone();
+        let barrier_request = PayloadReleaseBarrierRequest {
+            commit_id: admission.commit_id.clone(),
+            expected_policy_epoch: policy.epoch,
+            expected_policy_record_digest: policy.record_digest.clone(),
+            signer_key_id: "owner-1".into(),
+            expected_authority_subject_digest: admission.plan_digest.clone(),
+            expected_authority_audience: "nixward-change-v1".into(),
+            payload_digest: "99".repeat(32),
+            expires_at_ms: 5000,
+            now_ms: 1200,
+        };
+        (store, admission, policy, barrier_request)
+    }
+
+
     #[test]
     fn refuses_schema_v1_database_without_authority_provenance_migration() {
         let temp = tempfile::tempdir().unwrap();
@@ -3207,7 +3273,7 @@ mod tests {
                 "public_key_hex": "11".repeat(32),
                 "allowed_actions": ["change"],
                 "revoked": false,
-                "claims": {}
+                "claims": { "holon_id": "33".repeat(32) }
             }],
             "max_ttl_ms": 900000,
             "allowed_audiences": ["nixward-change-v1"]
