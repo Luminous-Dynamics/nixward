@@ -378,6 +378,13 @@ struct ScenarioSummary {
     complete: bool,
     valid_trials: usize,
     invalid_trials: usize,
+    barriers_created: usize,
+    attempts_reserved: usize,
+    uncertain_trials: usize,
+    operator_reconciliation_trials: usize,
+    barriers_per_second: Option<f64>,
+    uncertainty_rate: Option<f64>,
+    operator_reconciliation_rate: Option<f64>,
     duration: MetricSummary,
     barrier_commit: MetricSummary,
     attempt_reservation: MetricSummary,
@@ -1025,21 +1032,62 @@ fn verify_manifest(
     {
         return Err("trial count or environment metadata is invalid".into());
     }
+    const ALLOWED_OBSERVATIONS: [&str; 6] = [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs",
+    ];
+    for scenario in &corpus.scenarios {
+        if scenario.minimum_trials == 0
+            || scenario.fault_boundary.trim().is_empty()
+            || scenario.required_observations.iter().any(|observation| {
+                !ALLOWED_OBSERVATIONS.contains(&observation.as_str())
+            })
+        {
+            return Err(format!("scenario {} has an invalid observation contract", scenario.id));
+        }
+        let floor = match scenario.trial_class.as_str() {
+            "clean" => corpus.trial_policy.clean_min_trials,
+            "fault" => corpus.trial_policy.fault_min_trials,
+            "concurrency" => corpus.trial_policy.concurrency_min_trials,
+            "durability" => corpus.trial_policy.durability_min_trials,
+            "performance" => corpus.trial_policy.p99_claim_min_trials,
+            _ => return Err(format!("scenario {} has unknown trial class", scenario.id)),
+        };
+        if scenario.minimum_trials < floor {
+            return Err(format!("scenario {} weakens its class trial floor", scenario.id));
+        }
+    }
     let scenarios = corpus.scenarios.iter()
         .map(|scenario| (scenario.id.as_str(), scenario))
         .collect::<BTreeMap<_, _>>();
-    if scenarios.len() != corpus.scenarios.len() {
-        return Err("corpus has duplicate scenario IDs".into());
+    if scenarios.len() != corpus.scenarios.len() || scenarios.is_empty() {
+        return Err("corpus has duplicate or no scenario IDs".into());
     }
     let mut trial_ids = BTreeSet::new();
     let mut verified = Vec::<VerifiedTrial>::new();
     for trial in &manifest.trials {
-        if !trial_ids.insert((trial.scenario_id.as_str(), trial.trial_id.as_str())) {
-            return Err(format!("duplicate trial ID {} for {}", trial.trial_id, trial.scenario_id));
+        if trial.trial_id.trim().is_empty() || !trial_ids.insert(trial.trial_id.as_str()) {
+            return Err(format!("duplicate or empty trial ID {}", trial.trial_id));
         }
         let scenario = scenarios.get(trial.scenario_id.as_str())
             .ok_or_else(|| format!("unknown scenario ID {}", trial.scenario_id))?;
-        verified.push(verify_trial(trial, scenario, artifact_root)?);
+        let mut result = verify_trial(trial, scenario, artifact_root)?;
+        let artifact_kinds = trial.artifacts.iter()
+            .map(|artifact| artifact.artifact_kind.as_str())
+            .collect::<BTreeSet<_>>();
+        if scenario.required_observations.iter().any(|value| value == "raw_sqlite_and_supervisor_logs")
+            && (!artifact_kinds.contains("raw_sqlite") || !artifact_kinds.contains("supervisor_log"))
+        {
+            result.report.valid = false;
+            result.report.violations.push(
+                "required raw SQLite database/log and supervisor log artifacts are missing".into()
+            );
+        }
+        verified.push(result);
     }
 
     let mut summaries = Vec::new();
@@ -1052,6 +1100,13 @@ fn verify_manifest(
         let valid_count = selected.iter().filter(|trial| trial.report.valid).count();
         let scenario_complete = selected.len() >= scenario.minimum_trials;
         complete &= scenario_complete;
+        let barriers_created = selected.iter().map(|trial| trial.report.barrier_count).sum::<usize>();
+        let attempts_reserved = selected.iter().map(|trial| trial.report.attempt_count).sum::<usize>();
+        let uncertain_trials = selected.iter().filter(|trial| trial.report.uncertain_count > 0).count();
+        let operator_reconciliation_trials = selected.iter().filter(|trial| {
+            trial.report.uncertain_count > 0
+                && trial.report.receipt_count == 0
+        }).count();
 
         let durations = selected.iter().flat_map(|trial| trial.measurements.duration_ns.iter().copied()).collect::<Vec<_>>();
         let barrier = selected.iter().flat_map(|trial| trial.measurements.barrier_latency_ns.iter().copied()).collect::<Vec<_>>();
@@ -1069,6 +1124,22 @@ fn verify_manifest(
             complete: scenario_complete,
             valid_trials: valid_count,
             invalid_trials: selected.len().saturating_sub(valid_count),
+            barriers_created,
+            attempts_reserved,
+            uncertain_trials,
+            operator_reconciliation_trials,
+            barriers_per_second: {
+                let total_ns = durations.iter().copied().sum::<u64>();
+                if total_ns == 0 { None } else {
+                    Some(barriers_created as f64 / (total_ns as f64 / 1_000_000_000.0))
+                }
+            },
+            uncertainty_rate: if selected.is_empty() { None } else {
+                Some(uncertain_trials as f64 / selected.len() as f64)
+            },
+            operator_reconciliation_rate: if selected.is_empty() { None } else {
+                Some(operator_reconciliation_trials as f64 / selected.len() as f64)
+            },
             duration: metric_summary(&durations, corpus.trial_policy.p99_claim_min_trials),
             barrier_commit: metric_summary(&barrier, corpus.trial_policy.p99_claim_min_trials),
             attempt_reservation: metric_summary(&attempt, corpus.trial_policy.p99_claim_min_trials),
@@ -1081,6 +1152,13 @@ fn verify_manifest(
 
     let trial_reports = verified.into_iter().map(|trial| trial.report).collect::<Vec<_>>();
     let unsafe_count = trial_reports.iter().filter(|trial| !trial.valid).count();
+    let outcome = if unsafe_count > 0 {
+        "unsafe"
+    } else if !complete {
+        "incomplete"
+    } else {
+        "valid"
+    };
     Ok(VerificationReport {
         schema: REPORT_SCHEMA.into(),
         version: 1,
@@ -1091,6 +1169,8 @@ fn verify_manifest(
         unsafe_trial_count: unsafe_count,
         complete,
         p99_claims_enabled,
+        outcome: outcome.into(),
+        environment: manifest.environment,
         trials: trial_reports,
         scenarios: summaries,
     })
