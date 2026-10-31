@@ -25,3 +25,14 @@ A future protocol extension must increment the authority schema version and upda
 ## Verification scope
 
 The added tests are unit-level deserialization negative controls. They do not test filesystem trust-policy ownership, root supervisor IPC, permit signing, replay-store integration or systemd submission. No build or test run is claimed in this authoring environment.
+
+
+## Receipt and policy-epoch semantics
+
+The trust-policy record accepts an optional `policy_epoch` metadata field. Legacy policies without an epoch remain usable for read-only signature verification, but they cannot mint a durable-admission receipt. Epoch zero is invalid. The epoch must be managed by the machine-local policy owner; it is not accepted from an authority signer or an untrusted admission request.
+
+`AuthorityProvenanceRecord` retains exact JSON proof bytes plus domain-separated digests for the raw proof, parsed signature evidence, challenge and replay key. Its integrity validator detects inconsistent or tampered storage, but does not establish signer trust. Deserializing the record never creates a capability. Historical re-verification requires the exact archived policy ID, digest and epoch and verifies at the originally recorded verifier time. Release eligibility is separate: a policy-epoch change, emergency key revocation, or expiry blocks payload release.
+
+The typed compatibility functions receive an already-decoded signature object and serialize it into a deterministic JSON representation. New trust-boundary code should use the byte-oriented `*_json` functions to preserve the original input bytes.
+
+These changes do not prove trusted policy-file ownership, a monotonic root-owned epoch store, atomic replay/admission persistence, or root-supervisor behavior. No privileged service or payload-release path is enabled by this PR.

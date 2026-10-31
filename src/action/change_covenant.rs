@@ -11,7 +11,7 @@
 use super::config_writer::ConfigPatch;
 use super::execution_intent::VerifiedExecutionBundle;
 use super::executor::NixOSCommand;
-use crate::authority_signature::VerifiedSignatureEvidence;
+use crate::authority_signature::{AuthorityProvenanceRecord, VerifiedAuthorityReceipt};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -427,6 +427,8 @@ pub struct ChangeAuthorization {
     authority_challenge_blake3: Option<String>,
     authority_replay_key: Option<String>,
     authority_subject_blake3: Option<String>,
+    /// Durable provenance is audit data only; it is never a deserializable capability.
+    authority_provenance: Option<AuthorityProvenanceRecord>,
     issued_at_ms: u64,
     expires_at_ms: u64,
 }
@@ -456,6 +458,7 @@ impl ChangeAuthorization {
             authority_challenge_blake3: None,
             authority_replay_key: None,
             authority_subject_blake3: None,
+            authority_provenance: None,
             issued_at_ms: now_ms(),
             expires_at_ms: plan.expires_at_ms,
         })
@@ -509,6 +512,7 @@ impl ChangeAuthorization {
             authority_challenge_blake3: None,
             authority_replay_key: None,
             authority_subject_blake3: None,
+            authority_provenance: None,
             issued_at_ms: now_ms(),
             expires_at_ms: plan.expires_at_ms,
         })
@@ -532,59 +536,57 @@ impl ChangeAuthorization {
         Ok(out)
     }
 
-    fn validate_verified_signature_evidence(
-        evidence: &VerifiedSignatureEvidence,
+    fn validate_verified_authority_receipt(
+        receipt: &VerifiedAuthorityReceipt,
         expected_subject: &str,
     ) -> Result<[u8; 32], String> {
-        if evidence.issuer.trim().is_empty() || evidence.signer_key_id.trim().is_empty() {
-            return Err("verified authority evidence omitted signer identity".into());
+        if receipt.issuer().trim().is_empty() || receipt.signer_key_id().trim().is_empty() {
+            return Err("verified authority receipt omitted signer identity".into());
         }
-        if evidence.subject_blake3.as_str() != expected_subject {
-            return Err("verified authority evidence is bound to a different subject".into());
+        if receipt.subject_blake3() != expected_subject {
+            return Err("verified authority receipt is bound to a different subject".into());
         }
-        Self::decode_authority_digest("evidence", &evidence.evidence_blake3)?;
-        Self::decode_authority_digest("challenge", &evidence.challenge_blake3)?;
-        Self::decode_authority_digest("replay", &evidence.replay_key)?;
-        Self::decode_authority_digest("subject", &evidence.subject_blake3)?;
-        Self::decode_authority_digest("evidence", &evidence.evidence_blake3)
+        if receipt.policy_epoch() == 0 {
+            return Err("verified authority receipt has no policy epoch".into());
+        }
+        if receipt.action().as_str() != "change" {
+            return Err("verified authority receipt is not a change authorization".into());
+        }
+        receipt.provenance().validate_integrity().map_err(|error| error.to_string())?;
+        Self::decode_authority_digest("evidence", receipt.evidence_blake3())
     }
 
-    /// Construct a ChangeAuthorization only from opaque cryptographically
-    /// verified authority evidence. This constructor is crate-private so callers
-    /// cannot substitute strings for AuthorityVerifier's result.
-    pub(crate) fn from_verified_authority_evidence(
+    /// Construct a ChangeAuthorization only from a verifier-minted runtime receipt.
+    pub(crate) fn from_verified_authority_receipt(
         plan: &ChangePlan,
-        evidence: &VerifiedSignatureEvidence,
+        receipt: &VerifiedAuthorityReceipt,
         expected_subject: &str,
-        signed_expires_at_ms: u64,
     ) -> Result<Self, String> {
         plan.validate_fresh()?;
-        let evidence_digest =
-            Self::validate_verified_signature_evidence(evidence, expected_subject)?;
+        let evidence_digest = Self::validate_verified_authority_receipt(receipt, expected_subject)?;
         Ok(Self {
             plan_digest: plan.digest(),
-            issuer: evidence.issuer.clone(),
+            issuer: receipt.issuer().to_string(),
             evidence_digest,
             approval_evidence_kind: ApprovalEvidenceKind::AuthoritySignature,
             execution_intent_digest: None,
             realization_plan_digest: None,
-            authority_signer_key_id: Some(evidence.signer_key_id.clone()),
-            authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
-            authority_replay_key: Some(evidence.replay_key.clone()),
-            authority_subject_blake3: Some(evidence.subject_blake3.clone()),
-            issued_at_ms: now_ms(),
-            expires_at_ms: plan.expires_at_ms.min(signed_expires_at_ms),
+            authority_signer_key_id: Some(receipt.signer_key_id().to_string()),
+            authority_challenge_blake3: Some(receipt.challenge_blake3().to_string()),
+            authority_replay_key: Some(receipt.replay_key().to_string()),
+            authority_subject_blake3: Some(receipt.subject_blake3().to_string()),
+            authority_provenance: Some(receipt.provenance().clone()),
+            issued_at_ms: receipt.verified_at_ms(),
+            expires_at_ms: plan.expires_at_ms.min(receipt.expires_at_ms()),
         })
     }
 
-    /// Same as from_verified_authority_evidence, additionally binding the v34
-    /// execution intent and exact immutable realization selected by v35.
-    pub(crate) fn from_verified_execution_intent_authority_evidence(
+    /// Same receipt gate, additionally binding the exact framework execution intent.
+    pub(crate) fn from_verified_execution_intent_authority_receipt(
         plan: &ChangePlan,
         bundle: &VerifiedExecutionBundle,
-        evidence: &VerifiedSignatureEvidence,
+        receipt: &VerifiedAuthorityReceipt,
         expected_subject: &str,
-        signed_expires_at_ms: u64,
     ) -> Result<Self, String> {
         plan.validate_fresh()?;
         if plan.machine().machine_id() != bundle.execution_target_identity() {
@@ -603,21 +605,21 @@ impl ChangeAuthorization {
                 return Err("execution-intent authority requires ActivateSystemClosure".into());
             }
         }
-        let evidence_digest =
-            Self::validate_verified_signature_evidence(evidence, expected_subject)?;
+        let evidence_digest = Self::validate_verified_authority_receipt(receipt, expected_subject)?;
         Ok(Self {
             plan_digest: plan.digest(),
-            issuer: evidence.issuer.clone(),
+            issuer: receipt.issuer().to_string(),
             evidence_digest,
             approval_evidence_kind: ApprovalEvidenceKind::ExecutionIntentAuthority,
             execution_intent_digest: Some(bundle.intent_digest()),
             realization_plan_digest: Some(bundle.realization_plan_digest()),
-            authority_signer_key_id: Some(evidence.signer_key_id.clone()),
-            authority_challenge_blake3: Some(evidence.challenge_blake3.clone()),
-            authority_replay_key: Some(evidence.replay_key.clone()),
-            authority_subject_blake3: Some(evidence.subject_blake3.clone()),
-            issued_at_ms: now_ms(),
-            expires_at_ms: plan.expires_at_ms.min(signed_expires_at_ms),
+            authority_signer_key_id: Some(receipt.signer_key_id().to_string()),
+            authority_challenge_blake3: Some(receipt.challenge_blake3().to_string()),
+            authority_replay_key: Some(receipt.replay_key().to_string()),
+            authority_subject_blake3: Some(receipt.subject_blake3().to_string()),
+            authority_provenance: Some(receipt.provenance().clone()),
+            issued_at_ms: receipt.verified_at_ms(),
+            expires_at_ms: plan.expires_at_ms.min(receipt.expires_at_ms()),
         })
     }
 
@@ -644,7 +646,8 @@ impl ChangeAuthorization {
         let has_authority = self.authority_signer_key_id.is_some()
             && self.authority_challenge_blake3.is_some()
             && self.authority_replay_key.is_some()
-            && self.authority_subject_blake3.is_some();
+            && self.authority_subject_blake3.is_some()
+            && self.authority_provenance.is_some();
         let has_execution_intent =
             self.execution_intent_digest.is_some() && self.realization_plan_digest.is_some();
         let shape_is_valid = match self.approval_evidence_kind {
@@ -657,6 +660,21 @@ impl ChangeAuthorization {
             return Err(
                 "change authorization evidence shape does not match its evidence class".into(),
             );
+        }
+        if let Some(provenance) = &self.authority_provenance {
+            provenance.validate_integrity().map_err(|error| error.to_string())?;
+            if self.authority_signer_key_id.as_deref() != Some(provenance.signer_key_id.as_str())
+                || self.authority_challenge_blake3.as_deref()
+                    != Some(provenance.challenge_blake3.as_str())
+                || self.authority_replay_key.as_deref() != Some(provenance.replay_key.as_str())
+                || self.authority_subject_blake3.as_deref()
+                    != Some(provenance.subject_blake3.as_str())
+                || self.issuer != provenance.issuer
+                || self.evidence_digest
+                    != Self::decode_authority_digest("evidence", &provenance.signature_evidence_blake3)?
+            {
+                return Err("change authorization and authority provenance disagree".into());
+            }
         }
         Ok(())
     }
@@ -699,6 +717,10 @@ impl ChangeAuthorization {
 
     pub fn authority_subject_blake3(&self) -> Option<&str> {
         self.authority_subject_blake3.as_deref()
+    }
+
+    pub fn authority_provenance(&self) -> Option<&AuthorityProvenanceRecord> {
+        self.authority_provenance.as_ref()
     }
 
     pub fn issued_at_ms(&self) -> u64 {

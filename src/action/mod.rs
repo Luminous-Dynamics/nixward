@@ -26,7 +26,8 @@ pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,
     execution_intent_authority_subject, general_change_authority_subject,
-    verify_execution_intent_change_authority, verify_general_change_authority,
+    verify_execution_intent_change_authority, verify_execution_intent_change_authority_json,
+    verify_general_change_authority, verify_general_change_authority_json,
 };
 pub use authority_replay::{
     AuthorityReplayError, AuthorityReplayLedger, DEFAULT_AUTHORITY_REPLAY_DB,

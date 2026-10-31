@@ -97,11 +97,30 @@ fn require_exact_audience(
     Ok(())
 }
 
-/// Verify a detached authority signature for a normal ChangePlan.
-///
-/// The returned ChangeAuthorization can only be constructed after
-/// AuthorityVerifier has verified signer trust, revocation, action, subject,
-/// Holon binding, audience policy, freshness and the Ed25519 signature.
+/// Verify exact detached proof bytes for a normal ChangePlan.
+pub fn verify_general_change_authority_json(
+    plan: &ChangePlan,
+    policy: &AuthorityTrustPolicy,
+    signed_proof_json: &[u8],
+    expected_holon_id: &str,
+    now_ms: u64,
+) -> Result<ChangeAuthorization, String> {
+    let subject = general_change_authority_subject(plan);
+    let receipt = AuthorityVerifier::new(policy)
+        .map_err(|error| error.to_string())?
+        .verify_json(signed_proof_json, AuthorityAction::Change, &subject, expected_holon_id, now_ms)
+        .map_err(|error| error.to_string())?;
+    if receipt.audience() != NIXWARD_CHANGE_AUDIENCE {
+        return Err(format!(
+            "authority signature audience mismatch: expected {}, got {}",
+            NIXWARD_CHANGE_AUDIENCE,
+            receipt.audience()
+        ));
+    }
+    ChangeAuthorization::from_verified_authority_receipt(plan, &receipt, &subject)
+}
+
+/// Typed compatibility wrapper. Use the JSON variant at ingress to preserve original proof bytes.
 pub fn verify_general_change_authority(
     plan: &ChangePlan,
     policy: &AuthorityTrustPolicy,
@@ -109,28 +128,37 @@ pub fn verify_general_change_authority(
     expected_holon_id: &str,
     now_ms: u64,
 ) -> Result<ChangeAuthorization, String> {
-    let subject = general_change_authority_subject(plan);
-    require_exact_audience(signed, NIXWARD_CHANGE_AUDIENCE)?;
-    let evidence = AuthorityVerifier::new(policy)
+    let bytes = serde_json::to_vec(signed).map_err(|error| error.to_string())?;
+    verify_general_change_authority_json(plan, policy, &bytes, expected_holon_id, now_ms)
+}
+
+/// Verify exact detached proof bytes for one v34 execution-intent and realization-plan pair.
+pub fn verify_execution_intent_change_authority_json(
+    plan: &ChangePlan,
+    bundle: &VerifiedExecutionBundle,
+    policy: &AuthorityTrustPolicy,
+    signed_proof_json: &[u8],
+    expected_holon_id: &str,
+    now_ms: u64,
+) -> Result<ChangeAuthorization, String> {
+    let subject = execution_intent_authority_subject(plan, bundle);
+    let receipt = AuthorityVerifier::new(policy)
         .map_err(|error| error.to_string())?
-        .verify(
-            signed,
-            AuthorityAction::Change,
-            &subject,
-            expected_holon_id,
-            now_ms,
-        )
+        .verify_json(signed_proof_json, AuthorityAction::Change, &subject, expected_holon_id, now_ms)
         .map_err(|error| error.to_string())?;
-    ChangeAuthorization::from_verified_authority_evidence(
-        plan,
-        &evidence,
-        &subject,
-        signed.challenge.expires_at_ms,
+    if receipt.audience() != NIXWARD_EXECUTION_INTENT_AUDIENCE {
+        return Err(format!(
+            "authority signature audience mismatch: expected {}, got {}",
+            NIXWARD_EXECUTION_INTENT_AUDIENCE,
+            receipt.audience()
+        ));
+    }
+    ChangeAuthorization::from_verified_execution_intent_authority_receipt(
+        plan, bundle, &receipt, &subject,
     )
 }
 
-/// Verify owner/operator authority for the exact v34 execution intent and
-/// realization plan that resolve to one immutable NixOS system closure.
+/// Typed compatibility wrapper for callers that already decoded the proof.
 pub fn verify_execution_intent_change_authority(
     plan: &ChangePlan,
     bundle: &VerifiedExecutionBundle,
@@ -139,23 +167,8 @@ pub fn verify_execution_intent_change_authority(
     expected_holon_id: &str,
     now_ms: u64,
 ) -> Result<ChangeAuthorization, String> {
-    let subject = execution_intent_authority_subject(plan, bundle);
-    require_exact_audience(signed, NIXWARD_EXECUTION_INTENT_AUDIENCE)?;
-    let evidence = AuthorityVerifier::new(policy)
-        .map_err(|error| error.to_string())?
-        .verify(
-            signed,
-            AuthorityAction::Change,
-            &subject,
-            expected_holon_id,
-            now_ms,
-        )
-        .map_err(|error| error.to_string())?;
-    ChangeAuthorization::from_verified_execution_intent_authority_evidence(
-        plan,
-        bundle,
-        &evidence,
-        &subject,
-        signed.challenge.expires_at_ms,
+    let bytes = serde_json::to_vec(signed).map_err(|error| error.to_string())?;
+    verify_execution_intent_change_authority_json(
+        plan, bundle, policy, &bytes, expected_holon_id, now_ms,
     )
 }

@@ -166,6 +166,7 @@ impl OwnerRootPublicIdentity {
             schema_version: AUTHORITY_SCHEMA_VERSION,
             kind: AUTHORITY_POLICY_KIND.into(),
             policy_id: format!("owner-root:{}", self.key_id),
+            policy_epoch: None,
             keys: vec![TrustedAuthorityKey {
                 key_id: self.key_id.clone(),
                 issuer: "owner-root".into(),
@@ -199,6 +200,28 @@ impl OwnerRootPublicIdentity {
                 audiences.into_iter().collect()
             },
         };
+        policy
+            .validate()
+            .map_err(|_| OwnerRootError::InvalidPolicy)?;
+        Ok(policy)
+    }
+
+    /// Construct an authority policy eligible to mint durable admission receipts.
+    ///
+    /// The caller must obtain `policy_epoch` from a monotonic, machine-local
+    /// owner-controlled policy store. This constructor does not choose or
+    /// persist the epoch; it rejects zero and only binds the supplied value.
+    pub fn authority_policy_at_epoch(
+        &self,
+        holon_id: &str,
+        audience: impl Into<String>,
+        policy_epoch: u64,
+    ) -> Result<AuthorityTrustPolicy, OwnerRootError> {
+        if policy_epoch == 0 {
+            return Err(OwnerRootError::InvalidPolicy);
+        }
+        let mut policy = self.authority_policy(holon_id, audience)?;
+        policy.policy_epoch = Some(policy_epoch);
         policy
             .validate()
             .map_err(|_| OwnerRootError::InvalidPolicy)?;
@@ -309,6 +332,41 @@ mod tests {
             policy.keys[0].claims.get("holon_id").unwrap(),
             &"33".repeat(32)
         );
+    }
+
+    #[test]
+    fn legacy_owner_policy_is_read_only_without_an_explicit_epoch() {
+        let root = OwnerRootPublicIdentity::new(
+            "owner-epoch",
+            "11".repeat(32),
+            "Primary owner",
+            1000,
+            "22".repeat(32),
+            OwnerRecoveryPolicy::default(),
+        ).unwrap();
+        let policy = root.authority_policy(&"33".repeat(32), "spore.local").unwrap();
+        assert_eq!(policy.policy_epoch, None);
+    }
+
+    #[test]
+    fn durable_owner_policy_requires_a_caller_supplied_nonzero_epoch() {
+        let root = OwnerRootPublicIdentity::new(
+            "owner-epoch",
+            "11".repeat(32),
+            "Primary owner",
+            1000,
+            "22".repeat(32),
+            OwnerRecoveryPolicy::default(),
+        ).unwrap();
+        let first = root.authority_policy_at_epoch(&"33".repeat(32), "spore.local", 4).unwrap();
+        let second = root.authority_policy_at_epoch(&"33".repeat(32), "spore.local", 5).unwrap();
+        assert_eq!(first.policy_epoch, Some(4));
+        assert_eq!(second.policy_epoch, Some(5));
+        assert_ne!(first.digest().unwrap(), second.digest().unwrap());
+        assert!(matches!(
+            root.authority_policy_at_epoch(&"33".repeat(32), "spore.local", 0),
+            Err(OwnerRootError::InvalidPolicy)
+        ));
     }
 
     #[test]
