@@ -1361,6 +1361,21 @@ impl SupervisorAdmissionStore {
         expected_current_record_digest: &str,
         request: &AuthorityPolicyEpochRequest,
     ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
+        self.advance_authority_policy_epoch_with_release_decisions(
+            expected_current_epoch,
+            expected_current_record_digest,
+            request,
+            &[],
+        )
+    }
+
+    pub(crate) fn advance_authority_policy_epoch_with_release_decisions(
+        &self,
+        expected_current_epoch: u64,
+        expected_current_record_digest: &str,
+        request: &AuthorityPolicyEpochRequest,
+        decisions: &[StoredReleasePolicyDecision],
+    ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
         if !Self::valid_digest(expected_current_record_digest)
             || request.epoch != expected_current_epoch.checked_add(1)
                 .ok_or(AdmissionStoreError::PolicyEpochConflict)?
@@ -1380,6 +1395,12 @@ impl SupervisorAdmissionStore {
                 expected_current_record_digest,
             )?;
             if existing == expected {
+                Self::verify_existing_release_policy_decisions(
+                    &transaction,
+                    &existing,
+                    decisions,
+                    request.created_at_ms,
+                )?;
                 transaction.commit()?;
                 return Ok(AuthorityPolicyEpochOutcome::Existing(existing));
             }
@@ -1396,6 +1417,12 @@ impl SupervisorAdmissionStore {
         let record =
             Self::derive_policy_epoch_record(request, &current.record_digest)?;
         Self::insert_policy_epoch_record(&transaction, &record)?;
+        Self::append_release_policy_decisions(
+            &transaction,
+            &record,
+            decisions,
+            request.created_at_ms,
+        )?;
         let changed = transaction.execute(
             r#"
             UPDATE authority_policy_current
@@ -1642,7 +1669,7 @@ impl SupervisorAdmissionStore {
             payload_digest: row.get(16)?,
             expires_at_ms: expires_at_ms as u64,
             barrier_committed_at_ms: committed_at_ms as u64,
-            barrier_digest: row.get(20)?,
+            barrier_digest: row.get(19)?,
         })
     }
 
