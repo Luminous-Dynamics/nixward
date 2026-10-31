@@ -457,6 +457,7 @@ struct VerificationReport {
     schema: String,
     version: u32,
     corpus_sha256: String,
+    manifest_sha256: String,
     source_commit_sha: String,
     flake_lock_sha256: String,
     trial_count: usize,
@@ -1287,6 +1288,7 @@ fn verify_manifest(
         return Err("unsupported manifest schema or version".into());
     }
     let corpus_digest = sha256_hex(corpus_bytes);
+    let manifest_digest = sha256_hex(manifest_bytes);
     if manifest.corpus_sha256 != corpus_digest
         || !valid_hex(&manifest.source_commit_sha, 40)
         || !valid_hex(&manifest.flake_lock_sha256, 64)
@@ -1439,6 +1441,7 @@ fn verify_manifest(
         schema: REPORT_SCHEMA.into(),
         version: 1,
         corpus_sha256: corpus_digest,
+        manifest_sha256: manifest_digest,
         source_commit_sha: manifest.source_commit_sha,
         flake_lock_sha256: manifest.flake_lock_sha256,
         trial_count: trial_reports.len(),
