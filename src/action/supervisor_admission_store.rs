@@ -477,14 +477,22 @@ impl SupervisorAdmissionStore {
         if application_id != 0 && application_id != APPLICATION_ID {
             return Err(AdmissionStoreError::WrongApplicationId);
         }
-        if application_id == 0 {
-            connection.pragma_update(None, "application_id", APPLICATION_ID)?;
-        }
 
         let version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(AdmissionStoreError::UnsupportedSchema(version));
+        }
+        if application_id == 0 {
+            let existing_objects: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            if version != 0 || existing_objects != 0 {
+                return Err(AdmissionStoreError::WrongApplicationId);
+            }
+            connection.pragma_update(None, "application_id", APPLICATION_ID)?;
         }
 
         let mut connection = connection;
@@ -493,8 +501,51 @@ impl SupervisorAdmissionStore {
         transaction.execute_batch(SCHEMA)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
+        Self::check_schema_objects(&connection)?;
 
         Ok(connection)
+    }
+
+    fn check_schema_objects(connection: &Connection) -> Result<(), AdmissionStoreError> {
+        const REQUIRED: [(&str, &str); 16] = [
+            ("table", "admission_commits"),
+            ("table", "authority_replays"),
+            ("table", "supervisor_permits"),
+            ("table", "transaction_attempts"),
+            ("table", "admission_events"),
+            ("index", "one_unresolved_attempt_per_transaction"),
+            ("trigger", "admission_commits_immutable_update"),
+            ("trigger", "admission_commits_immutable_delete"),
+            ("trigger", "authority_replays_immutable_update"),
+            ("trigger", "authority_replays_immutable_delete"),
+            ("trigger", "supervisor_permits_immutable_update"),
+            ("trigger", "supervisor_permits_immutable_delete"),
+            ("trigger", "admission_events_immutable_update"),
+            ("trigger", "admission_events_immutable_delete"),
+            ("trigger", "transaction_attempts_one_way_resolution"),
+            ("trigger", "transaction_attempts_no_delete"),
+        ];
+
+        for (kind, name) in REQUIRED {
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                params![kind, name],
+                |row| row.get(0),
+            )?;
+            if count != 1 {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+
+        let user_object_count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if user_object_count != REQUIRED.len() as i64 {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Ok(())
     }
 
     fn digest(bytes: &[u8]) -> String {
@@ -1341,6 +1392,50 @@ mod tests {
         assert!(outcomes.iter().all(AdmissionOutcome::was_created));
         assert_ne!(outcomes[0].record().commit_id, outcomes[1].record().commit_id);
         store.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn refuses_to_adopt_an_unidentified_existing_sqlite_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE unrelated_state (id INTEGER PRIMARY KEY);",
+        ).unwrap();
+        drop(connection);
+
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::WrongApplicationId)
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_or_unexpected_schema_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        store.admit(&request("tx-a", "attempt-a1", 0x11, 0x22, 0x33)).unwrap();
+
+        let connection = store.connect().unwrap();
+        connection.execute_batch(
+            "DROP TRIGGER admission_events_immutable_update;",
+        ).unwrap();
+        drop(connection);
+
+        // Reopening recreates the required trigger from the pinned schema.
+        // The store does not silently accept arbitrary extra schema objects.
+        let reopened = store.connect().unwrap();
+        reopened.execute_batch(
+            "CREATE TABLE unexpected_extension (value TEXT);",
+        ).unwrap();
+        drop(reopened);
+
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
     }
 
     #[test]
