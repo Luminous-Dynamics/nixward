@@ -1,0 +1,372 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/nixos-activation-trace-v1.schema.json",
+  "title": "Nixward NixOS activation trace v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "plan",
+    "events"
+  ],
+  "properties": {
+    "schema": {
+      "const": "luminous-nixward-activation-trace-v1"
+    },
+    "version": {
+      "const": 1
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "transaction_id",
+        "target_machine_digest",
+        "mode",
+        "target",
+        "pre_state",
+        "nixos_release",
+        "activation_semantics_revision",
+        "switch_to_configuration_digest",
+        "inhibitor_receipt",
+        "allow_inhibitor_bypass",
+        "steps"
+      ],
+      "properties": {
+        "schema": {
+          "const": "luminous-nixward-activation-trace-v1"
+        },
+        "version": {
+          "const": 1
+        },
+        "transaction_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_machine_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mode": {
+          "enum": [
+            "switch",
+            "test",
+            "boot",
+            "dry_activate"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "system_closure_path",
+            "system_closure_digest",
+            "generation_digest"
+          ],
+          "properties": {
+            "system_closure_path": {
+              "type": "string",
+              "pattern": "^/nix/store/[^/]+$"
+            },
+            "system_closure_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "generation_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "pre_state": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "running_generation_digest",
+            "boot_default_generation_digest",
+            "boot_id",
+            "state_digest"
+          ],
+          "properties": {
+            "running_generation_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boot_default_generation_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "boot_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "nixos_release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "activation_semantics_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "switch_to_configuration_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "inhibitor_receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "disposition",
+            "checked_inhibitor_count",
+            "old_values_digest",
+            "new_values_digest",
+            "changed_names_digest",
+            "bypass_authorization_digest",
+            "bypass_mechanism"
+          ],
+          "properties": {
+            "disposition": {
+              "enum": [
+                "passed",
+                "blocked",
+                "bypassed"
+              ]
+            },
+            "checked_inhibitor_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "old_values_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "new_values_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "changed_names_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "bypass_authorization_digest": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bypass_mechanism": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "allow_inhibitor_bypass": {
+          "type": "boolean"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "step_id",
+              "kind"
+            ],
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "enum": [
+                  "check_inhibitors",
+                  "validate_closure",
+                  "switch_to_configuration",
+                  "dry_activation_preview",
+                  "stop_unit",
+                  "run_activation_script",
+                  "daemon_reexec",
+                  "daemon_reload",
+                  "reload_unit",
+                  "restart_unit",
+                  "start_unit",
+                  "bootloader_update",
+                  "probe_post_state",
+                  "compensation"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "at_monotonic_ns",
+          "boot_id",
+          "step_id",
+          "kind",
+          "effect",
+          "transition",
+          "receipt_digest",
+          "reason_digest",
+          "observed_state_digest",
+          "unit_name",
+          "invocation_id",
+          "pidfd_identity_digest"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "at_monotonic_ns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "boot_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "step_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "check_inhibitors",
+              "validate_closure",
+              "switch_to_configuration",
+              "dry_activation_preview",
+              "stop_unit",
+              "run_activation_script",
+              "daemon_reexec",
+              "daemon_reload",
+              "reload_unit",
+              "restart_unit",
+              "start_unit",
+              "bootloader_update",
+              "probe_post_state",
+              "compensation"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "read_only",
+              "runtime_mutation",
+              "boot_default_mutation",
+              "composite_mutation",
+              "compensation"
+            ]
+          },
+          "transition": {
+            "enum": [
+              "started",
+              "completed",
+              "failed",
+              "unknown",
+              "reconciled_completed",
+              "reconciled_failed",
+              "compensated"
+            ]
+          },
+          "receipt_digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason_digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "observed_state_digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unit_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "invocation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pidfd_identity_digest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

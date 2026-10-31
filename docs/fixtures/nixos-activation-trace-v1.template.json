@@ -1,0 +1,54 @@
+{
+  "schema": "luminous-nixward-activation-trace-v1",
+  "version": 1,
+  "plan": {
+    "schema": "luminous-nixward-activation-trace-v1",
+    "version": 1,
+    "transaction_id": "tx-nixos-switch-example",
+    "target_machine_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "mode": "switch",
+    "target": {
+      "system_closure_path": "/nix/store/00000000000000000000000000000000-nixos-system-example",
+      "system_closure_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "generation_digest": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "pre_state": {
+      "running_generation_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "boot_default_generation_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+      "boot_id": "replace-with-kernel-boot-id",
+      "state_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "nixos_release": "26.05",
+    "activation_semantics_revision": "switch-to-configuration-ng-v1",
+    "switch_to_configuration_digest": "7777777777777777777777777777777777777777777777777777777777777777",
+    "inhibitor_receipt": {
+      "disposition": "passed",
+      "checked_inhibitor_count": 2,
+      "old_values_digest": "8888888888888888888888888888888888888888888888888888888888888888",
+      "new_values_digest": "9999999999999999999999999999999999999999999999999999999999999999",
+      "changed_names_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bypass_authorization_digest": null,
+      "bypass_mechanism": null
+    },
+    "allow_inhibitor_bypass": false,
+    "steps": [
+      {
+        "step_id": "inhibitors",
+        "kind": "check_inhibitors"
+      },
+      {
+        "step_id": "closure-validation",
+        "kind": "validate_closure"
+      },
+      {
+        "step_id": "switch-to-configuration",
+        "kind": "switch_to_configuration"
+      },
+      {
+        "step_id": "post-state",
+        "kind": "probe_post_state"
+      }
+    ]
+  },
+  "events": []
+}
