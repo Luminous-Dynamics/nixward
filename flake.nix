@@ -433,6 +433,104 @@
               touch $out
             '';
 
+        # Structural validation of the proposed deployment transaction workload corpus.
+        # This does not execute a deployment, fault injection, or benchmark trial.
+        checks.deployment-transaction-benchmark-corpus =
+          let
+            corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/deployment-transaction-benchmark-corpus-v1.json);
+            scenarios = corpus.scenarios;
+            ids = map (scenario: scenario.id) scenarios;
+            allowedCategories = [ "functional" "fault" "concurrency" "storage" ];
+            allowedModes = [
+              "admission-only"
+              "nixos-switch"
+              "nixos-test"
+              "nixos-boot"
+              "nixward-switch"
+              "systemd-supervised"
+              "remote-deploy"
+              "storage-only"
+            ];
+            allowedBaselines = [
+              "nixos-rebuild"
+              "colmena"
+              "deploy-rs"
+              "nixward-direct"
+              "nixward-systemd-gated"
+              "sqlite-admission"
+            ];
+            validScenario = scenario:
+              builtins.isString scenario.id
+              && builtins.elem scenario.category allowedCategories
+              && builtins.isString scenario.comparison_group
+              && builtins.elem scenario.operation_mode allowedModes
+              && builtins.isList scenario.supported_baselines
+              && scenario.supported_baselines != []
+              && builtins.all (baseline: builtins.elem baseline allowedBaselines) scenario.supported_baselines
+              && builtins.isList scenario.preconditions
+              && scenario.preconditions != []
+              && builtins.isList scenario.required_observations
+              && scenario.required_observations != []
+              && builtins.isString scenario.expected_disposition
+              && builtins.isList scenario.forbidden_claims
+              && scenario.forbidden_claims != []
+              && builtins.isList scenario.metric_tags
+              && scenario.metric_tags != []
+              && builtins.elem scenario.trial_class [
+                "clean-baseline"
+                "fault-correctness"
+                "concurrency-correctness"
+                "storage-correctness"
+                "performance"
+              ]
+              && builtins.isInt scenario.min_trials
+              && scenario.min_trials >= (
+                if scenario.trial_class == "clean-baseline" || scenario.trial_class == "performance"
+                then 30
+                else 100
+              )
+              && (if builtins.elem scenario.trial_class [
+                    "fault-correctness"
+                    "concurrency-correctness"
+                    "storage-correctness"
+                  ]
+                  then builtins.isAttrs scenario.fault_injection
+                    && builtins.isString scenario.fault_injection.boundary
+                    && builtins.isString scenario.fault_injection.action
+                  else scenario.fault_injection == null);
+            requiredIds = [
+              "noop-admission"
+              "service-configuration-switch"
+              "test-does-not-change-boot-default"
+              "boot-only-does-not-activate"
+              "successful-exact-closure-activation"
+              "failed-activation-predecessor-reconcile"
+              "lost-startunit-reply"
+              "jobremoved-missing-or-reordered"
+              "supervisor-crash-before-release"
+              "supervisor-crash-after-release"
+              "manager-restart-during-worker"
+              "host-reboot-during-activation"
+              "network-loss-during-remote-confirmation"
+              "concurrent-independent-transactions"
+              "concurrent-same-transaction-different-replay"
+              "sqlite-precommit-failure-matrix"
+              "sqlite-commit-ack-lost"
+              "sqlite-wal-growth-checkpoint"
+              "fleet-throughput-baseline"
+            ];
+          in
+            assert corpus.schema == "org.luminousdynamics.nixward.deployment-transaction-benchmark-corpus";
+            assert corpus.version == 1;
+            assert corpus.status == "proposed-not-executed";
+            assert builtins.length scenarios == 19;
+            assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
+            assert builtins.all (id: builtins.elem id ids) requiredIds;
+            assert builtins.all validScenario scenarios;
+            pkgs.runCommand "nixward-deployment-transaction-benchmark-corpus" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
