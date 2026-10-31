@@ -75,8 +75,6 @@ pub struct DispatchEvidence {
     pub requested_unit_name: String,
     pub requested_mode: String,
     pub start_call_count: u32,
-    /// Timestamp of the payload-release barrier, not a systemd manager signal.
-    pub payload_released_at_ns: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,6 +139,23 @@ pub struct ProcessReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct PayloadReleaseEvidence {
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub admission_commit_id: String,
+    pub permit_digest: String,
+    pub plan_digest: String,
+    pub machine_binding_digest: String,
+    pub unit_name: String,
+    pub invocation_id: String,
+    pub manager_boot_id: String,
+    pub released_at_ns: u64,
+    pub persisted_at_ns: u64,
+    pub release_receipt_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NixosPostState {
     pub kernel_boot_id: String,
     pub observed_at_ns: u64,
@@ -193,6 +208,7 @@ pub struct SystemdExecutionEvidence {
     pub worker_identity: Option<WorkerIdentity>,
     pub unit_snapshot: Option<UnitSnapshot>,
     pub process_receipt: Option<ProcessReceipt>,
+    pub payload_release: Option<PayloadReleaseEvidence>,
     pub post_state: Option<NixosPostState>,
     pub health_observations: Vec<HealthObservation>,
     pub recovery: Option<RecoveryEvidence>,
@@ -255,8 +271,14 @@ fn is_digest(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 fn valid_store_path(value: &str) -> bool {
-    value.starts_with("/nix/store/") && value.len() > 11
-        && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+    const NIX_BASE32: &[u8] = b"0123456789abcdfghijklmnpqrsvwxyz";
+    let Some(name) = value.strip_prefix("/nix/store/") else { return false; };
+    if name.len() <= 33 || name.as_bytes().get(32) != Some(&b'-') {
+        return false;
+    }
+    name.as_bytes()[..32].iter().all(|byte| NIX_BASE32.contains(byte))
+        && !name[33..].is_empty()
+        && !name.bytes().any(|byte| byte.is_ascii_whitespace() || byte == b'/')
 }
 fn nonempty(value: &str) -> bool { !value.trim().is_empty() }
 
@@ -437,12 +459,33 @@ fn validate_worker_and_receipt(e: &SystemdExecutionEvidence, job_new_at_ns: u64,
     {
         f.violation("worker identity observation/persistence timestamps are invalid");
     }
-    let release_at = match e.dispatch.payload_released_at_ns {
+    let release = match e.payload_release.as_ref() {
         Some(value) => value,
-        None => { f.missing("payload-release barrier timestamp is missing"); return None; }
+        None => { f.missing("durable payload-release evidence is missing"); return None; }
     };
-    if release_at <= worker.identity_persisted_at_ns {
-        f.violation("payload released before durable worker identity persistence");
+    for (name, actual, expected) in [
+        ("transaction_id", release.transaction_id.as_str(), b.transaction_id.as_str()),
+        ("attempt_id", release.attempt_id.as_str(), b.attempt_id.as_str()),
+        ("admission_commit_id", release.admission_commit_id.as_str(), b.admission_commit_id.as_str()),
+        ("permit_digest", release.permit_digest.as_str(), b.permit_digest.as_str()),
+        ("plan_digest", release.plan_digest.as_str(), b.plan_digest.as_str()),
+        ("machine_binding_digest", release.machine_binding_digest.as_str(), b.machine_binding_digest.as_str()),
+    ] {
+        if actual != expected { f.violation(format!("payload-release {name} is foreign to this admission")); }
+    }
+    if release.unit_name != worker.unit_name
+        || release.invocation_id != worker.invocation_id
+        || release.manager_boot_id != b.kernel_boot_id
+    {
+        f.violation("payload-release evidence is not bound to the PIDFD-derived worker identity");
+    }
+    if !is_digest(&release.release_receipt_digest) {
+        f.violation("payload-release receipt digest is malformed");
+    }
+    if release.released_at_ns <= worker.identity_persisted_at_ns
+        || release.persisted_at_ns < release.released_at_ns
+    {
+        f.violation("payload released before durable worker identity or release-record persistence");
     }
     let receipt = match e.process_receipt.as_ref() {
         Some(value) => value,
@@ -466,7 +509,7 @@ fn validate_worker_and_receipt(e: &SystemdExecutionEvidence, job_new_at_ns: u64,
     if !is_digest(&receipt.receipt_digest) {
         f.violation("process receipt digest is malformed");
     }
-    if receipt.exited_at_ns <= release_at || receipt.persisted_at_ns < receipt.exited_at_ns {
+    if receipt.exited_at_ns <= release.persisted_at_ns || receipt.persisted_at_ns < receipt.exited_at_ns {
         f.violation("process receipt timestamps do not follow payload release");
     }
     Some(receipt.exit_code)
@@ -681,8 +724,8 @@ mod tests {
 
     fn valid_evidence(operation: NixosOperation) -> SystemdExecutionEvidence {
         let boot = "boot-id-001".to_string();
-        let candidate = "/nix/store/aaaaaaaaaaaaaaaa-system".to_string();
-        let predecessor = "/nix/store/bbbbbbbbbbbbbbbb-system".to_string();
+        let candidate = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-candidate-system".to_string();
+        let predecessor = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-predecessor-system".to_string();
         let (selected, running, boot_default) = match operation {
             NixosOperation::Switch => (candidate.clone(), candidate.clone(), candidate.clone()),
             NixosOperation::Test => (predecessor.clone(), candidate.clone(), predecessor.clone()),
@@ -713,7 +756,7 @@ mod tests {
                 start_request_at_ns: 130, start_reply_at_ns: Some(145),
                 returned_job_object_path: Some("/org/freedesktop/systemd1/job/77".into()),
                 requested_unit_name: "nixward-worker@attempt-1.service".into(),
-                requested_mode: "replace".into(), start_call_count: 1, payload_released_at_ns: Some(180),
+                requested_mode: "replace".into(), start_call_count: 1,
             },
             manager_events: vec![
                 ManagerEvent { kind: ManagerEventKind::JobNew, job_id: 77,
@@ -743,6 +786,14 @@ mod tests {
                 plan_digest: digest('3'), machine_binding_digest: digest('4'),
                 unit_name: "nixward-worker@attempt-1.service".into(), invocation_id: "invocation-77".into(),
                 manager_boot_id: boot.clone(), exit_code: 0, exited_at_ns: 190, persisted_at_ns: 200, receipt_digest: digest('5'),
+            }),
+            payload_release: Some(PayloadReleaseEvidence {
+                transaction_id: "txn-1".into(), attempt_id: "attempt-1".into(),
+                admission_commit_id: "commit-1".into(), permit_digest: digest('2'),
+                plan_digest: digest('3'), machine_binding_digest: digest('4'),
+                unit_name: "nixward-worker@attempt-1.service".into(), invocation_id: "invocation-77".into(),
+                manager_boot_id: boot.clone(), released_at_ns: 180, persisted_at_ns: 185,
+                release_receipt_digest: digest('8'),
             }),
             post_state: Some(NixosPostState {
                 kernel_boot_id: boot.clone(), observed_at_ns: 210,
@@ -830,7 +881,8 @@ mod tests {
     #[test]
     fn payload_release_before_persisted_worker_identity_is_never_success() {
         let mut e = valid_evidence(NixosOperation::Switch);
-        e.dispatch.payload_released_at_ns = Some(155);
+        e.payload_release.as_mut().unwrap().released_at_ns = 155;
+        e.payload_release.as_mut().unwrap().persisted_at_ns = 165;
         assert_eq!(eval(&e).classification, TerminalClassification::ReconciliationRequired);
     }
     #[test]
