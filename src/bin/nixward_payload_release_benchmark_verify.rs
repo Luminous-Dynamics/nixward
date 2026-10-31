@@ -732,7 +732,6 @@ fn verify_trial(
                     || !["nixward-change-v1", "nixward-execution-intent-v1"].contains(&expected_authority_audience.as_str())
                     || !valid_hex(payload_digest, 64)
                     || *expires_at_ms == 0
-                    || *wall_time_ms > *expires_at_ms
                     || barrier_requests.insert(request_id.clone(), BarrierRequestState {
                         admission_commit_id: admission_commit_id.clone(),
                         expected_policy_id: expected_policy_id.clone(),
@@ -940,6 +939,7 @@ fn verify_trial(
                 if seen != active {
                     violations.push("policy decision set does not cover all outstanding barriers".into());
                 }
+                current_policy_id = new_policy_id.clone();
                 current_policy_epoch = *to_epoch;
                 current_policy_digest = new_policy_digest.clone();
                 current_policy_record_digest = new_record_digest.clone();
@@ -1185,6 +1185,39 @@ fn metric_summary(samples_ns: &[u64], p99_minimum: usize) -> MetricSummary {
     }
 }
 
+fn scenario_observations_present(
+        scenario: &ScenarioDefinition,
+        trial: &TrialRecord,
+        artifact_kinds: &BTreeSet<&str>,
+    ) -> bool {
+        scenario.required_observations.iter().all(|required| match required.as_str() {
+            "source_sha_and_flake_lock" => true,
+            "admission_commit_and_release_id" => trial.events.iter().any(|event| matches!(
+                event,
+                EvidenceEvent::BarrierCreateRequested { .. }
+                    | EvidenceEvent::BarrierCommitted { .. }
+                    | EvidenceEvent::OperationRejected { .. }
+            )),
+            "policy_epoch_and_record_digest" => trial.initial_policy_epoch > 0
+                && valid_hex(&trial.initial_policy_digest, 64)
+                && valid_hex(&trial.initial_policy_record_digest, 64),
+            "payload_digest_and_attempt_state" => trial.events.iter().any(|event| matches!(
+                event,
+                EvidenceEvent::BarrierCreateRequested { .. }
+                    | EvidenceEvent::ReleaseAttemptRequested { .. }
+                    | EvidenceEvent::ReleaseAttemptReserved { .. }
+            )),
+            "monotonic_timestamps" => !trial.events.is_empty()
+                && trial.events.first().map(EvidenceEvent::timestamp).unwrap_or(0)
+                    >= trial.started_monotonic_ns
+                && trial.events.last().map(EvidenceEvent::timestamp).unwrap_or(0)
+                    <= trial.finished_monotonic_ns,
+            "raw_sqlite_and_supervisor_logs" => artifact_kinds.contains("raw_sqlite")
+                && artifact_kinds.contains("supervisor_log"),
+            _ => false,
+        })
+    }
+
 fn verify_manifest(
     corpus_bytes: &[u8],
     manifest_bytes: &[u8],
@@ -1218,6 +1251,7 @@ fn verify_manifest(
             manifest.environment.device_model.as_str(),
             manifest.environment.device_firmware.as_str(),
             manifest.environment.cpu_model.as_str(),
+            manifest.environment.boot_id.as_str(),
         ].iter().any(|value| value.trim().is_empty())
     {
         return Err("trial count or environment metadata is invalid".into());
@@ -1269,12 +1303,10 @@ fn verify_manifest(
         let artifact_kinds = trial.artifacts.iter()
             .map(|artifact| artifact.artifact_kind.as_str())
             .collect::<BTreeSet<_>>();
-        if scenario.required_observations.iter().any(|value| value == "raw_sqlite_and_supervisor_logs")
-            && (!artifact_kinds.contains("raw_sqlite") || !artifact_kinds.contains("supervisor_log"))
-        {
+        if !scenario_observations_present(scenario, trial, &artifact_kinds) {
             result.report.valid = false;
             result.report.violations.push(
-                "required raw SQLite database/log and supervisor log artifacts are missing".into()
+                "one or more scenario-required observations are missing".into()
             );
         }
         verified.push(result);
@@ -1540,6 +1572,62 @@ mod tests {
         trial.events_sha256 = sha256_hex(&serde_json::to_vec(&trial.events).unwrap());
     }
 
+
+    #[test]
+    fn release_id_is_deterministic_and_binds_every_authority_and_plan_field() {
+        let original = test_release_id();
+        assert_eq!(original, test_release_id());
+        let changed = derive_release_id(
+            &digest('a'), &digest('4'), &digest('1'), &digest('b'),
+            &digest('c'), &digest('d'), &digest('e'), &digest('6'),
+            "owner-key", &digest('7'), "nixward-change-v1",
+            &digest('8'), "owner-root:1", 1, &digest('5'), &digest('2'), 5_000,
+        );
+        assert_ne!(original, changed);
+    }
+
+
+    #[test]
+    fn barrier_retry_after_expiry_is_read_only_but_attempt_is_forbidden() {
+        let (mut trial, _scenario) = clean_trial();
+        trial.events.truncate(2);
+        trial.events.push(EvidenceEvent::BarrierCreateRequested {
+            seq: 3, at_ns: 130, request_id: "retry-after-expiry".into(),
+            admission_commit_id: digest('1'), expected_policy_id: "owner-root:1".into(),
+            expected_policy_epoch: 1, expected_policy_digest: digest('5'),
+            expected_policy_record_digest: digest('2'), signer_key_id: "owner-key".into(),
+            expected_authority_subject_digest: digest('7'),
+            expected_authority_audience: "nixward-change-v1".into(),
+            payload_digest: digest('9'), expires_at_ms: 5_000, wall_time_ms: 6_000,
+        });
+        trial.events.push(EvidenceEvent::BarrierRetryExisting {
+            seq: 4, at_ns: 140, request_id: "retry-after-expiry".into(),
+            release_id: test_release_id(),
+        });
+        resequence(&mut trial.events);
+        trial.finished_monotonic_ns = 200;
+        rehash(&mut trial);
+        let retry_scenario = ScenarioDefinition {
+            id: "exact-barrier-retry-after-lost-ack".into(),
+            trial_class: "fault".into(),
+            expected_disposition: "existing_same_release_id".into(),
+            minimum_trials: 100,
+            fault_boundary: "after_expiry".into(),
+            required_observations: vec![],
+        };
+        let result = verify_trial(&trial, &retry_scenario, Path::new(".")).unwrap();
+        assert!(result.report.valid);
+        trial.events.push(EvidenceEvent::ReleaseAttemptRequested {
+            seq: 5, at_ns: 150, wall_time_ms: 6_001,
+            request_id: "expired-attempt".into(), release_id: test_release_id(),
+        });
+        resequence(&mut trial.events);
+        rehash(&mut trial);
+        let expired = verify_trial(&trial, &retry_scenario, Path::new(".")).unwrap();
+        assert!(!expired.report.valid);
+        assert!(expired.report.violations.iter().any(|value| value.contains("expired")));
+    }
+
     #[test]
     fn derives_clean_disposition_from_raw_ordered_events() {
         let (trial, scenario) = clean_trial();
@@ -1611,6 +1699,36 @@ mod tests {
         assert!(result.report.valid);
         assert_eq!(result.report.uncertain_count, 1);
         assert_eq!(result.report.receipt_count, 1);
+    }
+
+
+    #[test]
+    fn rejects_policy_preserve_when_new_policy_removes_change_right_or_audience() {
+        let (mut trial, scenario) = clean_trial();
+        trial.events.truncate(2);
+        trial.finished_monotonic_ns = 300;
+        trial.events.push(EvidenceEvent::PolicyAdvanceRequested {
+            seq: 3, at_ns: 150, request_id: "policy-2".into(),
+            expected_epoch: 1, expected_record_digest: digest('2'),
+        });
+        trial.events.push(EvidenceEvent::PolicyAdvanced {
+            seq: 4, at_ns: 160, request_id: "policy-2".into(),
+            from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
+            new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
+            new_record_digest: digest('a'),
+            new_policy_allowed_signers: vec!["owner-key".into()],
+            new_policy_allowed_audiences: vec![],
+            new_policy_allowed_actions: vec![],
+            emergency_revoked_signers: vec![],
+            decisions: vec![PolicyDecision {
+                release_id: test_release_id(),
+                disposition: PolicyDisposition::PreserveExistingBarrier,
+            }],
+        });
+        rehash(&mut trial);
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| value.contains("no-longer-authorized")));
     }
 
     #[test]
