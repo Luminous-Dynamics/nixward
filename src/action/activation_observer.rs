@@ -46,6 +46,7 @@ pub struct SwitchInhibitorReceipt {
     pub new_values_digest: String,
     pub changed_names_digest: String,
     pub bypass_authorization_digest: Option<String>,
+    pub bypass_mechanism: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,8 +160,10 @@ impl ActivationPlan {
         }
         match inhibitor.disposition {
             InhibitorDisposition::Passed => {
-                if inhibitor.bypass_authorization_digest.is_some() {
-                    return Err("passed inhibitor receipt cannot carry bypass authorization".into());
+                if inhibitor.bypass_authorization_digest.is_some()
+                    || inhibitor.bypass_mechanism.is_some()
+                {
+                    return Err("passed inhibitor receipt cannot carry bypass metadata".into());
                 }
             }
             InhibitorDisposition::Blocked => {
@@ -170,6 +173,7 @@ impl ActivationPlan {
                 if !self.allow_inhibitor_bypass
                     || !inhibitor.bypass_authorization_digest.as_deref()
                         .is_some_and(valid_digest)
+                    || inhibitor.bypass_mechanism.as_deref() != Some("NIXOS_NO_CHECK=1")
                 {
                     return Err("switch inhibitor bypass lacks explicit policy and authorization".into());
                 }
@@ -303,6 +307,12 @@ pub struct ActivationEvent {
     pub receipt_digest: Option<String>,
     pub reason_digest: Option<String>,
     pub observed_state_digest: Option<String>,
+    /// systemd unit identity for unit-related steps.
+    pub unit_name: Option<String>,
+    /// InvocationID captured from the exact systemd unit invocation.
+    pub invocation_id: Option<String>,
+    /// Digest of PIDFD-derived identity evidence when supported by systemd.
+    pub pidfd_identity_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -536,6 +546,37 @@ fn replay_events(
             return Err("activation event kind/effect differs from the immutable plan".into());
         }
 
+
+        let is_unit_step = matches!(
+            event.kind,
+            ActivationStepKind::StopUnit
+                | ActivationStepKind::ReloadUnit
+                | ActivationStepKind::RestartUnit
+                | ActivationStepKind::StartUnit
+        );
+        if is_unit_step {
+            if !event.unit_name.as_deref().is_some_and(valid_token)
+                || event.invocation_id.as_deref().is_some_and(|id| !valid_token(id))
+                || event.pidfd_identity_digest.as_deref().is_some_and(|digest| !valid_digest(digest))
+            {
+                return Err("systemd step lacks a valid unit or identity binding".into());
+            }
+            if matches!(
+                event.transition,
+                ActivationTransition::Completed
+                    | ActivationTransition::ReconciledCompleted
+                    | ActivationTransition::Compensated
+            ) && event.invocation_id.is_none()
+            {
+                return Err("completed systemd step lacks exact InvocationID evidence".into());
+            }
+        } else if event.unit_name.is_some()
+            || event.invocation_id.is_some()
+            || event.pidfd_identity_digest.is_some()
+        {
+            return Err("non-systemd activation step carries unrelated unit identity fields".into());
+        }
+
         if event.boot_id != active_boot_id {
             if !matches!(
                 event.transition,
@@ -723,6 +764,7 @@ mod tests {
                 new_values_digest: digest('9'),
                 changed_names_digest: digest('a'),
                 bypass_authorization_digest: None,
+                bypass_mechanism: None,
             },
             allow_inhibitor_bypass: false,
             steps: vec![
@@ -762,6 +804,9 @@ mod tests {
             receipt_digest: receipt,
             reason_digest: None,
             observed_state_digest: observed,
+            unit_name: None,
+            invocation_id: None,
+            pidfd_identity_digest: None,
         }
     }
 
@@ -839,6 +884,64 @@ mod tests {
         assert!(invalid.validate().is_err());
     }
 
+
+    #[test]
+    fn systemd_step_requires_unit_and_invocation_identity_receipt() {
+        let mut p = plan(ActivationMode::Switch);
+        p.steps.insert(2, PlannedActivationStep {
+            step_id: "restart-sshd".into(),
+            kind: ActivationStepKind::RestartUnit,
+        });
+        let mut trace = ActivationTrace::new(p.clone()).unwrap();
+        for (index, step) in p.steps.iter().take(2).enumerate() {
+            trace.append(completed_event(
+                &p, (index * 2 + 1) as u64, step, (index * 2 + 1) as u64 * 10,
+                ActivationTransition::Started, None, None
+            )).unwrap();
+            trace.append(completed_event(
+                &p, (index * 2 + 2) as u64, step, (index * 2 + 2) as u64 * 10,
+                ActivationTransition::Completed, Some(digest('c')), None
+            )).unwrap();
+        }
+        let step = &p.steps[2];
+        let started = ActivationEvent {
+            sequence: 5, at_monotonic_ns: 50, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Started, receipt_digest: None,
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: None,
+            pidfd_identity_digest: None,
+        };
+        trace.append(started).unwrap();
+
+        let invalid = ActivationEvent {
+            sequence: 6, at_monotonic_ns: 60, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Completed, receipt_digest: Some(digest('c')),
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: None,
+            pidfd_identity_digest: None,
+        };
+        assert!(trace.append(invalid).is_err());
+
+        let valid = ActivationEvent {
+            sequence: 6, at_monotonic_ns: 60, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Completed, receipt_digest: Some(digest('c')),
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-123".into()),
+            pidfd_identity_digest: Some(digest('d')),
+        };
+        trace.append(valid).unwrap();
+    }
+
+    #[test]
+    fn passed_inhibitor_receipt_rejects_a_claimed_bypass_mechanism() {
+        let mut p = plan(ActivationMode::Switch);
+        p.inhibitor_receipt.bypass_mechanism = Some("NIXOS_NO_CHECK=1".into());
+        assert!(p.validate().is_err());
+    }
+
     #[test]
     fn inhibitor_block_is_a_hard_plan_rejection() {
         let mut p = plan(ActivationMode::Switch);
@@ -853,6 +956,7 @@ mod tests {
         assert!(p.validate().is_err());
         p.allow_inhibitor_bypass = true;
         p.inhibitor_receipt.bypass_authorization_digest = Some(digest('f'));
+        p.inhibitor_receipt.bypass_mechanism = Some("NIXOS_NO_CHECK=1".into());
         let mut trace = ActivationTrace::new(p.clone()).unwrap();
         let post = post_state(&p);
         let mut seq = 1;
@@ -877,6 +981,7 @@ mod tests {
             step_id: first.step_id.clone(), kind: first.kind, effect: p.effect_for(first.kind),
             transition: ActivationTransition::Unknown, receipt_digest: None,
             reason_digest: Some(digest('d')), observed_state_digest: None,
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         }).unwrap();
         assert_eq!(trace.evaluate(&post_state(&p)).unwrap().outcome, ActivationOutcome::ReconciliationRequired);
     }
@@ -892,6 +997,7 @@ mod tests {
             step_id: first.step_id.clone(), kind: first.kind, effect: p.effect_for(first.kind),
             transition: ActivationTransition::Completed, receipt_digest: Some(digest('c')),
             reason_digest: None, observed_state_digest: None,
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         };
         assert!(trace.append(invalid).is_err());
     }
@@ -907,6 +1013,7 @@ mod tests {
             step_id: first.step_id.clone(), kind: first.kind, effect: p.effect_for(first.kind),
             transition: ActivationTransition::Unknown, receipt_digest: None,
             reason_digest: Some(digest('d')), observed_state_digest: None,
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         }).unwrap();
         let rec = ActivationEvent {
             sequence: 3, at_monotonic_ns: 2, boot_id: "boot-after".into(),
@@ -914,6 +1021,7 @@ mod tests {
             transition: ActivationTransition::ReconciledCompleted,
             receipt_digest: Some(digest('c')), reason_digest: None,
             observed_state_digest: Some(digest('e')),
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         };
         trace.append(rec).unwrap();
     }
@@ -964,12 +1072,14 @@ mod tests {
             step_id: first.step_id.clone(), kind: first.kind, effect: p.effect_for(first.kind),
             transition: ActivationTransition::Failed, receipt_digest: None,
             reason_digest: Some(digest('d')), observed_state_digest: None,
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         }).unwrap();
         trace.append(ActivationEvent {
             sequence: 3, at_monotonic_ns: 30, boot_id: p.pre_state.boot_id.clone(),
             step_id: first.step_id.clone(), kind: first.kind, effect: p.effect_for(first.kind),
             transition: ActivationTransition::Compensated, receipt_digest: Some(digest('e')),
             reason_digest: None, observed_state_digest: Some(digest('f')),
+            unit_name: None, invocation_id: None, pidfd_identity_digest: None,
         }).unwrap();
         assert_eq!(trace.evaluate(&post_state(&p)).unwrap().outcome, ActivationOutcome::SafeHold);
     }
