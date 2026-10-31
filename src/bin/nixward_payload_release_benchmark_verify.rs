@@ -91,6 +91,7 @@ struct TrialRecord {
     started_monotonic_ns: u64,
     finished_monotonic_ns: u64,
     initial_policy_epoch: u64,
+    initial_policy_digest: String,
     initial_policy_record_digest: String,
     events_sha256: String,
     events: Vec<EvidenceEvent>,
@@ -155,6 +156,7 @@ enum EvidenceEvent {
         to_epoch: u64,
         previous_record_digest: String,
         new_policy_id: String,
+        new_policy_digest: String,
         new_record_digest: String,
         emergency_revoked_signers: Vec<String>,
         decisions: Vec<PolicyDecision>,
@@ -556,6 +558,7 @@ fn verify_trial(
     if trial.trial_id.trim().is_empty()
         || trial.started_monotonic_ns >= trial.finished_monotonic_ns
         || trial.initial_policy_epoch == 0
+        || !valid_hex(&trial.initial_policy_digest, 64)
         || !valid_hex(&trial.initial_policy_record_digest, 64)
         || trial.events.is_empty()
         || trial.events.len() > MAX_EVENTS_PER_TRIAL
@@ -574,6 +577,7 @@ fn verify_trial(
     let mut previous_sequence = 0_u64;
     let mut previous_timestamp = trial.started_monotonic_ns;
     let mut current_policy_epoch = trial.initial_policy_epoch;
+    let mut current_policy_digest = trial.initial_policy_digest.clone();
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
     let mut barrier_requests = BTreeMap::<String, (String, u64, String, String, u64)>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
@@ -657,6 +661,7 @@ fn verify_trial(
                     || requested_policy != policy_record_digest
                     || requested_payload != payload_digest
                     || *policy_epoch != current_policy_epoch
+                    || policy_digest != &current_policy_digest
                     || policy_record_digest != &current_policy_record_digest
                     || *at_ns < *requested_at
                 {
@@ -703,7 +708,7 @@ fn verify_trial(
             }
             EvidenceEvent::PolicyAdvanced {
                 request_id, from_epoch, to_epoch, previous_record_digest,
-                new_policy_id, new_record_digest, emergency_revoked_signers, decisions, at_ns, ..
+                new_policy_id, new_policy_digest, new_record_digest, emergency_revoked_signers, decisions, at_ns, ..
             } => {
                 let Some((requested_epoch, requested_digest, requested_at)) = policy_requests.get(request_id) else {
                     violations.push("policy advance has no preceding request".into());
@@ -715,6 +720,7 @@ fn verify_trial(
                     || previous_record_digest != requested_digest
                     || *to_epoch != from_epoch.saturating_add(1)
                     || *at_ns < *requested_at
+                    || !valid_hex(new_policy_digest, 64)
                     || !valid_hex(new_record_digest, 64)
                     || new_policy_id.trim().is_empty()
                 {
@@ -759,6 +765,7 @@ fn verify_trial(
                     violations.push("policy decision set does not cover all outstanding barriers".into());
                 }
                 current_policy_epoch = *to_epoch;
+                current_policy_digest = new_policy_digest.clone();
                 current_policy_record_digest = new_record_digest.clone();
             }
             EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, .. } => {
@@ -1284,6 +1291,7 @@ mod tests {
                 started_monotonic_ns: 100,
                 finished_monotonic_ns: 250,
                 initial_policy_epoch: 1,
+                initial_policy_digest: digest('5'),
                 initial_policy_record_digest: digest('2'),
                 events_sha256: sha256_hex(&event_bytes),
                 events,
@@ -1412,7 +1420,8 @@ mod tests {
         trial.events.push(EvidenceEvent::PolicyAdvanced {
             seq: 4, at_ns: 160, request_id: "policy-2".into(),
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
-            new_policy_id: "owner-root:1".into(), new_record_digest: digest('a'),
+            new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
+            new_record_digest: digest('a'),
             emergency_revoked_signers: vec!["owner-key".into()],
             decisions: vec![PolicyDecision {
                 release_id: digest('3'),
