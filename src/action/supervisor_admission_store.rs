@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x4e58_5744; // "NXWD"
 const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
@@ -248,6 +248,121 @@ BEGIN
     SELECT RAISE(ABORT, 'authority policy current pointer cannot be deleted');
 END;
 
+
+CREATE TABLE IF NOT EXISTS payload_release_barriers (
+    release_id TEXT PRIMARY KEY NOT NULL CHECK(length(release_id) = 64),
+    commit_id TEXT NOT NULL UNIQUE REFERENCES admission_commits(commit_id) ON DELETE RESTRICT,
+    transaction_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL UNIQUE,
+    replay_key TEXT NOT NULL UNIQUE,
+    permit_digest TEXT NOT NULL,
+    plan_digest TEXT NOT NULL,
+    machine_binding_digest TEXT NOT NULL,
+    authority_provenance_digest TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL CHECK(policy_epoch > 0),
+    policy_digest TEXT NOT NULL,
+    policy_record_digest TEXT NOT NULL,
+    signer_key_id TEXT NOT NULL,
+    authority_subject_digest TEXT NOT NULL,
+    authority_audience TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > 0),
+    barrier_committed_at_ms INTEGER NOT NULL CHECK(barrier_committed_at_ms >= 0),
+    barrier_digest TEXT NOT NULL UNIQUE CHECK(length(barrier_digest) = 64),
+    FOREIGN KEY(policy_epoch, policy_record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_attempts (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_barriers(release_id) ON DELETE RESTRICT,
+    attempt_id TEXT NOT NULL UNIQUE,
+    started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    attempt_digest TEXT NOT NULL UNIQUE CHECK(length(attempt_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_uncertain (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_attempts(release_id) ON DELETE RESTRICT,
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    uncertainty_digest TEXT NOT NULL UNIQUE CHECK(length(uncertainty_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_receipts (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_attempts(release_id) ON DELETE RESTRICT,
+    payload_digest TEXT NOT NULL,
+    worker_unit TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+    acknowledged_at_ms INTEGER NOT NULL CHECK(acknowledged_at_ms >= 0),
+    receipt_record_digest TEXT NOT NULL UNIQUE CHECK(length(receipt_record_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_policy_decisions (
+    decision_id TEXT PRIMARY KEY NOT NULL CHECK(length(decision_id) = 64),
+    release_id TEXT NOT NULL REFERENCES payload_release_barriers(release_id) ON DELETE RESTRICT,
+    policy_epoch INTEGER NOT NULL CHECK(policy_epoch > 0),
+    policy_record_digest TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('preserve_existing_barrier', 'stop_or_recovery_required')),
+    decision_digest TEXT NOT NULL UNIQUE CHECK(length(decision_digest) = 64),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    UNIQUE(release_id, policy_epoch),
+    FOREIGN KEY(policy_epoch, policy_record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS payload_release_barriers_immutable_update
+BEFORE UPDATE ON payload_release_barriers BEGIN
+    SELECT RAISE(ABORT, 'payload release barrier records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_barriers_no_delete
+BEFORE DELETE ON payload_release_barriers BEGIN
+    SELECT RAISE(ABORT, 'payload release barrier records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_attempts_immutable_update
+BEFORE UPDATE ON payload_release_attempts BEGIN
+    SELECT RAISE(ABORT, 'payload release attempt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_attempts_no_delete
+BEFORE DELETE ON payload_release_attempts BEGIN
+    SELECT RAISE(ABORT, 'payload release attempt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_uncertain_immutable_update
+BEFORE UPDATE ON payload_release_uncertain BEGIN
+    SELECT RAISE(ABORT, 'payload release uncertainty records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_uncertain_no_delete
+BEFORE DELETE ON payload_release_uncertain BEGIN
+    SELECT RAISE(ABORT, 'payload release uncertainty records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_receipts_immutable_update
+BEFORE UPDATE ON payload_release_receipts BEGIN
+    SELECT RAISE(ABORT, 'payload release receipt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_receipts_no_delete
+BEFORE DELETE ON payload_release_receipts BEGIN
+    SELECT RAISE(ABORT, 'payload release receipt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_immutable_update
+BEFORE UPDATE ON payload_release_policy_decisions BEGIN
+    SELECT RAISE(ABORT, 'payload release policy decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_no_delete
+BEFORE DELETE ON payload_release_policy_decisions BEGIN
+    SELECT RAISE(ABORT, 'payload release policy decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_no_downgrade
+BEFORE INSERT ON payload_release_policy_decisions
+WHEN NEW.disposition = 'preserve_existing_barrier'
+  AND EXISTS (
+      SELECT 1 FROM payload_release_policy_decisions AS prior
+      WHERE prior.release_id = NEW.release_id
+        AND prior.disposition = 'stop_or_recovery_required'
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'stop/recovery disposition cannot be downgraded');
+END;
+
+
 "#;
 
 const SELECT_ADMISSION_BY_COMMIT: &str = r#"
@@ -387,6 +502,26 @@ pub(crate) enum AdmissionStoreError {
     PolicyEpochConflict,
     #[error("authority policy epoch record is invalid or corrupt")]
     InvalidPolicyEpochRecord,
+    #[error("payload release barrier conflicts with the committed admission or existing barrier")]
+    ReleaseBarrierConflict,
+    #[error("payload release request uses a stale authority policy snapshot")]
+    ReleaseBarrierStalePolicy,
+    #[error("payload release signer, audience, subject or provenance is not authorized by the archived policy")]
+    ReleaseBarrierUnauthorized,
+    #[error("payload release barrier or admission has expired")]
+    ReleaseBarrierExpired,
+    #[error("payload release attempt has already been durably reserved; resend is forbidden")]
+    ReleaseAttemptAlreadyStarted,
+    #[error("payload release is blocked by a stop/recovery policy decision")]
+    ReleaseAttemptBlocked,
+    #[error("payload release attempt has no committed barrier")]
+    ReleaseBarrierNotFound,
+    #[error("payload release receipt conflicts with the unique release attempt")]
+    ReleaseReceiptConflict,
+    #[error("payload release policy decisions are missing, duplicated or foreign")]
+    ReleasePolicyDecisionRequired,
+    #[error("policy release decision cannot downgrade stop/recovery to preserve")]
+    ReleasePolicyDecisionDowngrade,
     #[error("authority policy epoch {epoch} may be durable but read-back failed: {detail}")]
     PolicyEpochReadBackUncertain { epoch: u64, detail: String },
     #[error("unsupported supervisor admission schema version {0}")]
@@ -456,6 +591,91 @@ impl AuthorityPolicyEpochOutcome {
             Self::Created(record) | Self::Existing(record) => record,
         }
     }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredReleaseDisposition {
+    PreserveExistingBarrier,
+    StopOrRecoveryRequired,
+}
+impl StoredReleaseDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PreserveExistingBarrier => "preserve_existing_barrier",
+            Self::StopOrRecoveryRequired => "stop_or_recovery_required",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredReleasePolicyDecision {
+    pub release_id: String,
+    pub disposition: StoredReleaseDisposition,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadReleaseBarrierRequest {
+    pub commit_id: String,
+    pub expected_policy_epoch: u64,
+    pub expected_policy_record_digest: String,
+    pub signer_key_id: String,
+    pub expected_authority_subject_digest: String,
+    pub expected_authority_audience: String,
+    pub payload_digest: String,
+    pub expires_at_ms: u64,
+    pub now_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadReleaseBarrierRecord {
+    pub release_id: String,
+    pub commit_id: String,
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub replay_key: String,
+    pub permit_digest: String,
+    pub plan_digest: String,
+    pub machine_binding_digest: String,
+    pub authority_provenance_digest: String,
+    pub policy_id: String,
+    pub policy_epoch: u64,
+    pub policy_digest: String,
+    pub policy_record_digest: String,
+    pub signer_key_id: String,
+    pub authority_subject_digest: String,
+    pub authority_audience: String,
+    pub payload_digest: String,
+    pub expires_at_ms: u64,
+    pub barrier_committed_at_ms: u64,
+    pub barrier_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PayloadReleaseBarrierOutcome {
+    Created(PayloadReleaseBarrierRecord),
+    Existing(PayloadReleaseBarrierRecord),
+}
+impl PayloadReleaseBarrierOutcome {
+    pub(crate) fn record(&self) -> &PayloadReleaseBarrierRecord {
+        match self {
+            Self::Created(record) | Self::Existing(record) => record,
+        }
+    }
+    pub(crate) fn was_created(&self) -> bool { matches!(self, Self::Created(_)) }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PayloadReleaseStoreState {
+    BarrierCommitted(PayloadReleaseBarrierRecord),
+    Attempted {
+        barrier: PayloadReleaseBarrierRecord,
+        started_at_ms: u64,
+        uncertain_at_ms: Option<u64>,
+    },
+    Acknowledged {
+        barrier: PayloadReleaseBarrierRecord,
+        started_at_ms: u64,
+        acknowledged_at_ms: u64,
+        worker_unit: String,
+        invocation_id: String,
+        receipt_digest: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -668,7 +888,7 @@ impl SupervisorAdmissionStore {
     }
 
     fn check_schema_objects(connection: &Connection) -> Result<(), AdmissionStoreError> {
-        const REQUIRED: [(&str, &str); 24] = [
+        const REQUIRED: [(&str, &str); 40] = [
             ("table", "admission_commits"),
             ("table", "authority_replays"),
             ("table", "supervisor_permits"),
@@ -693,6 +913,22 @@ impl SupervisorAdmissionStore {
             ("trigger", "authority_policy_current_initial_only"),
             ("trigger", "authority_policy_current_only_advance"),
             ("trigger", "authority_policy_current_no_delete"),
+            ("table", "payload_release_barriers"),
+            ("table", "payload_release_attempts"),
+            ("table", "payload_release_uncertain"),
+            ("table", "payload_release_receipts"),
+            ("table", "payload_release_policy_decisions"),
+            ("trigger", "payload_release_barriers_immutable_update"),
+            ("trigger", "payload_release_barriers_no_delete"),
+            ("trigger", "payload_release_attempts_immutable_update"),
+            ("trigger", "payload_release_attempts_no_delete"),
+            ("trigger", "payload_release_uncertain_immutable_update"),
+            ("trigger", "payload_release_uncertain_no_delete"),
+            ("trigger", "payload_release_receipts_immutable_update"),
+            ("trigger", "payload_release_receipts_no_delete"),
+            ("trigger", "payload_release_policy_decisions_immutable_update"),
+            ("trigger", "payload_release_policy_decisions_no_delete"),
+            ("trigger", "payload_release_policy_decisions_no_downgrade"),
         ];
 
         for (kind, name) in REQUIRED {
