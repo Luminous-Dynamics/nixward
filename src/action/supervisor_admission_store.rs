@@ -20,12 +20,26 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x4e58_5744; // "NXWD"
 const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
+const MAX_AUTHORITY_POLICY_BYTES: usize = 1024 * 1024;
+const MAX_POLICY_UPDATE_PROVENANCE_BYTES: usize = 64 * 1024;
+const MAX_EMERGENCY_REVOCATION_IDS: usize = 4096;
+const MAX_EMERGENCY_REVOCATION_BYTES: usize = 64 * 1024;
 const MAX_PERMIT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const AUTHORITY_POLICY_SCHEMA_VERSION: u64 = 1;
+const AUTHORITY_POLICY_KIND: &str = "symthaea-authority-trust-policy-v1";
+const AUTHORITY_POLICY_DIGEST_DOMAIN: &[u8] = b"symthaea-authority-policy-v1\0";
+const POLICY_EMERGENCY_REVOCATION_DOMAIN: &[u8] =
+    b"nixward-authority-emergency-revocations-v1\0";
+const POLICY_UPDATE_PROVENANCE_DOMAIN: &[u8] =
+    b"nixward-authority-policy-update-provenance-v1\0";
+const POLICY_EPOCH_RECORD_DOMAIN: &[u8] = b"nixward-authority-policy-epoch-record-v1\0";
+const GENESIS_POLICY_RECORD_DIGEST: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS admission_commits (
@@ -151,6 +165,89 @@ BEFORE DELETE ON transaction_attempts
 BEGIN
     SELECT RAISE(ABORT, 'transaction attempt rows are immutable');
 END;
+
+CREATE TABLE IF NOT EXISTS authority_policy_epochs (
+    epoch INTEGER PRIMARY KEY NOT NULL CHECK(epoch > 0),
+    policy_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL CHECK(length(policy_digest) = 64),
+    policy_json BLOB NOT NULL CHECK(length(policy_json) > 0),
+    emergency_revocation_digest TEXT NOT NULL CHECK(length(emergency_revocation_digest) = 64),
+    emergency_revoked_key_ids_json BLOB NOT NULL CHECK(length(emergency_revoked_key_ids_json) > 0),
+    previous_record_digest TEXT NOT NULL CHECK(length(previous_record_digest) = 64),
+    update_provenance_digest TEXT NOT NULL CHECK(length(update_provenance_digest) = 64),
+    update_provenance BLOB NOT NULL CHECK(length(update_provenance) > 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    record_digest TEXT NOT NULL UNIQUE CHECK(length(record_digest) = 64),
+    UNIQUE(epoch, record_digest)
+);
+
+CREATE TABLE IF NOT EXISTS authority_policy_current (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    epoch INTEGER NOT NULL UNIQUE,
+    record_digest TEXT NOT NULL UNIQUE,
+    FOREIGN KEY(epoch, record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_immutable_update
+BEFORE UPDATE ON authority_policy_epochs
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epoch records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_no_delete
+BEFORE DELETE ON authority_policy_epochs
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epoch records are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_monotonic_insert
+BEFORE INSERT ON authority_policy_epochs
+WHEN
+    (NEW.epoch = 1 AND NEW.previous_record_digest <> '0000000000000000000000000000000000000000000000000000000000000000')
+    OR
+    (NEW.epoch > 1 AND NOT EXISTS (
+        SELECT 1 FROM authority_policy_epochs AS prior
+        WHERE prior.epoch = NEW.epoch - 1
+          AND prior.record_digest = NEW.previous_record_digest
+    ))
+    OR
+    EXISTS (SELECT 1 FROM authority_policy_epochs WHERE epoch >= NEW.epoch)
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epochs must extend the immutable contiguous history');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_initial_only
+BEFORE INSERT ON authority_policy_current
+WHEN NEW.singleton <> 1
+  OR NEW.epoch <> 1
+  OR NOT EXISTS (
+      SELECT 1 FROM authority_policy_epochs
+      WHERE epoch = NEW.epoch AND record_digest = NEW.record_digest
+        AND previous_record_digest = '0000000000000000000000000000000000000000000000000000000000000000'
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer must begin at verified genesis epoch 1');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_only_advance
+BEFORE UPDATE ON authority_policy_current
+WHEN NEW.singleton <> OLD.singleton
+  OR NEW.epoch <> OLD.epoch + 1
+  OR NOT EXISTS (
+      SELECT 1 FROM authority_policy_epochs
+      WHERE epoch = NEW.epoch AND record_digest = NEW.record_digest
+        AND previous_record_digest = OLD.record_digest
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer may only advance one verified epoch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_no_delete
+BEFORE DELETE ON authority_policy_current
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer cannot be deleted');
+END;
+
 "#;
 
 const SELECT_ADMISSION_BY_COMMIT: &str = r#"
@@ -284,6 +381,14 @@ pub(crate) enum AdmissionStoreError {
     ResolutionConflict,
     #[error("admission not found")]
     NotFound,
+    #[error("authority policy epoch archive has not been initialized")]
+    PolicyEpochNotInitialized,
+    #[error("authority policy epoch does not match the expected current state")]
+    PolicyEpochConflict,
+    #[error("authority policy epoch record is invalid or corrupt")]
+    InvalidPolicyEpochRecord,
+    #[error("authority policy epoch {epoch} may be durable but read-back failed: {detail}")]
+    PolicyEpochReadBackUncertain { epoch: u64, detail: String },
     #[error("unsupported supervisor admission schema version {0}")]
     UnsupportedSchema(i64),
     #[error("admission commit {commit_id} may be durable but read-back failed: {detail}")]
@@ -305,6 +410,52 @@ pub(crate) enum AdmissionStoreError {
     #[cfg(test)]
     #[error("injected admission-store failure at {0}")]
     InjectedFailure(&'static str),
+}
+
+
+/// Policy update input. Its provenance bytes must be produced by the trusted
+/// supervisor after verifying owner authority under the existing current policy.
+/// This storage layer hashes and retains those bytes; it does not verify them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorityPolicyEpochRequest {
+    pub policy_id: String,
+    pub epoch: u64,
+    /// Exact serde_json::to_vec bytes of AuthorityTrustPolicy, including its epoch.
+    pub policy_json: Vec<u8>,
+    /// Sorted, unique emergency-revocation key IDs active at this epoch.
+    pub emergency_revoked_key_ids: Vec<String>,
+    /// Serialized update/bootstrapping proof or verifier provenance.
+    pub update_provenance: Vec<u8>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorityPolicyEpochRecord {
+    pub policy_id: String,
+    pub epoch: u64,
+    pub policy_digest: String,
+    pub policy_json: Vec<u8>,
+    pub emergency_revocation_digest: String,
+    pub emergency_revoked_key_ids: Vec<String>,
+    pub previous_record_digest: String,
+    pub update_provenance_digest: String,
+    pub update_provenance: Vec<u8>,
+    pub created_at_ms: u64,
+    pub record_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthorityPolicyEpochOutcome {
+    Created(AuthorityPolicyEpochRecord),
+    Existing(AuthorityPolicyEpochRecord),
+}
+
+impl AuthorityPolicyEpochOutcome {
+    pub(crate) fn record(&self) -> &AuthorityPolicyEpochRecord {
+        match self {
+            Self::Created(record) | Self::Existing(record) => record,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -517,7 +668,7 @@ impl SupervisorAdmissionStore {
     }
 
     fn check_schema_objects(connection: &Connection) -> Result<(), AdmissionStoreError> {
-        const REQUIRED: [(&str, &str); 16] = [
+        const REQUIRED: [(&str, &str); 24] = [
             ("table", "admission_commits"),
             ("table", "authority_replays"),
             ("table", "supervisor_permits"),
@@ -534,6 +685,14 @@ impl SupervisorAdmissionStore {
             ("trigger", "admission_events_immutable_delete"),
             ("trigger", "transaction_attempts_one_way_resolution"),
             ("trigger", "transaction_attempts_no_delete"),
+            ("table", "authority_policy_epochs"),
+            ("table", "authority_policy_current"),
+            ("trigger", "authority_policy_epochs_immutable_update"),
+            ("trigger", "authority_policy_epochs_no_delete"),
+            ("trigger", "authority_policy_epochs_monotonic_insert"),
+            ("trigger", "authority_policy_current_initial_only"),
+            ("trigger", "authority_policy_current_only_advance"),
+            ("trigger", "authority_policy_current_no_delete"),
         ];
 
         for (kind, name) in REQUIRED {
@@ -569,7 +728,501 @@ impl SupervisorAdmissionStore {
         {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
+
+        let mut policy_columns = connection.prepare("PRAGMA table_info(authority_policy_epochs)")?;
+        let policy_rows = policy_columns.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut policy_names = std::collections::BTreeMap::new();
+        for column in policy_rows {
+            let (name, not_null) = column?;
+            policy_names.insert(name, not_null);
+        }
+        for required in [
+            "epoch",
+            "policy_id",
+            "policy_digest",
+            "policy_json",
+            "emergency_revocation_digest",
+            "emergency_revoked_key_ids_json",
+            "previous_record_digest",
+            "update_provenance_digest",
+            "update_provenance",
+            "created_at_ms",
+            "record_digest",
+        ] {
+            if policy_names.get(required) != Some(&1) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+
+        let mut current_columns = connection.prepare("PRAGMA table_info(authority_policy_current)")?;
+        let current_rows = current_columns.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut current_names = std::collections::BTreeMap::new();
+        for column in current_rows {
+            let (name, not_null) = column?;
+            current_names.insert(name, not_null);
+        }
+        for required in ["singleton", "epoch", "record_digest"] {
+            if current_names.get(required) != Some(&1) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
         Ok(())
+    }
+
+    fn digest_domain(domain: &[u8], bytes: &[u8]) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain);
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn derive_policy_epoch_record_digest(record: &AuthorityPolicyEpochRecord) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(POLICY_EPOCH_RECORD_DOMAIN);
+        let epoch = record.epoch.to_le_bytes();
+        let created_at = record.created_at_ms.to_le_bytes();
+        for value in [
+            epoch.as_slice(),
+            record.policy_id.as_bytes(),
+            record.policy_digest.as_bytes(),
+            record.emergency_revocation_digest.as_bytes(),
+            record.previous_record_digest.as_bytes(),
+            record.update_provenance_digest.as_bytes(),
+            created_at.as_slice(),
+        ] {
+            Self::update_hash_field(&mut hasher, value);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn derive_policy_epoch_record(
+        request: &AuthorityPolicyEpochRequest,
+        previous_record_digest: &str,
+    ) -> Result<AuthorityPolicyEpochRecord, AdmissionStoreError> {
+        if !Self::valid_token(&request.policy_id)
+            || request.epoch == 0
+            || !Self::valid_digest(previous_record_digest)
+            || request.policy_json.is_empty()
+            || request.policy_json.len() > MAX_AUTHORITY_POLICY_BYTES
+            || request.update_provenance.is_empty()
+            || request.update_provenance.len() > MAX_POLICY_UPDATE_PROVENANCE_BYTES
+        {
+            return Err(AdmissionStoreError::InvalidInput("authority policy epoch request"));
+        }
+        let _epoch_sql = i64::try_from(request.epoch)
+            .map_err(|_| AdmissionStoreError::InvalidInput("authority policy epoch"))?;
+        let created_at_ms = i64::try_from(request.created_at_ms)
+            .map_err(|_| AdmissionStoreError::InvalidInput("authority policy creation timestamp"))?;
+        if request.emergency_revoked_key_ids.len() > MAX_EMERGENCY_REVOCATION_IDS {
+            return Err(AdmissionStoreError::InvalidInput("emergency revocation count"));
+        }
+
+        let policy: serde_json::Value = serde_json::from_slice(&request.policy_json)
+            .map_err(|_| AdmissionStoreError::InvalidInput("authority policy JSON"))?;
+        if policy.get("schema_version").and_then(serde_json::Value::as_u64)
+                != Some(AUTHORITY_POLICY_SCHEMA_VERSION)
+            || policy.get("kind").and_then(serde_json::Value::as_str)
+                != Some(AUTHORITY_POLICY_KIND)
+            || policy.get("policy_id").and_then(serde_json::Value::as_str)
+                != Some(request.policy_id.as_str())
+            || policy.get("policy_epoch").and_then(serde_json::Value::as_u64)
+                != Some(request.epoch)
+        {
+            return Err(AdmissionStoreError::InvalidInput("authority policy identity/epoch binding"));
+        }
+
+        let mut prior_key: Option<&str> = None;
+        for key_id in &request.emergency_revoked_key_ids {
+            if !Self::valid_token(key_id)
+                || prior_key.is_some_and(|prior| prior >= key_id.as_str())
+            {
+                return Err(AdmissionStoreError::InvalidInput(
+                    "emergency revocation IDs must be sorted, unique tokens",
+                ));
+            }
+            prior_key = Some(key_id);
+        }
+
+        let emergency_json = serde_json::to_vec(&request.emergency_revoked_key_ids)
+            .map_err(|_| AdmissionStoreError::InvalidInput("emergency revocation JSON"))?;
+        if emergency_json.len() > MAX_EMERGENCY_REVOCATION_BYTES {
+            return Err(AdmissionStoreError::InvalidInput("emergency revocation bytes"));
+        }
+        let policy_digest =
+            Self::digest_domain(AUTHORITY_POLICY_DIGEST_DOMAIN, &request.policy_json);
+        let emergency_revocation_digest =
+            Self::digest_domain(POLICY_EMERGENCY_REVOCATION_DOMAIN, &emergency_json);
+        let update_provenance_digest =
+            Self::digest_domain(POLICY_UPDATE_PROVENANCE_DOMAIN, &request.update_provenance);
+
+        let mut record = AuthorityPolicyEpochRecord {
+            policy_id: request.policy_id.clone(),
+            epoch: request.epoch,
+            policy_digest,
+            policy_json: request.policy_json.clone(),
+            emergency_revocation_digest,
+            emergency_revoked_key_ids: request.emergency_revoked_key_ids.clone(),
+            previous_record_digest: previous_record_digest.to_string(),
+            update_provenance_digest,
+            update_provenance: request.update_provenance.clone(),
+            created_at_ms: request.created_at_ms,
+            record_digest: String::new(),
+        };
+        record.record_digest = Self::derive_policy_epoch_record_digest(&record);
+        // Keep the signed timestamp range check above; the conversion also rejects
+        // impossible SQLite timestamps before the record is returned.
+        let _ = created_at_ms;
+        Ok(record)
+    }
+
+    fn validate_policy_epoch_record(
+        record: &AuthorityPolicyEpochRecord,
+    ) -> Result<(), AdmissionStoreError> {
+        let request = AuthorityPolicyEpochRequest {
+            policy_id: record.policy_id.clone(),
+            epoch: record.epoch,
+            policy_json: record.policy_json.clone(),
+            emergency_revoked_key_ids: record.emergency_revoked_key_ids.clone(),
+            update_provenance: record.update_provenance.clone(),
+            created_at_ms: record.created_at_ms,
+        };
+        let expected =
+            Self::derive_policy_epoch_record(&request, &record.previous_record_digest)?;
+        if expected != *record || !Self::valid_digest(&record.record_digest) {
+            return Err(AdmissionStoreError::InvalidPolicyEpochRecord);
+        }
+        Ok(())
+    }
+
+    fn map_policy_epoch_record(row: &Row<'_>) -> rusqlite::Result<AuthorityPolicyEpochRecord> {
+        let epoch_raw: i64 = row.get(0)?;
+        let emergency_json: Vec<u8> = row.get(5)?;
+        let created_at_raw: i64 = row.get(9)?;
+        if epoch_raw <= 0 || created_at_raw < 0 {
+            return Err(rusqlite::Error::IntegralValueOutOfRange(0, epoch_raw));
+        }
+        let emergency_revoked_key_ids: Vec<String> =
+            serde_json::from_slice(&emergency_json).map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    5,
+                    "emergency_revoked_key_ids_json".into(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+        Ok(AuthorityPolicyEpochRecord {
+            epoch: epoch_raw as u64,
+            policy_id: row.get(1)?,
+            policy_digest: row.get(2)?,
+            policy_json: row.get(3)?,
+            emergency_revocation_digest: row.get(4)?,
+            emergency_revoked_key_ids,
+            previous_record_digest: row.get(6)?,
+            update_provenance_digest: row.get(7)?,
+            update_provenance: row.get(8)?,
+            created_at_ms: created_at_raw as u64,
+            record_digest: row.get(10)?,
+        })
+    }
+
+    fn load_policy_epoch_by_number(
+        connection: &Connection,
+        epoch: u64,
+    ) -> Result<Option<AuthorityPolicyEpochRecord>, AdmissionStoreError> {
+        let epoch = i64::try_from(epoch)
+            .map_err(|_| AdmissionStoreError::InvalidInput("authority policy epoch"))?;
+        let record = connection
+            .query_row(
+                r#"
+                SELECT epoch, policy_id, policy_digest, policy_json,
+                       emergency_revocation_digest, emergency_revoked_key_ids_json,
+                       previous_record_digest, update_provenance_digest,
+                       update_provenance, created_at_ms, record_digest
+                FROM authority_policy_epochs
+                WHERE epoch = ?1
+                "#,
+                [epoch],
+                Self::map_policy_epoch_record,
+            )
+            .optional()?;
+        if let Some(record) = &record {
+            Self::validate_policy_epoch_record(record)?;
+        }
+        Ok(record)
+    }
+
+    fn load_current_policy_epoch_from(
+        connection: &Connection,
+    ) -> Result<Option<AuthorityPolicyEpochRecord>, AdmissionStoreError> {
+        let pointer: Option<(i64, String)> = connection
+            .query_row(
+                "SELECT epoch, record_digest FROM authority_policy_current WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((epoch, expected_digest)) = pointer else {
+            let history_count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM authority_policy_epochs",
+                [],
+                |row| row.get(0),
+            )?;
+            if history_count != 0 {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+            return Ok(None);
+        };
+        if epoch <= 0 {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        let record = Self::load_policy_epoch_by_number(connection, epoch as u64)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let maximum_epoch: Option<i64> = connection.query_row(
+            "SELECT MAX(epoch) FROM authority_policy_epochs",
+            [],
+            |row| row.get(0),
+        )?;
+        if maximum_epoch != Some(epoch) || record.record_digest != expected_digest {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Ok(Some(record))
+    }
+
+    fn check_policy_epoch_pointer(connection: &Connection) -> Result<(), AdmissionStoreError> {
+        let _ = Self::load_current_policy_epoch_from(connection)?;
+        Ok(())
+    }
+
+    fn insert_policy_epoch_record(
+        transaction: &rusqlite::Transaction<'_>,
+        record: &AuthorityPolicyEpochRecord,
+    ) -> Result<(), AdmissionStoreError> {
+        let emergency_json = serde_json::to_vec(&record.emergency_revoked_key_ids)
+            .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let created_at_ms = i64::try_from(record.created_at_ms)
+            .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        transaction.execute(
+            r#"
+            INSERT INTO authority_policy_epochs (
+                epoch, policy_id, policy_digest, policy_json,
+                emergency_revocation_digest, emergency_revoked_key_ids_json,
+                previous_record_digest, update_provenance_digest,
+                update_provenance, created_at_ms, record_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                i64::try_from(record.epoch)
+                    .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?,
+                record.policy_id,
+                record.policy_digest,
+                record.policy_json,
+                record.emergency_revocation_digest,
+                emergency_json,
+                record.previous_record_digest,
+                record.update_provenance_digest,
+                record.update_provenance,
+                created_at_ms,
+                record.record_digest,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn verify_policy_epoch_history(
+        connection: &Connection,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement =
+            connection.prepare("SELECT epoch FROM authority_policy_epochs ORDER BY epoch")?;
+        let epochs = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let mut expected_epoch = 1_i64;
+        let mut previous_digest = GENESIS_POLICY_RECORD_DIGEST.to_string();
+        for epoch in epochs {
+            if epoch != expected_epoch || epoch <= 0 {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+            let record = Self::load_policy_epoch_by_number(connection, epoch as u64)?
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+            if record.previous_record_digest != previous_digest {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+            previous_digest = record.record_digest;
+            expected_epoch = expected_epoch
+                .checked_add(1)
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        }
+        Self::check_policy_epoch_pointer(connection)?;
+        Ok(())
+    }
+
+    /// Initialize the local policy archive at epoch 1. The caller is responsible
+    /// for performing the trusted owner-enrollment/bootstrap ceremony first.
+    pub(crate) fn initialize_authority_policy_epoch(
+        &self,
+        request: &AuthorityPolicyEpochRequest,
+    ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
+        if request.epoch != 1 {
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+        let record =
+            Self::derive_policy_epoch_record(request, GENESIS_POLICY_RECORD_DIGEST)?;
+        let connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        Self::verify_policy_epoch_history(&transaction)?;
+
+        if let Some(existing) = Self::load_current_policy_epoch_from(&transaction)? {
+            let historical = Self::load_policy_epoch_by_number(&transaction, 1)?
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+            if historical.record_digest == record.record_digest {
+                transaction.commit()?;
+                return Ok(AuthorityPolicyEpochOutcome::Existing(historical));
+            }
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+
+        let existing_history: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM authority_policy_epochs",
+            [],
+            |row| row.get(0),
+        )?;
+        if existing_history != 0 {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Self::insert_policy_epoch_record(&transaction, &record)?;
+        transaction.execute(
+            "INSERT INTO authority_policy_current (singleton, epoch, record_digest) VALUES (1, 1, ?1)",
+            [&record.record_digest],
+        )?;
+        transaction.commit()?;
+
+        let stored = Self::load_policy_epoch_by_number(&connection, 1)?
+            .ok_or_else(|| AdmissionStoreError::PolicyEpochReadBackUncertain {
+                epoch: 1,
+                detail: "epoch 1 is not visible after commit".into(),
+            })?;
+        if stored != record {
+            return Err(AdmissionStoreError::PolicyEpochReadBackUncertain {
+                epoch: 1,
+                detail: "epoch 1 differs from the committed policy snapshot".into(),
+            });
+        }
+        Ok(AuthorityPolicyEpochOutcome::Created(stored))
+    }
+
+    /// Advance exactly one epoch from the expected current record. The policy
+    /// update proof must already have been verified by the trusted supervisor.
+    pub(crate) fn advance_authority_policy_epoch(
+        &self,
+        expected_current_epoch: u64,
+        expected_current_record_digest: &str,
+        request: &AuthorityPolicyEpochRequest,
+    ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
+        if !Self::valid_digest(expected_current_record_digest)
+            || request.epoch != expected_current_epoch.checked_add(1)
+                .ok_or(AdmissionStoreError::PolicyEpochConflict)?
+        {
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+        let connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        Self::verify_policy_epoch_history(&transaction)?;
+
+        if let Some(existing) =
+            Self::load_policy_epoch_by_number(&transaction, request.epoch)?
+        {
+            let expected = Self::derive_policy_epoch_record(
+                request,
+                expected_current_record_digest,
+            )?;
+            if existing == expected {
+                transaction.commit()?;
+                return Ok(AuthorityPolicyEpochOutcome::Existing(existing));
+            }
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+
+        let current = Self::load_current_policy_epoch_from(&transaction)?
+            .ok_or(AdmissionStoreError::PolicyEpochNotInitialized)?;
+        if current.epoch != expected_current_epoch
+            || current.record_digest != expected_current_record_digest
+        {
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+        let record =
+            Self::derive_policy_epoch_record(request, &current.record_digest)?;
+        Self::insert_policy_epoch_record(&transaction, &record)?;
+        let changed = transaction.execute(
+            r#"
+            UPDATE authority_policy_current
+            SET epoch = ?2, record_digest = ?3
+            WHERE singleton = 1 AND epoch = ?1 AND record_digest = ?4
+            "#,
+            params![
+                i64::try_from(expected_current_epoch)
+                    .map_err(|_| AdmissionStoreError::PolicyEpochConflict)?,
+                i64::try_from(record.epoch)
+                    .map_err(|_| AdmissionStoreError::PolicyEpochConflict)?,
+                record.record_digest,
+                current.record_digest,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+        transaction.commit()?;
+
+        let stored = Self::load_policy_epoch_by_number(&connection, record.epoch)?
+            .ok_or_else(|| AdmissionStoreError::PolicyEpochReadBackUncertain {
+                epoch: record.epoch,
+                detail: "advanced policy epoch is not visible after commit".into(),
+            })?;
+        if stored != record {
+            return Err(AdmissionStoreError::PolicyEpochReadBackUncertain {
+                epoch: record.epoch,
+                detail: "advanced policy epoch differs from the committed record".into(),
+            });
+        }
+        Ok(AuthorityPolicyEpochOutcome::Created(stored))
+    }
+
+    /// Return the current trusted-store snapshot as audit/configuration data.
+    /// The caller must still enforce policy trust and signature semantics.
+    pub(crate) fn current_authority_policy_epoch(
+        &self,
+    ) -> Result<Option<AuthorityPolicyEpochRecord>, AdmissionStoreError> {
+        let connection = self.connect()?;
+        Self::check_join_invariants(&connection)?;
+        Self::verify_policy_epoch_history(&connection)?;
+        Self::load_current_policy_epoch_from(&connection)
+    }
+
+    /// Load an exact historical policy snapshot by epoch and record digest.
+    /// This returns data, never an authority capability.
+    pub(crate) fn historical_authority_policy_epoch(
+        &self,
+        epoch: u64,
+        expected_record_digest: &str,
+    ) -> Result<Option<AuthorityPolicyEpochRecord>, AdmissionStoreError> {
+        if !Self::valid_digest(expected_record_digest) {
+            return Err(AdmissionStoreError::InvalidInput("authority policy record digest"));
+        }
+        let connection = self.connect()?;
+        Self::check_join_invariants(&connection)?;
+        Self::verify_policy_epoch_history(&connection)?;
+        let record = Self::load_policy_epoch_by_number(&connection, epoch)?;
+        if record.as_ref().is_some_and(|value| value.record_digest != expected_record_digest) {
+            return Err(AdmissionStoreError::PolicyEpochConflict);
+        }
+        Ok(record)
     }
 
     fn digest(bytes: &[u8]) -> String {
@@ -764,6 +1417,7 @@ impl SupervisorAdmissionStore {
         if rows.next()?.is_some() {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
+        Self::check_policy_epoch_pointer(connection)?;
         Ok(())
     }
 
@@ -1148,6 +1802,7 @@ impl SupervisorAdmissionStore {
                 return Err(AdmissionStoreError::InconsistentStorage);
             }
         }
+        Self::verify_policy_epoch_history(&connection)?;
         Ok(())
     }
 
@@ -1227,6 +1882,264 @@ mod tests {
             store.connect(),
             Err(AdmissionStoreError::UnsupportedSchema(1))
         ));
+    }
+
+
+    fn policy_request(epoch: u64, key_ids: Vec<String>) -> AuthorityPolicyEpochRequest {
+        let policy_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "symthaea-authority-trust-policy-v1",
+            "policy_id": "owner-root:policy-1",
+            "policy_epoch": epoch,
+            "keys": [{
+                "key_id": "owner-1",
+                "issuer": "owner-root",
+                "public_key_hex": "11".repeat(32),
+                "allowed_actions": ["change"],
+                "revoked": false,
+                "claims": {}
+            }],
+            "max_ttl_ms": 900000,
+            "allowed_audiences": ["nixward-change-v1"]
+        })).unwrap();
+        AuthorityPolicyEpochRequest {
+            policy_id: "owner-root:policy-1".into(),
+            epoch,
+            policy_json,
+            emergency_revoked_key_ids: key_ids,
+            update_provenance: format!("verified-policy-update-proof-epoch-{epoch}").into_bytes(),
+            created_at_ms: 1_800_000_000_000 + epoch,
+        }
+    }
+
+    #[test]
+    fn schema_v2_database_is_refused_without_policy_epoch_archive_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        legacy.pragma_update(None, "user_version", 2_i64).unwrap();
+        drop(legacy);
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::UnsupportedSchema(2))
+        ));
+    }
+
+    #[test]
+    fn initializes_epoch_one_and_loads_exact_policy_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let request = policy_request(1, vec![]);
+        let outcome = store.initialize_authority_policy_epoch(&request).unwrap();
+        assert!(matches!(&outcome, AuthorityPolicyEpochOutcome::Created(_)));
+        let created = outcome.record();
+        assert_eq!(created.epoch, 1);
+        assert_eq!(created.previous_record_digest, GENESIS_POLICY_RECORD_DIGEST);
+        assert_eq!(created.emergency_revoked_key_ids, Vec::<String>::new());
+
+        let current = store.current_authority_policy_epoch().unwrap().unwrap();
+        assert_eq!(&current, created);
+        let historical = store
+            .historical_authority_policy_epoch(1, &created.record_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&historical, created);
+        assert!(matches!(
+            store.historical_authority_policy_epoch(1, &"f".repeat(64)),
+            Err(AdmissionStoreError::PolicyEpochConflict)
+        ));
+    }
+
+    #[test]
+    fn repeated_genesis_initialization_is_idempotent_but_replacement_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let request = policy_request(1, vec![]);
+        let first = store.initialize_authority_policy_epoch(&request).unwrap();
+        let second = store.initialize_authority_policy_epoch(&request).unwrap();
+        assert!(matches!(first, AuthorityPolicyEpochOutcome::Created(_)));
+        assert!(matches!(second, AuthorityPolicyEpochOutcome::Existing(_)));
+
+        let mut replacement = policy_request(1, vec!["owner-1".into()]);
+        replacement.update_provenance.push(b'!');
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&replacement),
+            Err(AdmissionStoreError::PolicyEpochConflict)
+        ));
+    }
+
+    #[test]
+    fn policy_epoch_advances_once_and_preserves_historical_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap();
+        let first_record = first.record().clone();
+        let second = store
+            .advance_authority_policy_epoch(1, &first_record.record_digest, &policy_request(2, vec![]))
+            .unwrap();
+        let second_record = second.record().clone();
+        assert!(matches!(second, AuthorityPolicyEpochOutcome::Created(_)));
+        assert_eq!(second_record.epoch, 2);
+        assert_eq!(second_record.previous_record_digest, first_record.record_digest);
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), second_record);
+        assert_eq!(
+            store.historical_authority_policy_epoch(1, &first_record.record_digest).unwrap().unwrap(),
+            first_record
+        );
+        store.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn stale_epoch_skipped_epoch_and_wrong_parent_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap();
+        let first_record = first.record().clone();
+
+        assert!(matches!(
+            store.advance_authority_policy_epoch(1, &"a".repeat(64), &policy_request(2, vec![])),
+            Err(AdmissionStoreError::PolicyEpochConflict)
+        ));
+        assert!(matches!(
+            store.advance_authority_policy_epoch(1, &first_record.record_digest, &policy_request(3, vec![])),
+            Err(AdmissionStoreError::PolicyEpochConflict)
+        ));
+        assert!(matches!(
+            store.advance_authority_policy_epoch(0, &first_record.record_digest, &policy_request(1, vec![])),
+            Err(AdmissionStoreError::PolicyEpochConflict)
+        ));
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), first_record);
+    }
+
+    #[test]
+    fn policy_epoch_advance_is_idempotent_after_lost_ack() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap();
+        let first_record = first.record().clone();
+        let request = policy_request(2, vec!["owner-1".into()]);
+        let created = store.advance_authority_policy_epoch(1, &first_record.record_digest, &request).unwrap();
+        let retried = store.advance_authority_policy_epoch(1, &first_record.record_digest, &request).unwrap();
+        assert!(matches!(&created, AuthorityPolicyEpochOutcome::Created(_)));
+        assert!(matches!(&retried, AuthorityPolicyEpochOutcome::Existing(_)));
+        assert_eq!(created.record(), retried.record());
+    }
+
+    #[test]
+    fn emergency_revocation_is_versioned_with_the_policy_epoch() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap();
+        let first_record = first.record().clone();
+        let second = store
+            .advance_authority_policy_epoch(1, &first_record.record_digest, &policy_request(2, vec!["owner-1".into()]))
+            .unwrap();
+        let record = second.record();
+        assert_eq!(record.emergency_revoked_key_ids, vec!["owner-1".to_string()]);
+        assert_ne!(record.emergency_revocation_digest, first_record.emergency_revocation_digest);
+        assert_ne!(record.record_digest, first_record.record_digest);
+    }
+
+    #[test]
+    fn policy_epoch_rejects_unsorted_duplicate_or_invalid_revocation_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&policy_request(
+                1,
+                vec!["owner-b".into(), "owner-a".into()]
+            )),
+            Err(AdmissionStoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&policy_request(
+                1,
+                vec!["owner-a".into(), "owner-a".into()]
+            )),
+            Err(AdmissionStoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn policy_epoch_rejects_zero_or_policy_json_epoch_mismatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&policy_request(0, vec![])),
+            Err(AdmissionStoreError::InvalidInput(_))
+        ));
+        let mut mismatched = policy_request(1, vec![]);
+        mismatched.policy_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "symthaea-authority-trust-policy-v1",
+            "policy_id": "owner-root:policy-1",
+            "policy_epoch": 2,
+            "keys": [],
+            "max_ttl_ms": 900000,
+            "allowed_audiences": []
+        })).unwrap();
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&mismatched),
+            Err(AdmissionStoreError::InvalidInput("authority policy identity/epoch binding"))
+        ));
+    }
+
+    #[test]
+    fn update_provenance_must_not_be_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let mut request = policy_request(1, vec![]);
+        request.update_provenance.clear();
+        assert!(matches!(
+            store.initialize_authority_policy_epoch(&request),
+            Err(AdmissionStoreError::InvalidInput("authority policy epoch request"))
+        ));
+    }
+
+    #[test]
+    fn corrupt_policy_snapshot_is_detected_by_integrity_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let record = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap().record().clone();
+        let connection = store.connect().unwrap();
+        connection.execute(
+            "DROP TRIGGER authority_policy_epochs_immutable_update",
+            [],
+        ).unwrap();
+        connection.execute(
+            "UPDATE authority_policy_epochs SET policy_json = ?1 WHERE epoch = 1",
+            [&b"corrupt policy json"[..]],
+        ).unwrap();
+        drop(connection);
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InvalidInput(_))
+                | Err(AdmissionStoreError::InvalidPolicyEpochRecord)
+                | Err(AdmissionStoreError::InconsistentStorage)
+        ));
+        assert_ne!(record.record_digest, GENESIS_POLICY_RECORD_DIGEST);
+    }
+
+    #[test]
+    fn current_policy_pointer_cannot_be_deleted_or_rolled_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let first = store.initialize_authority_policy_epoch(&policy_request(1, vec![])).unwrap();
+        let record = first.record().clone();
+        let connection = store.connect().unwrap();
+        assert!(connection.execute(
+            "UPDATE authority_policy_current SET epoch = 0 WHERE singleton = 1",
+            [],
+        ).is_err());
+        assert!(connection.execute(
+            "DELETE FROM authority_policy_current WHERE singleton = 1",
+            [],
+        ).is_err());
+        drop(connection);
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), record);
     }
 
     #[test]

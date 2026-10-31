@@ -1,10 +1,10 @@
-# Supervisor admission SQLite prototype v1
+# Supervisor admission SQLite prototype
 
-Status: **non-privileged storage prototype; v2 binds opaque authority provenance but is not a supervisor or production execution path**
+Status: **non-privileged storage prototype; v3 adds an immutable policy-epoch archive but is not a supervisor or production execution path**
 
 Date: 2026-10-31
 
-Schema: **v2**. Existing schema-v1 databases are refused with an unsupported-schema error. They must be explicitly reconciled/re-admitted under verified authority; this prototype does not fabricate provenance or silently upgrade old permits.
+Schema: **v3**. Existing schema-v1 and schema-v2 databases are refused with an unsupported-schema error. They must be explicitly reconciled/re-admitted under verified authority; this prototype does not fabricate provenance, silently migrate old permits, or infer missing policy history.
 
 Related work:
 - Issue #111: supervisor-owned atomic admission store
@@ -18,7 +18,7 @@ This change introduces an isolated SQLite storage prototype behind the Rust nati
 
 The store accepts opaque approval material, serialized authority provenance, permit wire bytes, and an admission event payload. It computes content digests and persists these payloads. It does not parse or verify provenance, approval signatures, signer trust, policy-epoch ownership, freshness, machine binding, permit signatures, or caller admission rights. Only a trusted supervisor may construct the request from a runtime receipt minted by the authority verifier. Those remain responsibilities of a future independent supervisor.
 
-The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates all five durable records.
+The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates all five admission records. Policy history and its current pointer are checked independently as part of the same database integrity checks.
 
 ## Storage model
 
@@ -29,13 +29,15 @@ One SQLite database is the authoritative prototype store. A single BEGIN IMMEDIA
 3. supervisor_permits: unique permit digest / attempt binding.
 4. transaction_attempts: unique attempt ID and unresolved/resolved state.
 5. admission_events: the immutable admission event payload and digest.
+6. authority_policy_epochs: append-only versioned policy snapshots, emergency-revocation sets, update provenance and previous-record digests.
+7. authority_policy_current: a singleton pointer to the latest immutable policy-epoch record.
 
-The v2 commit ID is a domain-separated BLAKE3 digest over the admission's stable identity and content digests, including authority-provenance digest. It is not a signature or authorization token. The attempt ID must be generated once by the supervisor and reused when reconciling an ambiguous acknowledgement.
+The v2 admission commit ID is a domain-separated BLAKE3 digest over the admission's stable identity and content digests, including authority-provenance digest. The v3 policy-epoch archive uses a separate domain-separated record digest and a previous-record hash chain. It is not a signature or authorization token. The attempt ID must be generated once by the supervisor and reused when reconciling an ambiguous acknowledgement.
 
 Database constraints enforce:
 - primary/unique replay-key, attempt-ID, permit-digest and commit-ID bindings;
 - one unresolved attempt per transaction via a partial unique index;
-- foreign keys from all four records to the same commit;
+- foreign keys from the four companion admission rows to the same commit;
 - immutable approval, permit, replay and admission-event rows;
 - one-way transition from unresolved to resolved.
 
@@ -113,3 +115,29 @@ Every new v2 `AdmissionRequest` must carry a non-empty serialized authority-prov
 This is deliberately a storage-integrity rule, not a cryptographic trust decision. The future supervisor must construct the bytes by serializing its verifier-minted runtime-only `VerifiedAuthorityReceipt`. The store does not accept a boolean or infer that the bytes are genuine. The supervisor remains responsible for signature verification and current policy epoch, emergency revocation and expiry checks before payload release.
 
 Schema v1 is refused rather than auto-migrated. Existing v1 rows did not contain versioned verifier provenance; filling that gap with a placeholder would silently upgrade an old approval into a new capability. A future explicit migration/re-admission procedure must preserve the historical row as non-releasable audit data and obtain fresh authority before a new admission.
+
+
+## Authority policy epoch archive v3
+
+Schema v3 stores policy history in the same SQLite database as admission:
+
+- `authority_policy_epochs` is append-only. Each row contains a non-zero epoch, policy ID, exact serialized policy bytes and digest, sorted emergency-revocation key IDs and digest, previous-record digest, update-provenance bytes and digest, creation timestamp, and immutable record digest.
+- `authority_policy_current` is a singleton pointer to the current epoch and record digest.
+- SQLite triggers require the first record to be epoch 1 with the all-zero genesis parent, each later row to extend exactly epoch (n-1), immutable historical rows, and a current-pointer update of exactly (n → n+1) to a record whose parent digest matches the previous current record.
+- Policy JSON must carry the same policy ID and non-zero epoch as the request. Its bytes must be the exact `serde_json::to_vec(&AuthorityTrustPolicy)` representation used by the verifier's policy digest. The store recomputes the same domain-separated policy digest.
+- Emergency-revocation IDs must be sorted, unique, non-empty tokens. Policy JSON is capped at 1 MiB, update-provenance at 64 KiB, and the emergency revocation set at 4,096 IDs / 64 KiB serialized.
+- Initialization is explicit at epoch 1. Advancement requires the exact expected current epoch and record digest, and can only create epoch (n+1). Retrying the same already-committed update returns the existing record; changing the policy, revocation set, update provenance or parent conflicts.
+- Current-policy and historical-policy reads verify the immutable record digest and the full contiguous history chain. Full `verify_integrity` repeats that verification.
+- The v3 schema refuses v1 and v2 databases. It does not invent policy snapshots for earlier admissions or provide an implicit migration.
+
+The policy-update proof is opaque to this store. Only a trusted supervisor may call the crate-private epoch API after independently verifying owner authority under the current policy. The archive records the update proof/provenance for audit and restart re-verification; it does not validate Ed25519, signer trust, challenge freshness, owner enrollment, or the caller's entitlement to rotate policy.
+
+### Threat boundary and anti-rollback
+
+This archive provides atomic local history, immutable-row constraints, digest validation and monotonic advancement while the database state itself is trusted. It does **not** protect against a privileged root attacker who can replace the database, disable triggers offline, or restore an older complete disk image. Root-owned permissions are an access-control boundary against unprivileged callers, not a hardware anti-rollback guarantee.
+
+A TPM2 NV monotonic counter or remote quorum anchor may provide a stronger anti-rollback root on supported systems, but neither is assumed or implemented here. Such a backend needs its own hardware compatibility, provisioning, outage, recovery and destructive-reset qualification.
+
+### Payload-release ordering remains a separate gate
+
+A policy check followed by a later external payload write has a time-of-check/time-of-use race. A future release-barrier change must serialize policy advancement and payload-release authorization through this same store. The durable release barrier is the linearization point: after it commits, a later policy update treats the operation as already in-flight and must use separate stop/recovery policy. SQLite cannot atomically commit and write bytes to a worker; the supervisor must enforce the barrier-before-write ordering. This v3 PR does **not** implement that barrier and therefore does not enable payload release.
