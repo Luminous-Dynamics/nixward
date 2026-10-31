@@ -1,0 +1,52 @@
+name: systemd crash-cut corpus guard
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - "src/action/systemd_job_evidence.rs"
+      - "docs/fixtures/systemd-transaction-crash-cuts-v1.json"
+      - "docs/fixtures/systemd-transaction-crash-cuts-v1.schema.json"
+      - ".github/workflows/systemd-crash-cut-corpus.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "flake.nix"
+      - "flake.lock"
+      - "src/action/systemd_job_evidence.rs"
+      - "docs/fixtures/systemd-transaction-crash-cuts-v1.json"
+      - "docs/fixtures/systemd-transaction-crash-cuts-v1.schema.json"
+      - ".github/workflows/systemd-crash-cut-corpus.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: systemd-crash-cut-corpus-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus-guard:
+    name: Nix and Rust crash-cut corpus guards
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install pinned Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Evaluate crash-cut corpus flake check
+        run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-corpus --no-link -L
+      - name: Run Rust corpus regression test with pinned toolchain
+        run: nix develop --command cargo test --locked --lib action::systemd_job_evidence::tests::crash_cut_corpus_is_complete_and_replay_forbidding -- --exact
