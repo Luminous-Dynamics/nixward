@@ -37,7 +37,7 @@ Database constraints enforce:
 - immutable approval, permit, replay and admission-event rows;
 - one-way transition from unresolved to resolved.
 
-The store uses WAL, synchronous=FULL, foreign keys, trusted_schema=OFF, a five-second busy timeout, and an application/schema ID. It checks those runtime settings on every connection. It validates the stored approval, permit and event payload hashes plus the derived commit ID whenever an admission record is read; full integrity verification scans all stored commits. Database paths must be absolute and normalized, database files are set to mode 0600, and the immediate parent directory must be private (0700-equivalent on Unix). A deployment must additionally establish correct service ownership, safe path creation without TOCTOU races, and WAL/SHM sidecar access controls before privileged use.
+The store uses WAL, synchronous=FULL, foreign keys, trusted_schema=OFF, a five-second busy timeout, and an application/schema ID. SQLite WAL is a same-host mechanism and is not suitable for placing this database on a network filesystem such as NFS; the supervisor database must remain on a supported local filesystem. Its shared-memory and WAL sidecars must remain in the same protected directory and under the same service ownership policy. It checks those runtime settings on every connection. It validates the stored approval, permit and event payload hashes plus the derived commit ID whenever an admission record is read; full integrity verification scans all stored commits. Database paths must be absolute and normalized, database files are set to mode 0600, and the immediate parent directory must be private (0700-equivalent on Unix). A deployment must additionally establish correct service ownership, safe path creation without TOCTOU races, and WAL/SHM sidecar access controls before privileged use.
 
 ## Admission behavior
 
@@ -85,7 +85,7 @@ Before any production supervisor integration:
 7. Demonstrate that the permit cannot reach a worker before successful commit and read-back.
 8. Independently review the full threat model before adding a root service or systemd submission.
 
-SQLite FULL is a requested/checked SQLite synchronization mode, not proof that all filesystems, storage devices, virtual disks, and hardware honor durable flushes. Report the exact kernel, filesystem, mount options, SQLite build, device cache policy, and test harness when making durability claims.
+SQLite FULL is a requested/checked SQLite synchronization mode, not proof that all filesystems, storage devices, virtual disks, and hardware honor durable flushes. WAL auto-checkpointing can introduce occasional commit-latency spikes around its default page threshold, and long-lived readers can prevent checkpoints from completing and allow WAL growth. Benchmark commit, checkpoint and read latency together rather than reporting only mean write time. Report the exact kernel, filesystem, mount options, SQLite build, device cache policy, and test harness when making durability claims.
 
 ## Benchmark targets
 
