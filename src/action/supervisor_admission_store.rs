@@ -1383,7 +1383,7 @@ mod tests {
         ).unwrap();
 
         assert!(matches!(
-            store.admit(&request("tx-b", "attempt-b1", 0x44, 0x55, 0x66)),
+            store.admit(&request("tx-a", "attempt-a2", 0x44, 0x22, 0x33)),
             Err(AdmissionStoreError::InconsistentStorage)
         ));
         assert!(matches!(

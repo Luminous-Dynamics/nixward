@@ -37,7 +37,7 @@ Database constraints enforce:
 - immutable approval, permit, replay and admission-event rows;
 - one-way transition from unresolved to resolved.
 
-The store uses WAL, synchronous=FULL, foreign keys, a five-second busy timeout, and an application/schema ID. It checks those runtime settings on every connection. Database files are set to mode 0600 and the immediate parent directory must be private (0700-equivalent on Unix). A deployment must additionally establish correct service ownership, safe path creation without TOCTOU races, and WAL/SHM sidecar access controls before privileged use.
+The store uses WAL, synchronous=FULL, foreign keys, trusted_schema=OFF, a five-second busy timeout, and an application/schema ID. It checks those runtime settings on every connection. It validates the stored approval, permit and event payload hashes plus the derived commit ID whenever an admission record is read; full integrity verification scans all stored commits. Database paths must be absolute and normalized, database files are set to mode 0600, and the immediate parent directory must be private (0700-equivalent on Unix). A deployment must additionally establish correct service ownership, safe path creation without TOCTOU races, and WAL/SHM sidecar access controls before privileged use.
 
 ## Admission behavior
 
@@ -71,7 +71,7 @@ The Rust unit tests exercise:
 - concurrent independent transactions;
 - WAL/FULL/foreign-key settings, private database file mode, and symlink path rejection.
 
-The failpoints are private test hooks, not environment variables or production IPC controls. They test application transaction rollback and process reopen behavior; they do not simulate kernel crash, storage-controller cache loss, filesystem corruption, or physical power loss.
+The failpoints are private test hooks, not environment variables or production IPC controls. They test application transaction rollback and process reopen behavior; they do not simulate kernel crash, storage-controller cache loss, filesystem corruption, or physical power loss. A SQLite COMMIT error is surfaced as an uncertain outcome with the deterministic commit ID; the caller must stop and reconcile by the same replay key rather than submitting or generating a new attempt.
 
 ## Remaining qualification gates
 
