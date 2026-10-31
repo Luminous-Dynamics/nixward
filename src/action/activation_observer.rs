@@ -206,6 +206,13 @@ impl ActivationPlan {
         if inhibitor_count != 1 || closure_check_count != 1 || post_probe_count != 1 {
             return Err("activation plan must contain exactly one inhibitor check, closure validation and post-state probe".into());
         }
+        let expected_dispatch = match self.mode {
+            ActivationMode::DryActivate => ActivationStepKind::DryActivationPreview,
+            _ => ActivationStepKind::SwitchToConfiguration,
+        };
+        if self.steps.get(2).map(|step| step.kind) != Some(expected_dispatch) {
+            return Err("activation dispatch/preview must follow inhibitor and closure preflight".into());
+        }
         match self.mode {
             ActivationMode::DryActivate if dry_preview_count != 1 || switch_count != 0 => {
                 return Err("dry-activate plans require a preview step and cannot dispatch activation".into());
@@ -370,8 +377,6 @@ enum ReplayedStepState {
 
 #[derive(Debug, Clone)]
 struct ReplayedStep {
-    kind: ActivationStepKind,
-    effect: ActivationEffect,
     state: ReplayedStepState,
 }
 
@@ -617,8 +622,6 @@ fn replay_events(
                     return Err("step-start event cannot carry terminal evidence".into());
                 }
                 states.insert(event.step_id.clone(), ReplayedStep {
-                    kind: event.kind,
-                    effect: event.effect,
                     state: ReplayedStepState::Started,
                 });
             }
