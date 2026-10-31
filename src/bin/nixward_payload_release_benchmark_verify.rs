@@ -91,6 +91,7 @@ struct TrialRecord {
     scenario_id: String,
     started_monotonic_ns: u64,
     finished_monotonic_ns: u64,
+    initial_policy_id: String,
     initial_policy_epoch: u64,
     initial_policy_digest: String,
     initial_policy_record_digest: String,
@@ -175,6 +176,9 @@ enum EvidenceEvent {
         new_record_digest: String,
         new_policy_allowed_signers: Vec<String>,
         new_policy_allowed_audiences: Vec<String>,
+        new_policy_allowed_signers: Vec<String>,
+        new_policy_allowed_audiences: Vec<String>,
+        new_policy_allowed_actions: Vec<String>,
         emergency_revoked_signers: Vec<String>,
         decisions: Vec<PolicyDecision>,
     },
@@ -655,6 +659,7 @@ fn verify_trial(
 ) -> Result<VerifiedTrial, String> {
     if trial.trial_id.trim().is_empty()
         || trial.started_monotonic_ns >= trial.finished_monotonic_ns
+        || trial.initial_policy_id.trim().is_empty()
         || trial.initial_policy_epoch == 0
         || !valid_hex(&trial.initial_policy_digest, 64)
         || !valid_hex(&trial.initial_policy_record_digest, 64)
@@ -674,6 +679,7 @@ fn verify_trial(
     let mut violations = Vec::new();
     let mut previous_sequence = 0_u64;
     let mut previous_timestamp = trial.started_monotonic_ns;
+    let mut current_policy_id = trial.initial_policy_id.clone();
     let mut current_policy_epoch = trial.initial_policy_epoch;
     let mut current_policy_digest = trial.initial_policy_digest.clone();
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
@@ -1420,43 +1426,64 @@ mod tests {
         std::iter::repeat(byte).take(64).collect()
     }
 
+    fn test_release_id() -> String {
+        derive_release_id(
+            &digest('a'), &digest('4'), &digest('1'), &digest('b'),
+            &digest('c'), &digest('d'), &digest('e'), &digest('6'),
+            "owner-key", &digest('7'), "nixward-change-v1",
+            &digest('9'), "owner-root:1", 1, &digest('5'), &digest('2'), 5_000,
+        )
+    }
+
     fn clean_trial() -> (TrialRecord, ScenarioDefinition) {
         let events = vec![
             EvidenceEvent::BarrierCreateRequested {
                 seq: 1, at_ns: 100, request_id: "barrier-request-1".into(),
-                admission_commit_id: digest('1'), expected_policy_epoch: 1,
-                expected_policy_record_digest: digest('2'), payload_digest: digest('9'),
+                admission_commit_id: digest('1'),
+                expected_policy_id: "owner-root:1".into(),
+                expected_policy_epoch: 1,
+                expected_policy_digest: digest('5'),
+                expected_policy_record_digest: digest('2'),
+                signer_key_id: "owner-key".into(),
+                expected_authority_subject_digest: digest('7'),
+                expected_authority_audience: "nixward-change-v1".into(),
+                payload_digest: digest('9'), expires_at_ms: 5_000, wall_time_ms: 1_000,
             },
             EvidenceEvent::BarrierCommitted {
                 seq: 2, at_ns: 120, request_id: "barrier-request-1".into(),
-                release_id: digest('3'), admission_commit_id: digest('1'),
-                attempt_id: digest('4'), policy_id: "owner-root:1".into(),
+                release_id: test_release_id(), admission_commit_id: digest('1'),
+                transaction_id: digest('a'), attempt_id: digest('4'),
+                replay_key: digest('b'), permit_digest: digest('c'),
+                plan_digest: digest('d'), machine_binding_digest: digest('e'),
+                policy_id: "owner-root:1".into(),
                 policy_epoch: 1, policy_digest: digest('5'), policy_record_digest: digest('2'),
                 signer_key_id: "owner-key".into(), authority_provenance_digest: digest('6'),
                 authority_subject_digest: digest('7'), authority_audience: "nixward-change-v1".into(),
-                payload_digest: digest('9'),
+                payload_digest: digest('9'), expires_at_ms: 5_000, wall_time_ms: 1_010,
             },
             EvidenceEvent::ReleaseAttemptRequested {
-                seq: 3, at_ns: 130, request_id: "attempt-request-1".into(),
-                release_id: digest('3'),
+                seq: 3, at_ns: 130, wall_time_ms: 1_020,
+                request_id: "attempt-request-1".into(),
+                release_id: test_release_id(),
             },
             EvidenceEvent::ReleaseAttemptReserved {
-                seq: 4, at_ns: 140, request_id: "attempt-request-1".into(),
-                release_id: digest('3'), attempt_id: digest('4'), payload_digest: digest('9'),
+                seq: 4, at_ns: 140, wall_time_ms: 1_030,
+                request_id: "attempt-request-1".into(),
+                release_id: test_release_id(), attempt_id: digest('4'), payload_digest: digest('9'),
             },
             EvidenceEvent::PayloadWriteStarted {
-                seq: 5, at_ns: 150, release_id: digest('3'), payload_digest: digest('9'),
+                seq: 5, at_ns: 150, release_id: test_release_id(), payload_digest: digest('9'),
             },
             EvidenceEvent::PayloadWriteCompleted {
-                seq: 6, at_ns: 170, release_id: digest('3'), payload_digest: digest('9'), bytes_written: 512,
+                seq: 6, at_ns: 170, release_id: test_release_id(), payload_digest: digest('9'), bytes_written: 512,
             },
             EvidenceEvent::WorkerReceiptPersisted {
-                seq: 7, at_ns: 200, worker_completed_at_ns: 190, release_id: digest('3'),
+                seq: 7, at_ns: 200, worker_completed_at_ns: 190, release_id: test_release_id(),
                 payload_digest: digest('9'), worker_unit: "nixward-release.service".into(),
                 invocation_id: "invocation-1".into(), receipt_digest: digest('8'),
             },
             EvidenceEvent::ResolutionCommitted {
-                seq: 8, at_ns: 210, release_id: digest('3'), admission_commit_id: digest('1'),
+                seq: 8, at_ns: 210, release_id: test_release_id(), admission_commit_id: digest('1'),
                 receipt_digest: digest('8'),
             },
         ];
@@ -1467,6 +1494,7 @@ mod tests {
                 scenario_id: "barrier-create-clean".into(),
                 started_monotonic_ns: 100,
                 finished_monotonic_ns: 250,
+                initial_policy_id: "owner-root:1".into(),
                 initial_policy_epoch: 1,
                 initial_policy_digest: digest('5'),
                 initial_policy_record_digest: digest('2'),
@@ -1531,7 +1559,7 @@ mod tests {
         let (mut trial, scenario) = clean_trial();
         trial.events.insert(4, EvidenceEvent::ReleaseAttemptReserved {
             seq: 5, at_ns: 145, request_id: "attempt-request-1".into(),
-            release_id: digest('3'), attempt_id: digest('4'), payload_digest: digest('9'),
+            release_id: test_release_id(), attempt_id: digest('4'), payload_digest: digest('9'),
         });
         resequence(&mut trial.events);
         rehash(&mut trial);
@@ -1566,7 +1594,7 @@ mod tests {
     fn permits_late_receipt_to_reconcile_uncertain_original_attempt() {
         let (mut trial, scenario) = clean_trial();
         trial.events.insert(6, EvidenceEvent::ReleaseUncertain {
-            seq: 7, at_ns: 195, release_id: digest('3'),
+            seq: 7, at_ns: 195, release_id: test_release_id(),
         });
         if let EvidenceEvent::WorkerReceiptPersisted { seq, at_ns, worker_completed_at_ns, .. } = &mut trial.events[7] {
             *seq = 8;
@@ -1599,9 +1627,12 @@ mod tests {
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
+            new_policy_allowed_signers: vec!["owner-key".into()],
+            new_policy_allowed_audiences: vec!["nixward-change-v1".into()],
+            new_policy_allowed_actions: vec!["change".into()],
             emergency_revoked_signers: vec!["owner-key".into()],
             decisions: vec![PolicyDecision {
-                release_id: digest('3'),
+                release_id: test_release_id(),
                 disposition: PolicyDisposition::PreserveExistingBarrier,
             }],
         });
@@ -1636,7 +1667,7 @@ mod tests {
             "environment": {
                 "kernel_release": "k", "systemd_version": "s", "sqlite_version": "q",
                 "nix_version": "n", "filesystem": "xfs", "mount_options": "rw",
-                "device_model": "nvme", "device_firmware": "f", "cpu_model": "cpu"
+                "device_model": "nvme", "device_firmware": "f", "cpu_model": "cpu", "boot_id": "boot-1"
             },
             "trials": [],
             "runner_passed": true
