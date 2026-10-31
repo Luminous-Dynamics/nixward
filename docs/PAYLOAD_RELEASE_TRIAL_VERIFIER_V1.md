@@ -46,4 +46,4 @@ Latency is derived only from matching request and commit events. The report sepa
 
 ## Test status
 
-The binary contains deterministic negative controls for duplicate release attempts, payload write before attempt reservation, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, percentile suppression, path traversal and unknown runner-summary fields. Cargo tests and the Nix test target are authored but not executed in this environment.
+The binary contains deterministic negative controls for duplicate release attempts, payload write before attempt reservation, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, percentile suppression, path traversal, wall-clock rollback, release-ID mutation and unknown runner-summary fields. Cargo tests and the Nix test target are authored but not executed in this environment.

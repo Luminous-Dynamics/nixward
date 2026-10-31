@@ -1109,7 +1109,7 @@ fn verify_trial(
             }
         }
         if let EvidenceEvent::ReleaseAttemptReserved { request_id, at_ns, .. } = event {
-            if let Some((_, start_at)) = attempt_requests.get(request_id) {
+            if let Some((_, start_at, _)) = attempt_requests.get(request_id) {
                 if at_ns >= start_at {
                     measurements.attempt_latency_ns.push(at_ns - start_at);
                 }
