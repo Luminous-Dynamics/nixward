@@ -20,12 +20,24 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x4e58_5744; // "NXWD"
 const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
+const MAX_AUTHORITY_POLICY_BYTES: usize = 1024 * 1024;
+const MAX_POLICY_UPDATE_PROVENANCE_BYTES: usize = 64 * 1024;
 const MAX_PERMIT_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const AUTHORITY_POLICY_SCHEMA_VERSION: u64 = 1;
+const AUTHORITY_POLICY_KIND: &str = "symthaea-authority-trust-policy-v1";
+const AUTHORITY_POLICY_DIGEST_DOMAIN: &[u8] = b"symthaea-authority-policy-v1\\0";
+const POLICY_EMERGENCY_REVOCATION_DOMAIN: &[u8] =
+    b"nixward-authority-emergency-revocations-v1\\0";
+const POLICY_UPDATE_PROVENANCE_DOMAIN: &[u8] =
+    b"nixward-authority-policy-update-provenance-v1\\0";
+const POLICY_EPOCH_RECORD_DOMAIN: &[u8] = b"nixward-authority-policy-epoch-record-v1\\0";
+const GENESIS_POLICY_RECORD_DIGEST: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS admission_commits (
@@ -151,6 +163,89 @@ BEFORE DELETE ON transaction_attempts
 BEGIN
     SELECT RAISE(ABORT, 'transaction attempt rows are immutable');
 END;
+
+CREATE TABLE IF NOT EXISTS authority_policy_epochs (
+    epoch INTEGER PRIMARY KEY NOT NULL CHECK(epoch > 0),
+    policy_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL CHECK(length(policy_digest) = 64),
+    policy_json BLOB NOT NULL CHECK(length(policy_json) > 0),
+    emergency_revocation_digest TEXT NOT NULL CHECK(length(emergency_revocation_digest) = 64),
+    emergency_revoked_key_ids_json BLOB NOT NULL CHECK(length(emergency_revoked_key_ids_json) > 0),
+    previous_record_digest TEXT NOT NULL CHECK(length(previous_record_digest) = 64),
+    update_provenance_digest TEXT NOT NULL CHECK(length(update_provenance_digest) = 64),
+    update_provenance BLOB NOT NULL CHECK(length(update_provenance) > 0),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    record_digest TEXT NOT NULL UNIQUE CHECK(length(record_digest) = 64),
+    UNIQUE(epoch, record_digest)
+);
+
+CREATE TABLE IF NOT EXISTS authority_policy_current (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton = 1),
+    epoch INTEGER NOT NULL UNIQUE,
+    record_digest TEXT NOT NULL UNIQUE,
+    FOREIGN KEY(epoch, record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_immutable_update
+BEFORE UPDATE ON authority_policy_epochs
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epoch records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_no_delete
+BEFORE DELETE ON authority_policy_epochs
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epoch records are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_epochs_monotonic_insert
+BEFORE INSERT ON authority_policy_epochs
+WHEN
+    (NEW.epoch = 1 AND NEW.previous_record_digest <> '0000000000000000000000000000000000000000000000000000000000000000')
+    OR
+    (NEW.epoch > 1 AND NOT EXISTS (
+        SELECT 1 FROM authority_policy_epochs AS prior
+        WHERE prior.epoch = NEW.epoch - 1
+          AND prior.record_digest = NEW.previous_record_digest
+    ))
+    OR
+    EXISTS (SELECT 1 FROM authority_policy_epochs WHERE epoch >= NEW.epoch)
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy epochs must extend the immutable contiguous history');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_initial_only
+BEFORE INSERT ON authority_policy_current
+WHEN NEW.singleton <> 1
+  OR NEW.epoch <> 1
+  OR NOT EXISTS (
+      SELECT 1 FROM authority_policy_epochs
+      WHERE epoch = NEW.epoch AND record_digest = NEW.record_digest
+        AND previous_record_digest = '0000000000000000000000000000000000000000000000000000000000000000'
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer must begin at verified genesis epoch 1');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_only_advance
+BEFORE UPDATE ON authority_policy_current
+WHEN NEW.singleton <> OLD.singleton
+  OR NEW.epoch <> OLD.epoch + 1
+  OR NOT EXISTS (
+      SELECT 1 FROM authority_policy_epochs
+      WHERE epoch = NEW.epoch AND record_digest = NEW.record_digest
+        AND previous_record_digest = OLD.record_digest
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer may only advance one verified epoch');
+END;
+
+CREATE TRIGGER IF NOT EXISTS authority_policy_current_no_delete
+BEFORE DELETE ON authority_policy_current
+BEGIN
+    SELECT RAISE(ABORT, 'authority policy current pointer cannot be deleted');
+END;
+
 "#;
 
 const SELECT_ADMISSION_BY_COMMIT: &str = r#"
@@ -284,6 +379,14 @@ pub(crate) enum AdmissionStoreError {
     ResolutionConflict,
     #[error("admission not found")]
     NotFound,
+    #[error("authority policy epoch archive has not been initialized")]
+    PolicyEpochNotInitialized,
+    #[error("authority policy epoch does not match the expected current state")]
+    PolicyEpochConflict,
+    #[error("authority policy epoch record is invalid or corrupt")]
+    InvalidPolicyEpochRecord,
+    #[error("authority policy epoch {epoch} may be durable but read-back failed: {detail}")]
+    PolicyEpochReadBackUncertain { epoch: u64, detail: String },
     #[error("unsupported supervisor admission schema version {0}")]
     UnsupportedSchema(i64),
     #[error("admission commit {commit_id} may be durable but read-back failed: {detail}")]
@@ -305,6 +408,44 @@ pub(crate) enum AdmissionStoreError {
     #[cfg(test)]
     #[error("injected admission-store failure at {0}")]
     InjectedFailure(&'static str),
+}
+
+
+/// Policy update input. Its provenance bytes must be produced by the trusted
+/// supervisor after verifying owner authority under the existing current policy.
+/// This storage layer hashes and retains those bytes; it does not verify them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorityPolicyEpochRequest {
+    pub policy_id: String,
+    pub epoch: u64,
+    /// Exact serde_json::to_vec bytes of AuthorityTrustPolicy, including its epoch.
+    pub policy_json: Vec<u8>,
+    /// Sorted, unique emergency-revocation key IDs active at this epoch.
+    pub emergency_revoked_key_ids: Vec<String>,
+    /// Serialized update/bootstrapping proof or verifier provenance.
+    pub update_provenance: Vec<u8>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorityPolicyEpochRecord {
+    pub policy_id: String,
+    pub epoch: u64,
+    pub policy_digest: String,
+    pub policy_json: Vec<u8>,
+    pub emergency_revocation_digest: String,
+    pub emergency_revoked_key_ids: Vec<String>,
+    pub previous_record_digest: String,
+    pub update_provenance_digest: String,
+    pub update_provenance: Vec<u8>,
+    pub created_at_ms: u64,
+    pub record_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AuthorityPolicyEpochOutcome {
+    Created(AuthorityPolicyEpochRecord),
+    Existing(AuthorityPolicyEpochRecord),
 }
 
 #[derive(Debug, Clone)]
@@ -517,7 +658,7 @@ impl SupervisorAdmissionStore {
     }
 
     fn check_schema_objects(connection: &Connection) -> Result<(), AdmissionStoreError> {
-        const REQUIRED: [(&str, &str); 16] = [
+        const REQUIRED: [(&str, &str); 24] = [
             ("table", "admission_commits"),
             ("table", "authority_replays"),
             ("table", "supervisor_permits"),
@@ -534,6 +675,14 @@ impl SupervisorAdmissionStore {
             ("trigger", "admission_events_immutable_delete"),
             ("trigger", "transaction_attempts_one_way_resolution"),
             ("trigger", "transaction_attempts_no_delete"),
+            ("table", "authority_policy_epochs"),
+            ("table", "authority_policy_current"),
+            ("trigger", "authority_policy_epochs_immutable_update"),
+            ("trigger", "authority_policy_epochs_no_delete"),
+            ("trigger", "authority_policy_epochs_monotonic_insert"),
+            ("trigger", "authority_policy_current_initial_only"),
+            ("trigger", "authority_policy_current_only_advance"),
+            ("trigger", "authority_policy_current_no_delete"),
         ];
 
         for (kind, name) in REQUIRED {
