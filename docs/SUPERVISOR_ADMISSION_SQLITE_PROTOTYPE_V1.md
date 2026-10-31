@@ -18,7 +18,7 @@ This change introduces an isolated SQLite storage prototype behind the Rust nati
 
 The store accepts opaque approval material, serialized authority provenance, permit wire bytes, and an admission event payload. It computes content digests and persists these payloads. It does not parse or verify provenance, approval signatures, signer trust, policy-epoch ownership, freshness, machine binding, permit signatures, or caller admission rights. Only a trusted supervisor may construct the request from a runtime receipt minted by the authority verifier. Those remain responsibilities of a future independent supervisor.
 
-The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates the four durable records.
+The store returns the stored permit bytes only after a single database transaction commits and a joined read-back validates all five durable records.
 
 ## Storage model
 
@@ -50,8 +50,8 @@ The write path takes an IMMEDIATE transaction, checks the joined storage invaria
 
 Outcomes:
 - no replay and no unresolved attempt: insert all records and commit once;
-- same replay key with the same transaction, plan, machine and approval-material digest: return the original persisted attempt and permit, even if the caller proposes new attempt/permit bytes;
-- same replay key with changed intent or approval material: reject replay conflict;
+- same replay key with the same transaction, plan, machine, approval-material digest and authority-provenance digest: return the original persisted attempt and permit, even if the caller proposes new attempt/permit bytes;
+- same replay key with changed intent, approval material or authority provenance: reject replay conflict;
 - a different replay key while the transaction has an unresolved attempt: reject/hold;
 - replay lookup and unresolved-transaction lookup pointing at different commits: hold inconsistent storage;
 - failed commit read-back: return an explicit uncertain outcome; the caller must not submit a worker and must retry by the same replay key.
@@ -61,9 +61,11 @@ A resolved attempt remains in the audit history. A later fresh replay key may cr
 ## Fault tests
 
 The Rust unit tests exercise:
-- successful write of all four records and exact joined read-back;
+- successful write of all five records and exact joined read-back;
+- missing authority provenance rejection;
 - idempotent retry after a committed transaction's acknowledgement is lost;
 - changed plan/machine replay rejection;
+- changed authority provenance on the same replay key rejection;
 - unresolved transaction exclusion;
 - one-way resolution and subsequent new attempt;
 - injected errors after each individual table insert and immediately before commit, followed by reopen and retry;
@@ -71,7 +73,9 @@ The Rust unit tests exercise:
 - concurrent same-replay requests (one creation, one existing result);
 - concurrent different-replay requests for one transaction (one creation, one hold);
 - concurrent independent transactions;
-- WAL/FULL/foreign-key settings, private database file mode, and symlink path rejection.
+- WAL/FULL/foreign-key settings, private database file mode, and symlink path rejection;
+- v1 database refusal without authority-provenance migration;
+- authority-provenance tamper detection during full integrity scan.
 
 The failpoints are private test hooks, not environment variables or production IPC controls. They test application transaction rollback and process reopen behavior; they do not simulate kernel crash, storage-controller cache loss, filesystem corruption, or physical power loss. A SQLite COMMIT error is surfaced as an uncertain outcome with the deterministic commit ID; the caller must stop and reconcile by the same replay key rather than submitting or generating a new attempt.
 
