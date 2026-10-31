@@ -470,6 +470,43 @@
             '';
           };
 
+
+        # Exercise the pure policy-serialized, one-shot release barrier model.
+        # This is a transition model; it does not atomically couple SQLite to external I/O.
+        checks.payload-release-barrier-model-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-payload-release-barrier-model-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [
+              "-p" "nixward"
+              "--lib"
+              "action::release_barrier::tests"
+            ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/payload-release-barrier-model-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

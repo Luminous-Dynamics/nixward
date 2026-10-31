@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/payload-release-barrier-v1.schema.json",
+  "title": "Payload release barrier fixture catalogue v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "status",
+    "safety_contract",
+    "vectors"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.payload-release-barrier-vectors"
+    },
+    "version": {
+      "const": 1
+    },
+    "status": {
+      "const": "proposed-not-executed"
+    },
+    "safety_contract": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vectors": {
+      "type": "array",
+      "minItems": 20,
+      "uniqueItems": false,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "expected_disposition"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "expected_disposition": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}
