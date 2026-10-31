@@ -33,6 +33,8 @@ pub(crate) enum ReleaseBarrierError {
     ReleaseAttemptAlreadyStarted,
     #[error("release is uncertain and requires independent reconciliation")]
     ReleaseUncertain,
+    #[error("a newly emergency-revoked signer cannot preserve an unreleased barrier")]
+    PreserveRevokedSigner,
     #[error("policy update has stale epoch or parent digest")]
     PolicyEpochConflict,
     #[error("in-flight barrier requires an explicit stop/recovery or preserve decision")]
@@ -350,6 +352,13 @@ impl ReleaseBarrierLedger {
         let next = self
             .current_policy
             .advance(next_policy_digest, next_emergency_revoked_key_ids)?;
+        if in_flight_decision == InFlightPolicyDecision::PreserveExistingBarrier
+            && self.barrier.as_ref().is_some_and(|barrier| {
+                next.emergency_revoked_key_ids.contains(&barrier.signer_key_id)
+            })
+        {
+            return Err(ReleaseBarrierError::PreserveRevokedSigner);
+        }
         if self.barrier.is_some() {
             self.in_flight_disposition = Some(match in_flight_decision {
                 InFlightPolicyDecision::PreserveExistingBarrier => {
@@ -724,7 +733,7 @@ mod tests {
             current.epoch,
             &current.record_digest,
             digest('c'),
-            BTreeSet::from(["owner-key-1".to_string()]),
+            BTreeSet::new(),
             InFlightPolicyDecision::PreserveExistingBarrier,
         ).unwrap();
         assert_eq!(ledger.barrier().unwrap().policy_epoch, old_epoch);
@@ -734,6 +743,37 @@ mod tests {
         );
         ledger.begin_release_attempt(&release_id, 1_200).unwrap();
         assert!(matches!(&ledger.barrier().unwrap().state, ReleaseState::ReleaseAttempted { .. }));
+    }
+
+
+    #[test]
+    fn emergency_revocation_cannot_preserve_unreleased_historical_barrier() {
+        let mut ledger = ledger();
+        let request = intent(ledger.current_policy());
+        let barrier = ledger.create_barrier(&request).unwrap();
+        let current = ledger.current_policy().clone();
+        assert!(matches!(
+            ledger.advance_policy(
+                current.epoch,
+                &current.record_digest,
+                digest('c'),
+                BTreeSet::from(["owner-key-1".to_string()]),
+                InFlightPolicyDecision::PreserveExistingBarrier,
+            ),
+            Err(ReleaseBarrierError::PreserveRevokedSigner)
+        ));
+        assert_eq!(ledger.current_policy(), &current);
+        assert!(ledger.advance_policy(
+            current.epoch,
+            &current.record_digest,
+            digest('c'),
+            BTreeSet::from(["owner-key-1".to_string()]),
+            InFlightPolicyDecision::RequireStopOrRecovery,
+        ).is_ok());
+        assert!(matches!(
+            ledger.begin_release_attempt(&barrier.record().release_id, 1_200),
+            Err(ReleaseBarrierError::StopRecoveryRequired)
+        ));
     }
 
     #[test]
