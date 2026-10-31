@@ -84,6 +84,14 @@ struct TrialEnvironment {
     boot_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PolicySignerAuthorization {
+    signer_key_id: String,
+    revoked: bool,
+    allowed_actions: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrialRecord {
@@ -95,6 +103,8 @@ struct TrialRecord {
     initial_policy_epoch: u64,
     initial_policy_digest: String,
     initial_policy_record_digest: String,
+    initial_policy_keys: Vec<PolicySignerAuthorization>,
+    initial_policy_allowed_audiences: Vec<String>,
     events_sha256: String,
     events: Vec<EvidenceEvent>,
     artifacts: Vec<ArtifactReceipt>,
@@ -174,11 +184,8 @@ enum EvidenceEvent {
         new_policy_id: String,
         new_policy_digest: String,
         new_record_digest: String,
-        new_policy_allowed_signers: Vec<String>,
+        new_policy_keys: Vec<PolicySignerAuthorization>,
         new_policy_allowed_audiences: Vec<String>,
-        new_policy_allowed_signers: Vec<String>,
-        new_policy_allowed_audiences: Vec<String>,
-        new_policy_allowed_actions: Vec<String>,
         emergency_revoked_signers: Vec<String>,
         decisions: Vec<PolicyDecision>,
     },
@@ -663,6 +670,8 @@ fn verify_trial(
         || trial.initial_policy_epoch == 0
         || !valid_hex(&trial.initial_policy_digest, 64)
         || !valid_hex(&trial.initial_policy_record_digest, 64)
+        || trial.initial_policy_keys.is_empty()
+        || trial.initial_policy_allowed_audiences.is_empty()
         || trial.events.is_empty()
         || trial.events.len() > MAX_EVENTS_PER_TRIAL
         || !valid_hex(&trial.events_sha256, 64)
@@ -677,12 +686,29 @@ fn verify_trial(
     }
 
     let mut violations = Vec::new();
+    let mut initial_key_ids = BTreeSet::new();
+    for key in &current_policy_keys {
+        if key.signer_key_id.trim().is_empty()
+            || !initial_key_ids.insert(key.signer_key_id.as_str())
+            || key.allowed_actions.iter().any(|action| action.trim().is_empty())
+        {
+            violations.push("initial policy signer authorization is malformed or duplicated".into());
+        }
+    }
+    let mut initial_audiences = BTreeSet::new();
+    if current_policy_allowed_audiences.iter().any(|audience| {
+        audience.trim().is_empty() || !initial_audiences.insert(audience.as_str())
+    }) {
+        violations.push("initial policy audience list is malformed or duplicated".into());
+    }
     let mut previous_sequence = 0_u64;
     let mut previous_timestamp = trial.started_monotonic_ns;
     let mut current_policy_id = trial.initial_policy_id.clone();
     let mut current_policy_epoch = trial.initial_policy_epoch;
     let mut current_policy_digest = trial.initial_policy_digest.clone();
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
+    let mut current_policy_keys = trial.initial_policy_keys.clone();
+    let mut current_policy_allowed_audiences = trial.initial_policy_allowed_audiences.clone();
     let mut barrier_requests = BTreeMap::<String, BarrierRequestState>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
     let mut attempt_requests = BTreeMap::<String, (String, u64, u64)>::new();
@@ -793,6 +819,12 @@ fn verify_trial(
                     || policy_id != &current_policy_id
                     || policy_digest != &current_policy_digest
                     || policy_record_digest != &current_policy_record_digest
+                    || !current_policy_allowed_audiences.contains(authority_audience)
+                    || !current_policy_keys.iter().any(|key| {
+                        key.signer_key_id == *signer_key_id
+                            && !key.revoked
+                            && key.allowed_actions.iter().any(|action| action == "change")
+                    })
                     || *at_ns < request.requested_at_ns
                 {
                     violations.push(format!("barrier {release_id} is not bound to exact request/current policy or expiry"));
@@ -878,7 +910,7 @@ fn verify_trial(
             EvidenceEvent::PolicyAdvanced {
                 request_id, from_epoch, to_epoch, previous_record_digest,
                 new_policy_id, new_policy_digest, new_record_digest,
-                new_policy_allowed_signers, new_policy_allowed_audiences, new_policy_allowed_actions,
+                new_policy_keys, new_policy_allowed_audiences,
                 emergency_revoked_signers, decisions, at_ns, ..
             } => {
                 let Some((requested_epoch, requested_digest, requested_at)) = policy_requests.get(request_id) else {
@@ -918,10 +950,14 @@ fn verify_trial(
                         if new_policy_id != &barrier.policy_id {
                             violations.push("policy identity changed while preserving barrier".into());
                         }
+                        let key_still_authorized = new_policy_keys.iter().any(|key| {
+                            key.signer_key_id == barrier.signer_key_id
+                                && !key.revoked
+                                && key.allowed_actions.iter().any(|action| action == "change")
+                        });
                         if emergency_revoked_signers.contains(&barrier.signer_key_id)
-                            || !new_policy_allowed_signers.contains(&barrier.signer_key_id)
+                            || !key_still_authorized
                             || !new_policy_allowed_audiences.contains(&barrier.authority_audience)
-                            || !new_policy_allowed_actions.iter().any(|action| action == "change")
                         {
                             violations.push("revoked or no-longer-authorized signer/action/audience was preserved".into());
                         }
@@ -939,10 +975,26 @@ fn verify_trial(
                 if seen != active {
                     violations.push("policy decision set does not cover all outstanding barriers".into());
                 }
+                let mut next_key_ids = BTreeSet::new();
+                if new_policy_keys.iter().any(|key| {
+                    key.signer_key_id.trim().is_empty()
+                        || !next_key_ids.insert(key.signer_key_id.as_str())
+                        || key.allowed_actions.iter().any(|action| action.trim().is_empty())
+                }) {
+                    violations.push("next policy signer authorization is malformed or duplicated".into());
+                }
+                let mut next_audiences = BTreeSet::new();
+                if new_policy_allowed_audiences.iter().any(|audience| {
+                    audience.trim().is_empty() || !next_audiences.insert(audience.as_str())
+                }) {
+                    violations.push("next policy audience list is malformed or duplicated".into());
+                }
                 current_policy_id = new_policy_id.clone();
                 current_policy_epoch = *to_epoch;
                 current_policy_digest = new_policy_digest.clone();
                 current_policy_record_digest = new_record_digest.clone();
+                current_policy_keys = new_policy_keys.clone();
+                current_policy_allowed_audiences = new_policy_allowed_audiences.clone();
             }
             EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, wall_time_ms, .. } => {
                 let Some(barrier) = barriers.get(release_id) else {
@@ -1532,6 +1584,12 @@ mod tests {
                 initial_policy_epoch: 1,
                 initial_policy_digest: digest('5'),
                 initial_policy_record_digest: digest('2'),
+                initial_policy_keys: vec![PolicySignerAuthorization {
+                    signer_key_id: "owner-key".into(),
+                    revoked: false,
+                    allowed_actions: vec!["change".into()],
+                }],
+                initial_policy_allowed_audiences: vec!["nixward-change-v1".into()],
                 events_sha256: sha256_hex(&event_bytes),
                 events,
                 artifacts: vec![],
@@ -1734,9 +1792,11 @@ mod tests {
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
-            new_policy_allowed_signers: vec!["owner-key".into()],
+            new_policy_keys: vec![PolicySignerAuthorization {
+                signer_key_id: "owner-key".into(), revoked: false,
+                allowed_actions: vec![],
+            }],
             new_policy_allowed_audiences: vec![],
-            new_policy_allowed_actions: vec![],
             emergency_revoked_signers: vec![],
             decisions: vec![PolicyDecision {
                 release_id: test_release_id(),
@@ -1763,9 +1823,11 @@ mod tests {
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
-            new_policy_allowed_signers: vec!["owner-key".into()],
+            new_policy_keys: vec![PolicySignerAuthorization {
+                signer_key_id: "owner-key".into(), revoked: true,
+                allowed_actions: vec!["change".into()],
+            }],
             new_policy_allowed_audiences: vec!["nixward-change-v1".into()],
-            new_policy_allowed_actions: vec!["change".into()],
             emergency_revoked_signers: vec!["owner-key".into()],
             decisions: vec![PolicyDecision {
                 release_id: test_release_id(),
