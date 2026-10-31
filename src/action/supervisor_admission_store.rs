@@ -2181,6 +2181,7 @@ impl SupervisorAdmissionStore {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
         let started: Option<i64> = transaction.query_row(
             "SELECT started_at_ms FROM payload_release_attempts WHERE release_id = ?1",
             [release_id],
@@ -2247,6 +2248,7 @@ impl SupervisorAdmissionStore {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
         let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
             .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
         Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
@@ -2303,6 +2305,7 @@ impl SupervisorAdmissionStore {
         release_id: &str,
     ) -> Result<PayloadReleaseStoreState, AdmissionStoreError> {
         let connection = self.connect()?;
+        Self::check_join_invariants(&connection)?;
         let barrier = Self::load_payload_release_barrier(&connection, release_id)?
             .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
         Self::validate_payload_release_cross_bindings(&connection, &barrier)?;
@@ -2529,6 +2532,155 @@ impl SupervisorAdmissionStore {
         })
     }
 
+
+    fn verify_payload_release_integrity(
+        connection: &Connection,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement =
+            connection.prepare("SELECT release_id FROM payload_release_barriers ORDER BY release_id")?;
+        let release_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for release_id in release_ids {
+            let barrier = Self::load_payload_release_barrier(connection, &release_id)?
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+            Self::validate_payload_release_cross_bindings(connection, &barrier)?;
+
+            let attempt: Option<(String, i64, String)> = connection.query_row(
+                "SELECT attempt_id, started_at_ms, attempt_digest FROM payload_release_attempts WHERE release_id = ?1",
+                [&release_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?;
+            if let Some((attempt_id, started_at_ms, attempt_digest)) = attempt {
+                if attempt_id != barrier.attempt_id || started_at_ms < 0 {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let expected = Self::digest_domain(
+                    b"nixward-payload-release-attempt-v1\\0",
+                    format!("{release_id}:{attempt_id}:{started_at_ms}").as_bytes(),
+                );
+                if expected != attempt_digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+
+                let uncertain: Option<(i64, String)> = connection.query_row(
+                    "SELECT observed_at_ms, uncertainty_digest FROM payload_release_uncertain WHERE release_id = ?1",
+                    [&release_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((observed_at_ms, uncertainty_digest)) = uncertain {
+                    if observed_at_ms < started_at_ms {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                    let expected = Self::digest_domain(
+                        b"nixward-payload-release-uncertain-v1\\0",
+                        format!("{release_id}:{observed_at_ms}").as_bytes(),
+                    );
+                    if expected != uncertainty_digest {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                }
+
+                let receipt: Option<(String, String, String, String, i64, String)> = connection.query_row(
+                    r#"
+                    SELECT payload_digest, worker_unit, invocation_id, receipt_digest,
+                           acknowledged_at_ms, receipt_record_digest
+                    FROM payload_release_receipts WHERE release_id = ?1
+                    "#,
+                    [&release_id],
+                    |row| Ok((
+                        row.get(0)?, row.get(1)?, row.get(2)?,
+                        row.get(3)?, row.get(4)?, row.get(5)?,
+                    )),
+                ).optional()?;
+                if let Some((payload, unit, invocation, receipt_digest, ack_at, record_digest)) = receipt {
+                    if payload != barrier.payload_digest
+                        || !Self::valid_token(&unit)
+                        || !Self::valid_token(&invocation)
+                        || !Self::valid_digest(&receipt_digest)
+                        || ack_at < started_at_ms
+                    {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                    let expected = Self::digest_domain(
+                        b"nixward-payload-release-receipt-v1\\0",
+                        format!("{release_id}:{payload}:{unit}:{invocation}:{receipt_digest}:{ack_at}").as_bytes(),
+                    );
+                    if expected != record_digest {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                }
+            } else {
+                let child_exists: bool = connection.query_row(
+                    r#"
+                    SELECT EXISTS(SELECT 1 FROM payload_release_uncertain WHERE release_id = ?1)
+                        OR EXISTS(SELECT 1 FROM payload_release_receipts WHERE release_id = ?1)
+                    "#,
+                    [&release_id],
+                    |row| row.get(0),
+                )?;
+                if child_exists {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+            }
+
+            let mut decisions = connection.prepare(
+                r#"
+                SELECT policy_epoch, policy_record_digest, disposition,
+                       decision_digest, created_at_ms
+                FROM payload_release_policy_decisions
+                WHERE release_id = ?1 ORDER BY policy_epoch
+                "#,
+            )?;
+            let rows = decisions.query_map([&release_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let stored_decisions = rows.collect::<Result<Vec<_>, _>>()?;
+            drop(decisions);
+            let mut stop_seen = false;
+            for (epoch_raw, policy_digest, disposition, digest, created_at_raw) in stored_decisions {
+                if epoch_raw <= 0 || created_at_raw < 0 {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let policy = Self::load_policy_epoch_by_number(connection, epoch_raw as u64)?
+                    .ok_or(AdmissionStoreError::InconsistentStorage)?;
+                if policy.record_digest != policy_digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let disposition_value = match disposition.as_str() {
+                    "preserve_existing_barrier" => StoredReleaseDisposition::PreserveExistingBarrier,
+                    "stop_or_recovery_required" => StoredReleaseDisposition::StopOrRecoveryRequired,
+                    _ => return Err(AdmissionStoreError::InconsistentStorage),
+                };
+                if stop_seen && disposition_value == StoredReleaseDisposition::PreserveExistingBarrier {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                if disposition_value == StoredReleaseDisposition::StopOrRecoveryRequired {
+                    stop_seen = true;
+                }
+                let expected = Self::release_decision_digest(
+                    &release_id,
+                    epoch_raw as u64,
+                    &policy_digest,
+                    disposition_value,
+                    created_at_raw as u64,
+                );
+                if expected != digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_join_invariants(connection: &Connection) -> Result<(), AdmissionStoreError> {
         let inconsistent: i64 = connection.query_row(
             r#"
@@ -2568,6 +2720,7 @@ impl SupervisorAdmissionStore {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
         Self::check_policy_epoch_pointer(connection)?;
+        Self::verify_payload_release_integrity(connection)?;
         Ok(())
     }
 
