@@ -95,6 +95,10 @@
     {
       "id": "exact-barrier-retry-after-policy-update",
       "expected_disposition": "existing-historical-read"
+    },
+    {
+      "id": "emergency-revocation-cannot-preserve-barrier",
+      "expected_disposition": "reject-preserve"
     }
   ]
 }
