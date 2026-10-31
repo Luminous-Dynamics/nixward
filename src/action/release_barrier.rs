@@ -172,8 +172,7 @@ pub(crate) enum PostUpdateBarrierDisposition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReleaseIntent {
     pub admission: AdmissionBinding,
-    pub expected_policy_epoch: u64,
-    pub expected_policy_record_digest: String,
+    pub expected_policy: PolicyHead,
     pub signer_key_id: String,
     pub payload_digest: String,
     pub expires_at_ms: u64,
@@ -276,27 +275,12 @@ impl ReleaseBarrierLedger {
         if !valid_token(&intent.signer_key_id) || !valid_digest(&intent.payload_digest) {
             return Err(ReleaseBarrierError::InvalidInput("signer or payload digest"));
         }
-        if intent.expected_policy_epoch != self.current_policy.epoch
-            || intent.expected_policy_record_digest != self.current_policy.record_digest
-        {
-            return Err(ReleaseBarrierError::StalePolicy);
-        }
-        if intent.expires_at_ms == 0 || intent.now_ms > intent.expires_at_ms {
-            return Err(ReleaseBarrierError::Expired);
-        }
-        if self
-            .current_policy
-            .emergency_revoked_key_ids
-            .contains(&intent.signer_key_id)
-        {
-            return Err(ReleaseBarrierError::RevokedSigner);
-        }
-
+        let expected_policy = &intent.expected_policy;
         let release_id = derive_release_id(
             &intent.admission,
             &intent.signer_key_id,
             &intent.payload_digest,
-            &self.current_policy,
+            expected_policy,
             intent.expires_at_ms,
         );
         let proposed = ReleaseBarrierRecord {
@@ -304,21 +288,34 @@ impl ReleaseBarrierLedger {
             admission: intent.admission.clone(),
             signer_key_id: intent.signer_key_id.clone(),
             authority_provenance_digest: intent.admission.authority_provenance_digest.clone(),
-            policy_id: self.current_policy.policy_id.clone(),
-            policy_epoch: self.current_policy.epoch,
-            policy_digest: self.current_policy.policy_digest.clone(),
-            policy_record_digest: self.current_policy.record_digest.clone(),
+            policy_id: expected_policy.policy_id.clone(),
+            policy_epoch: expected_policy.epoch,
+            policy_digest: expected_policy.policy_digest.clone(),
+            policy_record_digest: expected_policy.record_digest.clone(),
             payload_digest: intent.payload_digest.clone(),
             expires_at_ms: intent.expires_at_ms,
             barrier_committed_at_ms: intent.now_ms,
             state: ReleaseState::BarrierCommitted,
         };
 
+        // Idempotent retry is a read of the immutable historical barrier. It
+        // remains available after policy advancement or expiry, but cannot
+        // change its disposition or authorize another attempt.
         if let Some(existing) = &self.barrier {
             if same_release_intent(existing, &proposed) {
                 return Ok(ReleaseBarrierOutcome::Existing(existing.clone()));
             }
             return Err(ReleaseBarrierError::BarrierConflict);
+        }
+
+        if expected_policy != &self.current_policy {
+            return Err(ReleaseBarrierError::StalePolicy);
+        }
+        if intent.expires_at_ms == 0 || intent.now_ms > intent.expires_at_ms {
+            return Err(ReleaseBarrierError::Expired);
+        }
+        if self.current_policy.emergency_revoked_key_ids.contains(&intent.signer_key_id) {
+            return Err(ReleaseBarrierError::RevokedSigner);
         }
 
         self.barrier = Some(proposed.clone());
@@ -605,8 +602,7 @@ mod tests {
     fn intent(policy: &PolicyHead) -> ReleaseIntent {
         ReleaseIntent {
             admission: admission(),
-            expected_policy_epoch: policy.epoch,
-            expected_policy_record_digest: policy.record_digest.clone(),
+            expected_policy: policy.clone(),
             signer_key_id: "owner-key-1".into(),
             payload_digest: digest('b'),
             expires_at_ms: 5_000,
@@ -642,6 +638,49 @@ mod tests {
         assert!(first.was_created());
         assert!(!second.was_created());
         assert_eq!(first.record(), second.record());
+    }
+
+
+    #[test]
+    fn exact_barrier_retry_remains_readable_after_policy_advancement() {
+        let mut ledger = ledger();
+        let request = intent(ledger.current_policy());
+        let first = ledger.create_barrier(&request).unwrap();
+        let immutable = first.record().clone();
+        let current = ledger.current_policy().clone();
+        ledger.advance_policy(
+            current.epoch,
+            &current.record_digest,
+            digest('c'),
+            BTreeSet::from(["owner-key-1".to_string()]),
+            InFlightPolicyDecision::PreserveExistingBarrier,
+        ).unwrap();
+        let retry = ledger.create_barrier(&request).unwrap();
+        assert!(!retry.was_created());
+        assert_eq!(retry.record(), &immutable);
+        ledger.begin_release_attempt(&immutable.release_id, 1_200).unwrap();
+    }
+
+    #[test]
+    fn exact_barrier_retry_after_stop_decision_is_readable_but_not_releasable() {
+        let mut ledger = ledger();
+        let request = intent(ledger.current_policy());
+        let first = ledger.create_barrier(&request).unwrap();
+        let immutable = first.record().clone();
+        let current = ledger.current_policy().clone();
+        ledger.advance_policy(
+            current.epoch,
+            &current.record_digest,
+            digest('c'),
+            BTreeSet::from(["owner-key-1".to_string()]),
+            InFlightPolicyDecision::RequireStopOrRecovery,
+        ).unwrap();
+        let retry = ledger.create_barrier(&request).unwrap();
+        assert_eq!(retry.record(), &immutable);
+        assert!(matches!(
+            ledger.begin_release_attempt(&immutable.release_id, 1_200),
+            Err(ReleaseBarrierError::StopRecoveryRequired)
+        ));
     }
 
     #[test]
