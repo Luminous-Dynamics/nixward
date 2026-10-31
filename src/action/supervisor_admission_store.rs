@@ -518,6 +518,8 @@ pub(crate) enum AdmissionStoreError {
     ReleaseAttemptBlocked,
     #[error("payload release attempt has no committed barrier")]
     ReleaseBarrierNotFound,
+    #[error("transaction cannot be resolved while a release barrier has no exact worker receipt")]
+    ReleaseBarrierInFlight,
     #[error("payload release receipt conflicts with the unique release attempt")]
     ReleaseReceiptConflict,
     #[error("payload release policy decisions are missing, duplicated or foreign")]
@@ -1589,6 +1591,7 @@ impl SupervisorAdmissionStore {
             || action != "change"
             || audience != request.expected_authority_audience
             || subject != request.expected_authority_subject_digest
+            || (audience == "nixward-change-v1" && subject != admission.plan_digest)
             || replay_key != admission.replay_key
             || !Self::valid_digest(holon_id)
             || !Self::valid_digest(signature_evidence)
@@ -1607,6 +1610,13 @@ impl SupervisorAdmissionStore {
         ]
         .contains(&audience)
         {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        let signed_proof_json = provenance
+            .get("signed_proof_json")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        if signed_proof_json.is_empty() || signed_proof_json.len() > 64 * 1024 {
             return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
         }
 
@@ -1646,8 +1656,8 @@ impl SupervisorAdmissionStore {
 
     fn map_payload_release_barrier(row: &Row<'_>) -> rusqlite::Result<PayloadReleaseBarrierRecord> {
         let epoch: i64 = row.get(10)?;
-        let expires_at_ms: i64 = row.get(18)?;
-        let committed_at_ms: i64 = row.get(19)?;
+        let expires_at_ms: i64 = row.get(17)?;
+        let committed_at_ms: i64 = row.get(18)?;
         if epoch <= 0 || expires_at_ms <= 0 || committed_at_ms < 0 {
             return Err(rusqlite::Error::IntegralValueOutOfRange(10, epoch));
         }
@@ -3061,6 +3071,21 @@ impl SupervisorAdmissionStore {
         let Some(existing) = Self::load_by_commit(&transaction, commit_id)? else {
             return Err(AdmissionStoreError::NotFound);
         };
+        let unreceipted_release: bool = transaction.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM payload_release_barriers AS b
+                LEFT JOIN payload_release_receipts AS r ON r.release_id = b.release_id
+                WHERE b.commit_id = ?1 AND r.release_id IS NULL
+            )
+            "#,
+            [commit_id],
+            |row| row.get(0),
+        )?;
+        if unreceipted_release {
+            return Err(AdmissionStoreError::ReleaseBarrierInFlight);
+        }
         match existing.state {
             AdmissionState::Resolved {
                 resolution_digest: existing_digest,
@@ -3534,6 +3559,35 @@ mod tests {
     }
 
     #[test]
+    fn transaction_resolution_is_blocked_until_exact_release_receipt_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.record_resolution(&admission.commit_id, &"ff".repeat(32), 1500),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
+        ));
+        store.begin_payload_release_attempt(&barrier.record().release_id, 1300).unwrap();
+        assert!(matches!(
+            store.record_resolution(&admission.commit_id, &"ff".repeat(32), 1500),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
+        ));
+        store.acknowledge_payload_release(
+            &barrier.record().release_id,
+            &request.payload_digest,
+            "nixward-payload-release.service",
+            "invocation-1",
+            &"dd".repeat(32),
+            1400,
+        ).unwrap();
+        assert!(store.record_resolution(
+            &admission.commit_id,
+            &"ff".repeat(32),
+            1500
+        ).is_ok());
+    }
+
+    #[test]
     fn resolved_admission_cannot_start_a_reserved_release() {
         let temp = tempfile::tempdir().unwrap();
         let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
@@ -3613,6 +3667,22 @@ mod tests {
             update_provenance: format!("verified-policy-update-proof-epoch-{epoch}").into_bytes(),
             created_at_ms: 1_800_000_000_000 + epoch,
         }
+    }
+
+    #[test]
+    fn schema_v3_database_is_refused_without_release_barrier_v4_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        legacy.pragma_update(None, "user_version", 3_i64).unwrap();
+        drop(legacy);
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::UnsupportedSchema(3))
+        ));
     }
 
     #[test]
