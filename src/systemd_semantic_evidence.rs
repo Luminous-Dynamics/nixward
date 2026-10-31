@@ -180,6 +180,11 @@ pub struct HealthObservation {
 #[serde(deny_unknown_fields)]
 pub struct RecoveryEvidence {
     pub authorized: bool,
+    pub transaction_id: String,
+    pub original_attempt_id: String,
+    pub admission_commit_id: String,
+    pub plan_digest: String,
+    pub machine_binding_digest: String,
     pub recovery_attempt_id: String,
     pub authorization_digest: String,
     pub receipt_digest: String,
@@ -543,6 +548,8 @@ fn validate_unit_snapshot(e: &SystemdExecutionEvidence, job: &CorrelatedJob, suc
         }
     } else if !nonempty(&snapshot.result) {
         f.missing("failed invocation unit snapshot omitted its systemd Result");
+    } else if snapshot.result == e.plan.expected_unit_result {
+        f.violation("failed JobRemoved result conflicts with a successful unit Result snapshot");
     }
 }
 
@@ -611,6 +618,11 @@ fn validate_recovery(e: &SystemdExecutionEvidence, job: &CorrelatedJob, f: &mut 
         None => { f.missing("failed activation has no separately authorized recovery evidence"); return false; }
     };
     if !recovery.authorized
+        || recovery.transaction_id != e.binding.transaction_id
+        || recovery.original_attempt_id != e.binding.attempt_id
+        || recovery.admission_commit_id != e.binding.admission_commit_id
+        || recovery.plan_digest != e.binding.plan_digest
+        || recovery.machine_binding_digest != e.binding.machine_binding_digest
         || !nonempty(&recovery.recovery_attempt_id)
         || recovery.recovery_attempt_id == e.binding.attempt_id
         || !is_digest(&recovery.authorization_digest)
@@ -904,9 +916,12 @@ mod tests {
         let mut e = valid_evidence(NixosOperation::Switch);
         e.manager_events[1].result = Some("failed".into());
         e.process_receipt.as_mut().unwrap().exit_code = 1;
+        e.unit_snapshot.as_mut().unwrap().result = "exit-code".into();
         e.recovery = Some(RecoveryEvidence {
-            authorized: true, recovery_attempt_id: "recovery-attempt-2".into(),
-            authorization_digest: digest('6'), receipt_digest: digest('7'), exit_code: 0, completed_at_ns: 230,
+            authorized: true, transaction_id: "txn-1".into(), original_attempt_id: "attempt-1".into(),
+            admission_commit_id: "commit-1".into(), plan_digest: digest('3'), machine_binding_digest: digest('4'),
+            recovery_attempt_id: "recovery-attempt-2".into(), authorization_digest: digest('6'),
+            receipt_digest: digest('7'), exit_code: 0, completed_at_ns: 230,
         });
         let predecessor = e.plan.predecessor_store_path.clone();
         let state = e.post_state.as_mut().unwrap();
