@@ -564,7 +564,7 @@ fn derive_release_id(
     expires_at_ms: u64,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nixward-payload-release-id-v1\\0");
+    hasher.update(b"nixward-payload-release-id-v1\0");
     let epoch = policy_epoch.to_le_bytes();
     let expiry = expires_at_ms.to_le_bytes();
     for value in [
@@ -1101,9 +1101,9 @@ fn verify_trial(
 
     for event in &trial.events {
         if let EvidenceEvent::BarrierCommitted { request_id, at_ns, .. } = event {
-            if let Some((_, _, _, _, start_at)) = barrier_requests.get(request_id) {
-                if at_ns >= start_at {
-                    measurements.barrier_latency_ns.push(at_ns - start_at);
+            if let Some(request) = barrier_requests.get(request_id) {
+                if at_ns >= &request.requested_at_ns {
+                    measurements.barrier_latency_ns.push(at_ns - &request.requested_at_ns);
                 }
             }
         }
