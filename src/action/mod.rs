@@ -35,6 +35,7 @@ pub mod systemd_job_evidence;
 pub(crate) mod systemd_job_bus;
 pub mod transaction_supervision;
 pub mod transaction_supervision_trace;
+pub mod worker_environment;
 mod worker_observation;
 
 pub use authority_approval::{
