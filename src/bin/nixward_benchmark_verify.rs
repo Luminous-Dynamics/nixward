@@ -47,6 +47,8 @@ struct Options {
 
 #[derive(Debug)]
 struct TrialMeta {
+    trial_id: String,
+    record_sha256: String,
     scenario: String,
     baseline: String,
     index: u64,
@@ -281,12 +283,15 @@ fn validate_record(
     }
 
     let expected_record_sha = str_field(record, "record_sha256")?;
-    if !is_sha256(expected_record_sha) || record_digest(record)? != expected_record_sha {
+    let computed_record_sha = record_digest(record)?;
+    if !is_sha256(expected_record_sha) || computed_record_sha != expected_record_sha {
         return Err("record_sha256 does not match canonical record digest".into());
     }
     let trial_index = record.get("trial_index").and_then(Value::as_u64)
         .ok_or("trial_index must be an unsigned integer")?;
     Ok(TrialMeta {
+        trial_id: str_field(record, "trial_id")?.to_string(),
+        record_sha256: computed_record_sha,
         scenario: scenario_id,
         baseline: baseline_id,
         index: trial_index,
@@ -351,6 +356,7 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
     let mut trial_keys = BTreeSet::new();
     let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut matched: BTreeMap<(String, u64), Vec<(String, String, String)>> = BTreeMap::new();
+    let mut verified_manifest = Vec::new();
     for record in records {
         let id = record.get("trial_id").and_then(Value::as_str).unwrap_or("<missing>");
         let result = validate_record(record, &corpus_sha, &required_evidence, &scenarios, &baselines, &root, allow_gated);
@@ -365,6 +371,14 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
                     continue;
                 }
                 records_verified += 1;
+                verified_manifest.push(json!({
+                    "trial_id": meta.trial_id,
+                    "record_sha256": meta.record_sha256,
+                    "scenario_id": meta.scenario,
+                    "baseline_id": meta.baseline,
+                    "trial_index": meta.index,
+                    "baseline_status": meta.baseline_status
+                }));
                 *counts.entry((meta.scenario.clone(), meta.baseline.clone())).or_default() += 1;
                 if meta.baseline_status == "available-baseline" {
                     matched.entry((meta.scenario.clone(), meta.index)).or_default()
@@ -414,7 +428,7 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
     });
     let status = if !errors.is_empty() { "invalid" }
         else if incomplete { "integrity-valid-incomplete" }
-        else { "integrity-valid-minimum-trials-met" };
+        else { "integrity-valid-available-baseline-floors-met" };
     Ok(json!({
         "schema": "org.luminousdynamics.nixward.deployment-transaction-evidence-audit",
         "version": 1,
@@ -422,6 +436,8 @@ fn audit(corpus_bytes: &[u8], records_bytes: &[u8], artifact_root_path: &Path, a
         "corpus_sha256": corpus_sha,
         "records_seen": records.len(),
         "records_verified": records_verified,
+        "verified_record_manifest": verified_manifest,
+        "available_baseline_floors_met": !incomplete,
         "errors": errors,
         "trial_floors": floors,
         "matched_trials": comparisons,
