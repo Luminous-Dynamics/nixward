@@ -780,7 +780,7 @@ mod tests {
     fn same_epoch_with_wrong_policy_record_digest_is_rejected() {
         let mut ledger = ledger();
         let mut request = intent(ledger.current_policy());
-        request.expected_policy_record_digest = digest('f');
+        request.expected_policy.record_digest = digest('f');
         assert!(matches!(
             ledger.create_barrier(&request),
             Err(ReleaseBarrierError::StalePolicy)

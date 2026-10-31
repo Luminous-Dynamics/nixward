@@ -37,6 +37,6 @@ A late exact receipt may resolve an uncertain attempt to acknowledged. It does n
 
 ## Acceptance tests
 
-The Rust module contains 20 deterministic tests, covering both policy/barrier race orderings, stale policy, revocation, expiry, exact admission binding, changed payload, idempotent barrier retry, one-shot attempt, ambiguous acknowledgement, late receipt reconciliation, exact worker identity and post-barrier policy change. The JSON fixture catalogue mirrors these named cases.
+The Rust module contains 20 deterministic tests, covering both policy/barrier race orderings, stale policy, revocation, expiry, exact admission binding, changed payload, idempotent barrier retry, one-shot attempt, ambiguous acknowledgement, late receipt reconciliation, exact worker identity and post-barrier policy change. The JSON fixture catalogue contains 23 machine-readable positive/negative cases and includes the barrier immutability and post-policy-change retry cases.
 
 The model is in-memory and pure. It does not prove SQLite transaction ordering, disk durability, D-Bus capture, PIDFD authenticity or worker behavior. A dedicated Nix check is authored to compile the native library test target and run only these tests; it is not executed in this environment.

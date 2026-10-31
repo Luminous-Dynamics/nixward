@@ -87,6 +87,14 @@
     {
       "id": "same-epoch-wrong-policy-record-digest",
       "expected_disposition": "reject-stale-policy"
+    },
+    {
+      "id": "barrier-record-remains-immutable-after-policy-update",
+      "expected_disposition": "immutable"
+    },
+    {
+      "id": "exact-barrier-retry-after-policy-update",
+      "expected_disposition": "existing-historical-read"
     }
   ]
 }
