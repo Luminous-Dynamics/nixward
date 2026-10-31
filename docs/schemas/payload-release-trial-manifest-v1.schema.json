@@ -107,7 +107,9 @@
           "initial_policy_record_digest",
           "events_sha256",
           "events",
-          "artifacts"
+          "artifacts",
+          "initial_policy_keys",
+          "initial_policy_allowed_audiences"
         ],
         "properties": {
           "trial_id": {
@@ -445,9 +447,8 @@
                     "new_record_digest",
                     "emergency_revoked_signers",
                     "decisions",
-                    "new_policy_allowed_signers",
                     "new_policy_allowed_audiences",
-                    "new_policy_allowed_actions"
+                    "new_policy_keys"
                   ],
                   "properties": {
                     "kind": {
@@ -520,14 +521,6 @@
                         }
                       }
                     },
-                    "new_policy_allowed_signers": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "uniqueItems": true
-                    },
                     "new_policy_allowed_audiences": {
                       "type": "array",
                       "items": {
@@ -536,13 +529,35 @@
                       },
                       "uniqueItems": true
                     },
-                    "new_policy_allowed_actions": {
+                    "new_policy_keys": {
                       "type": "array",
+                      "minItems": 1,
                       "items": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "uniqueItems": true
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "signer_key_id",
+                          "revoked",
+                          "allowed_actions"
+                        ],
+                        "properties": {
+                          "signer_key_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "revoked": {
+                            "type": "boolean"
+                          },
+                          "allowed_actions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "uniqueItems": true
+                          }
+                        }
+                      }
                     }
                   }
                 },
@@ -936,6 +951,45 @@
                 }
               }
             }
+          },
+          "initial_policy_keys": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "signer_key_id",
+                "revoked",
+                "allowed_actions"
+              ],
+              "properties": {
+                "signer_key_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revoked": {
+                  "type": "boolean"
+                },
+                "allowed_actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                }
+              }
+            }
+          },
+          "initial_policy_allowed_audiences": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
           }
         }
       }
