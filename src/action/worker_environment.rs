@@ -49,7 +49,23 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), values.len(), "worker environment keys must be unique");
         assert_eq!(values.len(), 8, "changing the allowlist requires an explicit contract revision");
-        assert!(values.iter().any(|(name, value)| *name == "NIX_USER_CONF_FILES" && *value == "/dev/null"));
-        assert!(values.iter().any(|(name, value)| *name == "PATH" && value.starts_with("/run/current-system/sw/bin:")));
+        let expected = std::collections::BTreeMap::from([
+            ("HOME".to_string(), "/root".to_string()),
+            ("LANG".to_string(), "C".to_string()),
+            ("LC_ALL".to_string(), "C".to_string()),
+            ("NIX_USER_CONF_FILES".to_string(), "/dev/null".to_string()),
+            (
+                "PATH".to_string(),
+                "/run/current-system/sw/bin:/run/current-system/sw/sbin:/run/wrappers/bin".to_string(),
+            ),
+            ("SYSTEMD_COLORS".to_string(), "0".to_string()),
+            ("TERM".to_string(), "dumb".to_string()),
+            ("XDG_CONFIG_HOME".to_string(), "/var/empty".to_string()),
+        ]);
+        let actual = values
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(actual, expected, "the privileged payload environment is a fixed contract");
     }
 }
