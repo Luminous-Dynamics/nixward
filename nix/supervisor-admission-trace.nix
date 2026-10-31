@@ -21,7 +21,7 @@ let
     builtins.isString value
     && builtins.stringLength value > 0
     && builtins.stringLength value <= 256
-    && builtins.match "[^[:space:]]+" value != null;
+    && builtins.match "[^[:space:][:cntrl:]]+" value != null;
   validDigest = value:
     builtins.isString value
     && builtins.match "[0-9a-f]{64}" value != null;

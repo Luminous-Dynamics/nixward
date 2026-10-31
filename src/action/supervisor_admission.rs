@@ -343,7 +343,7 @@ mod tests {
             "org.luminousdynamics.nixward.supervisor-admission-vectors"
         );
         assert_eq!(corpus.version, 1);
-        assert_eq!(corpus.vectors.len(), 20);
+        assert_eq!(corpus.vectors.len(), 36);
 
         let mut ids = std::collections::HashSet::new();
         for vector in corpus.vectors {

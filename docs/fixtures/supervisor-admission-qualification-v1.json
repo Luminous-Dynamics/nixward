@@ -577,6 +577,422 @@
         "unresolved_attempt": true
       },
       "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0000",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "commit_admission_atomically"
+    },
+    {
+      "id": "presence-mask-0001",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0010",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0011",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0100",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0101",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0110",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0111",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1000",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1001",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1010",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1011",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1100",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1101",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1110",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1111",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "resume_existing_attempt"
     }
   ]
 }
