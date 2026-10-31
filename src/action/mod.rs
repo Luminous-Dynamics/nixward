@@ -21,6 +21,8 @@ pub mod phi_gate;
 pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
+/// Atomic SQLite admission prototype. Not connected to a privileged execution path.
+pub mod supervisor_admission_store;
 
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,

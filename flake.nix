@@ -176,6 +176,39 @@
           default = self.apps.${system}.nixward;
         };
 
+
+        # Compile and run the supervisor admission store with a real
+        # AuthorityVerifier-minted receipt required by the new schema-v2 API.
+        checks.supervisor-admission-provenance-store-tests =
+          pkgs.rustPlatform.buildRustPackage {
+            pname = "nixward-supervisor-admission-provenance-store-tests";
+            version = "0.1.0";
+            src = monorepoSrc;
+            sourceRoot = "luminous-dynamics-nixward-src/symthaea";
+            cargoLock = {
+              lockFile = ../../../Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/supervisor-admission-provenance-store-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

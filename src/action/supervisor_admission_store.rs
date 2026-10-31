@@ -1429,6 +1429,10 @@ mod tests {
         assert_eq!(record.approval_material, request.approval_material);
         assert_eq!(record.permit_wire, request.permit_wire);
         assert_eq!(record.event_payload, request.event_payload);
+        assert_eq!(record.authority_provenance_digest, SupervisorAdmissionStore::digest(
+            &serde_json::to_vec(&request.authority_receipt.provenance()).unwrap()
+        ));
+        assert_eq!(&record.authority_provenance, request.authority_receipt.provenance());
         assert_eq!(record.state, AdmissionState::Unresolved);
         store.verify_integrity().unwrap();
     }
@@ -1502,8 +1506,80 @@ mod tests {
         store.verify_integrity().unwrap();
     }
 
+
     #[test]
-    fn every_precommit_failure_rolls_back_all_four_records() {
+    fn receipt_subject_must_match_the_locally_derived_admission_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let mut request = request("tx-a", "attempt-a1", 0x11, 0x22, 0x33);
+        request.expected_authority_subject = hex_digest(0x99);
+        assert!(matches!(
+            store.admit(&request),
+            Err(AdmissionStoreError::InvalidAuthorityReceipt("subject/Holon binding"))
+        ));
+    }
+
+    #[test]
+    fn schema_v1_with_existing_admissions_requires_fresh_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let parent = store.path().parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let connection = Connection::open(store.path()).unwrap();
+        connection.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE admission_commits (commit_id TEXT PRIMARY KEY NOT NULL);
+             INSERT INTO admission_commits(commit_id) VALUES ('legacy-admission');"
+        ).unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::LegacyAdmissionsRequireReauthorization)
+        ));
+    }
+
+    #[test]
+    fn tampered_persisted_provenance_is_detected_by_integrity_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_in(&temp);
+        let outcome = store.admit(&request("tx-a", "attempt-a1", 0x11, 0x22, 0x33)).unwrap();
+        let commit_id = outcome.record().commit_id.clone();
+
+        let connection = Connection::open(store.path()).unwrap();
+        connection.execute(
+            "DROP TRIGGER authority_provenance_records_immutable_update",
+            [],
+        ).unwrap();
+        let mut wire: Vec<u8> = connection.query_row(
+            "SELECT provenance_wire FROM authority_provenance_records WHERE commit_id = ?1",
+            [&commit_id],
+            |row| row.get(0),
+        ).unwrap();
+        let last = wire.len() - 1;
+        wire[last] ^= 1;
+        connection.execute(
+            "UPDATE authority_provenance_records SET provenance_wire = ?1 WHERE commit_id = ?2",
+            params![wire, commit_id],
+        ).unwrap();
+        connection.execute_batch(
+            "CREATE TRIGGER authority_provenance_records_immutable_update
+             BEFORE UPDATE ON authority_provenance_records
+             BEGIN
+                 SELECT RAISE(ABORT, 'authority provenance rows are immutable');
+             END;"
+        ).unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
+    }
+
+    #[test]
+    fn every_precommit_failure_rolls_back_all_admission_and_provenance_records() {
         let stages = [
             WriteStage::CommitRow,
             WriteStage::ReplayRow,
