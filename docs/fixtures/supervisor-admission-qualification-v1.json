@@ -1,0 +1,1024 @@
+{
+  "schema": "org.luminousdynamics.nixward.supervisor-admission-vectors",
+  "version": 1,
+  "identities": {
+    "base": {
+      "transaction_id": "transaction-1",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "attempt_id": "attempt-1",
+      "permit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "commit_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "changed_plan": {
+      "transaction_id": "transaction-1",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "attempt_id": "attempt-1",
+      "permit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "commit_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "changed_machine": {
+      "transaction_id": "transaction-1",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "machine_binding_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "attempt_id": "attempt-1",
+      "permit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "commit_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "changed_commit": {
+      "transaction_id": "transaction-1",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "attempt_id": "attempt-1",
+      "permit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "commit_id": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "foreign_transaction": {
+      "transaction_id": "transaction-foreign",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "attempt_id": "attempt-1",
+      "permit_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "commit_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "malformed": {
+      "transaction_id": "transaction-1",
+      "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "attempt_id": "attempt-1",
+      "permit_digest": "invalid",
+      "commit_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  },
+  "vectors": [
+    {
+      "id": "empty-valid-admission",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "commit_admission_atomically"
+    },
+    {
+      "id": "lost-commit-ack-exact-retry",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "resume_existing_attempt"
+    },
+    {
+      "id": "same-replay-different-plan",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "reject_replay_conflict"
+    },
+    {
+      "id": "same-replay-different-machine",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "reject_replay_conflict"
+    },
+    {
+      "id": "same-replay-foreign-transaction",
+      "intent": {
+        "transaction_id": "transaction-foreign",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "reject_replay_conflict"
+    },
+    {
+      "id": "new-replay-same-transaction-unresolved",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "6666666666666666666666666666666666666666666666666666666666666666",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "hold_unresolved_attempt"
+    },
+    {
+      "id": "new-replay-same-transaction-resolved",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "6666666666666666666666666666666666666666666666666666666666666666",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "commit_admission_atomically"
+    },
+    {
+      "id": "new-transaction-new-replay",
+      "intent": {
+        "transaction_id": "transaction-2",
+        "replay_key": "7777777777777777777777777777777777777777777777777777777777777777",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "commit_admission_atomically"
+    },
+    {
+      "id": "invalid-signature",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": false,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "untrusted-signer",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": false,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "wrong-audience",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": false,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "wrong-subject",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": false,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "foreign-machine-proof",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": false,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "wrong-plan-proof",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": false,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "expired-proof",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": false
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "reject_invalid_proof"
+    },
+    {
+      "id": "partial-replay-only",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "partial-three-of-four",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": true
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "conflicting-commit-id",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "changed_commit",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "empty-with-unresolved-flag",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": true
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "malformed-persisted-digest",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "malformed",
+        "verified_permit": "malformed",
+        "attempt_reservation": "malformed",
+        "journal_entry": "malformed",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0000",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "commit_admission_atomically"
+    },
+    {
+      "id": "presence-mask-0001",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0010",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0011",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0100",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0101",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0110",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-0111",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": null,
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1000",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1001",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1010",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1011",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": null,
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1100",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1101",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": null,
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1110",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": null,
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    },
+    {
+      "id": "presence-mask-1111",
+      "intent": {
+        "transaction_id": "transaction-1",
+        "replay_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": true
+      },
+      "expected_decision": "resume_existing_attempt"
+    },
+    {
+      "id": "unrelated-index-record-hold",
+      "intent": {
+        "transaction_id": "transaction-2",
+        "replay_key": "7777777777777777777777777777777777777777777777777777777777777777",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
+    }
+  ]
+}
