@@ -580,6 +580,34 @@
             '';
           };
 
+
+        # Pure activation-observer state model: no privileged host actions.
+        checks.activation-observer-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-activation-observer-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" "action::activation_observer::tests" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/activation-observer-tests"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

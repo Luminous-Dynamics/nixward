@@ -13,6 +13,7 @@ pub mod secure_boot;
 pub mod uki_evidence;
 pub mod boot_selection;
 
+pub mod activation_observer;
 pub mod authority_approval;
 pub mod authority_replay;
 pub mod change_covenant;
@@ -45,6 +46,12 @@ pub mod transaction_supervision_trace;
 pub mod worker_environment;
 mod worker_observation;
 
+pub use activation_observer::{
+    ActivationEffect, ActivationEvaluation, ActivationEvent, ActivationMode, ActivationOutcome,
+    ActivationPlan, ActivationPostState, ActivationStepKind, ActivationTrace,
+    ActivationTransition, HostStateSnapshot, InhibitorDisposition, PlannedActivationStep,
+    SwitchInhibitorReceipt, ActivationTarget,
+};
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,
