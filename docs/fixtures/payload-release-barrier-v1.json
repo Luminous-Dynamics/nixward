@@ -1,0 +1,104 @@
+{
+  "schema": "org.luminousdynamics.nixward.payload-release-barrier-vectors",
+  "version": 1,
+  "status": "proposed-not-executed",
+  "safety_contract": "At-most-one durable external release attempt per admission. Ambiguous post-attempt outcomes require reconciliation; no exactly-once delivery claim.",
+  "vectors": [
+    {
+      "id": "complete-barrier-commit",
+      "expected_disposition": "created"
+    },
+    {
+      "id": "identical-barrier-retry",
+      "expected_disposition": "existing"
+    },
+    {
+      "id": "changed-payload-same-admission",
+      "expected_disposition": "conflict"
+    },
+    {
+      "id": "policy-advance-wins-stale-barrier",
+      "expected_disposition": "reject-stale-policy"
+    },
+    {
+      "id": "barrier-wins-preserve-historical-policy",
+      "expected_disposition": "allow-inflight"
+    },
+    {
+      "id": "barrier-wins-stop-recovery-decision",
+      "expected_disposition": "block-release"
+    },
+    {
+      "id": "policy-update-requires-inflight-decision",
+      "expected_disposition": "reject-missing-decision"
+    },
+    {
+      "id": "revoked-signer-before-barrier",
+      "expected_disposition": "reject-revoked"
+    },
+    {
+      "id": "expired-before-barrier",
+      "expected_disposition": "reject-expired"
+    },
+    {
+      "id": "foreign-admission-binding",
+      "expected_disposition": "reject-foreign"
+    },
+    {
+      "id": "one-release-attempt",
+      "expected_disposition": "attempted"
+    },
+    {
+      "id": "duplicate-release-attempt",
+      "expected_disposition": "reject-resend"
+    },
+    {
+      "id": "lost-ack-after-release-attempt",
+      "expected_disposition": "uncertain-no-resend"
+    },
+    {
+      "id": "exact-worker-ack",
+      "expected_disposition": "acknowledged"
+    },
+    {
+      "id": "foreign-payload-receipt",
+      "expected_disposition": "reject-foreign-receipt"
+    },
+    {
+      "id": "late-receipt-reconciles-uncertainty",
+      "expected_disposition": "acknowledged-without-resend"
+    },
+    {
+      "id": "expiry-after-barrier-before-attempt",
+      "expected_disposition": "cancelled"
+    },
+    {
+      "id": "stale-policy-parent",
+      "expected_disposition": "reject-policy-advance"
+    },
+    {
+      "id": "policy-advance-with-no-inflight",
+      "expected_disposition": "advance"
+    },
+    {
+      "id": "policy-change-after-attempt-no-resend",
+      "expected_disposition": "no-resend"
+    },
+    {
+      "id": "same-epoch-wrong-policy-record-digest",
+      "expected_disposition": "reject-stale-policy"
+    },
+    {
+      "id": "barrier-record-remains-immutable-after-policy-update",
+      "expected_disposition": "immutable"
+    },
+    {
+      "id": "exact-barrier-retry-after-policy-update",
+      "expected_disposition": "existing-historical-read"
+    },
+    {
+      "id": "emergency-revocation-cannot-preserve-barrier",
+      "expected_disposition": "reject-preserve"
+    }
+  ]
+}

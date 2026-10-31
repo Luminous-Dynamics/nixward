@@ -25,6 +25,8 @@ pub mod gc_manager;
 pub mod generation_manager;
 pub mod phi_gate;
 pub mod plan_executor;
+/// Pure policy-serialized payload-release barrier model.
+pub(crate) mod release_barrier;
 pub mod service_manager;
 pub mod system_transaction;
 pub mod systemd_job_evidence;
