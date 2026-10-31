@@ -804,7 +804,7 @@ fn verify_trial(
                     authority_audience, payload_digest, policy_id, *policy_epoch,
                     policy_digest, policy_record_digest, *expires_at_ms,
                 );
-                if expected_release_id != *release_id {
+                if expected_release_id.as_str() != release_id.as_str() {
                     violations.push(format!("deterministic release ID mismatch for {release_id}"));
                 }
                 if barriers.contains_key(release_id)
@@ -1102,8 +1102,8 @@ fn verify_trial(
     for event in &trial.events {
         if let EvidenceEvent::BarrierCommitted { request_id, at_ns, .. } = event {
             if let Some(request) = barrier_requests.get(request_id) {
-                if at_ns >= &request.requested_at_ns {
-                    measurements.barrier_latency_ns.push(at_ns - &request.requested_at_ns);
+                if *at_ns >= request.requested_at_ns {
+                    measurements.barrier_latency_ns.push(*at_ns - request.requested_at_ns);
                 }
             }
         }
@@ -1351,7 +1351,8 @@ fn verify_manifest(
             uncertain_trials,
             operator_reconciliation_trials,
             barriers_per_second: {
-                let total_ns = durations.iter().copied().sum::<u64>();
+                let total_ns = durations.iter().copied()
+                    .fold(0_u64, u64::saturating_add);
                 if total_ns == 0 { None } else {
                     Some(barriers_created as f64 / (total_ns as f64 / 1_000_000_000.0))
                 }
