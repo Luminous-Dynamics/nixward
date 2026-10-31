@@ -3738,19 +3738,19 @@ mod tests {
     }
 
     #[test]
-    fn resolved_admission_cannot_start_a_reserved_release() {
+    fn unreceipted_admission_cannot_resolve_but_may_start_its_reserved_release() {
         let temp = tempfile::tempdir().unwrap();
         let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
         let barrier = store.create_payload_release_barrier(&request).unwrap();
-        store.record_resolution(
-            &admission.commit_id,
-            &"ff".repeat(32),
-            1250,
-        ).unwrap();
         assert!(matches!(
-            store.begin_payload_release_attempt(&barrier.record().release_id, 1300),
-            Err(AdmissionStoreError::ReleaseAttemptBlocked)
+            store.record_resolution(
+                &admission.commit_id,
+                &"ff".repeat(32),
+                1250,
+            ),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
         ));
+        assert!(store.begin_payload_release_attempt(&barrier.record().release_id, 1300).is_ok());
     }
 
     #[test]
