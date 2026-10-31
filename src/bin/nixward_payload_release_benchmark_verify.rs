@@ -105,6 +105,7 @@ struct TrialRecord {
     initial_policy_record_digest: String,
     initial_policy_keys: Vec<PolicySignerAuthorization>,
     initial_policy_allowed_audiences: Vec<String>,
+    initial_policy_emergency_revoked_signers: Vec<String>,
     events_sha256: String,
     events: Vec<EvidenceEvent>,
     artifacts: Vec<ArtifactReceipt>,
@@ -673,6 +674,9 @@ fn verify_trial(
         || !valid_hex(&trial.initial_policy_record_digest, 64)
         || trial.initial_policy_keys.is_empty()
         || trial.initial_policy_allowed_audiences.is_empty()
+        || trial.initial_policy_emergency_revoked_signers.iter().any(|key| key.trim().is_empty())
+        || trial.initial_policy_emergency_revoked_signers.iter().collect::<BTreeSet<_>>().len()
+            != trial.initial_policy_emergency_revoked_signers.len()
         || trial.events.is_empty()
         || trial.events.len() > MAX_EVENTS_PER_TRIAL
         || !valid_hex(&trial.events_sha256, 64)
@@ -710,6 +714,8 @@ fn verify_trial(
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
     let mut current_policy_keys = trial.initial_policy_keys.clone();
     let mut current_policy_allowed_audiences = trial.initial_policy_allowed_audiences.clone();
+    let mut current_policy_emergency_revoked_signers =
+        trial.initial_policy_emergency_revoked_signers.clone();
     let mut barrier_requests = BTreeMap::<String, BarrierRequestState>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
     let mut attempt_requests = BTreeMap::<String, (String, u64, u64)>::new();
@@ -821,6 +827,7 @@ fn verify_trial(
                     || policy_digest != &current_policy_digest
                     || policy_record_digest != &current_policy_record_digest
                     || !current_policy_allowed_audiences.contains(authority_audience)
+                    || current_policy_emergency_revoked_signers.contains(signer_key_id)
                     || !current_policy_keys.iter().any(|key| {
                         key.signer_key_id == *signer_key_id
                             && !key.revoked
@@ -996,6 +1003,7 @@ fn verify_trial(
                 current_policy_record_digest = new_record_digest.clone();
                 current_policy_keys = new_policy_keys.clone();
                 current_policy_allowed_audiences = new_policy_allowed_audiences.clone();
+                current_policy_emergency_revoked_signers = emergency_revoked_signers.clone();
             }
             EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, wall_time_ms, .. } => {
                 let Some(barrier) = barriers.get(release_id) else {
@@ -1593,6 +1601,7 @@ mod tests {
                     allowed_actions: vec!["change".into()],
                 }],
                 initial_policy_allowed_audiences: vec!["nixward-change-v1".into()],
+                initial_policy_emergency_revoked_signers: vec![],
                 events_sha256: sha256_hex(&event_bytes),
                 events,
                 artifacts: vec![],
@@ -1810,6 +1819,16 @@ mod tests {
         let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
         assert!(!result.report.valid);
         assert!(result.report.violations.iter().any(|value| value.contains("no-longer-authorized")));
+    }
+
+
+    #[test]
+    fn initial_emergency_revocation_blocks_barrier_even_when_key_record_is_not_revoked() {
+        let (mut trial, scenario) = clean_trial();
+        trial.initial_policy_emergency_revoked_signers = vec!["owner-key".into()];
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| value.contains("not bound to exact request/current policy or expiry")));
     }
 
     #[test]
