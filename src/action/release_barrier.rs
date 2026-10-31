@@ -190,7 +190,7 @@ pub(crate) enum ReleaseState {
         invocation_id: String,
         receipt_digest: String,
     },
-    Uncertain { observed_at_ms: u64 },
+    Uncertain { started_at_ms: u64, observed_at_ms: u64 },
     CancelledBeforeAttempt { cancelled_at_ms: u64 },
 }
 
@@ -207,7 +207,6 @@ pub(crate) struct ReleaseBarrierRecord {
     pub payload_digest: String,
     pub expires_at_ms: u64,
     pub barrier_committed_at_ms: u64,
-    pub post_update_disposition: Option<PostUpdateBarrierDisposition>,
     pub state: ReleaseState,
 }
 
@@ -234,6 +233,8 @@ pub(crate) struct ReleaseBarrierLedger {
     admission: AdmissionBinding,
     current_policy: PolicyHead,
     barrier: Option<ReleaseBarrierRecord>,
+    /// Separate policy-decision metadata; never mutates the historical barrier record.
+    in_flight_disposition: Option<PostUpdateBarrierDisposition>,
 }
 
 impl ReleaseBarrierLedger {
@@ -246,6 +247,7 @@ impl ReleaseBarrierLedger {
             admission,
             current_policy,
             barrier: None,
+            in_flight_disposition: None,
         })
     }
 
@@ -255,6 +257,10 @@ impl ReleaseBarrierLedger {
 
     pub(crate) fn barrier(&self) -> Option<&ReleaseBarrierRecord> {
         self.barrier.as_ref()
+    }
+
+    pub(crate) fn in_flight_disposition(&self) -> Option<PostUpdateBarrierDisposition> {
+        self.in_flight_disposition
     }
 
     /// Model of BEGIN IMMEDIATE. The expected policy pointer is checked in the
@@ -305,7 +311,6 @@ impl ReleaseBarrierLedger {
             payload_digest: intent.payload_digest.clone(),
             expires_at_ms: intent.expires_at_ms,
             barrier_committed_at_ms: intent.now_ms,
-            post_update_disposition: None,
             state: ReleaseState::BarrierCommitted,
         };
 
@@ -348,8 +353,8 @@ impl ReleaseBarrierLedger {
         let next = self
             .current_policy
             .advance(next_policy_digest, next_emergency_revoked_key_ids)?;
-        if let Some(barrier) = &mut self.barrier {
-            barrier.post_update_disposition = Some(match in_flight_decision {
+        if self.barrier.is_some() {
+            self.in_flight_disposition = Some(match in_flight_decision {
                 InFlightPolicyDecision::PreserveExistingBarrier => {
                     PostUpdateBarrierDisposition::PreserveHistoricalAuthorization
                 }
@@ -386,7 +391,7 @@ impl ReleaseBarrierLedger {
             };
             return Err(ReleaseBarrierError::Expired);
         }
-        if barrier.post_update_disposition
+        if self.in_flight_disposition
             == Some(PostUpdateBarrierDisposition::StopOrRecoveryRequired)
         {
             barrier.state = ReleaseState::CancelledBeforeAttempt {
@@ -415,8 +420,15 @@ impl ReleaseBarrierLedger {
             return Err(ReleaseBarrierError::BarrierConflict);
         }
         match &barrier.state {
-            ReleaseState::ReleaseAttempted { .. } => {
-                barrier.state = ReleaseState::Uncertain { observed_at_ms };
+            ReleaseState::ReleaseAttempted { started_at_ms } => {
+                let started_at_ms = *started_at_ms;
+                if observed_at_ms < started_at_ms {
+                    return Err(ReleaseBarrierError::InvalidTransition);
+                }
+                barrier.state = ReleaseState::Uncertain {
+                    started_at_ms,
+                    observed_at_ms,
+                };
                 Ok(())
             }
             ReleaseState::Uncertain { .. } => Err(ReleaseBarrierError::ReleaseUncertain),
@@ -451,7 +463,7 @@ impl ReleaseBarrierLedger {
         }
         match &barrier.state {
             ReleaseState::ReleaseAttempted { started_at_ms }
-            | ReleaseState::Uncertain { observed_at_ms: started_at_ms }
+            | ReleaseState::Uncertain { started_at_ms, .. }
                 if acknowledged_at_ms >= *started_at_ms =>
             {
                 barrier.state = ReleaseState::Acknowledged {
@@ -678,7 +690,7 @@ mod tests {
         ).unwrap();
         assert_eq!(ledger.barrier().unwrap().policy_epoch, old_epoch);
         assert_eq!(
-            ledger.barrier().unwrap().post_update_disposition,
+            ledger.in_flight_disposition(),
             Some(PostUpdateBarrierDisposition::PreserveHistoricalAuthorization)
         );
         ledger.begin_release_attempt(&release_id, 1_200).unwrap();
@@ -796,6 +808,52 @@ mod tests {
             Err(ReleaseBarrierError::ReleaseUncertain)
         );
         assert!(matches!(&ledger.barrier().unwrap().state, ReleaseState::Uncertain { .. }));
+    }
+
+
+    #[test]
+    fn policy_update_never_mutates_the_committed_barrier_record() {
+        let mut ledger = ledger();
+        let request = intent(ledger.current_policy());
+        let barrier = ledger.create_barrier(&request).unwrap();
+        let immutable_before = barrier.record().clone();
+        let current = ledger.current_policy().clone();
+        ledger.advance_policy(
+            current.epoch,
+            &current.record_digest,
+            digest('c'),
+            BTreeSet::from(["owner-key-1".to_string()]),
+            InFlightPolicyDecision::PreserveExistingBarrier,
+        ).unwrap();
+        assert_eq!(ledger.barrier().unwrap(), &immutable_before);
+        assert_eq!(
+            ledger.in_flight_disposition(),
+            Some(PostUpdateBarrierDisposition::PreserveHistoricalAuthorization)
+        );
+    }
+
+    #[test]
+    fn exact_late_receipt_can_reconcile_uncertain_attempt_without_resending() {
+        let mut ledger = ledger();
+        let request = intent(ledger.current_policy());
+        let created = ledger.create_barrier(&request).unwrap();
+        let release_id = created.record().release_id.clone();
+        ledger.begin_release_attempt(&release_id, 1_100).unwrap();
+        ledger.mark_release_uncertain(&release_id, 1_500).unwrap();
+        // Receipt time may predate local timeout observation: the worker may
+        // have completed and persisted it before the supervisor timed out.
+        ledger.acknowledge_release(
+            &release_id, &digest('b'), "nixward-tx.service",
+            "invocation-1", &digest('c'), 1_300,
+        ).unwrap();
+        assert!(matches!(
+            ledger.barrier().unwrap().state,
+            ReleaseState::Acknowledged { acknowledged_at_ms: 1_300, .. }
+        ));
+        assert!(matches!(
+            ledger.begin_release_attempt(&release_id, 1_600),
+            Err(ReleaseBarrierError::ReleaseAttemptAlreadyStarted)
+        ));
     }
 
     #[test]
