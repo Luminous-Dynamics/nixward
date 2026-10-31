@@ -55,6 +55,9 @@ pub mod evaluator_witness;
 /// Independent semantic consistency verifier for captured systemd/NixOS execution evidence.
 pub mod systemd_semantic_evidence;
 
+/// Signed host evidence-capture attestation and raw artifact verification.
+pub mod systemd_evidence_attestation;
+
 pub mod network_activation;
 pub mod network_calibration;
 pub mod network_calibration_harness;
