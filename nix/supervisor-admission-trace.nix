@@ -67,10 +67,11 @@ let
         && identity.machine_binding_digest == vector.intent.machine_binding_digest
       then "resume_existing_attempt"
       else "reject_replay_conflict"
-    else if identity.transaction_id == vector.intent.transaction_id
-      && snapshot.unresolved_attempt
-    then "hold_unresolved_attempt"
-    else "commit_admission_atomically";
+    else if identity.transaction_id == vector.intent.transaction_id then
+      if snapshot.unresolved_attempt
+      then "hold_unresolved_attempt"
+      else "commit_admission_atomically"
+    else "hold_inconsistent_persistence";
 in
   if !validIntent then "reject_invalid_intent"
   else if !proofSatisfied then "reject_invalid_proof"

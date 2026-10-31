@@ -206,10 +206,17 @@ pub(crate) fn decide_admission(
                     // original transaction, plan, and machine.
                     AdmissionDecision::RejectReplayConflict
                 }
-            } else if identity.transaction_id == intent.transaction_id && unresolved {
-                AdmissionDecision::HoldUnresolvedAttempt
+            } else if identity.transaction_id == intent.transaction_id {
+                if unresolved {
+                    AdmissionDecision::HoldUnresolvedAttempt
+                } else {
+                    AdmissionDecision::CommitAdmissionAtomically
+                }
             } else {
-                AdmissionDecision::CommitAdmissionAtomically
+                // The snapshot is the merged result of replay-key and unresolved-
+                // transaction lookups. A complete row matching neither lookup
+                // indicates index/read inconsistency; never ignore it and admit.
+                AdmissionDecision::HoldInconsistentPersistence
             }
         }
     }
@@ -343,7 +350,7 @@ mod tests {
             "org.luminousdynamics.nixward.supervisor-admission-vectors"
         );
         assert_eq!(corpus.version, 1);
-        assert_eq!(corpus.vectors.len(), 36);
+        assert_eq!(corpus.vectors.len(), 37);
 
         let mut ids = std::collections::HashSet::new();
         for vector in corpus.vectors {

@@ -420,7 +420,7 @@
           in
             assert corpus.schema == "org.luminousdynamics.nixward.supervisor-admission-vectors";
             assert corpus.version == 1;
-            assert builtins.length vectors == 36;
+            assert builtins.length vectors == 37;
             assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
             assert builtins.all (id: id != "") ids;
             assert builtins.all validIdentity (builtins.attrValues corpus.identities);

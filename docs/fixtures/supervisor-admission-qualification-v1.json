@@ -258,11 +258,11 @@
         "fresh": true
       },
       "snapshot": {
-        "replay_consumption": "base",
-        "verified_permit": "base",
-        "attempt_reservation": "base",
-        "journal_entry": "base",
-        "unresolved_attempt": true
+        "replay_consumption": null,
+        "verified_permit": null,
+        "attempt_reservation": null,
+        "journal_entry": null,
+        "unresolved_attempt": false
       },
       "expected_decision": "commit_admission_atomically"
     },
@@ -993,6 +993,32 @@
         "unresolved_attempt": true
       },
       "expected_decision": "resume_existing_attempt"
+    },
+    {
+      "id": "unrelated-index-record-hold",
+      "intent": {
+        "transaction_id": "transaction-2",
+        "replay_key": "7777777777777777777777777777777777777777777777777777777777777777",
+        "plan_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "machine_binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "proof": {
+        "signature_valid": true,
+        "trusted_signer": true,
+        "exact_audience": true,
+        "exact_subject": true,
+        "exact_machine_binding": true,
+        "exact_plan_binding": true,
+        "fresh": true
+      },
+      "snapshot": {
+        "replay_consumption": "base",
+        "verified_permit": "base",
+        "attempt_reservation": "base",
+        "journal_entry": "base",
+        "unresolved_attempt": false
+      },
+      "expected_decision": "hold_inconsistent_persistence"
     }
   ]
 }

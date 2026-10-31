@@ -58,6 +58,8 @@ The reference model reads four record slots:
 
 The four records are complete only when all slots are present, well-formed, and byte-for-byte equal in every identity field. Zero records is an empty pre-commit state. Any partial set, malformed identity, or cross-record mismatch is inconsistent persistence and must hold.
 
+The admission adapter must construct this snapshot from both uniqueness lookups in one consistent read transaction: (a) the globally unique replay key and (b) an unresolved attempt for the requested transaction. If both lookups identify the same admission, all four slots agree. If they identify different admissions, the merged slots disagree and the model holds. A complete row that matches neither the requested replay key nor the requested transaction is also an inconsistent lookup result, not a reason to proceed. Never query the two indexes at unrelated snapshots and silently choose one result.
+
 The request carries transaction ID, replay key, plan digest, and machine-binding digest. The independent proof assessment requires all of:
 
 - cryptographic signature validity;
