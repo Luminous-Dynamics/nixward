@@ -81,6 +81,7 @@ struct TrialEnvironment {
     device_model: String,
     device_firmware: String,
     cpu_model: String,
+    boot_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,9 +115,16 @@ enum EvidenceEvent {
         at_ns: u64,
         request_id: String,
         admission_commit_id: String,
+        expected_policy_id: String,
         expected_policy_epoch: u64,
+        expected_policy_digest: String,
         expected_policy_record_digest: String,
+        signer_key_id: String,
+        expected_authority_subject_digest: String,
+        expected_authority_audience: String,
         payload_digest: String,
+        expires_at_ms: u64,
+        wall_time_ms: u64,
     },
     BarrierCommitted {
         seq: u64,
@@ -124,7 +132,12 @@ enum EvidenceEvent {
         request_id: String,
         release_id: String,
         admission_commit_id: String,
+        transaction_id: String,
         attempt_id: String,
+        replay_key: String,
+        permit_digest: String,
+        plan_digest: String,
+        machine_binding_digest: String,
         policy_id: String,
         policy_epoch: u64,
         policy_digest: String,
@@ -134,6 +147,8 @@ enum EvidenceEvent {
         authority_subject_digest: String,
         authority_audience: String,
         payload_digest: String,
+        expires_at_ms: u64,
+        wall_time_ms: u64,
     },
     BarrierRetryExisting {
         seq: u64,
@@ -158,18 +173,22 @@ enum EvidenceEvent {
         new_policy_id: String,
         new_policy_digest: String,
         new_record_digest: String,
+        new_policy_allowed_signers: Vec<String>,
+        new_policy_allowed_audiences: Vec<String>,
         emergency_revoked_signers: Vec<String>,
         decisions: Vec<PolicyDecision>,
     },
     ReleaseAttemptRequested {
         seq: u64,
         at_ns: u64,
+        wall_time_ms: u64,
         request_id: String,
         release_id: String,
     },
     ReleaseAttemptReserved {
         seq: u64,
         at_ns: u64,
+        wall_time_ms: u64,
         request_id: String,
         release_id: String,
         attempt_id: String,
@@ -309,12 +328,23 @@ enum PolicyDisposition {
 struct BarrierState {
     release_id: String,
     admission_commit_id: String,
+    transaction_id: String,
     attempt_id: String,
+    replay_key: String,
+    permit_digest: String,
+    plan_digest: String,
+    machine_binding_digest: String,
+    authority_provenance_digest: String,
+    authority_subject_digest: String,
+    authority_audience: String,
     policy_id: String,
+    policy_digest: String,
     signer_key_id: String,
     policy_epoch: u64,
     policy_record_digest: String,
     payload_digest: String,
+    expires_at_ms: u64,
+    barrier_wall_time_ms: u64,
     committed_at_ns: u64,
     decision: Option<PolicyDisposition>,
 }
@@ -487,6 +517,59 @@ fn validate_artifacts(root: &Path, artifacts: &[ArtifactReceipt]) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn update_hash_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_release_id(
+    transaction_id: &str,
+    attempt_id: &str,
+    admission_commit_id: &str,
+    replay_key: &str,
+    permit_digest: &str,
+    plan_digest: &str,
+    machine_binding_digest: &str,
+    authority_provenance_digest: &str,
+    signer_key_id: &str,
+    authority_subject_digest: &str,
+    authority_audience: &str,
+    payload_digest: &str,
+    policy_id: &str,
+    policy_epoch: u64,
+    policy_digest: &str,
+    policy_record_digest: &str,
+    expires_at_ms: u64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nixward-payload-release-id-v1\\0");
+    let epoch = policy_epoch.to_le_bytes();
+    let expiry = expires_at_ms.to_le_bytes();
+    for value in [
+        transaction_id.as_bytes(),
+        attempt_id.as_bytes(),
+        admission_commit_id.as_bytes(),
+        replay_key.as_bytes(),
+        permit_digest.as_bytes(),
+        plan_digest.as_bytes(),
+        machine_binding_digest.as_bytes(),
+        authority_provenance_digest.as_bytes(),
+        signer_key_id.as_bytes(),
+        authority_subject_digest.as_bytes(),
+        authority_audience.as_bytes(),
+        payload_digest.as_bytes(),
+        policy_id.as_bytes(),
+        epoch.as_slice(),
+        policy_digest.as_bytes(),
+        policy_record_digest.as_bytes(),
+        expiry.as_slice(),
+    ] {
+        update_hash_field(&mut hasher, value);
+    }
+    hasher.finalize().to_hex().to_string()
 }
 
 fn expected_rejection_code(disposition: &str) -> Option<&'static str> {
