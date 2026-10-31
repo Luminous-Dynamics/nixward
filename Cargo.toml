@@ -40,6 +40,10 @@ path = "src/bin/nixward_release_sign.rs"
 name = "nixward-owner-key"
 path = "src/bin/nixward_owner_key.rs"
 
+[[bin]]
+name = "nixward-benchmark-verify"
+path = "src/bin/nixward_benchmark_verify.rs"
+
 [dependencies]
 # Pin the cognitive core to a content-addressed upstream revision. This is the
 # only cross-repository source dependency; all other dependencies are resolved

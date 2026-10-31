@@ -531,6 +531,36 @@
               touch $out
             '';
 
+
+        # Compile and test the standalone read-only benchmark evidence verifier
+        # without native/default features: its audit path needs only serde_json and SHA-256.
+        checks.deployment-transaction-evidence-verifier-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-deployment-transaction-evidence-verifier-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoBuildFlags = [ "-p" "nixward" "--bin" "nixward-benchmark-verify" ];
+            cargoTestFlags = [ "-p" "nixward" "--bin" "nixward-benchmark-verify" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/evidence-verifier-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
