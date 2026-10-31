@@ -235,10 +235,10 @@ A benchmark summary without per-trial evidence is not a qualification result.
 
 The current industry tools solve adjacent problems:
 
-- **nixos-rebuild** is the native local activation baseline, but its three main modes are semantically different: `switch` attempts runtime activation and makes the new configuration the boot default; `test` attempts runtime activation without making it the boot default; `boot` selects the next boot configuration without activating it in the running system. Run separate matched workloads for these modes rather than comparing unlike outcomes.
+- **nixos-rebuild** is the native local activation baseline, but its three main modes are semantically different: `switch` attempts runtime activation and makes the new configuration the boot default; `test` attempts runtime activation without making it the boot default; `boot` selects the next boot configuration without activating it in the running system. Run separate matched workloads for these modes rather than comparing unlike outcomes. It remains the right local baseline for single-host build/activation overhead.
 - **Colmena** is explicitly a stateless NixOS deployment tool and emphasizes parallel fleet deployment. Its documented parallel controls include a default deployment limit of 10, with experimental parallel evaluation. Nixward should not claim superiority on fleet throughput or stateless simplicity.
 - **deploy-rs** provides multi-profile Nix-flake deployments, remote activation, concurrency and magic rollback using a post-deploy connectivity confirmation. This is a strong availability-oriented baseline; Nixward should test against that behavior, not a weaker hand-written SSH loop.
-- **nixos-rebuild** is the native local activation baseline. It remains the right comparison for single-host build/activation overhead.
+
 
 Nixward's differentiator should be narrower and deeper: verifiable approval-to-effect provenance, no false success under ambiguous execution, no blind replay after cancellation or manager failure, and independently verified post-state. A measured Nixward result can be better on these dimensions without being a faster fleet deployer.
 
