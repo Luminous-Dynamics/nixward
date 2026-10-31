@@ -1799,6 +1799,57 @@ impl SupervisorAdmissionStore {
         hasher.finalize().to_hex().to_string()
     }
 
+    fn verify_existing_release_policy_decisions(
+        connection: &Connection,
+        policy: &AuthorityPolicyEpochRecord,
+        decisions: &[StoredReleasePolicyDecision],
+        created_at_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT release_id, disposition, decision_digest
+            FROM payload_release_policy_decisions
+            WHERE policy_epoch = ?1 AND policy_record_digest = ?2
+            ORDER BY release_id
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                i64::try_from(policy.epoch)
+                    .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?,
+                policy.record_digest,
+            ],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            )),
+        )?;
+        let stored = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if stored.len() != decisions.len() {
+            return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+        }
+        for decision in decisions {
+            let Some((_, disposition, digest)) =
+                stored.iter().find(|(release_id, _, _)| release_id == &decision.release_id)
+            else {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            };
+            let expected = Self::release_decision_digest(
+                &decision.release_id,
+                policy.epoch,
+                &policy.record_digest,
+                decision.disposition,
+                created_at_ms,
+            );
+            if disposition != decision.disposition.as_str() || digest != &expected {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            }
+        }
+        Ok(())
+    }
+
     fn append_release_policy_decisions(
         transaction: &rusqlite::Transaction<'_>,
         next_policy: &AuthorityPolicyEpochRecord,
@@ -1907,6 +1958,7 @@ impl SupervisorAdmissionStore {
             if !Self::release_barrier_matches_request(&existing, &admission, &policy, request) {
                 return Err(AdmissionStoreError::ReleaseBarrierConflict);
             }
+            Self::validate_payload_release_cross_bindings(&transaction, &existing)?;
             transaction.commit()?;
             return Ok(PayloadReleaseBarrierOutcome::Existing(existing));
         }
@@ -2015,6 +2067,15 @@ impl SupervisorAdmissionStore {
         Self::check_join_invariants(&transaction)?;
         let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
             .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
+        let admission_state: String = transaction.query_row(
+            "SELECT state FROM transaction_attempts WHERE commit_id = ?1",
+            [&barrier.commit_id],
+            |row| row.get(0),
+        )?;
+        if admission_state != "unresolved" {
+            return Err(AdmissionStoreError::ReleaseAttemptBlocked);
+        }
         let existing: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM payload_release_attempts WHERE release_id = ?1)",
             [release_id],
@@ -2071,6 +2132,9 @@ impl SupervisorAdmissionStore {
             |row| row.get(0),
         ).optional()?;
         let started = started.ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
+            .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
         if observed_at_ms < started as u64 {
             return Err(AdmissionStoreError::InvalidInput("uncertainty timestamp"));
         }
@@ -2130,6 +2194,7 @@ impl SupervisorAdmissionStore {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
             .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
         if barrier.payload_digest != payload_digest {
             return Err(AdmissionStoreError::ReleaseReceiptConflict);
         }
@@ -2185,6 +2250,7 @@ impl SupervisorAdmissionStore {
         let connection = self.connect()?;
         let barrier = Self::load_payload_release_barrier(&connection, release_id)?
             .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&connection, &barrier)?;
         let attempt: Option<(i64, Option<i64>)> = connection.query_row(
             r#"
             SELECT a.started_at_ms, u.observed_at_ms
