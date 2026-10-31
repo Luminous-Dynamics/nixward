@@ -364,6 +364,15 @@ impl SupervisorAdmissionStore {
         if !self.path.is_absolute() {
             return Err(AdmissionStoreError::RelativePath);
         }
+        if self.path.file_name().is_none()
+            || self.path.components().any(|component| {
+                matches!(component, Component::CurDir | Component::ParentDir)
+            })
+        {
+            return Err(AdmissionStoreError::InvalidInput(
+                "database path must be normalized and include a file name",
+            ));
+        }
         let parent = self
             .path
             .parent()
@@ -449,14 +458,17 @@ impl SupervisorAdmissionStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "trusted_schema", "OFF")?;
 
         let synchronous: i64 =
             connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
         let foreign_keys: i64 =
             connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-        if synchronous != 2 || foreign_keys != 1 {
+        let trusted_schema: i64 =
+            connection.query_row("PRAGMA trusted_schema", [], |row| row.get(0))?;
+        if synchronous != 2 || foreign_keys != 1 || trusted_schema != 0 {
             return Err(AdmissionStoreError::InvalidInput(
-                "SQLite FULL synchronous / foreign-key settings are not active",
+                "SQLite FULL synchronous, foreign-key, and trusted-schema settings are not active",
             ));
         }
 
@@ -907,7 +919,15 @@ impl SupervisorAdmissionStore {
         checkpoint(WriteStage::BeforeCommit)?;
 
         let commit_id = bindings.commit_id.clone();
-        transaction.commit()?;
+        if let Err(error) = transaction.commit() {
+            // COMMIT errors can be ambiguous at the storage boundary. Do not
+            // hand out the permit or retry with a new attempt. The caller must
+            // reopen and reconcile using the same replay key and intent.
+            return Err(AdmissionStoreError::ReadBackUncertain {
+                commit_id,
+                detail: format!("SQLite COMMIT returned an error: {error}"),
+            });
+        }
         checkpoint(WriteStage::AfterCommit)?;
 
         let record = Self::load_by_commit(&connection, &commit_id).map_err(|error| {
@@ -1333,9 +1353,11 @@ mod tests {
         let journal_mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
         let synchronous: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap();
         let foreign_keys: i64 = connection.query_row("PRAGMA foreign_keys", [], |row| row.get(0)).unwrap();
+        let trusted_schema: i64 = connection.query_row("PRAGMA trusted_schema", [], |row| row.get(0)).unwrap();
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert_eq!(synchronous, 2);
         assert_eq!(foreign_keys, 1);
+        assert_eq!(trusted_schema, 0);
 
         #[cfg(unix)]
         {
@@ -1357,7 +1379,7 @@ mod tests {
         ).unwrap();
         connection.execute(
             "UPDATE admission_events SET event_payload = ?2 WHERE commit_id = ?1",
-            params![record.record().commit_id, b"tampered event".as_slice()],
+            params![record.record().commit_id, &b"tampered event"[..]],
         ).unwrap();
 
         assert!(matches!(
