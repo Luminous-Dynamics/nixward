@@ -122,6 +122,7 @@ impl AuthorityAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedAuthorityKey {
     pub key_id: String,
     pub issuer: String,
@@ -135,6 +136,7 @@ pub struct TrustedAuthorityKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorityTrustPolicy {
     pub schema_version: u32,
     pub kind: String,
@@ -180,6 +182,7 @@ impl AuthorityTrustPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorityChallenge {
     pub schema_version: u32,
     pub kind: String,
@@ -277,6 +280,7 @@ impl AuthorityChallenge {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DetachedAuthoritySignature {
     pub schema_version: u32,
     pub kind: String,
@@ -501,6 +505,43 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, AuthorityError::SubjectMismatch);
+    }
+
+    #[test]
+    fn authority_wire_types_reject_unrecognized_fields() {
+        let signing = SigningKey::from_bytes(&[10u8; 32]);
+        let challenge = AuthorityChallenge::new(
+            AuthorityAction::Genesis,
+            "11".repeat(32),
+            "22".repeat(32),
+            "spore.local",
+            [6u8; 32],
+            1_000_000,
+            30_000,
+        )
+        .unwrap();
+        let signed = signed(&signing, challenge);
+        let mut signed_json = serde_json::to_value(&signed).unwrap();
+
+        // The outer signature envelope is an untrusted wire DTO. Unknown
+        // metadata is rejected rather than silently ignored.
+        signed_json["unrecognized"] = serde_json::json!("must-reject");
+        assert!(serde_json::from_value::<DetachedAuthoritySignature>(signed_json).is_err());
+
+        // Nested challenge data is equally strict.
+        let mut challenge_json = serde_json::to_value(&signed.challenge).unwrap();
+        challenge_json["future_security_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<AuthorityChallenge>(challenge_json).is_err());
+
+        // The local trust policy and each trusted key are strict configuration
+        // records; a typo must not be ignored and silently fall back to a default.
+        let mut policy_json = serde_json::to_value(policy(&signing)).unwrap();
+        policy_json["allow_all"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<AuthorityTrustPolicy>(policy_json).is_err());
+
+        let mut key_json = serde_json::to_value(policy(&signing).keys[0].clone()).unwrap();
+        key_json["privileged"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<TrustedAuthorityKey>(key_json).is_err());
     }
 
     #[test]
