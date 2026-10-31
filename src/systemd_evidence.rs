@@ -244,7 +244,7 @@ fn source_set_ok(host: &HostStateObservation, boot_id: &str) -> bool {
     }
     REQUIRED.iter().all(|name| seen.contains(name))
 }
-fn expected_paths(mode: OperationMode, candidate: &str, predecessor: &str) -> (&str, &str, &str) {
+fn expected_paths<'a>(mode: OperationMode, candidate: &'a str, predecessor: &'a str) -> (&'a str, &'a str, &'a str) {
     match mode {
         OperationMode::Switch => (candidate, candidate, candidate),
         OperationMode::Test => (predecessor, candidate, predecessor),
@@ -381,7 +381,9 @@ pub fn verify_execution(e: &SystemdExecutionEvidence) -> VerificationReport {
         || snapshot.observed_monotonic_ns < receipt.persisted_monotonic_ns {
         return hold("unit snapshot does not describe exact completed oneshot invocation", Some(job_id), invocation);
     }
-    if host.boot_id != e.kernel_boot_id || host.observed_monotonic_ns < snapshot.observed_monotonic_ns
+    if host.boot_id != e.kernel_boot_id
+        || host.observed_monotonic_ns < snapshot.observed_monotonic_ns
+        || host.observed_monotonic_ns < reply.received_monotonic_ns
         || !store_path_ok(&host.active_profile_store_path) || !store_path_ok(&host.running_system_store_path)
         || !store_path_ok(&host.boot_default_store_path) || !source_set_ok(host, &e.kernel_boot_id) {
         return hold("host observations are stale, malformed or not independently sourced", Some(job_id), invocation);
