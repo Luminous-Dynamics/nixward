@@ -378,6 +378,44 @@ enum ReplayedStepState {
 #[derive(Debug, Clone)]
 struct ReplayedStep {
     state: ReplayedStepState,
+    unit_name: Option<String>,
+    invocation_id: Option<String>,
+    pidfd_identity_digest: Option<String>,
+    boot_id: String,
+}
+
+fn validate_step_identity(state: &mut ReplayedStep, event: &ActivationEvent) -> Result<(), String> {
+    if state.unit_name != event.unit_name {
+        return Err("systemd unit name changed within one planned step".into());
+    }
+    let boot_changed = state.boot_id != event.boot_id;
+    if !boot_changed {
+        if state.invocation_id.as_ref().zip(event.invocation_id.as_ref())
+            .is_some_and(|(previous, next)| previous != next)
+        {
+            return Err("systemd InvocationID changed within the same boot".into());
+        }
+        if state.pidfd_identity_digest.as_ref().zip(event.pidfd_identity_digest.as_ref())
+            .is_some_and(|(previous, next)| previous != next)
+        {
+            return Err("PIDFD-derived identity changed within the same boot".into());
+        }
+    } else if !matches!(
+        event.transition,
+        ActivationTransition::ReconciledCompleted
+            | ActivationTransition::ReconciledFailed
+            | ActivationTransition::Compensated
+    ) {
+        return Err("systemd identity changed across boots without reconciliation".into());
+    }
+    if event.invocation_id.is_some() {
+        state.invocation_id = event.invocation_id.clone();
+    }
+    if event.pidfd_identity_digest.is_some() {
+        state.pidfd_identity_digest = event.pidfd_identity_digest.clone();
+    }
+    state.boot_id = event.boot_id.clone();
+    Ok(())
 }
 
 impl ActivationTrace {
@@ -623,11 +661,16 @@ fn replay_events(
                 }
                 states.insert(event.step_id.clone(), ReplayedStep {
                     state: ReplayedStepState::Started,
+                    unit_name: event.unit_name.clone(),
+                    invocation_id: event.invocation_id.clone(),
+                    pidfd_identity_digest: event.pidfd_identity_digest.clone(),
+                    boot_id: event.boot_id.clone(),
                 });
             }
             ActivationTransition::Completed => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("step completed without a start receipt")?;
+                validate_step_identity(state, event)?;
                 if state.state != ReplayedStepState::Started
                     || !event.receipt_digest.as_deref().is_some_and(valid_digest)
                     || event.reason_digest.is_some()
@@ -644,6 +687,7 @@ fn replay_events(
             ActivationTransition::Failed => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("step failed without a start receipt")?;
+                validate_step_identity(state, event)?;
                 if state.state != ReplayedStepState::Started
                     || !event.reason_digest.as_deref().is_some_and(valid_digest)
                     || event.receipt_digest.is_some()
@@ -655,6 +699,7 @@ fn replay_events(
             ActivationTransition::Unknown => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("unknown outcome recorded without a start receipt")?;
+                validate_step_identity(state, event)?;
                 if state.state != ReplayedStepState::Started
                     || !event.reason_digest.as_deref().is_some_and(valid_digest)
                     || event.receipt_digest.is_some()
@@ -666,6 +711,7 @@ fn replay_events(
             ActivationTransition::ReconciledCompleted => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("reconciliation has no earlier unknown step")?;
+                validate_step_identity(state, event)?;
                 if state.state != ReplayedStepState::Unknown
                     || !event.receipt_digest.as_deref().is_some_and(valid_digest)
                     || !event.observed_state_digest.as_deref().is_some_and(valid_digest)
@@ -677,6 +723,7 @@ fn replay_events(
             ActivationTransition::ReconciledFailed => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("reconciliation has no earlier unknown step")?;
+                validate_step_identity(state, event)?;
                 if state.state != ReplayedStepState::Unknown
                     || !event.reason_digest.as_deref().is_some_and(valid_digest)
                     || !event.observed_state_digest.as_deref().is_some_and(valid_digest)
@@ -688,6 +735,7 @@ fn replay_events(
             ActivationTransition::Compensated => {
                 let state = states.get_mut(&event.step_id)
                     .ok_or("compensation has no earlier failed/unknown step")?;
+                validate_step_identity(state, event)?;
                 if !matches!(state.state, ReplayedStepState::Failed | ReplayedStepState::Unknown)
                     || !event.receipt_digest.as_deref().is_some_and(valid_digest)
                     || !event.observed_state_digest.as_deref().is_some_and(valid_digest)
@@ -936,6 +984,91 @@ mod tests {
             pidfd_identity_digest: Some(digest('d')),
         };
         trace.append(valid).unwrap();
+    }
+
+
+    #[test]
+    fn systemd_invocation_identity_cannot_change_within_same_boot() {
+        let mut p = plan(ActivationMode::Switch);
+        p.steps.insert(2, PlannedActivationStep {
+            step_id: "restart-sshd".into(),
+            kind: ActivationStepKind::RestartUnit,
+        });
+        let mut trace = ActivationTrace::new(p.clone()).unwrap();
+        for (index, step) in p.steps.iter().take(2).enumerate() {
+            trace.append(completed_event(
+                &p, (index * 2 + 1) as u64, step, (index * 2 + 1) as u64 * 10,
+                ActivationTransition::Started, None, None
+            )).unwrap();
+            trace.append(completed_event(
+                &p, (index * 2 + 2) as u64, step, (index * 2 + 2) as u64 * 10,
+                ActivationTransition::Completed, Some(digest('c')), None
+            )).unwrap();
+        }
+        let step = &p.steps[2];
+        trace.append(ActivationEvent {
+            sequence: 5, at_monotonic_ns: 50, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Started, receipt_digest: None,
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-a".into()),
+            pidfd_identity_digest: Some(digest('d')),
+        }).unwrap();
+        let substituted = ActivationEvent {
+            sequence: 6, at_monotonic_ns: 60, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Completed, receipt_digest: Some(digest('c')),
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-b".into()),
+            pidfd_identity_digest: Some(digest('d')),
+        };
+        assert!(trace.append(substituted).is_err());
+    }
+
+    #[test]
+    fn systemd_invocation_identity_may_change_only_with_boot_reconciliation() {
+        let mut p = plan(ActivationMode::Switch);
+        p.steps.insert(2, PlannedActivationStep {
+            step_id: "restart-sshd".into(),
+            kind: ActivationStepKind::RestartUnit,
+        });
+        let mut trace = ActivationTrace::new(p.clone()).unwrap();
+        for (index, step) in p.steps.iter().take(2).enumerate() {
+            trace.append(completed_event(
+                &p, (index * 2 + 1) as u64, step, (index * 2 + 1) as u64 * 10,
+                ActivationTransition::Started, None, None
+            )).unwrap();
+            trace.append(completed_event(
+                &p, (index * 2 + 2) as u64, step, (index * 2 + 2) as u64 * 10,
+                ActivationTransition::Completed, Some(digest('c')), None
+            )).unwrap();
+        }
+        let step = &p.steps[2];
+        trace.append(ActivationEvent {
+            sequence: 5, at_monotonic_ns: 50, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Started, receipt_digest: None,
+            reason_digest: None, observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-before".into()),
+            pidfd_identity_digest: Some(digest('d')),
+        }).unwrap();
+        trace.append(ActivationEvent {
+            sequence: 6, at_monotonic_ns: 60, boot_id: p.pre_state.boot_id.clone(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::Unknown, receipt_digest: None,
+            reason_digest: Some(digest('e')), observed_state_digest: None,
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-before".into()),
+            pidfd_identity_digest: Some(digest('d')),
+        }).unwrap();
+        trace.append(ActivationEvent {
+            sequence: 7, at_monotonic_ns: 1, boot_id: "boot-after".into(),
+            step_id: step.step_id.clone(), kind: step.kind, effect: p.effect_for(step.kind),
+            transition: ActivationTransition::ReconciledCompleted,
+            receipt_digest: Some(digest('c')), reason_digest: None,
+            observed_state_digest: Some(digest('f')),
+            unit_name: Some("sshd.service".into()), invocation_id: Some("invocation-after".into()),
+            pidfd_identity_digest: Some(digest('a')),
+        }).unwrap();
     }
 
     #[test]
