@@ -433,6 +433,43 @@
               touch $out
             '';
 
+        # Exercise only the temporary-database supervisor admission storage prototype.
+        # This is not a privileged supervisor or an OS-level durability qualification.
+        checks.supervisor-admission-store-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-supervisor-admission-store-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [
+              "-p" "nixward"
+              "--lib"
+              "action::supervisor_admission_store::tests"
+            ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/supervisor-admission-store-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
