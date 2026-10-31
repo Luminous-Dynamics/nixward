@@ -367,6 +367,7 @@ mod tests {
         let token = [0x12u8; 32];
         assert!(read_release(&mut Cursor::new(token.to_vec()), &release_digest(&token).to_uppercase()).is_err());
         assert!(read_release(&mut Cursor::new(token.to_vec()), "not-a-digest").is_err());
+    }
 
     const ENVIRONMENT_PROBE_MARKER: &str = "NIXWARD_WORKER_ENV_PROBE";
 
@@ -414,6 +415,5 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
     }
 }
