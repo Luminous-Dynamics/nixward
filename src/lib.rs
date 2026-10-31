@@ -52,6 +52,9 @@ pub mod storage_intent;
 /// Evaluator-diversity evidence and the SNS-1 generated-Nix contract.
 pub mod evaluator_witness;
 
+/// Independent semantic consistency verifier for captured systemd/NixOS execution evidence.
+pub mod systemd_semantic_evidence;
+
 pub mod network_activation;
 pub mod network_calibration;
 pub mod network_calibration_harness;

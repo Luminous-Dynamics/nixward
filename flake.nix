@@ -561,6 +561,36 @@
             '';
           };
 
+
+        # Compile and test the pure-Rust systemd/NixOS semantic evidence verifier.
+        # This is read-only; it is not a D-Bus client or host mutator.
+        checks.systemd-semantic-evidence-verifier-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-systemd-semantic-evidence-verifier-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoBuildFlags = [ "-p" "nixward" "--lib" "--bin" "nixward-semantic-verify" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" "--bin" "nixward-semantic-verify" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/systemd-semantic-evidence-verifier-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
