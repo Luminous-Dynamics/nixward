@@ -1751,6 +1751,61 @@ impl SupervisorAdmissionStore {
         Ok(record)
     }
 
+
+    fn validate_payload_release_cross_bindings(
+        connection: &Connection,
+        barrier: &PayloadReleaseBarrierRecord,
+    ) -> Result<(), AdmissionStoreError> {
+        Self::validate_payload_release_barrier(barrier)?;
+        let admission = Self::load_by_commit(connection, &barrier.commit_id)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let policy = Self::load_policy_epoch_by_number(connection, barrier.policy_epoch)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+
+        if admission.transaction_id != barrier.transaction_id
+            || admission.attempt_id != barrier.attempt_id
+            || admission.replay_key != barrier.replay_key
+            || admission.permit_digest != barrier.permit_digest
+            || admission.plan_digest != barrier.plan_digest
+            || admission.machine_binding_digest != barrier.machine_binding_digest
+            || admission.authority_provenance_digest != barrier.authority_provenance_digest
+            || policy.policy_id != barrier.policy_id
+            || policy.policy_digest != barrier.policy_digest
+            || policy.record_digest != barrier.policy_record_digest
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        let expected_release_id = Self::derive_payload_release_id(
+            &admission,
+            &policy,
+            &barrier.signer_key_id,
+            &barrier.authority_subject_digest,
+            &barrier.authority_audience,
+            &barrier.payload_digest,
+            barrier.expires_at_ms,
+        );
+        if expected_release_id != barrier.release_id {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&admission.authority_provenance)
+                .map_err(|_| AdmissionStoreError::InconsistentStorage)?;
+        let get_str = |key: &str| provenance.get(key).and_then(serde_json::Value::as_str);
+        let get_u64 = |key: &str| provenance.get(key).and_then(serde_json::Value::as_u64);
+        if get_str("policy_id") != Some(barrier.policy_id.as_str())
+            || get_str("policy_digest") != Some(barrier.policy_digest.as_str())
+            || get_u64("policy_epoch") != Some(barrier.policy_epoch)
+            || get_str("signer_key_id") != Some(barrier.signer_key_id.as_str())
+            || get_str("subject_blake3") != Some(barrier.authority_subject_digest.as_str())
+            || get_str("audience") != Some(barrier.authority_audience.as_str())
+            || get_str("replay_key") != Some(barrier.replay_key.as_str())
+            || get_str("action") != Some("change")
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Ok(())
+    }
+
     fn release_barrier_matches_request(
         record: &PayloadReleaseBarrierRecord,
         admission: &AdmissionRecord,
