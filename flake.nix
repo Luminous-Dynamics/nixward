@@ -507,6 +507,46 @@
             '';
           };
 
+
+        # Structural qualification of the v4 payload-release benchmark corpus.
+        # This validates vector inventory only; no benchmark trial is executed.
+        checks.payload-release-assurance-benchmark-corpus =
+          let
+            corpus = builtins.fromJSON (builtins.readFile ./docs/fixtures/payload-release-assurance-benchmark-v1.json);
+            scenarios = corpus.scenarios;
+            ids = map (scenario: scenario.id) scenarios;
+            validClasses = [ "clean" "fault" "concurrency" "durability" "performance" ];
+            validScenario = scenario:
+              builtins.isString scenario.id
+              && scenario.id != ""
+              && builtins.elem scenario.trial_class validClasses
+              && builtins.isString scenario.fault_boundary
+              && builtins.isString scenario.expected_disposition
+              && builtins.isInt scenario.minimum_trials
+              && scenario.minimum_trials >= 30
+              && builtins.isList scenario.required_observations
+              && builtins.length scenario.required_observations >= 6;
+          in
+            assert corpus.schema == "org.luminousdynamics.nixward.payload-release-assurance-benchmark";
+            assert corpus.version == 1;
+            assert corpus.status == "proposed-not-executed";
+            assert builtins.length scenarios == 27;
+            assert builtins.length ids == builtins.length (pkgs.lib.unique ids);
+            assert builtins.all (id: id != "") ids;
+            assert builtins.all validScenario scenarios;
+            assert corpus.trial_policy.clean_min_trials >= 30;
+            assert corpus.trial_policy.fault_min_trials >= 100;
+            assert corpus.trial_policy.concurrency_min_trials >= 100;
+            assert corpus.trial_policy.durability_min_trials >= 100;
+            assert corpus.trial_policy.p99_claim_min_trials >= 1000;
+            assert corpus.aspirational_performance_targets.barrier_commit_p95_ms == 20;
+            assert corpus.aspirational_performance_targets.barrier_commit_p99_ms == 50;
+            assert builtins.any (baseline: baseline.id == "sqlite-full-control") corpus.baselines;
+            assert builtins.any (baseline: baseline.id == "nixward-release-v4") corpus.baselines;
+            pkgs.runCommand "nixward-payload-release-assurance-benchmark-corpus" {} ''
+              touch $out
+            '';
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

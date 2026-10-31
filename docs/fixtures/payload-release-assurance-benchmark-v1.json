@@ -1,0 +1,580 @@
+{
+  "schema": "org.luminousdynamics.nixward.payload-release-assurance-benchmark",
+  "version": 1,
+  "status": "proposed-not-executed",
+  "purpose": "Qualify durable policy-serialized payload release, at-most-once attempt semantics, recovery and assurance overhead. Scenario definitions do not themselves constitute executed qualification.",
+  "assurance_invariants": [
+    "unauthorized_barriers_accepted == 0",
+    "duplicate_external_release_attempts_per_admission == 0",
+    "release_attempts_without_durable_attempt_reservation == 0",
+    "transactions_resolved_before_exact_worker_receipt == 0",
+    "emergency_revoked_signer_preserve_decisions_accepted == 0",
+    "acknowledged_full_synchronous_commits_lost_after_supported_power_cut == 0"
+  ],
+  "baselines": [
+    {
+      "id": "sqlite-full-control",
+      "role": "matched_storage_control",
+      "description": "Same local storage/device and SQLite WAL synchronous=FULL, minimal prepared write/readback; isolates barrier/provenance logic overhead"
+    },
+    {
+      "id": "nixward-admission-only",
+      "role": "internal_component_control",
+      "description": "Nixward schema v2 admission path without policy archive/release barrier; historical baseline only, not directly comparable unless same build and hardware"
+    },
+    {
+      "id": "nixward-release-v4",
+      "role": "candidate",
+      "description": "Nixward schema v4 admission, policy history and durable release barrier"
+    },
+    {
+      "id": "nixos-rebuild",
+      "role": "activation_context",
+      "description": "Native NixOS switch/test/boot semantics; measures build/activation and host outcome, not a drop-in local release-barrier implementation"
+    },
+    {
+      "id": "colmena",
+      "role": "fleet_orchestration_context",
+      "description": "Parallel NixOS fleet deployment; compare end-to-end separately and record --limit/evaluation settings"
+    },
+    {
+      "id": "deploy-rs",
+      "role": "deployment_orchestration_context",
+      "description": "Multi-profile remote deployment and magicRollback/autoRollback; record exact settings and separate availability rollback from local release receipt semantics"
+    },
+    {
+      "id": "sqlite-wal-normal-control",
+      "role": "unsafe_performance_control",
+      "description": "synchronous=NORMAL diagnostic only; never eligible for a durability or safety win and never a release configuration"
+    }
+  ],
+  "trial_policy": {
+    "clean_min_trials": 30,
+    "fault_min_trials": 100,
+    "concurrency_min_trials": 100,
+    "durability_min_trials": 100,
+    "p99_claim_min_trials": 1000,
+    "preserve_raw_trials": true,
+    "preserve_excluded_trials_and_reasons": true,
+    "include_exact_source_sha": true,
+    "include_storage_and_filesystem_configuration": true,
+    "include_kernel_sqlite_and_nix_versions": true
+  },
+  "metric_contract": [
+    {
+      "name": "barrier_commit_latency",
+      "unit": "ms",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "attempt_reservation_latency",
+      "unit": "ms",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "policy_advance_latency_per_outstanding_barrier",
+      "unit": "ms",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "writer_lock_wait",
+      "unit": "ms",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "wal_bytes",
+      "unit": "bytes",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "checkpoint_duration",
+      "unit": "ms",
+      "aggregation": [
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ]
+    },
+    {
+      "name": "durable_release_barriers_per_second",
+      "unit": "barriers_per_second",
+      "aggregation": [
+        "mean",
+        "p95_window"
+      ]
+    },
+    {
+      "name": "uncertain_release_rate",
+      "unit": "fraction",
+      "aggregation": [
+        "mean",
+        "95ci"
+      ]
+    },
+    {
+      "name": "operator_reconciliation_rate",
+      "unit": "fraction",
+      "aggregation": [
+        "mean",
+        "95ci"
+      ]
+    },
+    {
+      "name": "duplicate_release_attempts",
+      "unit": "count",
+      "aggregation": [
+        "total"
+      ]
+    },
+    {
+      "name": "unauthorized_acceptances",
+      "unit": "count",
+      "aggregation": [
+        "total"
+      ]
+    }
+  ],
+  "aspirational_performance_targets": {
+    "reference_profile": "local PCIe NVMe, ext4 or xfs, Linux, SQLite WAL synchronous=FULL; report hardware/firmware and mount options",
+    "barrier_commit_p95_ms": 20,
+    "barrier_commit_p99_ms": 50,
+    "attempt_reservation_p95_ms": 20,
+    "attempt_reservation_p99_ms": 50,
+    "combined_barrier_and_attempt_p95_ms": 40,
+    "combined_barrier_and_attempt_p99_ms": 100,
+    "note": "Engineering targets for measurement, not claimed results or release gates until measured on disclosed hardware."
+  },
+  "scenarios": [
+    {
+      "id": "barrier-create-clean",
+      "trial_class": "clean",
+      "fault_boundary": "none",
+      "expected_disposition": "created",
+      "minimum_trials": 30,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "exact-barrier-retry-after-lost-ack",
+      "trial_class": "fault",
+      "fault_boundary": "after_barrier_commit_before_ack",
+      "expected_disposition": "existing_same_release_id",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "changed-payload-same-admission",
+      "trial_class": "fault",
+      "fault_boundary": "before_barrier_commit",
+      "expected_disposition": "reject_conflict",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "wrong-authority-subject",
+      "trial_class": "fault",
+      "fault_boundary": "before_barrier_commit",
+      "expected_disposition": "reject_unauthorized",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "stale-policy-record",
+      "trial_class": "fault",
+      "fault_boundary": "before_barrier_commit",
+      "expected_disposition": "reject_stale_policy",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "revoked-signer-before-barrier",
+      "trial_class": "fault",
+      "fault_boundary": "before_barrier_commit",
+      "expected_disposition": "reject_revoked",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "policy-advance-wins",
+      "trial_class": "concurrency",
+      "fault_boundary": "between_policy_and_barrier",
+      "expected_disposition": "reject_stale_barrier",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "barrier-wins-preserve-decision",
+      "trial_class": "concurrency",
+      "fault_boundary": "between_barrier_and_policy",
+      "expected_disposition": "preserve_historical_barrier",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "barrier-wins-stop-decision",
+      "trial_class": "concurrency",
+      "fault_boundary": "between_barrier_and_policy",
+      "expected_disposition": "block_attempt",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "preserve-after-emergency-revocation",
+      "trial_class": "fault",
+      "fault_boundary": "policy_update_before_commit",
+      "expected_disposition": "reject_preserve",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "policy-update-missing-disposition",
+      "trial_class": "fault",
+      "fault_boundary": "policy_update_before_commit",
+      "expected_disposition": "reject_policy_update",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "attempt-reservation-one-shot",
+      "trial_class": "clean",
+      "fault_boundary": "before_external_write",
+      "expected_disposition": "attempt_reserved",
+      "minimum_trials": 30,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "duplicate-attempt-after-process-reopen",
+      "trial_class": "durability",
+      "fault_boundary": "after_attempt_commit_before_retry",
+      "expected_disposition": "reject_second_attempt",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "crash-after-attempt-before-first-byte",
+      "trial_class": "durability",
+      "fault_boundary": "after_attempt_commit_before_external_io",
+      "expected_disposition": "uncertain_no_resend",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "partial-payload-write-without-receipt",
+      "trial_class": "durability",
+      "fault_boundary": "during_external_write",
+      "expected_disposition": "uncertain_no_resend",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "complete-write-before-receipt-commit",
+      "trial_class": "durability",
+      "fault_boundary": "after_external_write_before_receipt_commit",
+      "expected_disposition": "uncertain_no_resend",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "late-exact-receipt-after-timeout",
+      "trial_class": "fault",
+      "fault_boundary": "after_uncertainty_before_reconcile",
+      "expected_disposition": "acknowledge_original_attempt",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "foreign-worker-payload-receipt",
+      "trial_class": "fault",
+      "fault_boundary": "before_receipt_commit",
+      "expected_disposition": "reject_foreign_receipt",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "receipt-digest-substitution",
+      "trial_class": "fault",
+      "fault_boundary": "receipt_retry",
+      "expected_disposition": "reject_receipt_conflict",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "resolve-before-receipt",
+      "trial_class": "fault",
+      "fault_boundary": "before_resolution_commit",
+      "expected_disposition": "reject_in_flight",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "release-barrier-tamper-detection",
+      "trial_class": "durability",
+      "fault_boundary": "after_manual_storage_tamper",
+      "expected_disposition": "detect_corruption",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "attempt-digest-tamper-detection",
+      "trial_class": "durability",
+      "fault_boundary": "after_manual_storage_tamper",
+      "expected_disposition": "detect_corruption",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "stop-decision-downgrade-tamper",
+      "trial_class": "durability",
+      "fault_boundary": "before_policy_decision_commit",
+      "expected_disposition": "reject_downgrade",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "schema-v3-refusal",
+      "trial_class": "clean",
+      "fault_boundary": "database_open",
+      "expected_disposition": "refuse_legacy",
+      "minimum_trials": 30,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "same-admission-multiprocess-barrier-race",
+      "trial_class": "concurrency",
+      "fault_boundary": "concurrent_barrier_create",
+      "expected_disposition": "one_barrier_only",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "policy-advance-vs-barrier-multiprocess-race",
+      "trial_class": "concurrency",
+      "fault_boundary": "concurrent_policy_and_barrier",
+      "expected_disposition": "one_linearized_order",
+      "minimum_trials": 100,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    },
+    {
+      "id": "wal-checkpoint-under-long-reader",
+      "trial_class": "performance",
+      "fault_boundary": "checkpoint_with_reader",
+      "expected_disposition": "measure_tail_latency",
+      "minimum_trials": 1000,
+      "required_observations": [
+        "source_sha_and_flake_lock",
+        "admission_commit_and_release_id",
+        "policy_epoch_and_record_digest",
+        "payload_digest_and_attempt_state",
+        "monotonic_timestamps",
+        "raw_sqlite_and_supervisor_logs"
+      ]
+    }
+  ]
+}

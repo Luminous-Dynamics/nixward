@@ -20,7 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x4e58_5744; // "NXWD"
 const MAX_APPROVAL_BYTES: usize = 1024 * 1024;
 const MAX_AUTHORITY_PROVENANCE_BYTES: usize = 64 * 1024;
@@ -248,6 +248,121 @@ BEGIN
     SELECT RAISE(ABORT, 'authority policy current pointer cannot be deleted');
 END;
 
+
+CREATE TABLE IF NOT EXISTS payload_release_barriers (
+    release_id TEXT PRIMARY KEY NOT NULL CHECK(length(release_id) = 64),
+    commit_id TEXT NOT NULL UNIQUE REFERENCES admission_commits(commit_id) ON DELETE RESTRICT,
+    transaction_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL UNIQUE,
+    replay_key TEXT NOT NULL UNIQUE,
+    permit_digest TEXT NOT NULL,
+    plan_digest TEXT NOT NULL,
+    machine_binding_digest TEXT NOT NULL,
+    authority_provenance_digest TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_epoch INTEGER NOT NULL CHECK(policy_epoch > 0),
+    policy_digest TEXT NOT NULL,
+    policy_record_digest TEXT NOT NULL,
+    signer_key_id TEXT NOT NULL,
+    authority_subject_digest TEXT NOT NULL,
+    authority_audience TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > 0),
+    barrier_committed_at_ms INTEGER NOT NULL CHECK(barrier_committed_at_ms >= 0),
+    barrier_digest TEXT NOT NULL UNIQUE CHECK(length(barrier_digest) = 64),
+    FOREIGN KEY(policy_epoch, policy_record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_attempts (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_barriers(release_id) ON DELETE RESTRICT,
+    attempt_id TEXT NOT NULL UNIQUE,
+    started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
+    attempt_digest TEXT NOT NULL UNIQUE CHECK(length(attempt_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_uncertain (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_attempts(release_id) ON DELETE RESTRICT,
+    observed_at_ms INTEGER NOT NULL CHECK(observed_at_ms >= 0),
+    uncertainty_digest TEXT NOT NULL UNIQUE CHECK(length(uncertainty_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_receipts (
+    release_id TEXT PRIMARY KEY NOT NULL REFERENCES payload_release_attempts(release_id) ON DELETE RESTRICT,
+    payload_digest TEXT NOT NULL,
+    worker_unit TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+    acknowledged_at_ms INTEGER NOT NULL CHECK(acknowledged_at_ms >= 0),
+    receipt_record_digest TEXT NOT NULL UNIQUE CHECK(length(receipt_record_digest) = 64)
+);
+
+CREATE TABLE IF NOT EXISTS payload_release_policy_decisions (
+    decision_id TEXT PRIMARY KEY NOT NULL CHECK(length(decision_id) = 64),
+    release_id TEXT NOT NULL REFERENCES payload_release_barriers(release_id) ON DELETE RESTRICT,
+    policy_epoch INTEGER NOT NULL CHECK(policy_epoch > 0),
+    policy_record_digest TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('preserve_existing_barrier', 'stop_or_recovery_required')),
+    decision_digest TEXT NOT NULL UNIQUE CHECK(length(decision_digest) = 64),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+    UNIQUE(release_id, policy_epoch),
+    FOREIGN KEY(policy_epoch, policy_record_digest)
+        REFERENCES authority_policy_epochs(epoch, record_digest) ON DELETE RESTRICT
+);
+
+CREATE TRIGGER IF NOT EXISTS payload_release_barriers_immutable_update
+BEFORE UPDATE ON payload_release_barriers BEGIN
+    SELECT RAISE(ABORT, 'payload release barrier records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_barriers_no_delete
+BEFORE DELETE ON payload_release_barriers BEGIN
+    SELECT RAISE(ABORT, 'payload release barrier records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_attempts_immutable_update
+BEFORE UPDATE ON payload_release_attempts BEGIN
+    SELECT RAISE(ABORT, 'payload release attempt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_attempts_no_delete
+BEFORE DELETE ON payload_release_attempts BEGIN
+    SELECT RAISE(ABORT, 'payload release attempt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_uncertain_immutable_update
+BEFORE UPDATE ON payload_release_uncertain BEGIN
+    SELECT RAISE(ABORT, 'payload release uncertainty records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_uncertain_no_delete
+BEFORE DELETE ON payload_release_uncertain BEGIN
+    SELECT RAISE(ABORT, 'payload release uncertainty records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_receipts_immutable_update
+BEFORE UPDATE ON payload_release_receipts BEGIN
+    SELECT RAISE(ABORT, 'payload release receipt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_receipts_no_delete
+BEFORE DELETE ON payload_release_receipts BEGIN
+    SELECT RAISE(ABORT, 'payload release receipt records are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_immutable_update
+BEFORE UPDATE ON payload_release_policy_decisions BEGIN
+    SELECT RAISE(ABORT, 'payload release policy decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_no_delete
+BEFORE DELETE ON payload_release_policy_decisions BEGIN
+    SELECT RAISE(ABORT, 'payload release policy decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS payload_release_policy_decisions_no_downgrade
+BEFORE INSERT ON payload_release_policy_decisions
+WHEN NEW.disposition = 'preserve_existing_barrier'
+  AND EXISTS (
+      SELECT 1 FROM payload_release_policy_decisions AS prior
+      WHERE prior.release_id = NEW.release_id
+        AND prior.disposition = 'stop_or_recovery_required'
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'stop/recovery disposition cannot be downgraded');
+END;
+
+
 "#;
 
 const SELECT_ADMISSION_BY_COMMIT: &str = r#"
@@ -387,6 +502,32 @@ pub(crate) enum AdmissionStoreError {
     PolicyEpochConflict,
     #[error("authority policy epoch record is invalid or corrupt")]
     InvalidPolicyEpochRecord,
+    #[error("payload release barrier conflicts with the committed admission or existing barrier")]
+    ReleaseBarrierConflict,
+    #[error("payload release request uses a stale authority policy snapshot")]
+    ReleaseBarrierStalePolicy,
+    #[error("payload release signer, audience, subject or provenance is not authorized by the archived policy")]
+    ReleaseBarrierUnauthorized,
+    #[error("payload release barrier or admission has expired")]
+    ReleaseBarrierExpired,
+    #[error("payload release attempt has already been durably reserved; resend is forbidden")]
+    ReleaseAttemptAlreadyStarted,
+    #[error("payload release attempt has already been marked uncertain")]
+    ReleaseAttemptAlreadyUncertain,
+    #[error("payload release is blocked by a stop/recovery policy decision")]
+    ReleaseAttemptBlocked,
+    #[error("payload release attempt has no committed barrier")]
+    ReleaseBarrierNotFound,
+    #[error("transaction cannot be resolved while a release barrier has no exact worker receipt")]
+    ReleaseBarrierInFlight,
+    #[error("payload release receipt conflicts with the unique release attempt")]
+    ReleaseReceiptConflict,
+    #[error("payload release policy decisions are missing, duplicated or foreign")]
+    ReleasePolicyDecisionRequired,
+    #[error("policy release decision cannot downgrade stop/recovery to preserve")]
+    ReleasePolicyDecisionDowngrade,
+    #[error("a newly revoked or no-longer-authorized signer cannot preserve an unreleased barrier")]
+    ReleaseSignerRevoked,
     #[error("authority policy epoch {epoch} may be durable but read-back failed: {detail}")]
     PolicyEpochReadBackUncertain { epoch: u64, detail: String },
     #[error("unsupported supervisor admission schema version {0}")]
@@ -456,6 +597,91 @@ impl AuthorityPolicyEpochOutcome {
             Self::Created(record) | Self::Existing(record) => record,
         }
     }
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredReleaseDisposition {
+    PreserveExistingBarrier,
+    StopOrRecoveryRequired,
+}
+impl StoredReleaseDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PreserveExistingBarrier => "preserve_existing_barrier",
+            Self::StopOrRecoveryRequired => "stop_or_recovery_required",
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoredReleasePolicyDecision {
+    pub release_id: String,
+    pub disposition: StoredReleaseDisposition,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadReleaseBarrierRequest {
+    pub commit_id: String,
+    pub expected_policy_epoch: u64,
+    pub expected_policy_record_digest: String,
+    pub signer_key_id: String,
+    pub expected_authority_subject_digest: String,
+    pub expected_authority_audience: String,
+    pub payload_digest: String,
+    pub expires_at_ms: u64,
+    pub now_ms: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadReleaseBarrierRecord {
+    pub release_id: String,
+    pub commit_id: String,
+    pub transaction_id: String,
+    pub attempt_id: String,
+    pub replay_key: String,
+    pub permit_digest: String,
+    pub plan_digest: String,
+    pub machine_binding_digest: String,
+    pub authority_provenance_digest: String,
+    pub policy_id: String,
+    pub policy_epoch: u64,
+    pub policy_digest: String,
+    pub policy_record_digest: String,
+    pub signer_key_id: String,
+    pub authority_subject_digest: String,
+    pub authority_audience: String,
+    pub payload_digest: String,
+    pub expires_at_ms: u64,
+    pub barrier_committed_at_ms: u64,
+    pub barrier_digest: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PayloadReleaseBarrierOutcome {
+    Created(PayloadReleaseBarrierRecord),
+    Existing(PayloadReleaseBarrierRecord),
+}
+impl PayloadReleaseBarrierOutcome {
+    pub(crate) fn record(&self) -> &PayloadReleaseBarrierRecord {
+        match self {
+            Self::Created(record) | Self::Existing(record) => record,
+        }
+    }
+    pub(crate) fn was_created(&self) -> bool { matches!(self, Self::Created(_)) }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PayloadReleaseStoreState {
+    BarrierCommitted(PayloadReleaseBarrierRecord),
+    Attempted {
+        barrier: PayloadReleaseBarrierRecord,
+        started_at_ms: u64,
+        uncertain_at_ms: Option<u64>,
+    },
+    Acknowledged {
+        barrier: PayloadReleaseBarrierRecord,
+        started_at_ms: u64,
+        acknowledged_at_ms: u64,
+        worker_unit: String,
+        invocation_id: String,
+        receipt_digest: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -668,7 +894,7 @@ impl SupervisorAdmissionStore {
     }
 
     fn check_schema_objects(connection: &Connection) -> Result<(), AdmissionStoreError> {
-        const REQUIRED: [(&str, &str); 24] = [
+        const REQUIRED: [(&str, &str); 40] = [
             ("table", "admission_commits"),
             ("table", "authority_replays"),
             ("table", "supervisor_permits"),
@@ -693,6 +919,22 @@ impl SupervisorAdmissionStore {
             ("trigger", "authority_policy_current_initial_only"),
             ("trigger", "authority_policy_current_only_advance"),
             ("trigger", "authority_policy_current_no_delete"),
+            ("table", "payload_release_barriers"),
+            ("table", "payload_release_attempts"),
+            ("table", "payload_release_uncertain"),
+            ("table", "payload_release_receipts"),
+            ("table", "payload_release_policy_decisions"),
+            ("trigger", "payload_release_barriers_immutable_update"),
+            ("trigger", "payload_release_barriers_no_delete"),
+            ("trigger", "payload_release_attempts_immutable_update"),
+            ("trigger", "payload_release_attempts_no_delete"),
+            ("trigger", "payload_release_uncertain_immutable_update"),
+            ("trigger", "payload_release_uncertain_no_delete"),
+            ("trigger", "payload_release_receipts_immutable_update"),
+            ("trigger", "payload_release_receipts_no_delete"),
+            ("trigger", "payload_release_policy_decisions_immutable_update"),
+            ("trigger", "payload_release_policy_decisions_no_delete"),
+            ("trigger", "payload_release_policy_decisions_no_downgrade"),
         ];
 
         for (kind, name) in REQUIRED {
@@ -768,6 +1010,47 @@ impl SupervisorAdmissionStore {
         for required in ["singleton", "epoch", "record_digest"] {
             if current_names.get(required) != Some(&1) {
                 return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+
+        const RELEASE_TABLE_COLUMNS: [(&str, &[&str]); 5] = [
+            ("payload_release_barriers", &[
+                "release_id", "commit_id", "transaction_id", "attempt_id", "replay_key",
+                "permit_digest", "plan_digest", "machine_binding_digest",
+                "authority_provenance_digest", "policy_id", "policy_epoch",
+                "policy_digest", "policy_record_digest", "signer_key_id",
+                "authority_subject_digest", "authority_audience", "payload_digest",
+                "expires_at_ms", "barrier_committed_at_ms", "barrier_digest",
+            ]),
+            ("payload_release_attempts", &[
+                "release_id", "attempt_id", "started_at_ms", "attempt_digest",
+            ]),
+            ("payload_release_uncertain", &[
+                "release_id", "observed_at_ms", "uncertainty_digest",
+            ]),
+            ("payload_release_receipts", &[
+                "release_id", "payload_digest", "worker_unit", "invocation_id",
+                "receipt_digest", "acknowledged_at_ms", "receipt_record_digest",
+            ]),
+            ("payload_release_policy_decisions", &[
+                "decision_id", "release_id", "policy_epoch", "policy_record_digest",
+                "disposition", "decision_digest", "created_at_ms",
+            ]),
+        ];
+        for (table, required_columns) in RELEASE_TABLE_COLUMNS {
+            let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+            })?;
+            let mut actual = std::collections::BTreeMap::new();
+            for row in rows {
+                let (name, not_null) = row?;
+                actual.insert(name, not_null);
+            }
+            for required in required_columns {
+                if actual.get(*required) != Some(&1) {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
             }
         }
         Ok(())
@@ -1125,6 +1408,21 @@ impl SupervisorAdmissionStore {
         expected_current_record_digest: &str,
         request: &AuthorityPolicyEpochRequest,
     ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
+        self.advance_authority_policy_epoch_with_release_decisions(
+            expected_current_epoch,
+            expected_current_record_digest,
+            request,
+            &[],
+        )
+    }
+
+    pub(crate) fn advance_authority_policy_epoch_with_release_decisions(
+        &self,
+        expected_current_epoch: u64,
+        expected_current_record_digest: &str,
+        request: &AuthorityPolicyEpochRequest,
+        decisions: &[StoredReleasePolicyDecision],
+    ) -> Result<AuthorityPolicyEpochOutcome, AdmissionStoreError> {
         if !Self::valid_digest(expected_current_record_digest)
             || request.epoch != expected_current_epoch.checked_add(1)
                 .ok_or(AdmissionStoreError::PolicyEpochConflict)?
@@ -1144,6 +1442,12 @@ impl SupervisorAdmissionStore {
                 expected_current_record_digest,
             )?;
             if existing == expected {
+                Self::verify_existing_release_policy_decisions(
+                    &transaction,
+                    &existing,
+                    decisions,
+                    request.created_at_ms,
+                )?;
                 transaction.commit()?;
                 return Ok(AuthorityPolicyEpochOutcome::Existing(existing));
             }
@@ -1160,6 +1464,12 @@ impl SupervisorAdmissionStore {
         let record =
             Self::derive_policy_epoch_record(request, &current.record_digest)?;
         Self::insert_policy_epoch_record(&transaction, &record)?;
+        Self::append_release_policy_decisions(
+            &transaction,
+            &record,
+            decisions,
+            request.created_at_ms,
+        )?;
         let changed = transaction.execute(
             r#"
             UPDATE authority_policy_current
@@ -1192,6 +1502,967 @@ impl SupervisorAdmissionStore {
             });
         }
         Ok(AuthorityPolicyEpochOutcome::Created(stored))
+    }
+
+
+    fn derive_payload_release_id(
+        admission: &AdmissionRecord,
+        policy: &AuthorityPolicyEpochRecord,
+        signer_key_id: &str,
+        authority_subject_digest: &str,
+        authority_audience: &str,
+        payload_digest: &str,
+        expires_at_ms: u64,
+    ) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-payload-release-id-v1\0");
+        let epoch_bytes = policy.epoch.to_le_bytes();
+        let expiry_bytes = expires_at_ms.to_le_bytes();
+        for value in [
+            admission.transaction_id.as_bytes(),
+            admission.attempt_id.as_bytes(),
+            admission.commit_id.as_bytes(),
+            admission.replay_key.as_bytes(),
+            admission.permit_digest.as_bytes(),
+            admission.plan_digest.as_bytes(),
+            admission.machine_binding_digest.as_bytes(),
+            admission.authority_provenance_digest.as_bytes(),
+            signer_key_id.as_bytes(),
+            authority_subject_digest.as_bytes(),
+            authority_audience.as_bytes(),
+            payload_digest.as_bytes(),
+            policy.policy_id.as_bytes(),
+            epoch_bytes.as_slice(),
+            policy.policy_digest.as_bytes(),
+            policy.record_digest.as_bytes(),
+            expiry_bytes.as_slice(),
+        ] {
+            Self::update_hash_field(&mut hasher, value);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn derive_payload_barrier_digest(record: &PayloadReleaseBarrierRecord) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-payload-release-barrier-record-v1\\0");
+        let epoch = record.policy_epoch.to_le_bytes();
+        let expiry = record.expires_at_ms.to_le_bytes();
+        let committed = record.barrier_committed_at_ms.to_le_bytes();
+        for value in [
+            record.release_id.as_bytes(),
+            record.commit_id.as_bytes(),
+            record.transaction_id.as_bytes(),
+            record.attempt_id.as_bytes(),
+            record.replay_key.as_bytes(),
+            record.permit_digest.as_bytes(),
+            record.plan_digest.as_bytes(),
+            record.machine_binding_digest.as_bytes(),
+            record.authority_provenance_digest.as_bytes(),
+            record.policy_id.as_bytes(),
+            epoch.as_slice(),
+            record.policy_digest.as_bytes(),
+            record.policy_record_digest.as_bytes(),
+            record.signer_key_id.as_bytes(),
+            record.authority_subject_digest.as_bytes(),
+            record.authority_audience.as_bytes(),
+            record.payload_digest.as_bytes(),
+            expiry.as_slice(),
+            committed.as_slice(),
+        ] {
+            Self::update_hash_field(&mut hasher, value);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn validate_release_authority_provenance(
+        admission: &AdmissionRecord,
+        policy: &AuthorityPolicyEpochRecord,
+        request: &PayloadReleaseBarrierRequest,
+    ) -> Result<(), AdmissionStoreError> {
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&admission.authority_provenance)
+                .map_err(|_| AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let policy_json: serde_json::Value =
+            serde_json::from_slice(&policy.policy_json)
+                .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?;
+
+        let string_field = |object: &serde_json::Value, key: &str| {
+            object.get(key).and_then(serde_json::Value::as_str)
+        };
+        let integer_field = |object: &serde_json::Value, key: &str| {
+            object.get(key).and_then(serde_json::Value::as_u64)
+        };
+
+        let policy_id = string_field(&provenance, "policy_id")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let policy_digest = string_field(&provenance, "policy_digest")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let signer_key_id = string_field(&provenance, "signer_key_id")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let issuer = string_field(&provenance, "issuer")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let action = string_field(&provenance, "action")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let audience = string_field(&provenance, "audience")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let subject = string_field(&provenance, "subject_blake3")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let replay_key = string_field(&provenance, "replay_key")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let holon_id = string_field(&provenance, "holon_id")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let signature_evidence = string_field(&provenance, "signature_evidence_blake3")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let signed_proof_digest = string_field(&provenance, "signed_proof_blake3")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let issued_at_ms = integer_field(&provenance, "issued_at_ms")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let expires_at_ms = integer_field(&provenance, "expires_at_ms")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let verified_at_ms = integer_field(&provenance, "verified_at_ms")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        let policy_epoch = integer_field(&provenance, "policy_epoch")
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+
+        if integer_field(&provenance, "schema_version") != Some(1)
+            || string_field(&provenance, "kind") != Some("nixward-authority-provenance-v1")
+            || policy_id != policy.policy_id
+            || policy_digest != policy.policy_digest
+            || policy_epoch != policy.epoch
+            || policy_epoch != request.expected_policy_epoch
+            || signer_key_id != request.signer_key_id
+            || action != "change"
+            || audience != request.expected_authority_audience
+            || subject != request.expected_authority_subject_digest
+            || (audience == "nixward-change-v1" && subject != admission.plan_digest)
+            || replay_key != admission.replay_key
+            || !Self::valid_digest(holon_id)
+            || !Self::valid_digest(signature_evidence)
+            || !Self::valid_digest(signed_proof_digest)
+            || issued_at_ms > request.now_ms
+            || verified_at_ms < issued_at_ms
+            || verified_at_ms > request.now_ms
+            || request.now_ms > expires_at_ms
+            || expires_at_ms != request.expires_at_ms
+        {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        if ![
+            "nixward-change-v1",
+            "nixward-execution-intent-v1",
+        ]
+        .contains(&audience)
+        {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        let signed_proof_json = provenance
+            .get("signed_proof_json")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        if signed_proof_json.is_empty() || signed_proof_json.len() > 64 * 1024 {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+
+        let keys = policy_json.get("keys")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let trusted_key = keys.iter().find(|key| {
+            string_field(key, "key_id") == Some(signer_key_id)
+                && string_field(key, "issuer") == Some(issuer)
+        }).ok_or(AdmissionStoreError::ReleaseBarrierUnauthorized)?;
+        if trusted_key.get("revoked").and_then(serde_json::Value::as_bool) != Some(false) {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        let allowed_actions = trusted_key.get("allowed_actions")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        if !allowed_actions.iter().any(|value| value.as_str() == Some("change")) {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        let claims_holon = trusted_key.get("claims")
+            .and_then(|claims| claims.get("holon_id"))
+            .and_then(serde_json::Value::as_str);
+        if claims_holon != Some(holon_id) {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        let allowed_audiences = policy_json.get("allowed_audiences")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        if !allowed_audiences.iter().any(|value| value.as_str() == Some(audience)) {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        if policy.emergency_revoked_key_ids.iter().any(|key| key == signer_key_id) {
+            return Err(AdmissionStoreError::ReleaseBarrierUnauthorized);
+        }
+        Ok(())
+    }
+
+    fn map_payload_release_barrier(row: &Row<'_>) -> rusqlite::Result<PayloadReleaseBarrierRecord> {
+        let epoch: i64 = row.get(10)?;
+        let expires_at_ms: i64 = row.get(17)?;
+        let committed_at_ms: i64 = row.get(18)?;
+        if epoch <= 0 || expires_at_ms <= 0 || committed_at_ms < 0 {
+            return Err(rusqlite::Error::IntegralValueOutOfRange(10, epoch));
+        }
+        Ok(PayloadReleaseBarrierRecord {
+            release_id: row.get(0)?,
+            commit_id: row.get(1)?,
+            transaction_id: row.get(2)?,
+            attempt_id: row.get(3)?,
+            replay_key: row.get(4)?,
+            permit_digest: row.get(5)?,
+            plan_digest: row.get(6)?,
+            machine_binding_digest: row.get(7)?,
+            authority_provenance_digest: row.get(8)?,
+            policy_id: row.get(9)?,
+            policy_epoch: epoch as u64,
+            policy_digest: row.get(11)?,
+            policy_record_digest: row.get(12)?,
+            signer_key_id: row.get(13)?,
+            authority_subject_digest: row.get(14)?,
+            authority_audience: row.get(15)?,
+            payload_digest: row.get(16)?,
+            expires_at_ms: expires_at_ms as u64,
+            barrier_committed_at_ms: committed_at_ms as u64,
+            barrier_digest: row.get(19)?,
+        })
+    }
+
+    fn validate_payload_release_barrier(
+        record: &PayloadReleaseBarrierRecord,
+    ) -> Result<(), AdmissionStoreError> {
+        for digest in [
+            record.release_id.as_str(),
+            record.replay_key.as_str(),
+            record.permit_digest.as_str(),
+            record.plan_digest.as_str(),
+            record.machine_binding_digest.as_str(),
+            record.authority_provenance_digest.as_str(),
+            record.policy_digest.as_str(),
+            record.policy_record_digest.as_str(),
+            record.authority_subject_digest.as_str(),
+            record.payload_digest.as_str(),
+            record.barrier_digest.as_str(),
+        ] {
+            if !Self::valid_digest(digest) {
+                return Err(AdmissionStoreError::InconsistentStorage);
+            }
+        }
+        if !Self::valid_token(&record.transaction_id)
+            || !Self::valid_token(&record.attempt_id)
+            || !Self::valid_token(&record.policy_id)
+            || !Self::valid_token(&record.signer_key_id)
+            || !Self::valid_token(&record.authority_audience)
+            || Self::derive_payload_barrier_digest(record) != record.barrier_digest
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Ok(())
+    }
+
+    fn load_payload_release_barrier(
+        connection: &Connection,
+        release_id: &str,
+    ) -> Result<Option<PayloadReleaseBarrierRecord>, AdmissionStoreError> {
+        let record = connection.query_row(
+            r#"
+            SELECT release_id, commit_id, transaction_id, attempt_id, replay_key,
+                   permit_digest, plan_digest, machine_binding_digest,
+                   authority_provenance_digest, policy_id, policy_epoch,
+                   policy_digest, policy_record_digest, signer_key_id,
+                   authority_subject_digest, authority_audience, payload_digest,
+                   expires_at_ms, barrier_committed_at_ms, barrier_digest
+            FROM payload_release_barriers WHERE release_id = ?1
+            "#,
+            [release_id],
+            Self::map_payload_release_barrier,
+        ).optional()?;
+        if let Some(record) = &record {
+            Self::validate_payload_release_barrier(record)?;
+        }
+        Ok(record)
+    }
+
+    fn load_payload_release_barrier_by_commit(
+        connection: &Connection,
+        commit_id: &str,
+    ) -> Result<Option<PayloadReleaseBarrierRecord>, AdmissionStoreError> {
+        let record = connection.query_row(
+            r#"
+            SELECT release_id, commit_id, transaction_id, attempt_id, replay_key,
+                   permit_digest, plan_digest, machine_binding_digest,
+                   authority_provenance_digest, policy_id, policy_epoch,
+                   policy_digest, policy_record_digest, signer_key_id,
+                   authority_subject_digest, authority_audience, payload_digest,
+                   expires_at_ms, barrier_committed_at_ms, barrier_digest
+            FROM payload_release_barriers WHERE commit_id = ?1
+            "#,
+            [commit_id],
+            Self::map_payload_release_barrier,
+        ).optional()?;
+        if let Some(record) = &record {
+            Self::validate_payload_release_barrier(record)?;
+        }
+        Ok(record)
+    }
+
+
+    fn validate_payload_release_cross_bindings(
+        connection: &Connection,
+        barrier: &PayloadReleaseBarrierRecord,
+    ) -> Result<(), AdmissionStoreError> {
+        Self::validate_payload_release_barrier(barrier)?;
+        let admission = Self::load_by_commit(connection, &barrier.commit_id)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let policy = Self::load_policy_epoch_by_number(connection, barrier.policy_epoch)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+
+        if admission.transaction_id != barrier.transaction_id
+            || admission.attempt_id != barrier.attempt_id
+            || admission.replay_key != barrier.replay_key
+            || admission.permit_digest != barrier.permit_digest
+            || admission.plan_digest != barrier.plan_digest
+            || admission.machine_binding_digest != barrier.machine_binding_digest
+            || admission.authority_provenance_digest != barrier.authority_provenance_digest
+            || policy.policy_id != barrier.policy_id
+            || policy.policy_digest != barrier.policy_digest
+            || policy.record_digest != barrier.policy_record_digest
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        let expected_release_id = Self::derive_payload_release_id(
+            &admission,
+            &policy,
+            &barrier.signer_key_id,
+            &barrier.authority_subject_digest,
+            &barrier.authority_audience,
+            &barrier.payload_digest,
+            barrier.expires_at_ms,
+        );
+        if expected_release_id != barrier.release_id {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        let provenance: serde_json::Value =
+            serde_json::from_slice(&admission.authority_provenance)
+                .map_err(|_| AdmissionStoreError::InconsistentStorage)?;
+        let get_str = |key: &str| provenance.get(key).and_then(serde_json::Value::as_str);
+        let get_u64 = |key: &str| provenance.get(key).and_then(serde_json::Value::as_u64);
+        if get_str("policy_id") != Some(barrier.policy_id.as_str())
+            || get_str("policy_digest") != Some(barrier.policy_digest.as_str())
+            || get_u64("policy_epoch") != Some(barrier.policy_epoch)
+            || get_str("signer_key_id") != Some(barrier.signer_key_id.as_str())
+            || get_str("subject_blake3") != Some(barrier.authority_subject_digest.as_str())
+            || get_str("audience") != Some(barrier.authority_audience.as_str())
+            || get_str("replay_key") != Some(barrier.replay_key.as_str())
+            || get_str("action") != Some("change")
+        {
+            return Err(AdmissionStoreError::InconsistentStorage);
+        }
+        Ok(())
+    }
+
+    fn release_barrier_matches_request(
+        record: &PayloadReleaseBarrierRecord,
+        admission: &AdmissionRecord,
+        policy: &AuthorityPolicyEpochRecord,
+        request: &PayloadReleaseBarrierRequest,
+    ) -> bool {
+        record.commit_id == admission.commit_id
+            && record.transaction_id == admission.transaction_id
+            && record.attempt_id == admission.attempt_id
+            && record.replay_key == admission.replay_key
+            && record.permit_digest == admission.permit_digest
+            && record.plan_digest == admission.plan_digest
+            && record.machine_binding_digest == admission.machine_binding_digest
+            && record.authority_provenance_digest == admission.authority_provenance_digest
+            && record.policy_id == policy.policy_id
+            && record.policy_epoch == policy.epoch
+            && record.policy_digest == policy.policy_digest
+            && record.policy_record_digest == policy.record_digest
+            && record.signer_key_id == request.signer_key_id
+            && record.authority_subject_digest == request.expected_authority_subject_digest
+            && record.authority_audience == request.expected_authority_audience
+            && record.payload_digest == request.payload_digest
+            && record.expires_at_ms == request.expires_at_ms
+    }
+
+    fn release_decision_digest(
+        release_id: &str,
+        policy_epoch: u64,
+        policy_record_digest: &str,
+        disposition: StoredReleaseDisposition,
+        created_at_ms: u64,
+    ) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nixward-payload-release-policy-decision-v1\\0");
+        let epoch = policy_epoch.to_le_bytes();
+        let created = created_at_ms.to_le_bytes();
+        for value in [
+            release_id.as_bytes(),
+            epoch.as_slice(),
+            policy_record_digest.as_bytes(),
+            disposition.as_str().as_bytes(),
+            created.as_slice(),
+        ] {
+            Self::update_hash_field(&mut hasher, value);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    fn verify_existing_release_policy_decisions(
+        connection: &Connection,
+        policy: &AuthorityPolicyEpochRecord,
+        decisions: &[StoredReleasePolicyDecision],
+        created_at_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement = connection.prepare(
+            r#"
+            SELECT release_id, disposition, decision_digest
+            FROM payload_release_policy_decisions
+            WHERE policy_epoch = ?1 AND policy_record_digest = ?2
+            ORDER BY release_id
+            "#,
+        )?;
+        let rows = statement.query_map(
+            params![
+                i64::try_from(policy.epoch)
+                    .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?,
+                policy.record_digest,
+            ],
+            |row| Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            )),
+        )?;
+        let stored = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if stored.len() != decisions.len() {
+            return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for decision in decisions {
+            if !seen.insert(decision.release_id.as_str()) {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            }
+            let Some((_, disposition, digest)) =
+                stored.iter().find(|(release_id, _, _)| release_id == &decision.release_id)
+            else {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            };
+            let expected = Self::release_decision_digest(
+                &decision.release_id,
+                policy.epoch,
+                &policy.record_digest,
+                decision.disposition,
+                created_at_ms,
+            );
+            if disposition != decision.disposition.as_str() || digest != &expected {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            }
+        }
+        Ok(())
+    }
+
+
+    fn next_policy_revokes_or_disallows_barrier(
+        transaction: &rusqlite::Transaction<'_>,
+        next_policy: &AuthorityPolicyEpochRecord,
+        release_id: &str,
+    ) -> Result<bool, AdmissionStoreError> {
+        let (signer_key_id, authority_audience, admission_commit_id, barrier_policy_id): (String, String, String, String) =
+            transaction.query_row(
+                "SELECT signer_key_id, authority_audience, commit_id, policy_id FROM payload_release_barriers WHERE release_id = ?1",
+                [release_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        if next_policy.policy_id != barrier_policy_id
+            || next_policy.emergency_revoked_key_ids.contains(&signer_key_id) {
+            return Ok(true);
+        }
+        let admission = Self::load_by_commit(transaction, &admission_commit_id)?
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let provenance: serde_json::Value = serde_json::from_slice(&admission.authority_provenance)
+            .map_err(|_| AdmissionStoreError::InconsistentStorage)?;
+        let issuer = provenance.get("issuer").and_then(serde_json::Value::as_str)
+            .ok_or(AdmissionStoreError::InconsistentStorage)?;
+        let policy_json: serde_json::Value = serde_json::from_slice(&next_policy.policy_json)
+            .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let keys = policy_json.get("keys").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        let Some(key) = keys.iter().find(|key| {
+            key.get("key_id").and_then(serde_json::Value::as_str) == Some(signer_key_id.as_str())
+                && key.get("issuer").and_then(serde_json::Value::as_str) == Some(issuer)
+        }) else {
+            return Ok(true);
+        };
+        if key.get("revoked").and_then(serde_json::Value::as_bool) != Some(false) {
+            return Ok(true);
+        }
+        let actions = key.get("allowed_actions").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        if !actions.iter().any(|value| value.as_str() == Some("change")) {
+            return Ok(true);
+        }
+        let audiences = policy_json.get("allowed_audiences").and_then(serde_json::Value::as_array)
+            .ok_or(AdmissionStoreError::InvalidPolicyEpochRecord)?;
+        Ok(!audiences.iter().any(|value| value.as_str() == Some(authority_audience.as_str())))
+    }
+
+    fn append_release_policy_decisions(
+        transaction: &rusqlite::Transaction<'_>,
+        next_policy: &AuthorityPolicyEpochRecord,
+        decisions: &[StoredReleasePolicyDecision],
+        created_at_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement = transaction.prepare(
+            r#"
+            SELECT b.release_id
+            FROM payload_release_barriers AS b
+            LEFT JOIN payload_release_receipts AS r ON r.release_id = b.release_id
+            WHERE r.release_id IS NULL
+            ORDER BY b.release_id
+            "#,
+        )?;
+        let active = statement.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        if active.len() != decisions.len() {
+            return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+        }
+        let active_set = active.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let mut seen = std::collections::BTreeSet::new();
+        for decision in decisions {
+            if !active_set.contains(&decision.release_id) || !seen.insert(decision.release_id.clone()) {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionRequired);
+            }
+            let prior_stop: bool = transaction.query_row(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM payload_release_policy_decisions
+                    WHERE release_id = ?1 AND disposition = 'stop_or_recovery_required'
+                )
+                "#,
+                [&decision.release_id],
+                |row| row.get(0),
+            )?;
+            if prior_stop && decision.disposition == StoredReleaseDisposition::PreserveExistingBarrier {
+                return Err(AdmissionStoreError::ReleasePolicyDecisionDowngrade);
+            }
+            if decision.disposition == StoredReleaseDisposition::PreserveExistingBarrier
+                && Self::next_policy_revokes_or_disallows_barrier(
+                    transaction,
+                    next_policy,
+                    &decision.release_id,
+                )?
+            {
+                return Err(AdmissionStoreError::ReleaseSignerRevoked);
+            }
+            let digest = Self::release_decision_digest(
+                &decision.release_id,
+                next_policy.epoch,
+                &next_policy.record_digest,
+                decision.disposition,
+                created_at_ms,
+            );
+            transaction.execute(
+                r#"
+                INSERT INTO payload_release_policy_decisions (
+                    decision_id, release_id, policy_epoch, policy_record_digest,
+                    disposition, decision_digest, created_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+                params![
+                    digest,
+                    decision.release_id,
+                    i64::try_from(next_policy.epoch)
+                        .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?,
+                    next_policy.record_digest,
+                    decision.disposition.as_str(),
+                    digest,
+                    i64::try_from(created_at_ms)
+                        .map_err(|_| AdmissionStoreError::InvalidPolicyEpochRecord)?,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Create one immutable release barrier. Existing barriers are returned
+    /// read-only on an exact retry, even after policy advancement, so a lost
+    /// acknowledgement cannot accidentally authorize a second barrier.
+    pub(crate) fn create_payload_release_barrier(
+        &self,
+        request: &PayloadReleaseBarrierRequest,
+    ) -> Result<PayloadReleaseBarrierOutcome, AdmissionStoreError> {
+        if !Self::valid_digest(&request.commit_id)
+            || !Self::valid_digest(&request.expected_policy_record_digest)
+            || !Self::valid_token(&request.signer_key_id)
+            || !Self::valid_digest(&request.expected_authority_subject_digest)
+            || !Self::valid_digest(&request.payload_digest)
+            || request.expected_policy_epoch == 0
+            || !["nixward-change-v1", "nixward-execution-intent-v1"]
+                .contains(&request.expected_authority_audience.as_str())
+            || request.expires_at_ms == 0
+        {
+            return Err(AdmissionStoreError::InvalidInput("payload release barrier request"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        Self::verify_policy_epoch_history(&transaction)?;
+        let admission = Self::load_by_commit(&transaction, &request.commit_id)?
+            .ok_or(AdmissionStoreError::NotFound)?;
+        let policy = Self::load_policy_epoch_by_number(&transaction, request.expected_policy_epoch)?
+            .ok_or(AdmissionStoreError::PolicyEpochConflict)?;
+        if policy.record_digest != request.expected_policy_record_digest {
+            return Err(AdmissionStoreError::ReleaseBarrierStalePolicy);
+        }
+
+        if let Some(existing) =
+            Self::load_payload_release_barrier_by_commit(&transaction, &request.commit_id)?
+        {
+            if !Self::release_barrier_matches_request(&existing, &admission, &policy, request) {
+                return Err(AdmissionStoreError::ReleaseBarrierConflict);
+            }
+            Self::validate_payload_release_cross_bindings(&transaction, &existing)?;
+            transaction.commit()?;
+            return Ok(PayloadReleaseBarrierOutcome::Existing(existing));
+        }
+
+        let current = Self::load_current_policy_epoch_from(&transaction)?
+            .ok_or(AdmissionStoreError::PolicyEpochNotInitialized)?;
+        if current.epoch != request.expected_policy_epoch
+            || current.record_digest != request.expected_policy_record_digest
+        {
+            return Err(AdmissionStoreError::ReleaseBarrierStalePolicy);
+        }
+        if admission.state != AdmissionState::Unresolved {
+            return Err(AdmissionStoreError::ReleaseBarrierConflict);
+        }
+        if request.now_ms > request.expires_at_ms {
+            return Err(AdmissionStoreError::ReleaseBarrierExpired);
+        }
+        if request.now_ms > request.expires_at_ms {
+            return Err(AdmissionStoreError::ReleaseBarrierExpired);
+        }
+        Self::validate_release_authority_provenance(&admission, &current, request)?;
+
+        let release_id = Self::derive_payload_release_id(
+            &admission,
+            &current,
+            &request.signer_key_id,
+            &request.expected_authority_subject_digest,
+            &request.expected_authority_audience,
+            &request.payload_digest,
+            request.expires_at_ms,
+        );
+        let mut record = PayloadReleaseBarrierRecord {
+            release_id,
+            commit_id: admission.commit_id.clone(),
+            transaction_id: admission.transaction_id.clone(),
+            attempt_id: admission.attempt_id.clone(),
+            replay_key: admission.replay_key.clone(),
+            permit_digest: admission.permit_digest.clone(),
+            plan_digest: admission.plan_digest.clone(),
+            machine_binding_digest: admission.machine_binding_digest.clone(),
+            authority_provenance_digest: admission.authority_provenance_digest.clone(),
+            policy_id: current.policy_id.clone(),
+            policy_epoch: current.epoch,
+            policy_digest: current.policy_digest.clone(),
+            policy_record_digest: current.record_digest.clone(),
+            signer_key_id: request.signer_key_id.clone(),
+            authority_subject_digest: request.expected_authority_subject_digest.clone(),
+            authority_audience: request.expected_authority_audience.clone(),
+            payload_digest: request.payload_digest.clone(),
+            expires_at_ms: request.expires_at_ms,
+            barrier_committed_at_ms: request.now_ms,
+            barrier_digest: String::new(),
+        };
+        record.barrier_digest = Self::derive_payload_barrier_digest(&record);
+        Self::validate_payload_release_barrier(&record)?;
+        transaction.execute(
+            r#"
+            INSERT INTO payload_release_barriers (
+                release_id, commit_id, transaction_id, attempt_id, replay_key,
+                permit_digest, plan_digest, machine_binding_digest,
+                authority_provenance_digest, policy_id, policy_epoch, policy_digest,
+                policy_record_digest, signer_key_id, authority_subject_digest,
+                authority_audience, payload_digest, expires_at_ms,
+                barrier_committed_at_ms, barrier_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+            "#,
+            params![
+                record.release_id, record.commit_id, record.transaction_id, record.attempt_id,
+                record.replay_key, record.permit_digest, record.plan_digest,
+                record.machine_binding_digest, record.authority_provenance_digest,
+                record.policy_id, i64::try_from(record.policy_epoch)
+                    .map_err(|_| AdmissionStoreError::InvalidInput("policy epoch"))?,
+                record.policy_digest, record.policy_record_digest, record.signer_key_id,
+                record.authority_subject_digest, record.authority_audience,
+                record.payload_digest, i64::try_from(record.expires_at_ms)
+                    .map_err(|_| AdmissionStoreError::InvalidInput("release expiry"))?,
+                i64::try_from(record.barrier_committed_at_ms)
+                    .map_err(|_| AdmissionStoreError::InvalidInput("barrier timestamp"))?,
+                record.barrier_digest,
+            ],
+        )?;
+        transaction.commit()?;
+        let stored = Self::load_payload_release_barrier(&connection, &record.release_id)?
+            .ok_or_else(|| AdmissionStoreError::ReadBackUncertain {
+                commit_id: record.release_id.clone(),
+                detail: "release barrier not visible after commit".into(),
+            })?;
+        if stored != record {
+            return Err(AdmissionStoreError::ReadBackUncertain {
+                commit_id: record.release_id.clone(),
+                detail: "release barrier differs from committed record".into(),
+            });
+        }
+        Ok(PayloadReleaseBarrierOutcome::Created(stored))
+    }
+
+    /// Reserve the unique external release attempt. The caller MUST write no
+    /// worker payload bytes until this method has committed successfully.
+    pub(crate) fn begin_payload_release_attempt(
+        &self,
+        release_id: &str,
+        now_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        if !Self::valid_digest(release_id) {
+            return Err(AdmissionStoreError::InvalidInput("release ID"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
+            .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
+        let admission_state: String = transaction.query_row(
+            "SELECT state FROM transaction_attempts WHERE commit_id = ?1",
+            [&barrier.commit_id],
+            |row| row.get(0),
+        )?;
+        if admission_state != "unresolved" {
+            return Err(AdmissionStoreError::ReleaseAttemptBlocked);
+        }
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payload_release_attempts WHERE release_id = ?1)",
+            [release_id],
+            |row| row.get(0),
+        )?;
+        if existing {
+            return Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted);
+        }
+        let stop_required: bool = transaction.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM payload_release_policy_decisions
+                WHERE release_id = ?1 AND disposition = 'stop_or_recovery_required'
+            )
+            "#,
+            [release_id],
+            |row| row.get(0),
+        )?;
+        if stop_required {
+            return Err(AdmissionStoreError::ReleaseAttemptBlocked);
+        }
+        if now_ms > barrier.expires_at_ms {
+            return Err(AdmissionStoreError::ReleaseBarrierExpired);
+        }
+        let started_at_ms = i64::try_from(now_ms)
+            .map_err(|_| AdmissionStoreError::InvalidInput("release attempt timestamp"))?;
+        let attempt_digest = Self::digest_domain(
+            b"nixward-payload-release-attempt-v1\\0",
+            format!("{release_id}:{}:{now_ms}", barrier.attempt_id).as_bytes(),
+        );
+        transaction.execute(
+            "INSERT INTO payload_release_attempts (release_id, attempt_id, started_at_ms, attempt_digest) VALUES (?1, ?2, ?3, ?4)",
+            params![release_id, barrier.attempt_id, started_at_ms, attempt_digest],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Mark a started attempt as ambiguous. A receipt may still arrive later;
+    /// this marker never authorizes another send.
+    pub(crate) fn mark_payload_release_uncertain(
+        &self,
+        release_id: &str,
+        observed_at_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        if !Self::valid_digest(release_id) {
+            return Err(AdmissionStoreError::InvalidInput("release ID"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        let started: Option<i64> = transaction.query_row(
+            "SELECT started_at_ms FROM payload_release_attempts WHERE release_id = ?1",
+            [release_id],
+            |row| row.get(0),
+        ).optional()?;
+        let started = started.ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
+            .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
+        if observed_at_ms < started as u64 {
+            return Err(AdmissionStoreError::InvalidInput("uncertainty timestamp"));
+        }
+        let existing: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payload_release_uncertain WHERE release_id = ?1)",
+            [release_id],
+            |row| row.get(0),
+        )?;
+        if existing {
+            return Err(AdmissionStoreError::ReleaseAttemptAlreadyUncertain);
+        }
+        let has_receipt: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payload_release_receipts WHERE release_id = ?1)",
+            [release_id],
+            |row| row.get(0),
+        )?;
+        if has_receipt {
+            return Err(AdmissionStoreError::InvalidTransition);
+        }
+        let digest = Self::digest_domain(
+            b"nixward-payload-release-uncertain-v1\\0",
+            format!("{release_id}:{observed_at_ms}").as_bytes(),
+        );
+        transaction.execute(
+            "INSERT INTO payload_release_uncertain (release_id, observed_at_ms, uncertainty_digest) VALUES (?1, ?2, ?3)",
+            params![
+                release_id,
+                i64::try_from(observed_at_ms)
+                    .map_err(|_| AdmissionStoreError::InvalidInput("uncertainty timestamp"))?,
+                digest
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persist the one exact worker receipt. It may reconcile an uncertain
+    /// attempt, but it never creates or retries a release attempt.
+    pub(crate) fn acknowledge_payload_release(
+        &self,
+        release_id: &str,
+        payload_digest: &str,
+        worker_unit: &str,
+        invocation_id: &str,
+        receipt_digest: &str,
+        acknowledged_at_ms: u64,
+    ) -> Result<(), AdmissionStoreError> {
+        if !Self::valid_digest(release_id)
+            || !Self::valid_digest(payload_digest)
+            || !Self::valid_digest(receipt_digest)
+            || !Self::valid_token(worker_unit)
+            || !Self::valid_token(invocation_id)
+        {
+            return Err(AdmissionStoreError::InvalidInput("payload release receipt"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::check_join_invariants(&transaction)?;
+        let barrier = Self::load_payload_release_barrier(&transaction, release_id)?
+            .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&transaction, &barrier)?;
+        if barrier.payload_digest != payload_digest {
+            return Err(AdmissionStoreError::ReleaseReceiptConflict);
+        }
+        let started: Option<i64> = transaction.query_row(
+            "SELECT started_at_ms FROM payload_release_attempts WHERE release_id = ?1",
+            [release_id],
+            |row| row.get(0),
+        ).optional()?;
+        let started = started.ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        if acknowledged_at_ms < started as u64 {
+            return Err(AdmissionStoreError::ReleaseReceiptConflict);
+        }
+        let acknowledged_at_i64 = i64::try_from(acknowledged_at_ms)
+            .map_err(|_| AdmissionStoreError::InvalidInput("receipt timestamp"))?;
+        let existing: Option<(String, String, String, String, i64)> = transaction.query_row(
+            "SELECT payload_digest, worker_unit, invocation_id, receipt_digest, acknowledged_at_ms FROM payload_release_receipts WHERE release_id = ?1",
+            [release_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()?;
+        if let Some((old_payload, old_unit, old_invocation, old_receipt_digest, old_at)) = existing {
+            if old_payload == payload_digest && old_unit == worker_unit
+                && old_invocation == invocation_id && old_receipt_digest == receipt_digest
+                && old_at == acknowledged_at_i64
+            {
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(AdmissionStoreError::ReleaseReceiptConflict);
+        }
+        let receipt_record_digest = Self::digest_domain(
+            b"nixward-payload-release-receipt-v1\\0",
+            format!("{release_id}:{payload_digest}:{worker_unit}:{invocation_id}:{receipt_digest}:{acknowledged_at_ms}").as_bytes(),
+        );
+        transaction.execute(
+            r#"
+            INSERT INTO payload_release_receipts (
+                release_id, payload_digest, worker_unit, invocation_id,
+                receipt_digest, acknowledged_at_ms, receipt_record_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                release_id, payload_digest, worker_unit, invocation_id, receipt_digest,
+                acknowledged_at_i64,
+                receipt_record_digest,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn payload_release_state(
+        &self,
+        release_id: &str,
+    ) -> Result<PayloadReleaseStoreState, AdmissionStoreError> {
+        let connection = self.connect()?;
+        Self::check_join_invariants(&connection)?;
+        let barrier = Self::load_payload_release_barrier(&connection, release_id)?
+            .ok_or(AdmissionStoreError::ReleaseBarrierNotFound)?;
+        Self::validate_payload_release_cross_bindings(&connection, &barrier)?;
+        let attempt: Option<(i64, Option<i64>)> = connection.query_row(
+            r#"
+            SELECT a.started_at_ms, u.observed_at_ms
+            FROM payload_release_attempts AS a
+            LEFT JOIN payload_release_uncertain AS u ON u.release_id = a.release_id
+            WHERE a.release_id = ?1
+            "#,
+            [release_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((started_at, uncertain_at)) = attempt else {
+            return Ok(PayloadReleaseStoreState::BarrierCommitted(barrier));
+        };
+        let receipt: Option<(i64, String, String, String)> = connection.query_row(
+            r#"
+            SELECT acknowledged_at_ms, worker_unit, invocation_id, receipt_digest
+            FROM payload_release_receipts WHERE release_id = ?1
+            "#,
+            [release_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+        if let Some((ack, unit, invocation, digest)) = receipt {
+            return Ok(PayloadReleaseStoreState::Acknowledged {
+                barrier,
+                started_at_ms: started_at as u64,
+                acknowledged_at_ms: ack as u64,
+                worker_unit: unit,
+                invocation_id: invocation,
+                receipt_digest: digest,
+            });
+        }
+        Ok(PayloadReleaseStoreState::Attempted {
+            barrier,
+            started_at_ms: started_at as u64,
+            uncertain_at_ms: uncertain_at.map(|value| value as u64),
+        })
     }
 
     /// Return the current trusted-store snapshot as audit/configuration data.
@@ -1379,6 +2650,155 @@ impl SupervisorAdmissionStore {
         })
     }
 
+
+    fn verify_payload_release_integrity(
+        connection: &Connection,
+    ) -> Result<(), AdmissionStoreError> {
+        let mut statement =
+            connection.prepare("SELECT release_id FROM payload_release_barriers ORDER BY release_id")?;
+        let release_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        for release_id in release_ids {
+            let barrier = Self::load_payload_release_barrier(connection, &release_id)?
+                .ok_or(AdmissionStoreError::InconsistentStorage)?;
+            Self::validate_payload_release_cross_bindings(connection, &barrier)?;
+
+            let attempt: Option<(String, i64, String)> = connection.query_row(
+                "SELECT attempt_id, started_at_ms, attempt_digest FROM payload_release_attempts WHERE release_id = ?1",
+                [&release_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?;
+            if let Some((attempt_id, started_at_ms, attempt_digest)) = attempt {
+                if attempt_id != barrier.attempt_id || started_at_ms < 0 {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let expected = Self::digest_domain(
+                    b"nixward-payload-release-attempt-v1\\0",
+                    format!("{release_id}:{attempt_id}:{started_at_ms}").as_bytes(),
+                );
+                if expected != attempt_digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+
+                let uncertain: Option<(i64, String)> = connection.query_row(
+                    "SELECT observed_at_ms, uncertainty_digest FROM payload_release_uncertain WHERE release_id = ?1",
+                    [&release_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                if let Some((observed_at_ms, uncertainty_digest)) = uncertain {
+                    if observed_at_ms < started_at_ms {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                    let expected = Self::digest_domain(
+                        b"nixward-payload-release-uncertain-v1\\0",
+                        format!("{release_id}:{observed_at_ms}").as_bytes(),
+                    );
+                    if expected != uncertainty_digest {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                }
+
+                let receipt: Option<(String, String, String, String, i64, String)> = connection.query_row(
+                    r#"
+                    SELECT payload_digest, worker_unit, invocation_id, receipt_digest,
+                           acknowledged_at_ms, receipt_record_digest
+                    FROM payload_release_receipts WHERE release_id = ?1
+                    "#,
+                    [&release_id],
+                    |row| Ok((
+                        row.get(0)?, row.get(1)?, row.get(2)?,
+                        row.get(3)?, row.get(4)?, row.get(5)?,
+                    )),
+                ).optional()?;
+                if let Some((payload, unit, invocation, receipt_digest, ack_at, record_digest)) = receipt {
+                    if payload != barrier.payload_digest
+                        || !Self::valid_token(&unit)
+                        || !Self::valid_token(&invocation)
+                        || !Self::valid_digest(&receipt_digest)
+                        || ack_at < started_at_ms
+                    {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                    let expected = Self::digest_domain(
+                        b"nixward-payload-release-receipt-v1\\0",
+                        format!("{release_id}:{payload}:{unit}:{invocation}:{receipt_digest}:{ack_at}").as_bytes(),
+                    );
+                    if expected != record_digest {
+                        return Err(AdmissionStoreError::InconsistentStorage);
+                    }
+                }
+            } else {
+                let child_exists: bool = connection.query_row(
+                    r#"
+                    SELECT EXISTS(SELECT 1 FROM payload_release_uncertain WHERE release_id = ?1)
+                        OR EXISTS(SELECT 1 FROM payload_release_receipts WHERE release_id = ?1)
+                    "#,
+                    [&release_id],
+                    |row| row.get(0),
+                )?;
+                if child_exists {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+            }
+
+            let mut decisions = connection.prepare(
+                r#"
+                SELECT policy_epoch, policy_record_digest, disposition,
+                       decision_digest, created_at_ms
+                FROM payload_release_policy_decisions
+                WHERE release_id = ?1 ORDER BY policy_epoch
+                "#,
+            )?;
+            let rows = decisions.query_map([&release_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?;
+            let stored_decisions = rows.collect::<Result<Vec<_>, _>>()?;
+            drop(decisions);
+            let mut stop_seen = false;
+            for (epoch_raw, policy_digest, disposition, digest, created_at_raw) in stored_decisions {
+                if epoch_raw <= 0 || created_at_raw < 0 {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let policy = Self::load_policy_epoch_by_number(connection, epoch_raw as u64)?
+                    .ok_or(AdmissionStoreError::InconsistentStorage)?;
+                if policy.record_digest != policy_digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                let disposition_value = match disposition.as_str() {
+                    "preserve_existing_barrier" => StoredReleaseDisposition::PreserveExistingBarrier,
+                    "stop_or_recovery_required" => StoredReleaseDisposition::StopOrRecoveryRequired,
+                    _ => return Err(AdmissionStoreError::InconsistentStorage),
+                };
+                if stop_seen && disposition_value == StoredReleaseDisposition::PreserveExistingBarrier {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+                if disposition_value == StoredReleaseDisposition::StopOrRecoveryRequired {
+                    stop_seen = true;
+                }
+                let expected = Self::release_decision_digest(
+                    &release_id,
+                    epoch_raw as u64,
+                    &policy_digest,
+                    disposition_value,
+                    created_at_raw as u64,
+                );
+                if expected != digest {
+                    return Err(AdmissionStoreError::InconsistentStorage);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_join_invariants(connection: &Connection) -> Result<(), AdmissionStoreError> {
         let inconsistent: i64 = connection.query_row(
             r#"
@@ -1418,6 +2838,7 @@ impl SupervisorAdmissionStore {
             return Err(AdmissionStoreError::InconsistentStorage);
         }
         Self::check_policy_epoch_pointer(connection)?;
+        Self::verify_payload_release_integrity(connection)?;
         Ok(())
     }
 
@@ -1751,6 +3172,21 @@ impl SupervisorAdmissionStore {
         let Some(existing) = Self::load_by_commit(&transaction, commit_id)? else {
             return Err(AdmissionStoreError::NotFound);
         };
+        let unreceipted_release: bool = transaction.query_row(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM payload_release_barriers AS b
+                LEFT JOIN payload_release_receipts AS r ON r.release_id = b.release_id
+                WHERE b.commit_id = ?1 AND r.release_id IS NULL
+            )
+            "#,
+            [commit_id],
+            |row| row.get(0),
+        )?;
+        if unreceipted_release {
+            return Err(AdmissionStoreError::ReleaseBarrierInFlight);
+        }
         match existing.state {
             AdmissionState::Resolved {
                 resolution_digest: existing_digest,
@@ -1866,6 +3302,498 @@ mod tests {
     }
 
 
+    fn release_ready_fixture(
+        temp: &tempfile::TempDir,
+        revoked: Vec<String>,
+    ) -> (
+        SupervisorAdmissionStore,
+        AdmissionRecord,
+        AuthorityPolicyEpochRecord,
+        PayloadReleaseBarrierRequest,
+    ) {
+        let store = store_in(temp);
+        let policy_request = policy_request(1, revoked);
+        let policy = store
+            .initialize_authority_policy_epoch(&policy_request)
+            .unwrap()
+            .record()
+            .clone();
+
+        let mut admission_request = request(
+            "tx-payload-release",
+            "attempt-payload-release",
+            0x81,
+            0x82,
+            0x83,
+        );
+        admission_request.authority_provenance = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "nixward-authority-provenance-v1",
+            "policy_id": policy.policy_id,
+            "policy_digest": policy.policy_digest,
+            "policy_epoch": policy.epoch,
+            "issuer": "owner-root",
+            "signer_key_id": "owner-1",
+            "action": "change",
+            "audience": "nixward-change-v1",
+            "subject_blake3": admission_request.plan_digest,
+            "holon_id": "33".repeat(32),
+            "challenge_blake3": "44".repeat(32),
+            "replay_key": admission_request.replay_key,
+            "signature_evidence_blake3": "55".repeat(32),
+            "signed_proof_blake3": "66".repeat(32),
+            "signed_proof_json": [1, 2, 3, 4],
+            "issued_at_ms": 1000,
+            "expires_at_ms": 5000,
+            "verified_at_ms": 1100
+        })).unwrap();
+
+        let admission = store
+            .admit(&admission_request)
+            .unwrap()
+            .record()
+            .clone();
+        let barrier_request = PayloadReleaseBarrierRequest {
+            commit_id: admission.commit_id.clone(),
+            expected_policy_epoch: policy.epoch,
+            expected_policy_record_digest: policy.record_digest.clone(),
+            signer_key_id: "owner-1".into(),
+            expected_authority_subject_digest: admission.plan_digest.clone(),
+            expected_authority_audience: "nixward-change-v1".into(),
+            payload_digest: "99".repeat(32),
+            expires_at_ms: 5000,
+            now_ms: 1200,
+        };
+        (store, admission, policy, barrier_request)
+    }
+
+
+
+    #[test]
+    fn creates_and_reloads_release_barrier_bound_to_admission_and_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let result = store.create_payload_release_barrier(&request).unwrap();
+        assert!(result.was_created());
+        let record = result.record().clone();
+        assert_eq!(record.commit_id, admission.commit_id);
+        assert_eq!(record.attempt_id, admission.attempt_id);
+        assert_eq!(record.policy_epoch, policy.epoch);
+        assert_eq!(record.policy_record_digest, policy.record_digest);
+        assert_eq!(record.authority_provenance_digest, admission.authority_provenance_digest);
+        assert_eq!(record.authority_subject_digest, admission.plan_digest);
+        assert_eq!(record.payload_digest, request.payload_digest);
+        assert!(matches!(
+            store.payload_release_state(&record.release_id).unwrap(),
+            PayloadReleaseStoreState::BarrierCommitted(_)
+        ));
+        store.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn exact_barrier_retry_after_lost_ack_returns_existing_historical_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let first = store.create_payload_release_barrier(&request).unwrap();
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        let retry = reopened.create_payload_release_barrier(&request).unwrap();
+        assert!(first.was_created());
+        assert!(!retry.was_created());
+        assert_eq!(first.record(), retry.record());
+    }
+
+    #[test]
+    fn changed_payload_or_authority_binding_on_existing_barrier_is_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let first = store.create_payload_release_barrier(&request).unwrap();
+
+        let mut changed = request.clone();
+        changed.payload_digest = "aa".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&changed),
+            Err(AdmissionStoreError::ReleaseBarrierConflict)
+        ));
+
+        let mut changed_subject = request;
+        changed_subject.expected_authority_subject_digest = "bb".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&changed_subject),
+            Err(AdmissionStoreError::ReleaseBarrierConflict)
+        ));
+        assert_eq!(
+            store.payload_release_state(&first.record().release_id).unwrap(),
+            PayloadReleaseStoreState::BarrierCommitted(first.record().clone())
+        );
+    }
+
+    #[test]
+    fn stale_policy_epoch_or_record_digest_cannot_create_new_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store
+            .advance_authority_policy_epoch(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec![]),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierStalePolicy)
+        ));
+    }
+
+    #[test]
+    fn emergency_revoked_signer_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) =
+            release_ready_fixture(&temp, vec!["owner-1".into()]);
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierUnauthorized)
+        ));
+    }
+
+
+    #[test]
+    fn expired_barrier_cannot_start_release_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.begin_payload_release_attempt(
+                &barrier.record().release_id,
+                request.expires_at_ms + 1
+            ),
+            Err(AdmissionStoreError::ReleaseBarrierExpired)
+        ));
+    }
+
+    #[test]
+    fn expired_authority_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, mut request) = release_ready_fixture(&temp, vec![]);
+        request.now_ms = request.expires_at_ms + 1;
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierExpired)
+        ));
+    }
+
+    #[test]
+    fn unbound_authority_subject_cannot_create_release_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, mut request) = release_ready_fixture(&temp, vec![]);
+        request.expected_authority_subject_digest = "cc".repeat(32);
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierUnauthorized)
+        ));
+    }
+
+    #[test]
+    fn release_attempt_is_at_most_once_across_store_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1400),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        assert!(matches!(
+            reopened.payload_release_state(&release_id).unwrap(),
+            PayloadReleaseStoreState::Attempted {
+                started_at_ms: 1300,
+                uncertain_at_ms: None,
+                ..
+            }
+        ));
+        reopened.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn uncertain_attempt_never_resends_and_late_exact_receipt_reconciles() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        store.mark_payload_release_uncertain(&release_id, 1600).unwrap();
+
+        let reopened = SupervisorAdmissionStore::new(store.path().to_path_buf());
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1700),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        assert!(matches!(
+            reopened.mark_payload_release_uncertain(&release_id, 1700),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyUncertain)
+        ));
+
+        // The worker receipt was durably produced before the supervisor's
+        // timeout observation, so its timestamp may be earlier than 1600.
+        reopened.acknowledge_payload_release(
+            &release_id,
+            &request.payload_digest,
+            "nixward-payload-release.service",
+            "invocation-1",
+            &"dd".repeat(32),
+            1500,
+        ).unwrap();
+        assert!(matches!(
+            reopened.payload_release_state(&release_id).unwrap(),
+            PayloadReleaseStoreState::Acknowledged {
+                started_at_ms: 1300,
+                acknowledged_at_ms: 1500,
+                ..
+            }
+        ));
+        assert!(matches!(
+            reopened.begin_payload_release_attempt(&release_id, 1800),
+            Err(AdmissionStoreError::ReleaseAttemptAlreadyStarted)
+        ));
+        reopened.verify_integrity().unwrap();
+    }
+
+    #[test]
+    fn foreign_payload_receipt_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        assert!(matches!(
+            store.acknowledge_payload_release(
+                &release_id,
+                &"ee".repeat(32),
+                "nixward-payload-release.service",
+                "invocation-1",
+                &"dd".repeat(32),
+                1500,
+            ),
+            Err(AdmissionStoreError::ReleaseReceiptConflict)
+        ));
+    }
+
+    #[test]
+    fn policy_update_with_outstanding_barrier_requires_explicit_disposition() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec![]),
+            ),
+            Err(AdmissionStoreError::ReleasePolicyDecisionRequired)
+        ));
+        assert_eq!(
+            store.current_authority_policy_epoch().unwrap().unwrap(),
+            policy
+        );
+    }
+
+    #[test]
+    fn preserve_decision_and_policy_advance_commit_atomically_with_existing_barrier() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let decision = StoredReleasePolicyDecision {
+            release_id: barrier.record().release_id.clone(),
+            disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+        };
+        store.advance_authority_policy_epoch_with_release_decisions(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec!["owner-2".into()]),
+            &[decision],
+        ).unwrap();
+
+        // The exact old barrier remains retrievable, but no new policy epoch
+        // can be silently substituted into its immutable identity.
+        let retry = store.create_payload_release_barrier(&request).unwrap();
+        assert!(!retry.was_created());
+        assert_eq!(retry.record(), barrier.record());
+        store.begin_payload_release_attempt(&barrier.record().release_id, 1300).unwrap();
+    }
+
+
+    #[test]
+    fn emergency_revocation_cannot_be_overridden_by_preserve_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec!["owner-1".into()]),
+                &[StoredReleasePolicyDecision {
+                    release_id: barrier.record().release_id.clone(),
+                    disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+                }],
+            ),
+            Err(AdmissionStoreError::ReleaseSignerRevoked)
+        ));
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), policy);
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                1,
+                &policy.record_digest,
+                &policy_request(2, vec!["owner-1".into()]),
+                &[StoredReleasePolicyDecision {
+                    release_id: barrier.record().release_id,
+                    disposition: StoredReleaseDisposition::StopOrRecoveryRequired,
+                }],
+            ),
+            Ok(AuthorityPolicyEpochOutcome::Created(_))
+        ));
+    }
+
+    #[test]
+    fn stop_recovery_decision_blocks_release_and_cannot_be_downgraded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+
+        store.advance_authority_policy_epoch_with_release_decisions(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec!["owner-1".into()]),
+            &[StoredReleasePolicyDecision {
+                release_id: release_id.clone(),
+                disposition: StoredReleaseDisposition::StopOrRecoveryRequired,
+            }],
+        ).unwrap();
+
+        assert!(matches!(
+            store.begin_payload_release_attempt(&release_id, 1300),
+            Err(AdmissionStoreError::ReleaseAttemptBlocked)
+        ));
+        let current = store.current_authority_policy_epoch().unwrap().unwrap();
+        assert!(matches!(
+            store.advance_authority_policy_epoch_with_release_decisions(
+                current.epoch,
+                &current.record_digest,
+                &policy_request(3, vec![]),
+                &[StoredReleasePolicyDecision {
+                    release_id,
+                    disposition: StoredReleaseDisposition::PreserveExistingBarrier,
+                }],
+            ),
+            Err(AdmissionStoreError::ReleasePolicyDecisionDowngrade)
+        ));
+        assert_eq!(store.current_authority_policy_epoch().unwrap().unwrap(), current);
+    }
+
+    #[test]
+    fn policy_advance_wins_before_barrier_and_stale_barrier_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, policy, request) = release_ready_fixture(&temp, vec![]);
+        store.advance_authority_policy_epoch(
+            1,
+            &policy.record_digest,
+            &policy_request(2, vec![]),
+        ).unwrap();
+        assert!(matches!(
+            store.create_payload_release_barrier(&request),
+            Err(AdmissionStoreError::ReleaseBarrierStalePolicy)
+        ));
+    }
+
+    #[test]
+    fn transaction_resolution_is_blocked_until_exact_release_receipt_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.record_resolution(&admission.commit_id, &"ff".repeat(32), 1500),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
+        ));
+        store.begin_payload_release_attempt(&barrier.record().release_id, 1300).unwrap();
+        assert!(matches!(
+            store.record_resolution(&admission.commit_id, &"ff".repeat(32), 1500),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
+        ));
+        store.acknowledge_payload_release(
+            &barrier.record().release_id,
+            &request.payload_digest,
+            "nixward-payload-release.service",
+            "invocation-1",
+            &"dd".repeat(32),
+            1400,
+        ).unwrap();
+        assert!(store.record_resolution(
+            &admission.commit_id,
+            &"ff".repeat(32),
+            1500
+        ).is_ok());
+    }
+
+    #[test]
+    fn unreceipted_admission_cannot_resolve_but_may_start_its_reserved_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        assert!(matches!(
+            store.record_resolution(
+                &admission.commit_id,
+                &"ff".repeat(32),
+                1250,
+            ),
+            Err(AdmissionStoreError::ReleaseBarrierInFlight)
+        ));
+        assert!(store.begin_payload_release_attempt(&barrier.record().release_id, 1300).is_ok());
+    }
+
+    #[test]
+    fn full_integrity_detects_payload_release_barrier_tampering() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let connection = store.connect().unwrap();
+        connection.execute(
+            "DROP TRIGGER payload_release_barriers_immutable_update",
+            [],
+        ).unwrap();
+        connection.execute(
+            "UPDATE payload_release_barriers SET payload_digest = ?1 WHERE release_id = ?2",
+            params!["ab".repeat(32), barrier.record().release_id],
+        ).unwrap();
+        drop(connection);
+        assert!(matches!(
+            store.verify_integrity(),
+            Err(AdmissionStoreError::InconsistentStorage)
+        ));
+    }
+
+    #[test]
+    fn exact_receipt_retry_requires_the_same_receipt_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _admission, _policy, request) = release_ready_fixture(&temp, vec![]);
+        let barrier = store.create_payload_release_barrier(&request).unwrap();
+        let release_id = barrier.record().release_id.clone();
+        store.begin_payload_release_attempt(&release_id, 1300).unwrap();
+        store.acknowledge_payload_release(
+            &release_id, &request.payload_digest, "nixward-payload-release.service",
+            "invocation-1", &"dd".repeat(32), 1500,
+        ).unwrap();
+        assert!(matches!(
+            store.acknowledge_payload_release(
+                &release_id, &request.payload_digest, "nixward-payload-release.service",
+                "invocation-1", &"ee".repeat(32), 1500,
+            ),
+            Err(AdmissionStoreError::ReleaseReceiptConflict)
+        ));
+    }
+
     #[test]
     fn refuses_schema_v1_database_without_authority_provenance_migration() {
         let temp = tempfile::tempdir().unwrap();
@@ -1897,7 +3825,7 @@ mod tests {
                 "public_key_hex": "11".repeat(32),
                 "allowed_actions": ["change"],
                 "revoked": false,
-                "claims": {}
+                "claims": { "holon_id": "33".repeat(32) }
             }],
             "max_ttl_ms": 900000,
             "allowed_audiences": ["nixward-change-v1"]
@@ -1910,6 +3838,22 @@ mod tests {
             update_provenance: format!("verified-policy-update-proof-epoch-{epoch}").into_bytes(),
             created_at_ms: 1_800_000_000_000 + epoch,
         }
+    }
+
+    #[test]
+    fn schema_v3_database_is_refused_without_release_barrier_v4_migration() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("supervisor/admission.sqlite3");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = Connection::open(&path).unwrap();
+        legacy.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        legacy.pragma_update(None, "user_version", 3_i64).unwrap();
+        drop(legacy);
+        let store = SupervisorAdmissionStore::new(path);
+        assert!(matches!(
+            store.connect(),
+            Err(AdmissionStoreError::UnsupportedSchema(3))
+        ));
     }
 
     #[test]

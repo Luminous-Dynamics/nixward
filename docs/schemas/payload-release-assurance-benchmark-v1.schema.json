@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/payload-release-assurance-benchmark-v1.schema.json",
+  "title": "Nixward payload-release assurance benchmark v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "status",
+    "purpose",
+    "assurance_invariants",
+    "baselines",
+    "trial_policy",
+    "metric_contract",
+    "aspirational_performance_targets",
+    "scenarios"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.payload-release-assurance-benchmark"
+    },
+    "version": {
+      "const": 1
+    },
+    "status": {
+      "const": "proposed-not-executed"
+    },
+    "purpose": {
+      "type": "string",
+      "minLength": 1
+    },
+    "assurance_invariants": {
+      "type": "array",
+      "minItems": 5,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "baselines": {
+      "type": "array",
+      "minItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "description"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "role": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "trial_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clean_min_trials",
+        "fault_min_trials",
+        "concurrency_min_trials",
+        "durability_min_trials",
+        "p99_claim_min_trials",
+        "preserve_raw_trials",
+        "preserve_excluded_trials_and_reasons",
+        "include_exact_source_sha",
+        "include_storage_and_filesystem_configuration",
+        "include_kernel_sqlite_and_nix_versions"
+      ],
+      "properties": {
+        "clean_min_trials": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "fault_min_trials": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "concurrency_min_trials": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "durability_min_trials": {
+          "type": "integer",
+          "minimum": 100
+        },
+        "p99_claim_min_trials": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "preserve_raw_trials": {
+          "const": true
+        },
+        "preserve_excluded_trials_and_reasons": {
+          "const": true
+        },
+        "include_exact_source_sha": {
+          "const": true
+        },
+        "include_storage_and_filesystem_configuration": {
+          "const": true
+        },
+        "include_kernel_sqlite_and_nix_versions": {
+          "const": true
+        }
+      }
+    },
+    "metric_contract": {
+      "type": "array",
+      "minItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "unit",
+          "aggregation"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "aggregation": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "aspirational_performance_targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_profile",
+        "barrier_commit_p95_ms",
+        "barrier_commit_p99_ms",
+        "attempt_reservation_p95_ms",
+        "attempt_reservation_p99_ms",
+        "combined_barrier_and_attempt_p95_ms",
+        "combined_barrier_and_attempt_p99_ms",
+        "note"
+      ],
+      "properties": {
+        "reference_profile": {
+          "type": "string"
+        },
+        "barrier_commit_p95_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "barrier_commit_p99_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "attempt_reservation_p95_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "attempt_reservation_p99_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "combined_barrier_and_attempt_p95_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "combined_barrier_and_attempt_p99_ms": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 27,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "trial_class",
+          "fault_boundary",
+          "expected_disposition",
+          "minimum_trials",
+          "required_observations"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "trial_class": {
+            "enum": [
+              "clean",
+              "fault",
+              "concurrency",
+              "durability",
+              "performance"
+            ]
+          },
+          "fault_boundary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expected_disposition": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minimum_trials": {
+            "type": "integer",
+            "minimum": 30
+          },
+          "required_observations": {
+            "type": "array",
+            "minItems": 6,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}
