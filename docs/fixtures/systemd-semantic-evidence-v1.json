@@ -1,0 +1,100 @@
+{
+  "schema": "org.luminousdynamics.nixward.systemd-semantic-evidence-vectors",
+  "version": 1,
+  "status": "proposed-not-executed",
+  "description": "Expected outcome catalogue. The Rust library unit tests construct full records and are the executable source of truth.",
+  "vectors": [
+    {
+      "id": "complete-switch-success",
+      "expected_outcome": "verified_success"
+    },
+    {
+      "id": "nixos-test-keeps-predecessor-boot-default",
+      "expected_outcome": "verified_success"
+    },
+    {
+      "id": "nixos-boot-keeps-predecessor-running",
+      "expected_outcome": "verified_success"
+    },
+    {
+      "id": "job-done-with-wrong-host-state",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "missing-jobremoved",
+      "expected_outcome": "reconciliation_required"
+    },
+    {
+      "id": "foreign-unit-on-returned-job-path",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "duplicate-jobremoved",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "start-before-subscription",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "pid-only-attribution",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "payload-release-before-identity-persist",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "receipt-process-start-tuple-mismatch",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "unit-invocation-mismatch",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "failed-job-predecessor-restored",
+      "expected_outcome": "verified_recovery"
+    },
+    {
+      "id": "failed-job-candidate-still-active",
+      "expected_outcome": "reconciliation_required"
+    },
+    {
+      "id": "manager-boot-mismatch",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "missing-host-state",
+      "expected_outcome": "reconciliation_required"
+    },
+    {
+      "id": "test-boot-default-mismatch",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "authority-policy-epoch-zero",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "authority-replay-key-mismatch",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "unknown-wire-field",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "invalid-observation-source-digest",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "manager-events-out-of-order",
+      "expected_outcome": "safe_hold"
+    },
+    {
+      "id": "non-oneshot-worker-unit",
+      "expected_outcome": "safe_hold"
+    }
+  ]
+}

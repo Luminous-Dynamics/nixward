@@ -1,0 +1,580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/systemd-semantic-evidence-v1.schema.json",
+  "title": "Nixward systemd/NixOS semantic evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "binding",
+    "authority",
+    "expected_authority_subject_digest",
+    "operation",
+    "expected_unit",
+    "candidate_store_path",
+    "predecessor_store_path",
+    "manager_boot_id",
+    "kernel_boot_id",
+    "admission_committed_monotonic_ns",
+    "subscription_established_monotonic_ns",
+    "start_requested_monotonic_ns",
+    "start_unit_reply",
+    "manager_events",
+    "worker_identity",
+    "unit_snapshot",
+    "payload_receipt",
+    "host_state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.systemd-execution-evidence"
+    },
+    "version": {
+      "const": 1
+    },
+    "binding": {
+      "$ref": "#/$defs/binding"
+    },
+    "authority": {
+      "$ref": "#/$defs/authority"
+    },
+    "expected_authority_subject_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "operation": {
+      "enum": [
+        "switch",
+        "test",
+        "boot"
+      ]
+    },
+    "expected_unit": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_store_path": {
+      "type": "string",
+      "pattern": "^/nix/store/[^/]+$"
+    },
+    "predecessor_store_path": {
+      "type": "string",
+      "pattern": "^/nix/store/[^/]+$"
+    },
+    "manager_boot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kernel_boot_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "admission_committed_monotonic_ns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "subscription_established_monotonic_ns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "start_requested_monotonic_ns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "start_unit_reply": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/startReply"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "manager_events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/event"
+      }
+    },
+    "worker_identity": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/worker"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "unit_snapshot": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/unit"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload_receipt": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "host_state": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/host"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transaction_id",
+        "attempt_id",
+        "admission_commit_id",
+        "replay_key",
+        "permit_digest",
+        "plan_digest",
+        "machine_binding_digest"
+      ],
+      "properties": {
+        "transaction_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "admission_commit_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "replay_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "permit_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "plan_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "machine_binding_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy_id",
+        "policy_digest",
+        "policy_epoch",
+        "issuer",
+        "signer_key_id",
+        "action",
+        "audience",
+        "subject_digest",
+        "challenge_digest",
+        "replay_key",
+        "evidence_digest",
+        "issued_at_ms",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "policy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "policy_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signer_key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "const": "change"
+        },
+        "audience": {
+          "enum": [
+            "nixward-change-v1",
+            "nixward-execution-intent-v1"
+          ]
+        },
+        "subject_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "challenge_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "replay_key": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "startReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_object_path",
+        "unit_name",
+        "received_monotonic_ns"
+      ],
+      "properties": {
+        "job_object_path": {
+          "type": "string",
+          "pattern": "^/org/freedesktop/systemd1/job/[0-9]+$"
+        },
+        "unit_name": {
+          "type": "string"
+        },
+        "received_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "job_id",
+        "job_object_path",
+        "unit_name",
+        "result",
+        "monotonic_ns",
+        "manager_boot_id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "job_new",
+            "job_removed"
+          ]
+        },
+        "job_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "job_object_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "oneOf": [
+            {
+              "enum": [
+                "done",
+                "canceled",
+                "timeout",
+                "failed",
+                "dependency",
+                "skipped"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "manager_boot_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "lookup_method",
+        "unit_name",
+        "unit_object_path",
+        "invocation_id",
+        "manager_boot_id",
+        "kernel_boot_id",
+        "pid",
+        "process_start_ticks",
+        "observed_monotonic_ns",
+        "persisted_monotonic_ns"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "lookup_method": {
+          "enum": [
+            "get_unit_by_pidfd",
+            "get_unit_by_pid"
+          ]
+        },
+        "unit_name": {
+          "type": "string"
+        },
+        "unit_object_path": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "manager_boot_id": {
+          "type": "string"
+        },
+        "kernel_boot_id": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_start_ticks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "observed_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "persisted_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit_name",
+        "unit_object_path",
+        "invocation_id",
+        "manager_boot_id",
+        "service_type",
+        "active_state",
+        "sub_state",
+        "result",
+        "exec_main_status",
+        "observed_monotonic_ns"
+      ],
+      "properties": {
+        "unit_name": {
+          "type": "string"
+        },
+        "unit_object_path": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "manager_boot_id": {
+          "type": "string"
+        },
+        "service_type": {
+          "type": "string"
+        },
+        "active_state": {
+          "type": "string"
+        },
+        "sub_state": {
+          "type": "string"
+        },
+        "result": {
+          "type": "string"
+        },
+        "exec_main_status": {
+          "type": "integer"
+        },
+        "observed_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "unit_name",
+        "invocation_id",
+        "pid",
+        "process_start_ticks",
+        "released_monotonic_ns",
+        "exited_monotonic_ns",
+        "persisted_monotonic_ns",
+        "exit_status",
+        "receipt_sha256"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "unit_name": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "process_start_ticks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "released_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exited_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "persisted_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exit_status": {
+          "type": "integer"
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sha256",
+        "boot_id",
+        "observed_monotonic_ns"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "boot_id": {
+          "type": "string"
+        },
+        "observed_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding",
+        "boot_id",
+        "observed_monotonic_ns",
+        "active_profile_store_path",
+        "running_system_store_path",
+        "boot_default_store_path",
+        "runtime_health",
+        "sources"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "boot_id": {
+          "type": "string"
+        },
+        "observed_monotonic_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_profile_store_path": {
+          "type": "string",
+          "pattern": "^/nix/store/[^/]+$"
+        },
+        "running_system_store_path": {
+          "type": "string",
+          "pattern": "^/nix/store/[^/]+$"
+        },
+        "boot_default_store_path": {
+          "type": "string",
+          "pattern": "^/nix/store/[^/]+$"
+        },
+        "runtime_health": {
+          "enum": [
+            "healthy",
+            "unhealthy",
+            "unknown"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/source"
+          }
+        }
+      }
+    }
+  }
+}
