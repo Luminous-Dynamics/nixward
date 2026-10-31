@@ -726,6 +726,17 @@ mod tests {
     }
 
     #[test]
+    fn same_epoch_with_wrong_policy_record_digest_is_rejected() {
+        let mut ledger = ledger();
+        let mut request = intent(ledger.current_policy());
+        request.expected_policy_record_digest = digest('f');
+        assert!(matches!(
+            ledger.create_barrier(&request),
+            Err(ReleaseBarrierError::StalePolicy)
+        ));
+    }
+
+    #[test]
     fn barrier_cannot_be_created_after_signer_is_revoked() {
         let admission = admission();
         let mut ledger = ReleaseBarrierLedger::new(admission, policy(1, &["owner-key-1"])).unwrap();

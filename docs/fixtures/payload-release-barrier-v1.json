@@ -83,6 +83,10 @@
     {
       "id": "policy-change-after-attempt-no-resend",
       "expected_disposition": "no-resend"
+    },
+    {
+      "id": "same-epoch-wrong-policy-record-digest",
+      "expected_disposition": "reject-stale-policy"
     }
   ]
 }
