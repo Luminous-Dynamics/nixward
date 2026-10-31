@@ -685,7 +685,7 @@ fn verify_trial(
     let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
     let mut barrier_requests = BTreeMap::<String, BarrierRequestState>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
-    let mut attempt_requests = BTreeMap::<String, (String, u64)>::new();
+    let mut attempt_requests = BTreeMap::<String, (String, u64, u64)>::new();
     let mut barriers = BTreeMap::<String, BarrierState>::new();
     let mut admission_releases = BTreeMap::<String, String>::new();
     let mut retries = Vec::<(String, String)>::new();
@@ -952,7 +952,7 @@ fn verify_trial(
                 if request_id.trim().is_empty()
                     || *wall_time_ms < barrier.barrier_wall_time_ms
                     || *wall_time_ms > barrier.expires_at_ms
-                    || attempt_requests.insert(request_id.clone(), (release_id.clone(), *at_ns)).is_some()
+                    || attempt_requests.insert(request_id.clone(), (release_id.clone(), *at_ns, *wall_time_ms)).is_some()
                 {
                     violations.push("malformed, expired or duplicate attempt request".into());
                 }
@@ -960,7 +960,7 @@ fn verify_trial(
             EvidenceEvent::ReleaseAttemptReserved {
                 request_id, release_id, attempt_id, payload_digest, at_ns, wall_time_ms, ..
             } => {
-                let Some((requested_release, requested_at)) = attempt_requests.get(request_id) else {
+                let Some((requested_release, requested_at, requested_wall_time_ms)) = attempt_requests.get(request_id) else {
                     violations.push("attempt reservation has no preceding request".into());
                     continue;
                 };
@@ -972,6 +972,7 @@ fn verify_trial(
                     || *at_ns < *requested_at
                     || *at_ns < barrier.committed_at_ns
                     || *wall_time_ms < barrier.barrier_wall_time_ms
+                    || *wall_time_ms < *requested_wall_time_ms
                     || *wall_time_ms > barrier.expires_at_ms
                     || attempt_id != &barrier.attempt_id
                     || payload_digest != &barrier.payload_digest
@@ -1641,6 +1642,22 @@ mod tests {
         assert_eq!(verified.report.resolution_count, 1);
         assert_eq!(verified.measurements.barrier_latency_ns, vec![20]);
         assert_eq!(verified.measurements.attempt_latency_ns, vec![10]);
+    }
+
+
+    #[test]
+    fn rejects_wall_clock_rollback_between_attempt_request_and_reservation() {
+        let (mut trial, scenario) = clean_trial();
+        if let EvidenceEvent::ReleaseAttemptRequested { wall_time_ms, .. } = &mut trial.events[2] {
+            *wall_time_ms = 1_040;
+        }
+        if let EvidenceEvent::ReleaseAttemptReserved { wall_time_ms, .. } = &mut trial.events[3] {
+            *wall_time_ms = 1_039;
+        }
+        rehash(&mut trial);
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| value.contains("not authorized")));
     }
 
     #[test]
