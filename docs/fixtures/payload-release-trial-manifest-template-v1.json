@@ -1,0 +1,19 @@
+{
+  "schema": "org.luminousdynamics.nixward.payload-release-trial-manifest",
+  "version": 1,
+  "corpus_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_commit_sha": "0000000000000000000000000000000000000000",
+  "flake_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "environment": {
+    "kernel_release": "REPLACE_WITH_EXACT_KERNEL_RELEASE",
+    "systemd_version": "REPLACE_WITH_EXACT_SYSTEMD_VERSION",
+    "sqlite_version": "REPLACE_WITH_EXACT_SQLITE_VERSION",
+    "nix_version": "REPLACE_WITH_EXACT_NIX_VERSION",
+    "filesystem": "REPLACE_WITH_FILESYSTEM",
+    "mount_options": "REPLACE_WITH_MOUNT_OPTIONS",
+    "device_model": "REPLACE_WITH_DEVICE_MODEL",
+    "device_firmware": "REPLACE_WITH_DEVICE_FIRMWARE",
+    "cpu_model": "REPLACE_WITH_CPU_MODEL"
+  },
+  "trials": []
+}
