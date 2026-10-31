@@ -235,6 +235,7 @@ A benchmark summary without per-trial evidence is not a qualification result.
 
 The current industry tools solve adjacent problems:
 
+- **nixos-rebuild** is the native local activation baseline, but its three main modes are semantically different: `switch` attempts runtime activation and makes the new configuration the boot default; `test` attempts runtime activation without making it the boot default; `boot` selects the next boot configuration without activating it in the running system. Run separate matched workloads for these modes rather than comparing unlike outcomes.
 - **Colmena** is explicitly a stateless NixOS deployment tool and emphasizes parallel fleet deployment. Its documented parallel controls include a default deployment limit of 10, with experimental parallel evaluation. Nixward should not claim superiority on fleet throughput or stateless simplicity.
 - **deploy-rs** provides multi-profile Nix-flake deployments, remote activation, concurrency and magic rollback using a post-deploy connectivity confirmation. This is a strong availability-oriented baseline; Nixward should test against that behavior, not a weaker hand-written SSH loop.
 - **nixos-rebuild** is the native local activation baseline. It remains the right comparison for single-host build/activation overhead.
@@ -265,3 +266,7 @@ Reviewed 2026-10-31. These sources define the comparison envelope; they do not e
 - Colmena's parallelism manual documents bounded deployment concurrency (default 10) and experimental parallel evaluation: https://colmena.cli.rs/unstable/features/parallelism.html
 - deploy-rs documents multi-profile deployment, concurrent targets and magic rollback via a post-deploy connectivity confirmation: https://github.com/serokell/deploy-rs
 - systemd's D-Bus API documents GetUnitByPIDFD and why it is safer than PID-only lookup because PIDs can be recycled: https://www.freedesktop.org/software/systemd/man/262/org.freedesktop.systemd1.html
+
+
+Additional baseline reference:
+- NixOS 26.05 manual, “Changing the Configuration”, defines the operational distinction between `nixos-rebuild switch`, `test` and `boot`: https://nixos.org/manual/nixos/stable/
