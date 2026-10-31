@@ -13,7 +13,7 @@ pub const ACTIVATION_TRACE_VERSION: u16 = 1;
 const PLAN_DOMAIN: &[u8] = b"nixward-activation-plan-v1\0";
 const TRACE_DOMAIN: &[u8] = b"nixward-activation-trace-v1\0";
 const MAX_ACTIVATION_STEPS: usize = 256;
-const MAX_ACTIVATION_EVENTS: usize = 16_384;
+const MAX_ACTIVATION_EVENTS: usize = 2_048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
