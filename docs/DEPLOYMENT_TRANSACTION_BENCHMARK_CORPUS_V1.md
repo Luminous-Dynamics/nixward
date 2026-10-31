@@ -29,11 +29,11 @@ The 18 scenarios cover:
 - independent and contending transaction admission;
 - pre-commit database failure, lost commit acknowledgement and WAL/checkpoint performance.
 
-Each scenario includes preconditions, an explicit fault boundary where relevant, required independent observations, allowed terminal disposition, forbidden claims, supported comparison baselines, metric tags and minimum trial count.
+Each scenario includes preconditions, an explicit fault boundary where relevant, required independent observations, allowed terminal disposition, forbidden claims, supported comparison baselines, metric tags, a trial class and minimum trial count. Clean latency baselines and performance profiles require at least 30 trials; fault, concurrency and storage-correctness profiles require at least 100.
 
 ## Trial and evidence rules
 
-- Clean functional latency baselines start at 30 trials.
+- Clean functional latency baselines and explicitly tagged performance profiles start at 30 trials.
 - Fault, concurrency and storage correctness screens start at 100 trials per scenario.
 - Use at least 1,000 trials for stable p99 estimates where tail latency is a release claim.
 - Preserve raw data, all excluded trials and reasons, fault seeds, source SHAs and the exact VM/storage configuration.

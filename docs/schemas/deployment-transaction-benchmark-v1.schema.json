@@ -104,7 +104,8 @@
           "expected_disposition",
           "forbidden_claims",
           "metric_tags",
-          "min_trials"
+          "min_trials",
+          "trial_class"
         ],
         "properties": {
           "id": {
@@ -201,6 +202,15 @@
           "min_trials": {
             "type": "integer",
             "minimum": 1
+          },
+          "trial_class": {
+            "enum": [
+              "clean-baseline",
+              "fault-correctness",
+              "concurrency-correctness",
+              "storage-correctness",
+              "performance"
+            ]
           }
         }
       }

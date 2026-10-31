@@ -476,8 +476,19 @@
               && scenario.forbidden_claims != []
               && builtins.isList scenario.metric_tags
               && scenario.metric_tags != []
+              && builtins.elem scenario.trial_class [
+                "clean-baseline"
+                "fault-correctness"
+                "concurrency-correctness"
+                "storage-correctness"
+                "performance"
+              ]
               && builtins.isInt scenario.min_trials
-              && scenario.min_trials >= (if scenario.category == "functional" then 30 else 100)
+              && scenario.min_trials >= (
+                if scenario.trial_class == "clean-baseline" || scenario.trial_class == "performance"
+                then 30
+                else 100
+              )
               && (if scenario.category == "fault" || scenario.category == "concurrency" || scenario.category == "storage"
                   then builtins.isAttrs scenario.fault_injection
                     && builtins.isString scenario.fault_injection.boundary

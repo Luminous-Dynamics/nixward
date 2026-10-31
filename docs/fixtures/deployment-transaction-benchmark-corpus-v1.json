@@ -113,7 +113,8 @@
         "readback",
         "control_plane_overhead"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "clean-baseline"
     },
     {
       "id": "service-configuration-switch",
@@ -154,7 +155,8 @@
         "control_plane",
         "post_state"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "clean-baseline"
     },
     {
       "id": "test-does-not-change-boot-default",
@@ -188,7 +190,8 @@
         "boot_profile_invariant",
         "post_state"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "clean-baseline"
     },
     {
       "id": "boot-only-does-not-activate",
@@ -221,7 +224,8 @@
         "boot_profile_invariant",
         "post_state"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "clean-baseline"
     },
     {
       "id": "successful-exact-closure-activation",
@@ -261,7 +265,8 @@
         "post_state",
         "evidence_completeness"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "clean-baseline"
     },
     {
       "id": "failed-activation-predecessor-reconcile",
@@ -302,7 +307,8 @@
         "operator_intervention",
         "safe_hold"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "lost-startunit-reply",
@@ -341,7 +347,8 @@
         "reconciliation_time",
         "safe_hold"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "jobremoved-missing-or-reordered",
@@ -378,7 +385,8 @@
         "invocation_attribution",
         "reconciliation_time"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "supervisor-crash-before-release",
@@ -415,7 +423,8 @@
         "payload_release_count",
         "safe_hold"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "supervisor-crash-after-release",
@@ -452,7 +461,8 @@
         "duplicate_execution",
         "reconciliation_time"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "manager-restart-during-worker",
@@ -489,7 +499,8 @@
         "identity_conflicts",
         "reconciliation_time"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "host-reboot-during-activation",
@@ -528,7 +539,8 @@
         "profile_post_state",
         "operator_intervention"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "network-loss-during-remote-confirmation",
@@ -567,7 +579,8 @@
         "rollback_outcome",
         "operator_intervention"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "fault-correctness"
     },
     {
       "id": "concurrent-independent-transactions",
@@ -604,7 +617,8 @@
         "commit_latency",
         "busy_timeout_rate"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "concurrency-correctness"
     },
     {
       "id": "concurrent-same-transaction-different-replay",
@@ -641,7 +655,8 @@
         "duplicate_attempt_count",
         "lock_wait"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "concurrency-correctness"
     },
     {
       "id": "sqlite-precommit-failure-matrix",
@@ -678,7 +693,8 @@
         "retry_latency",
         "database_integrity"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "storage-correctness"
     },
     {
       "id": "sqlite-commit-ack-lost",
@@ -714,7 +730,8 @@
         "lost_ack_recovery_latency",
         "duplicate_attempt_count"
       ],
-      "min_trials": 100
+      "min_trials": 100,
+      "trial_class": "storage-correctness"
     },
     {
       "id": "sqlite-wal-growth-checkpoint",
@@ -752,7 +769,8 @@
         "wal_size",
         "read_latency"
       ],
-      "min_trials": 30
+      "min_trials": 30,
+      "trial_class": "performance"
     }
   ]
 }
