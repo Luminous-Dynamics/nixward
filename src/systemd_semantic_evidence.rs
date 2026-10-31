@@ -305,6 +305,12 @@ fn valid_store_path(value: &str) -> bool {
         && !name[33..].is_empty()
         && !name.bytes().any(|byte| byte.is_ascii_whitespace() || byte == b'/')
 }
+
+fn job_path_matches_id(path: &str, job_id: u32) -> bool {
+    path.strip_prefix("/org/freedesktop/systemd1/job/")
+        .and_then(|suffix| suffix.parse::<u32>().ok())
+        == Some(job_id)
+}
 fn nonempty(value: &str) -> bool { !value.trim().is_empty() }
 
 fn validate_binding(e: &SystemdExecutionEvidence, f: &mut Findings) {
@@ -427,8 +433,8 @@ fn validate_dispatch(e: &SystemdExecutionEvidence, f: &mut Findings) -> Option<C
     if news.len() != 1 || removed.len() != 1 { return None; }
     let new = news[0];
     let done = removed[0];
-    if new.job_id == 0 || new.job_id != done.job_id {
-        f.violation("JobNew and JobRemoved numeric job IDs do not match");
+    if new.job_id == 0 || new.job_id != done.job_id || !job_path_matches_id(&path, new.job_id) {
+        f.violation("JobNew/JobRemoved numeric job IDs do not match the returned systemd job path");
     }
     if new.job_object_path != done.job_object_path
         || new.unit_name != done.unit_name
@@ -652,7 +658,7 @@ fn validate_recovery(e: &SystemdExecutionEvidence, job: &CorrelatedJob, f: &mut 
         || !is_digest(&recovery.receipt_digest)
         || recovery.exit_code != 0
         || recovery.job_id == 0
-        || !recovery.job_object_path.starts_with("/org/freedesktop/systemd1/job/")
+        || !job_path_matches_id(&recovery.job_object_path, recovery.job_id)
         || !nonempty(&recovery.unit_name)
         || recovery.job_result != "done"
         || recovery.manager_boot_id != e.binding.kernel_boot_id
@@ -924,6 +930,18 @@ mod tests {
         assert_eq!(result.classification, TerminalClassification::ReconciliationRequired);
         assert!(result.violations.iter().any(|item| item.contains("numeric job IDs")));
     }
+    #[test]
+    fn numeric_job_id_must_match_the_returned_object_path() {
+        let mut e = valid_evidence(NixosOperation::Switch);
+        e.dispatch.returned_job_object_path =
+            Some("/org/freedesktop/systemd1/job/999".into());
+        e.manager_events[0].job_object_path = "/org/freedesktop/systemd1/job/999".into();
+        e.manager_events[1].job_object_path = "/org/freedesktop/systemd1/job/999".into();
+        let result = eval(&e);
+        assert_eq!(result.classification, TerminalClassification::ReconciliationRequired);
+        assert!(result.violations.iter().any(|item| item.contains("numeric job IDs")));
+    }
+
     #[test]
     fn pidfd_invocation_mismatch_cannot_prove_worker_identity() {
         let mut e = valid_evidence(NixosOperation::Switch);

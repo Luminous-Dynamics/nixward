@@ -22,6 +22,8 @@ Expected unit ActiveState/SubState/Result are part of the approved operation con
 
 The evaluator requires durable admission read-back before subscription, JobRemoved subscription before StartUnit, exactly one StartUnit call, one JobNew and one matching JobRemoved for the returned object path, identical numeric job ID/unit/manager boot, PIDFD-mapped unit and InvocationID, matching transaction/attempt/commit/plan/machine digests, a durable process receipt, the declared unit state, exact NixOS profile post-state and every required runtime health check.
 
+The returned D-Bus job path must encode the same numeric job ID as JobNew and JobRemoved. The PIDFD-derived worker identity must be captured while the process is still alive (before its receipt's exit timestamp), then durably persisted before the release record.
+
 A failed/canceled/timeout activation is not success. It can be classified as verified recovery only with a separately authorized recovery attempt, a matching recovery receipt, independently observed predecessor selected/running/boot-default profiles and passing predecessor health checks. Otherwise it is reconciliation-required or safe-hold.
 
 Safe-hold requires an explicit fence marker. Missing or ambiguous evidence without such a fence is reconciliation-required. Safe-hold is never scored as successful recovery.
