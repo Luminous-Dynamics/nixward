@@ -32,7 +32,9 @@ Expected unit ActiveState/SubState/Result are part of the approved operation con
 
 ## Evidence rules
 
-The evaluator requires durable admission read-back before subscription, JobRemoved subscription before StartUnit, exactly one StartUnit call, one JobNew and one matching JobRemoved for the returned object path, identical numeric job ID/unit/manager boot, PIDFD-mapped unit and InvocationID, matching transaction/attempt/commit/plan/machine digests, a durable process receipt, the declared unit state, exact NixOS profile post-state and every required runtime health check.
+The evaluator requires durable admission read-back, an explicit `Manager.Subscribe()` completion, and installation of D-Bus match rules for both JobNew and JobRemoved before StartUnit. It then requires exactly one StartUnit call, one JobNew and one matching JobRemoved for the returned object path, identical numeric job ID/unit/manager boot, PIDFD-mapped unit and InvocationID, matching transaction/attempt/commit/plan/machine digests, a durable process receipt, the declared unit state, exact NixOS profile post-state and every required runtime health check.
+
+systemd documents that JobNew/JobRemoved signals are sent only after `Subscribe()` has been invoked by at least one client. The capture must therefore record both the Manager.Subscribe completion and the D-Bus match-rule installation; a match rule without Manager.Subscribe is not sufficient.
 
 The returned D-Bus job path must encode the same numeric job ID as JobNew and JobRemoved. The PIDFD-derived worker identity must be captured while the process is still alive (before its receipt's exit timestamp), then durably persisted before the release record. The recovery path is held to the same bar: its own JobRemoved result, job path/ID, unit, InvocationID, PIDFD mapping, release ordering, process exit receipt and post-job unit snapshot must agree with the original transaction/plan/machine binding.
 
@@ -50,6 +52,6 @@ Safe-hold requires an explicit fence marker. Missing or ambiguous evidence witho
 
 ## Tests authored
 
-The library adds 18 controls for switch/test/boot semantics, JobRemoved=done with wrong post-state, test changing boot default, boot activating the running candidate, lost StartUnit reply, subscription ordering, job-ID and object-path mismatch, PIDFD InvocationID mismatch, PIDFD identity after worker exit, foreign worker identity, payload release before worker identity persistence, runtime health failure, foreign unit identity, duplicate dispatch, strict unknown-field decoding, and recovery with its own job/worker attribution. A Nix check is added to compile and run these tests with default features disabled.
+The library adds 19 controls for switch/test/boot semantics, JobRemoved=done with wrong post-state, test changing boot default, boot activating the running candidate, lost StartUnit reply, Manager.Subscribe and signal-match ordering, subscription ordering, job-ID and object-path mismatch, PIDFD InvocationID mismatch, PIDFD identity after worker exit, foreign worker identity, payload release before worker identity persistence, runtime health failure, foreign unit identity, duplicate dispatch, strict unknown-field decoding, and recovery with its own job/worker attribution. A Nix check is added to compile and run these tests with default features disabled.
 
 No Rust compile, unit test, flake evaluation, live systemd capture or disposable-VM test is claimed here.
