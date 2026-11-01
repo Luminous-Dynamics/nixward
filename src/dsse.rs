@@ -20,7 +20,7 @@ pub const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
 pub const TRUST_POLICY_SCHEMA: &str = "org.luminousdynamics.nixward.dsse-trust-policy";
 pub const NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE: &str =
     "https://luminousdynamics.io/attestations/nixward-source-evidence/v1";
-pub const NIXWARD_SOURCE_INPUTS_SUBJECT_NAME: &str = "nixward-source-inputs";
+pub const NIXWARD_SOURCE_SUBJECT_DIGEST_ALGORITHM: &str = "sha256";
 const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 12 * 1024 * 1024;
 const MAX_SIGNATURES: usize = 64;
@@ -132,6 +132,10 @@ impl VerifiedDsseAttestation {
 
 #[derive(Debug, Clone, Copy)]
 pub struct NixwardSourceEvidenceExpectation<'a> {
+    /// Exact in-toto subject name for the produced artifact or closure manifest.
+    pub subject_name: &'a str,
+    /// SHA-256 of the exact produced artifact or closure-manifest bytes.
+    pub subject_digest_sha256: &'a str,
     pub repository_uri: &'a str,
     pub source_commit_sha: &'a str,
     pub flake_lock_sha256: &'a str,
@@ -520,7 +524,7 @@ pub fn verify_in_toto_dsse(
 
 /// Deterministic subject digest for the exact source/build inputs. The
 /// domain-separated, length-prefixed encoding prevents concatenation ambiguity.
-pub fn nixward_source_inputs_subject_sha256(
+pub fn nixward_source_inputs_digest_sha256(
     repository_uri: &str,
     source_commit_sha: &str,
     flake_lock_sha256: &str,
@@ -557,7 +561,9 @@ pub fn verify_nixward_source_evidence(
     now_ms: u64,
     expected: NixwardSourceEvidenceExpectation<'_>,
 ) -> Result<VerifiedNixwardSourceEvidence, DsseVerificationError> {
-    if expected.repository_uri.trim().is_empty()
+    if expected.subject_name.trim().is_empty()
+        || !valid_hex(expected.subject_digest_sha256, 64)
+        || expected.repository_uri.trim().is_empty()
         || !(valid_hex(expected.source_commit_sha, 40) || valid_hex(expected.source_commit_sha, 64))
         || !valid_hex(expected.flake_lock_sha256, 64)
         || !valid_hex(expected.corpus_sha256, 64)
@@ -565,7 +571,7 @@ pub fn verify_nixward_source_evidence(
     {
         return Err(DsseVerificationError::SourceProvenanceMismatch);
     }
-    let subject_digest = nixward_source_inputs_subject_sha256(
+    let source_inputs_digest = nixward_source_inputs_digest_sha256(
         expected.repository_uri,
         expected.source_commit_sha,
         expected.flake_lock_sha256,
@@ -579,17 +585,16 @@ pub fn verify_nixward_source_evidence(
         InTotoExpectation {
             payload_type: DSSE_IN_TOTO_PAYLOAD_TYPE,
             predicate_type: NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE,
-            subject_name: NIXWARD_SOURCE_INPUTS_SUBJECT_NAME,
-            subject_digest_algorithm: "sha256",
-            subject_digest: &subject_digest,
+            subject_name: expected.subject_name,
+            subject_digest_algorithm: NIXWARD_SOURCE_SUBJECT_DIGEST_ALGORITHM,
+            subject_digest: expected.subject_digest_sha256,
         },
     )?;
     let subjects = attestation.statement.get("subject")
         .and_then(Value::as_array)
         .ok_or(DsseVerificationError::InvalidStatement)?;
     if subjects.len() != 1
-        || subjects[0].get("name").and_then(Value::as_str)
-            != Some(NIXWARD_SOURCE_INPUTS_SUBJECT_NAME)
+        || subjects[0].get("name").and_then(Value::as_str) != Some(expected.subject_name)
     {
         return Err(DsseVerificationError::SubjectMismatch);
     }
@@ -604,6 +609,8 @@ pub fn verify_nixward_source_evidence(
         || materials.get("flake_lock_sha256").and_then(Value::as_str)
             != Some(expected.flake_lock_sha256)
         || materials.get("corpus_sha256").and_then(Value::as_str) != Some(expected.corpus_sha256)
+        || materials.get("source_inputs_sha256").and_then(Value::as_str)
+            != Some(source_inputs_digest.as_str())
     {
         return Err(DsseVerificationError::SourceProvenanceMismatch);
     }
@@ -625,6 +632,8 @@ mod tests {
 
 
     const SOURCE_REPOSITORY: &str = "https://github.com/Luminous-Dynamics/nixward";
+    const OUTPUT_SUBJECT_NAME: &str = "nixward-benchmark-verifier-closure-manifest";
+    const OUTPUT_SUBJECT_SHA256: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const SOURCE_COMMIT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const FLAKE_LOCK: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const CORPUS: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
@@ -648,19 +657,21 @@ mod tests {
 
 
     fn source_statement(
+        subject_name: &str,
+        subject_digest: &str,
         repository_uri: &str,
         source_commit_sha: &str,
         flake_lock_sha256: &str,
         corpus_sha256: &str,
         builder_id: &str,
     ) -> Vec<u8> {
-        let subject_digest = nixward_source_inputs_subject_sha256(
+        let source_inputs_digest = nixward_source_inputs_digest_sha256(
             repository_uri, source_commit_sha, flake_lock_sha256, corpus_sha256
         ).unwrap();
         serde_json::to_vec(&serde_json::json!({
             "_type": IN_TOTO_STATEMENT_V1,
             "subject": [{
-                "name": NIXWARD_SOURCE_INPUTS_SUBJECT_NAME,
+                "name": subject_name,
                 "digest": { "sha256": subject_digest }
             }],
             "predicateType": NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE,
@@ -671,7 +682,8 @@ mod tests {
                 },
                 "materials": {
                     "flake_lock_sha256": flake_lock_sha256,
-                    "corpus_sha256": corpus_sha256
+                    "corpus_sha256": corpus_sha256,
+                    "source_inputs_sha256": source_inputs_digest
                 },
                 "builder": { "id": builder_id }
             }
@@ -680,6 +692,8 @@ mod tests {
 
     fn source_expectation() -> NixwardSourceEvidenceExpectation<'static> {
         NixwardSourceEvidenceExpectation {
+            subject_name: OUTPUT_SUBJECT_NAME,
+            subject_digest_sha256: OUTPUT_SUBJECT_SHA256,
             repository_uri: SOURCE_REPOSITORY,
             source_commit_sha: SOURCE_COMMIT,
             flake_lock_sha256: FLAKE_LOCK,
@@ -768,6 +782,7 @@ mod tests {
     fn verifies_signed_nixward_source_repository_commit_flake_corpus_and_builder_claims() {
         let key = signing_key(23);
         let payload = source_statement(
+            OUTPUT_SUBJECT_NAME, OUTPUT_SUBJECT_SHA256,
             SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, CORPUS, BUILDER
         );
         let envelope = envelope(&payload, &[key.clone()], DSSE_IN_TOTO_PAYLOAD_TYPE);
@@ -786,6 +801,7 @@ mod tests {
     fn signed_but_foreign_source_materials_do_not_pass_the_predicate_profile() {
         let key = signing_key(24);
         let payload = source_statement(
+            OUTPUT_SUBJECT_NAME, OUTPUT_SUBJECT_SHA256,
             SOURCE_REPOSITORY, SOURCE_COMMIT, &"e".repeat(64), CORPUS, BUILDER
         );
         let envelope = envelope(&payload, &[key.clone()], DSSE_IN_TOTO_PAYLOAD_TYPE);
@@ -803,6 +819,7 @@ mod tests {
         let key = signing_key(25);
         let policy = policy_bytes(vec![trusted_key(&key)], 1);
         let foreign_repository = source_statement(
+            OUTPUT_SUBJECT_NAME, OUTPUT_SUBJECT_SHA256,
             "https://example.invalid/other", SOURCE_COMMIT, FLAKE_LOCK, CORPUS, BUILDER
         );
         let foreign_repository_envelope = envelope(
@@ -817,6 +834,7 @@ mod tests {
         ));
 
         let foreign_builder = source_statement(
+            OUTPUT_SUBJECT_NAME, OUTPUT_SUBJECT_SHA256,
             SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, CORPUS,
             "https://example.invalid/builder"
         );
@@ -833,16 +851,16 @@ mod tests {
 
     #[test]
     fn source_subject_digest_changes_when_any_input_changes() {
-        let original = nixward_source_inputs_subject_sha256(
+        let original = nixward_source_inputs_digest_sha256(
             SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, CORPUS
         ).unwrap();
-        let changed_commit = nixward_source_inputs_subject_sha256(
+        let changed_commit = nixward_source_inputs_digest_sha256(
             SOURCE_REPOSITORY, &"a".repeat(40), FLAKE_LOCK, CORPUS
         ).unwrap();
-        let changed_flake = nixward_source_inputs_subject_sha256(
+        let changed_flake = nixward_source_inputs_digest_sha256(
             SOURCE_REPOSITORY, SOURCE_COMMIT, &"e".repeat(64), CORPUS
         ).unwrap();
-        let changed_corpus = nixward_source_inputs_subject_sha256(
+        let changed_corpus = nixward_source_inputs_digest_sha256(
             SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, &"f".repeat(64)
         ).unwrap();
         assert_ne!(original, changed_commit);
