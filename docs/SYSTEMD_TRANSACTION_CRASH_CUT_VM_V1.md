@@ -8,7 +8,7 @@ This qualification is a disposable NixOS/QEMU execution stage stacked on the pur
 nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
 ```
 
-The check uses the repository's pinned flake inputs and a single headless NixOS guest. The test driver runs one fixed, harmless systemd template worker. It does not run the Nixward daemon, invoke the host transaction API, run a NixOS activation, call a real participant, or modify the machine running the test.
+The check uses the repository's pinned flake inputs and a single headless NixOS guest. The test driver runs one fixed, harmless systemd template worker on an explicit writable qcow2 root image reused across abrupt VM termination/reboot. It does not run the Nixward daemon, invoke the host transaction API, run a NixOS activation, call a real participant, or modify the machine running the test.
 
 ## What is actually cut
 
