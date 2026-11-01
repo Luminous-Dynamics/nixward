@@ -1,0 +1,315 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/capture-attestation-statement-v1.schema.json",
+  "title": "Nixward capture in-toto Statement v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "_type",
+    "subject",
+    "predicateType",
+    "predicate"
+  ],
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1"
+    },
+    "subject": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "digest"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "digest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sha256"
+            ],
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "predicateType": {
+      "const": "https://luminousdynamics.io/attestations/nixward/capture/v1"
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "run_id",
+        "trial_id",
+        "scenario_id",
+        "challenge_id",
+        "challenge_nonce",
+        "source_commit_sha",
+        "flake_lock_sha256",
+        "corpus_sha256",
+        "boot_id",
+        "capture_tool_sha256",
+        "captured_at_ms",
+        "clock_source",
+        "clock_uncertainty_ms",
+        "environment",
+        "machine_attestation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "org.luminousdynamics.nixward.capture-predicate"
+        },
+        "version": {
+          "const": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "trial_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "scenario_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "challenge_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "challenge_nonce": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "minLength": 40,
+          "maxLength": 128
+        },
+        "source_commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "flake_lock_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "corpus_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "boot_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "capture_tool_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "event_stream_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "captured_at_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "monotonic_start_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "monotonic_end_ns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "clock_source": {
+          "enum": [
+            "clock_monotonic_raw",
+            "clock_monotonic",
+            "unknown"
+          ]
+        },
+        "clock_uncertainty_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kernel_release",
+            "systemd_version",
+            "sqlite_version",
+            "nix_version",
+            "filesystem",
+            "mount_options",
+            "device_model",
+            "device_firmware",
+            "cpu_model"
+          ],
+          "properties": {
+            "kernel_release": {
+              "type": "string",
+              "minLength": 1
+            },
+            "systemd_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sqlite_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "nix_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "filesystem": {
+              "type": "string",
+              "minLength": 1
+            },
+            "mount_options": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "device_firmware": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cpu_model": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "machine_attestation": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "reason"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "software_only"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "quote_base64",
+                "aik_certificate_chain",
+                "pcr_selection",
+                "pcr_values",
+                "event_log_sha256",
+                "event_log_subject_name"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "tpm2_quote"
+                },
+                "quote_base64": {
+                  "type": "string",
+                  "contentEncoding": "base64",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "aik_certificate_chain": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "contentEncoding": "base64"
+                  }
+                },
+                "pcr_selection": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  }
+                },
+                "pcr_values": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "event_log_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "event_log_subject_name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
+        },
+        "freshness_witness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "nonce_use_receipt_sha256"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "challenge_only",
+                "remote_nonce_use_receipt",
+                "transparency_timestamp"
+              ]
+            },
+            "nonce_use_receipt_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "transparency_inclusion_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

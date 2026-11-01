@@ -1,0 +1,15 @@
+{
+  "schema": "org.luminousdynamics.nixward.capture-challenge",
+  "version": 1,
+  "challenge_id": "REPLACE_WITH_UNIQUE_CHALLENGE_ID",
+  "nonce": "REPLACE_WITH_BASE64_32_BYTE_RANDOM_NONCE",
+  "corpus_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "source_commit_sha": "0000000000000000000000000000000000000000",
+  "flake_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "scenario_ids": [
+    "barrier-create-clean"
+  ],
+  "issued_at_ms": 1,
+  "expires_at_ms": 2,
+  "coordinator_issuer": "REPLACE_WITH_COORDINATOR"
+}

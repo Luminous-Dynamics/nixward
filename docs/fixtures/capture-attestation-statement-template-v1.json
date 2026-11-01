@@ -1,0 +1,87 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "corpus.json",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "trial-manifest.json",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "event-stream.json",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "database-snapshot.sqlite3",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "supervisor.jsonl",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "source-manifest.json",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "flake.lock",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ],
+  "predicateType": "https://luminousdynamics.io/attestations/nixward/capture/v1",
+  "predicate": {
+    "schema": "org.luminousdynamics.nixward.capture-predicate",
+    "version": 1,
+    "run_id": "REPLACE",
+    "trial_id": "REPLACE",
+    "scenario_id": "barrier-create-clean",
+    "challenge_id": "REPLACE",
+    "challenge_nonce": "REPLACE_WITH_BASE64_NONCE",
+    "source_commit_sha": "0000000000000000000000000000000000000000",
+    "flake_lock_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "corpus_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "boot_id": "REPLACE",
+    "capture_tool_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "event_stream_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "captured_at_ms": 1,
+    "monotonic_start_ns": 1,
+    "monotonic_end_ns": 2,
+    "clock_source": "clock_monotonic_raw",
+    "clock_uncertainty_ms": 1,
+    "environment": {
+      "kernel_release": "REPLACE",
+      "systemd_version": "REPLACE",
+      "sqlite_version": "REPLACE",
+      "nix_version": "REPLACE",
+      "filesystem": "REPLACE",
+      "mount_options": "REPLACE",
+      "device_model": "REPLACE",
+      "device_firmware": "REPLACE",
+      "cpu_model": "REPLACE"
+    },
+    "machine_attestation": {
+      "mode": "software_only",
+      "reason": "No TPM quote was collected; do not describe this trial as hardware-attested."
+    },
+    "freshness_witness": {
+      "mode": "remote_nonce_use_receipt",
+      "nonce_use_receipt_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "org.luminousdynamics.nixward.capture-trust-policy",
+  "version": 1,
+  "policy_id": "REPLACE_WITH_LOCALLY_PINNED_CAPTURE_POLICY",
+  "policy_epoch": 1,
+  "minimum_valid_signatures": 1,
+  "allowed_predicate_type": "https://luminousdynamics.io/attestations/nixward/capture/v1",
+  "software_only_allowed": false,
+  "require_freshness_witness": true,
+  "challenge_issuer": {
+    "issuer": "REPLACE_WITH_COORDINATOR_ISSUER",
+    "key_id": "REPLACE_WITH_CHALLENGE_SIGNER",
+    "public_key_ed25519_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "capture_keys": [
+    {
+      "issuer": "REPLACE_WITH_CAPTURE_ISSUER",
+      "key_id": "REPLACE_WITH_CAPTURE_KEY_ID",
+      "public_key_ed25519_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "not_before_ms": 1,
+      "not_after_ms": 2,
+      "revoked": false,
+      "machine_scopes": [
+        "REPLACE_MACHINE_GROUP"
+      ],
+      "scenario_scopes": [
+        "barrier-create-clean"
+      ]
+    }
+  ]
+}

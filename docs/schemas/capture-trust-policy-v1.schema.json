@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/capture-trust-policy-v1.schema.json",
+  "title": "Nixward capture trust policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "policy_id",
+    "policy_epoch",
+    "minimum_valid_signatures",
+    "challenge_issuer",
+    "capture_keys",
+    "allowed_predicate_type",
+    "software_only_allowed",
+    "require_freshness_witness"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.capture-trust-policy"
+    },
+    "version": {
+      "const": 1
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policy_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "minimum_valid_signatures": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16
+    },
+    "allowed_predicate_type": {
+      "const": "https://luminousdynamics.io/attestations/nixward/capture/v1"
+    },
+    "software_only_allowed": {
+      "type": "boolean"
+    },
+    "require_freshness_witness": {
+      "type": "boolean"
+    },
+    "challenge_issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issuer",
+        "key_id",
+        "public_key_ed25519_hex"
+      ],
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "public_key_ed25519_hex": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "capture_keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issuer",
+          "key_id",
+          "public_key_ed25519_hex",
+          "not_before_ms",
+          "not_after_ms",
+          "revoked",
+          "machine_scopes",
+          "scenario_scopes"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "key_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "public_key_ed25519_hex": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "not_before_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "not_after_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "machine_scopes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "scenario_scopes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

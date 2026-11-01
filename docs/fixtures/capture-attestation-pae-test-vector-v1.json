@@ -1,0 +1,10 @@
+{
+  "schema": "org.luminousdynamics.nixward.dsse-pae-test-vector",
+  "version": 1,
+  "payload_type": "application/vnd.in-toto+json",
+  "payload_utf8": "{}",
+  "payload_type_length_utf8": 28,
+  "payload_length": 2,
+  "expected_pae_utf8": "DSSEv1 28 application/vnd.in-toto+json 2 {}",
+  "expected_note": "PAE lengths are UTF-8 byte counts; the DSSE signature is over these exact PAE bytes."
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "org.luminousdynamics.nixward.capture-nonce-use-receipt",
+  "version": 1,
+  "receipt_id": "REPLACE_WITH_UNIQUE_RECEIPT_ID",
+  "challenge_id": "REPLACE_WITH_CHALLENGE_ID",
+  "nonce_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "trial_id": "REPLACE_WITH_TRIAL_ID",
+  "attestation_envelope_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "capture_key_id": "REPLACE_WITH_CAPTURE_KEY_ID",
+  "consumed_at_ms": 2,
+  "coordinator_issuer": "REPLACE_WITH_COORDINATOR"
+}

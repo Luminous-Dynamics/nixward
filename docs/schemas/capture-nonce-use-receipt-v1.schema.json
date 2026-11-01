@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/capture-nonce-use-receipt-v1.schema.json",
+  "title": "Nixward capture nonce-use receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "receipt_id",
+    "challenge_id",
+    "nonce_sha256",
+    "trial_id",
+    "attestation_envelope_sha256",
+    "capture_key_id",
+    "consumed_at_ms",
+    "coordinator_issuer"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.capture-nonce-use-receipt"
+    },
+    "version": {
+      "const": 1
+    },
+    "receipt_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "challenge_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nonce_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "trial_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attestation_envelope_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "capture_key_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "consumed_at_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coordinator_issuer": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

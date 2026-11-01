@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/capture-challenge-v1.schema.json",
+  "title": "Nixward capture challenge v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "challenge_id",
+    "nonce",
+    "corpus_sha256",
+    "source_commit_sha",
+    "flake_lock_sha256",
+    "scenario_ids",
+    "issued_at_ms",
+    "expires_at_ms",
+    "coordinator_issuer"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.capture-challenge"
+    },
+    "version": {
+      "const": 1
+    },
+    "challenge_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "nonce": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "minLength": 40,
+      "maxLength": 128
+    },
+    "corpus_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "flake_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scenario_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      }
+    },
+    "issued_at_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "expires_at_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coordinator_issuer": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}
