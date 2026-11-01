@@ -440,6 +440,7 @@ struct TrialReport {
     reader_blocked_checkpoints: usize,
     source_manifest_integrity_verified: bool,
     source_signature_verified: bool,
+    /// Signed predicate builder.id matched the caller-supplied expectation; this is not workload identity attestation.
     builder_claim_matched: bool,
     source_attestation: Option<SourceAttestationSummary>,
     source_attestation_error: Option<String>,
@@ -4031,7 +4032,7 @@ mod tests {
         let source_manifest_bytes = serde_json::to_vec(&serde_json::json!({
             "schema": "org.luminousdynamics.nixward.source-evidence",
             "version": 1,
-            "source_commit_sha": source_commit_sha,
+            "source_commit_sha": &source_commit_sha,
             "flake_lock_sha256": &flake_lock_sha256,
             "corpus_sha256": &corpus_sha256
         })).unwrap();
@@ -4058,7 +4059,7 @@ mod tests {
             "predicate": {
                 "source": {
                     "repository_uri": NIXWARD_SOURCE_REPOSITORY_URI,
-                    "commit_sha": source_commit_sha
+                    "commit_sha": &source_commit_sha
                 },
                 "materials": {
                     "flake_lock_sha256": &flake_lock_sha256,
