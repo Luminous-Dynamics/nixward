@@ -512,7 +512,10 @@ mod tests {
     fn missing_invocation_identity_is_denied() {
         let mut p = profile();
         p.requires_invocation_id = false;
-        assert_eq!(p.validate(), Err(ActivationProfileError::MalformedOrUnsafeProfile));
+        assert_eq!(
+            p.validate(),
+            Err(ActivationProfileError::MalformedOrUnsafeProfile)
+        );
     }
 
     #[test]
