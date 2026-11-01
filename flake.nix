@@ -582,6 +582,40 @@
             '';
           };
 
+
+        # Build and test the separate DSSE/in-toto capture attestation verifier.
+        checks.capture-attestation-dsse-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-capture-attestation-dsse-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+            cargoBuildFlags = [
+              "-p" "nixward" "--lib"
+            ];
+            cargoTestFlags = [
+              "-p" "nixward" "--lib" "capture_attestation::tests"
+            ];
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/capture-attestation-dsse-tests-passed"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

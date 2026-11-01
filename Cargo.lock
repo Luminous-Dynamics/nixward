@@ -2696,6 +2696,8 @@ dependencies = [
  "x509-parser",
  "zbus",
  "zeroize",
+ "base64",
+ "getrandom 0.2.17",
 ]
 
 [[package]]

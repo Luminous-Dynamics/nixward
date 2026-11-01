@@ -69,6 +69,10 @@ pub mod guest_realization;
 
 /// Detached cryptographic authority challenges and trust policies.
 pub mod authority_signature;
+
+/// DSSE/in-toto capture evidence authentication, separate from deployment authority.
+#[cfg(feature = "native")]
+pub mod capture_attestation;
 pub mod owner_root;
 pub mod release_integrity;
 
