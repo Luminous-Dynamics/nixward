@@ -3081,7 +3081,7 @@ fn verify_manifest_with_source_attestation(
         p99_claims_enabled,
         outcome: outcome.into(),
         source_attestation_mode: if source_attestation_options.is_some() {
-            if require_authenticated_source { "dsse_required" } else { "dsse_verified_when_supplied" }
+            if require_authenticated_source { "dsse_required" } else { "dsse_authenticated" }
         } else { "integrity_only_legacy" }.into(),
         source_integrity_verified_trials: trial_reports.iter()
             .filter(|trial| trial.source_manifest_integrity_verified).count(),
