@@ -1461,11 +1461,6 @@ fn digest_domain(domain: &[u8], bytes: &[u8]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn update_hash_field(hasher: &mut blake3::Hasher, value: &[u8]) {
-    hasher.update(&(value.len() as u64).to_le_bytes());
-    hasher.update(value);
-}
-
 fn policy_record_digest(
     epoch: u64,
     policy_id: &str,
@@ -1476,7 +1471,7 @@ fn policy_record_digest(
     created_at_ms: u64,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nixward-authority-policy-epoch-record-v1\\0");
+    hasher.update(b"nixward-authority-policy-epoch-record-v1\0");
     let epoch_bytes = epoch.to_le_bytes();
     let created_bytes = created_at_ms.to_le_bytes();
     for field in [
@@ -1495,7 +1490,7 @@ fn policy_record_digest(
 
 fn payload_barrier_digest(barrier: &BarrierState) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nixward-payload-release-barrier-record-v1\\0");
+    hasher.update(b"nixward-payload-release-barrier-record-v1\0");
     let epoch = barrier.policy_epoch.to_le_bytes();
     let expiry = barrier.expires_at_ms.to_le_bytes();
     let committed = barrier.barrier_wall_time_ms.to_le_bytes();
@@ -1527,14 +1522,14 @@ fn payload_barrier_digest(barrier: &BarrierState) -> String {
 
 fn release_attempt_digest(release_id: &str, attempt_id: &str, started_at_ms: u64) -> String {
     digest_domain(
-        b"nixward-payload-release-attempt-v1\\0",
+        b"nixward-payload-release-attempt-v1\0",
         format!("{release_id}:{attempt_id}:{started_at_ms}").as_bytes(),
     )
 }
 
 fn release_uncertainty_digest(release_id: &str, observed_at_ms: u64) -> String {
     digest_domain(
-        b"nixward-payload-release-uncertain-v1\\0",
+        b"nixward-payload-release-uncertain-v1\0",
         format!("{release_id}:{observed_at_ms}").as_bytes(),
     )
 }
@@ -1548,7 +1543,7 @@ fn release_receipt_record_digest(
     acknowledged_at_ms: u64,
 ) -> String {
     digest_domain(
-        b"nixward-payload-release-receipt-v1\\0",
+        b"nixward-payload-release-receipt-v1\0",
         format!(
             "{release_id}:{payload_digest}:{worker_unit}:{invocation_id}:{receipt_digest}:{acknowledged_at_ms}"
         )
@@ -1564,7 +1559,7 @@ fn release_policy_decision_digest(
     created_at_ms: u64,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nixward-payload-release-policy-decision-v1\\0");
+    hasher.update(b"nixward-payload-release-policy-decision-v1\0");
     let epoch = policy_epoch.to_le_bytes();
     let created = created_at_ms.to_le_bytes();
     for field in [
@@ -1591,7 +1586,7 @@ fn derive_admission_commit_id(
     event_digest: &str,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"nixward-supervisor-admission-commit-v2\\0");
+    hasher.update(b"nixward-supervisor-admission-commit-v2\0");
     for field in [
         transaction_id.as_bytes(),
         attempt_id.as_bytes(),
@@ -1684,10 +1679,10 @@ fn read_policy_snapshot(
             || !valid_hex(&record_digest, 64)
             || policy_id.trim().is_empty()
             || previous_record_digest != previous_digest
-            || digest_domain(b"symthaea-authority-policy-v1\\0", &policy_json) != policy_digest
-            || digest_domain(b"nixward-authority-emergency-revocations-v1\\0", &emergency_json)
+            || digest_domain(b"symthaea-authority-policy-v1\0", &policy_json) != policy_digest
+            || digest_domain(b"nixward-authority-emergency-revocations-v1\0", &emergency_json)
                 != emergency_digest
-            || digest_domain(b"nixward-authority-policy-update-provenance-v1\\0", &update_provenance)
+            || digest_domain(b"nixward-authority-policy-update-provenance-v1\0", &update_provenance)
                 != update_provenance_digest
         {
             return Err(SnapshotAuditError::Other(format!(
@@ -2735,8 +2730,8 @@ mod tests {
         assert_eq!(first, release_attempt_digest(&digest('1'), &digest('2'), 1234));
         assert_ne!(first, release_attempt_digest(&digest('1'), &digest('2'), 1235));
         assert_ne!(
-            digest_domain(b"one\\0", b"same"),
-            digest_domain(b"two\\0", b"same")
+            digest_domain(b"one\0", b"same"),
+            digest_domain(b"two\0", b"same")
         );
         assert_ne!(
             policy_record_digest(1, "root", &digest('3'), &digest('4'), &digest('5'), &digest('6'), 7),
