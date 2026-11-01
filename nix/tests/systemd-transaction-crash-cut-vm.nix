@@ -101,7 +101,7 @@ pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target", timeout=120)
     # The root must be a real writable image, not runNixOSTest's tmpfs mode.
-    root_fs = machine.succeed("findmnt -n -o FSTYPE /var/lib").strip()
+    root_fs = machine.succeed("findmnt -n -o FSTYPE /").strip()
     assert root_fs not in ["tmpfs", "ramfs"], root_fs
 
     state_root = "/var/lib/nixward-crash-cut-vm"
