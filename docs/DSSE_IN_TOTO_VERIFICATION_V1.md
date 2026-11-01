@@ -36,12 +36,25 @@ This generic layer checks envelope authentication, Statement v1, predicate type,
 
 A SLSA predicate type does not establish a SLSA level. Nixward must validate the selected SLSA predicate fields, builder trust and provenance expectations before reporting any SLSA conformance.
 
+## Nixward source-evidence predicate profile
+
+The first application profile uses predicate type `https://luminousdynamics.io/attestations/nixward-source-evidence/v1`. Its predicate has four explicit claim groups:
+
+- `source.repository_uri` and `source.commit_sha`;
+- `materials.flake_lock_sha256` and `materials.corpus_sha256`;
+- `builder.id`;
+- exactly one in-toto subject named `nixward-source-inputs` with a SHA-256 digest.
+
+The subject digest is independently recomputed as SHA-256 over a domain-separated, length-prefixed sequence of repository URI, source commit SHA, flake.lock SHA-256 and benchmark corpus SHA-256. This binds the four input materials without relying on JSON key order or ambiguous concatenation. After generic signature verification, the typed source verifier compares every predicate claim and the builder ID with values supplied by the local caller. A valid signature over a foreign repository, commit, flake, corpus or builder is therefore rejected.
+
+The predicate schema is deliberately Nixward-specific; it is not advertised as a SLSA provenance predicate. A later integration step can map and validate the corresponding SLSA Source/Build predicate fields while keeping this local acceptance contract explicit.
+
 ## Why this improves the architecture
 
 Nixward can keep its stronger local semantics—policy epoch, permit, release barrier, one-shot attempt, worker invocation and host post-state—while interoperating with standardized upstream attestations for source and build provenance. The format is no longer a competing signature protocol. The local verifier remains the policy enforcement point.
 
 ## Implemented negative controls
 
-Fourteen Rust tests are authored for byte-length PAE, exact payload verification, untrusted keyid hints, altered payload, payload-type confusion, trust-policy pin mismatch, untrusted signer, duplicate signer threshold, distinct signer threshold, revoked signer, policy/key expiry, wrong predicate/subject, per-key predicate restriction and URL-safe unpadded Base64.
+Eighteen Rust tests are authored for byte-length PAE, exact payload verification, untrusted keyid hints, altered payload, payload-type confusion, trust-policy pin mismatch, untrusted signer, duplicate signer threshold, distinct signer threshold, revoked signer, policy/key expiry, wrong predicate/subject, per-key predicate restriction, URL-safe unpadded Base64, signed source-material binding, repository/builder mismatch and source-subject digest mutation.
 
 The Nix target is a pure library test target with default/native features disabled. It is authored but has not been executed; no compile, test, or runtime result is claimed.

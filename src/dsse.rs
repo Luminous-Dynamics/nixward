@@ -703,12 +703,12 @@ mod tests {
         let foreign_repository = source_statement(
             "https://example.invalid/other", SOURCE_COMMIT, FLAKE_LOCK, CORPUS, BUILDER
         );
-        let envelope = envelope(
+        let foreign_repository_envelope = envelope(
             &foreign_repository, &[key.clone()], DSSE_IN_TOTO_PAYLOAD_TYPE
         );
         assert!(matches!(
             verify_nixward_source_evidence(
-                &envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
+                &foreign_repository_envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
             ),
             Err(DsseVerificationError::SubjectMismatch)
                 | Err(DsseVerificationError::SourceProvenanceMismatch)
@@ -718,10 +718,12 @@ mod tests {
             SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, CORPUS,
             "https://example.invalid/builder"
         );
-        let envelope = envelope(&foreign_builder, &[key], DSSE_IN_TOTO_PAYLOAD_TYPE);
+        let foreign_builder_envelope = envelope(
+            &foreign_builder, &[key], DSSE_IN_TOTO_PAYLOAD_TYPE
+        );
         assert!(matches!(
             verify_nixward_source_evidence(
-                &envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
+                &foreign_builder_envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
             ),
             Err(DsseVerificationError::SourceBuilderMismatch)
         ));
