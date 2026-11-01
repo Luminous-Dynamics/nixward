@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luminousdynamics.io/schemas/nixward-systemd-crash-cut-vm-campaign-v1.schema.json",
+  "title": "Nixward disposable systemd crash-cut VM campaign receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "status", "claim_ceiling",
+    "nixward_source_revision", "nixpkgs_revision", "flake_lock_sha256",
+    "worker_derivation", "worker_output", "guest_kernel",
+    "guest_nixos_version", "guest_systemd_version", "attempts"
+  ],
+  "properties": {
+    "schema": { "const": "org.luminousdynamics.nixward.systemd-crash-cut-vm-campaign" },
+    "version": { "const": 1 },
+    "status": { "const": "executed_disposable_qemu_guest" },
+    "claim_ceiling": { "type": "string", "minLength": 40, "maxLength": 1024 },
+    "nixward_source_revision": { "type": "string", "minLength": 7, "maxLength": 64 },
+    "nixpkgs_revision": { "type": "string", "minLength": 7, "maxLength": 64 },
+    "flake_lock_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "worker_derivation": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "worker_output": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "guest_kernel": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "guest_nixos_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "guest_systemd_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "attempts": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/attempt" }
+    }
+  },
+  "$defs": {
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id", "unit_name", "boot_id_before", "boot_id_after",
+        "invocation_id", "effect_marker_persisted", "process_receipt_persisted",
+        "invocation_count_after_reboot", "disposition"
+      ],
+      "properties": {
+        "attempt_id": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
+        "unit_name": { "type": "string", "pattern": "^nixward-crash-cut-fixture@[a-z0-9-]{1,64}\\.service$" },
+        "boot_id_before": { "type": "string", "pattern": "^[a-f0-9-]{36}$" },
+        "boot_id_after": { "type": "string", "pattern": "^[a-f0-9-]{36}$" },
+        "invocation_id": { "type": "string", "pattern": "^[a-fA-F0-9]{32}$" },
+        "effect_marker_persisted": { "type": "boolean" },
+        "process_receipt_persisted": { "type": "boolean" },
+        "invocation_count_after_reboot": { "type": "integer", "const": 1 },
+        "disposition": {
+          "enum": [
+            "attempt_started_effect_not_recorded_reconciliation_required",
+            "effect_committed_receipt_missing_reconciliation_required",
+            "complete_positive_control"
+          ]
+        },
+        "invocation_count_after_completion": { "type": "integer", "const": 1 }
+      }
+    }
+  }
+}
