@@ -1100,10 +1100,13 @@ mod tests {
                 _ => event.unit_name = "unrelated.service".into(),
             }
 
-            prop_assert!(matches!(
-                correlate_job_removed(&start, &event),
-                StartJobCorrelation::HoldForReconciliation { .. }
-            ));
+            prop_assert!(
+                matches!(
+                    correlate_job_removed(&start, &event),
+                    StartJobCorrelation::HoldForReconciliation { .. }
+                ),
+                "partial job identity must remain held for reconciliation"
+            );
         }
 
         /// A lost direct reply is ambiguous irrespective of the later signal's
@@ -1117,10 +1120,13 @@ mod tests {
                 1 => event.job_object_path = "/org/freedesktop/systemd1/job/42".into(),
                 _ => event.unit_name = "unrelated.service".into(),
             }
-            prop_assert!(matches!(
-                correlate_job_removed(&start, &event),
-                StartJobCorrelation::HoldForReconciliation { .. }
-            ));
+            prop_assert!(
+                matches!(
+                    correlate_job_removed(&start, &event),
+                    StartJobCorrelation::HoldForReconciliation { .. }
+                ),
+                "unknown manager reply must never become completed start"
+            );
         }
 
         /// Only a matched JobRemoved done result can be start-job completion.
