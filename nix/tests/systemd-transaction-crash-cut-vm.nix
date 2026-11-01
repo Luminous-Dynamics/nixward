@@ -85,7 +85,6 @@ pkgs.testers.runNixOSTest {
       cores = 2;
     };
 
-    services.getty.autologinUser = "root";
     system.stateVersion = "26.05";
   };
 
@@ -226,6 +225,7 @@ pkgs.testers.runNixOSTest {
         "guest_kernel": machine.succeed("uname -r").strip(),
         "guest_nixos_version": machine.succeed("nixos-version").strip(),
         "guest_systemd_version": machine.succeed("systemctl --version | head -n 1").strip(),
+        "guest_qemu_version": "${pkgs.qemu.version}",
         "attempts": attempts,
     }
 
@@ -239,6 +239,6 @@ pkgs.testers.runNixOSTest {
         "attempt_started_effect_not_recorded_reconciliation_required",
         "effect_committed_receipt_missing_reconciliation_required",
         "complete_positive_control",
-    ])
+    ]
   '';
 }
