@@ -1,0 +1,19 @@
+[package]
+name = "systemd-crash-cut-check"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[features]
+default = []
+native = []
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+proptest = "=1.12.0"
