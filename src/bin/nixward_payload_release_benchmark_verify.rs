@@ -2940,6 +2940,75 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn requires_exact_source_manifest_artifact_and_compares_all_digests() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = serde_json::json!({
+            "schema": "org.luminousdynamics.nixward.source-evidence",
+            "version": 1,
+            "source_commit_sha": "a".repeat(40),
+            "flake_lock_sha256": digest('b'),
+            "corpus_sha256": digest('c')
+        });
+        let path = temp.path().join("source-evidence.json");
+        let bytes = serde_json::to_vec(&evidence).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let receipt = ArtifactReceipt {
+            relative_path: "source-evidence.json".into(),
+            sha256: sha256_hex(&bytes),
+            artifact_kind: "source_manifest".into(),
+        };
+        assert!(verify_source_evidence_artifact(
+            temp.path(),
+            std::slice::from_ref(&receipt),
+            &"a".repeat(40),
+            &digest('b'),
+            &digest('c'),
+        ).is_ok());
+        assert!(verify_source_evidence_artifact(
+            temp.path(),
+            std::slice::from_ref(&receipt),
+            &"d".repeat(40),
+            &digest('b'),
+            &digest('c'),
+        ).is_err());
+        assert!(verify_source_evidence_artifact(
+            temp.path(),
+            &[],
+            &"a".repeat(40),
+            &digest('b'),
+            &digest('c'),
+        ).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_source_evidence_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source-evidence.json");
+        let value = serde_json::json!({
+            "schema": "org.luminousdynamics.nixward.source-evidence",
+            "version": 1,
+            "source_commit_sha": "a".repeat(40),
+            "flake_lock_sha256": digest('b'),
+            "corpus_sha256": digest('c'),
+            "runner_claimed_success": true
+        });
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let receipt = ArtifactReceipt {
+            relative_path: "source-evidence.json".into(),
+            sha256: sha256_hex(&fs::read(path).unwrap()),
+            artifact_kind: "source_manifest".into(),
+        };
+        assert!(verify_source_evidence_artifact(
+            temp.path(),
+            &[receipt],
+            &"a".repeat(40),
+            &digest('b'),
+            &digest('c'),
+        ).is_err());
+    }
+
     #[test]
     fn release_id_is_deterministic_and_binds_every_authority_and_plan_field() {
         let original = test_release_id();

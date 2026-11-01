@@ -965,7 +965,14 @@
                 },
                 "artifact_kind": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "enum": [
+                    "raw_sqlite",
+                    "supervisor_log",
+                    "source_manifest",
+                    "auxiliary_log",
+                    "system_metadata"
+                  ]
                 }
               }
             }
