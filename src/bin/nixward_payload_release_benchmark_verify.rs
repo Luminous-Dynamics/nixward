@@ -662,8 +662,12 @@ fn scenario_expectation_met(
                 && retries.iter().any(|(_, release_id)| barriers.contains_key(release_id))
         }
         value if expected_rejection_code(value).is_some() => {
-            let expected = expected_rejection_code(value).unwrap();
-            let expected_operation = expected_rejection_operation(disposition).unwrap();
+            let Some(expected) = expected_rejection_code(value) else {
+                return false;
+            };
+            let Some(expected_operation) = expected_rejection_operation(value) else {
+                return false;
+            };
             rejections.iter().any(|rejection| {
                 rejection.reason_code == expected
                     && rejection.operation == expected_operation
@@ -729,6 +733,15 @@ fn verify_trial(
     }
 
     let mut violations = Vec::new();
+    let mut current_policy_id = trial.initial_policy_id.clone();
+    let mut current_policy_epoch = trial.initial_policy_epoch;
+    let mut current_policy_digest = trial.initial_policy_digest.clone();
+    let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
+    let mut current_policy_keys = trial.initial_policy_keys.clone();
+    let mut current_policy_allowed_audiences = trial.initial_policy_allowed_audiences.clone();
+    let mut current_policy_emergency_revoked_signers =
+        trial.initial_policy_emergency_revoked_signers.clone();
+
     let mut initial_key_ids = BTreeSet::new();
     for key in &current_policy_keys {
         if key.signer_key_id.trim().is_empty()
@@ -746,14 +759,6 @@ fn verify_trial(
     }
     let mut previous_sequence = 0_u64;
     let mut previous_timestamp = trial.started_monotonic_ns;
-    let mut current_policy_id = trial.initial_policy_id.clone();
-    let mut current_policy_epoch = trial.initial_policy_epoch;
-    let mut current_policy_digest = trial.initial_policy_digest.clone();
-    let mut current_policy_record_digest = trial.initial_policy_record_digest.clone();
-    let mut current_policy_keys = trial.initial_policy_keys.clone();
-    let mut current_policy_allowed_audiences = trial.initial_policy_allowed_audiences.clone();
-    let mut current_policy_emergency_revoked_signers =
-        trial.initial_policy_emergency_revoked_signers.clone();
     let mut barrier_requests = BTreeMap::<String, BarrierRequestState>::new();
     let mut policy_requests = BTreeMap::<String, (u64, String, u64)>::new();
     let mut attempt_requests = BTreeMap::<String, (String, u64, u64)>::new();
