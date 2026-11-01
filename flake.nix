@@ -582,6 +582,35 @@
             '';
           };
 
+
+        # Pure offline DSSE v1 / in-toto Statement v1 verification tests.
+        checks.dsse-in-toto-verification-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-dsse-in-toto-verification-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            checkNoDefaultFeatures = true;
+            cargoBuildFlags = [ "-p" "nixward" "--lib" ];
+            cargoTestFlags = [ "-p" "nixward" "--lib" "dsse::tests" ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/dsse-in-toto-verification-tests-authored"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

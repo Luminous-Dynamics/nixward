@@ -29,6 +29,9 @@
 /// while maintaining API compatibility.
 pub mod traits;
 
+/// Offline DSSE v1 and in-toto Statement v1 attestation verification.
+pub mod dsse;
+
 // ── WASM-safe modules (compile on all targets) ──
 
 /// Layer 2: Perception — Structured data → HDC hypervectors

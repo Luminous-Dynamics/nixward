@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/dsse-trust-policy-v1.schema.json",
+  "title": "Nixward offline DSSE trust policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "policy_id",
+    "epoch",
+    "not_before_ms",
+    "not_after_ms",
+    "signature_threshold",
+    "allowed_payload_types",
+    "allowed_predicate_types",
+    "keys"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.dsse-trust-policy"
+    },
+    "version": {
+      "const": 1
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "not_before_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "not_after_ms": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "signature_threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "allowed_payload_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "const": "application/vnd.in-toto+json"
+      }
+    },
+    "allowed_predicate_types": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key_id",
+          "public_key",
+          "revoked",
+          "not_before_ms",
+          "not_after_ms",
+          "allowed_predicate_types"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "public_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9+/_-]{43}=?$"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "not_before_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "not_after_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "allowed_predicate_types": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        }
+      }
+    }
+  }
+}
