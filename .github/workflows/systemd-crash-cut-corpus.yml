@@ -64,6 +64,7 @@ jobs:
         run: |
           cargo generate-lockfile --manifest-path research/systemd-crash-cut-check/Cargo.toml
           sha256sum research/systemd-crash-cut-check/Cargo.lock
+          cat research/systemd-crash-cut-check/Cargo.lock
           git diff -- research/systemd-crash-cut-check/Cargo.lock
       - name: Test exact production systemd evidence module in isolation
         run: cargo test --manifest-path research/systemd-crash-cut-check/Cargo.toml --locked
