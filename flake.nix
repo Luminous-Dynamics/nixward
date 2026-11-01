@@ -525,7 +525,8 @@
               && builtins.isInt scenario.minimum_trials
               && scenario.minimum_trials >= 30
               && builtins.isList scenario.required_observations
-              && builtins.length scenario.required_observations >= 6;
+              && builtins.length scenario.required_observations >= 7
+              && builtins.elem "raw_policy_epoch_archive" scenario.required_observations;
           in
             assert corpus.schema == "org.luminousdynamics.nixward.payload-release-assurance-benchmark";
             assert corpus.version == 1;

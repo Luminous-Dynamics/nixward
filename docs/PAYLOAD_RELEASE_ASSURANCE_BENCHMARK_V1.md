@@ -42,6 +42,8 @@ Hard correctness targets are absolute: zero unauthorized barriers accepted, zero
 
 ## Paradigm shift: proof-carrying deployment
 
+Every trial must include the exact local policy-epoch archive, including original policy JSON bytes, update-provenance bytes, emergency revocations, and the chained record digests. This makes key/action/audience snapshots independently re-derived rather than accepted from the benchmark runner. The archive is still unsigned evidence at this stage; source authenticity is a separate gate.
+
 The desired architecture is not another command runner. It is an independently verifiable evidence chain:
 `source/build provenance -> exact closure digest -> owner authority receipt -> current policy epoch -> atomic admission -> immutable release barrier -> one-shot attempt -> PIDFD/InvocationID-bound worker receipt -> NixOS switch/test/boot post-state -> independent resolution`.
 
