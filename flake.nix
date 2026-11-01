@@ -352,12 +352,17 @@
         # terminates/reboots the same guest disk. It still does not model
         # physical storage-controller power loss or production Nixward IO.
         checks.systemd-transaction-crash-cut-vm =
-          import ./nix/tests/systemd-transaction-crash-cut-vm.nix {
-            inherit pkgs;
-            nixwardSourceRevision = if self ? rev then self.rev else "unversioned";
-            nixpkgsRevision = if nixpkgs ? rev then nixpkgs.rev else "unlocked";
-            flakeLockSha256 = builtins.hashFile "sha256" ./flake.lock;
-          };
+          let
+            campaignSchema = builtins.fromJSON
+              (builtins.readFile ./docs/fixtures/systemd-transaction-crash-cut-vm-campaign-v1.schema.json);
+          in
+            assert campaignSchema.title == "Nixward disposable systemd crash-cut VM campaign receipt v1";
+            import ./nix/tests/systemd-transaction-crash-cut-vm.nix {
+              inherit pkgs;
+              nixwardSourceRevision = if self ? rev then self.rev else "unversioned";
+              nixpkgsRevision = if nixpkgs ? rev then nixpkgs.rev else "unlocked";
+              flakeLockSha256 = builtins.hashFile "sha256" ./flake.lock;
+            };
 
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
