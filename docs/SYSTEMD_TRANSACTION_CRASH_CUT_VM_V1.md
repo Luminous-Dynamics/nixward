@@ -23,7 +23,7 @@ Runtime gate files live under /run and disappear across reboot. Per-attempt mark
 ## Evidence
 
 The test derivation exports raw files and a versioned JSON campaign receipt under its Nix output. The receipt binds:
-- Nixward source revision and flake.lock SHA-256;
+- Nixward PR/source revision and the exact GitHub Actions checkout revision (a pull-request workflow checks out the synthetic merge commit by default), plus flake.lock SHA-256;
 - Nixpkgs revision, worker derivation/output and QEMU package version;
 - guest NixOS, kernel and systemd versions;
 - exact unit and attempt ID;
