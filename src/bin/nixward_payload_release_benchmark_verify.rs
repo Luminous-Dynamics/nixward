@@ -1009,6 +1009,26 @@ fn verify_trial(
         return Err(format!("trial {} has malformed metadata", trial.trial_id));
     }
     validate_artifacts(artifact_root, &trial.artifacts)?;
+    let policy_snapshots = if scenario.required_observations.iter()
+        .any(|observation| observation == "raw_policy_epoch_archive")
+    {
+        Some(validate_policy_epoch_history(trial, artifact_root)?)
+    } else {
+        None
+    };
+    if let Some(snapshots) = &policy_snapshots {
+        let initial = snapshots.get(&trial.initial_policy_epoch)
+            .ok_or_else(|| "initial policy epoch is missing from archived history".to_string())?;
+        if initial.policy_id != trial.initial_policy_id
+            || initial.policy_digest != trial.initial_policy_digest
+            || initial.record_digest != trial.initial_policy_record_digest
+            || initial.keys != trial.initial_policy_keys
+            || initial.allowed_audiences != trial.initial_policy_allowed_audiences
+            || initial.emergency_revoked_signers != trial.initial_policy_emergency_revoked_signers
+        {
+            return Err("initial policy claims disagree with exact archived policy bytes".into());
+        }
+    }
     let event_bytes = serde_json::to_vec(&trial.events)
         .map_err(|error| format!("cannot serialize trial events: {error}"))?;
     if sha256_hex(&event_bytes) != trial.events_sha256 {
@@ -1340,6 +1360,23 @@ fn verify_trial(
                 current_policy_keys = new_policy_keys.clone();
                 current_policy_allowed_audiences = new_policy_allowed_audiences.clone();
                 current_policy_emergency_revoked_signers = emergency_revoked_signers.clone();
+
+                if let Some(snapshots) = &policy_snapshots {
+                    let snapshot = snapshots.get(to_epoch)
+                        .ok_or_else(|| format!("policy epoch {to_epoch} is absent from archived history"))?;
+                    if snapshot.previous_record_digest != *previous_record_digest
+                        || snapshot.policy_id != *new_policy_id
+                        || snapshot.policy_digest != *new_policy_digest
+                        || snapshot.record_digest != *new_record_digest
+                        || snapshot.keys != *new_policy_keys
+                        || snapshot.allowed_audiences != *new_policy_allowed_audiences
+                        || snapshot.emergency_revoked_signers != *emergency_revoked_signers
+                    {
+                        violations.push(format!(
+                            "policy epoch {to_epoch} event differs from the archived raw policy record"
+                        ));
+                    }
+                }
             }
             EvidenceEvent::ReleaseAttemptRequested { request_id, release_id, at_ns, wall_time_ms, .. } => {
                 let Some(barrier) = barriers.get(release_id) else {
@@ -1524,6 +1561,24 @@ fn verify_trial(
         }
     }
 
+    if let Some(snapshots) = &policy_snapshots {
+        let latest_epoch = snapshots.keys().next_back().copied().unwrap_or(0);
+        if latest_epoch != current_policy_epoch {
+            violations.push("event stream does not reach the latest archived policy epoch".into());
+        }
+        if let Some(latest) = snapshots.get(&latest_epoch) {
+            if latest.policy_id != current_policy_id
+                || latest.policy_digest != current_policy_digest
+                || latest.record_digest != current_policy_record_digest
+                || latest.keys != current_policy_keys
+                || latest.allowed_audiences != current_policy_allowed_audiences
+                || latest.emergency_revoked_signers != current_policy_emergency_revoked_signers
+            {
+                violations.push("final policy state differs from the latest archived epoch".into());
+            }
+        }
+    }
+
     for request_id in barrier_requests.keys() {
         let committed_count = trial.events.iter().filter(|event| matches!(
             event,
@@ -1653,6 +1708,13 @@ fn scenario_observations_present(
                     <= trial.finished_monotonic_ns,
             "raw_sqlite_and_supervisor_logs" => artifact_kinds.contains("raw_sqlite")
                 && artifact_kinds.contains("supervisor_log"),
+            "raw_policy_epoch_archive" => !trial.policy_epochs.is_empty()
+                && trial.policy_epochs.iter().all(|epoch| {
+                    artifact_kinds.contains("authority_policy_json")
+                        && artifact_kinds.contains("policy_update_provenance")
+                        && !epoch.policy_json_artifact_path.is_empty()
+                        && !epoch.update_provenance_artifact_path.is_empty()
+                }),
             _ => false,
         })
     }
@@ -1703,6 +1765,7 @@ fn verify_manifest(
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
         "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive",
     ];
     for scenario in &corpus.scenarios {
         if scenario.minimum_trials == 0
@@ -1974,11 +2037,15 @@ mod tests {
                 initial_policy_record_digest: digest('2'),
                 initial_policy_keys: vec![PolicySignerAuthorization {
                     signer_key_id: "owner-key".into(),
+                    issuer: "owner-root".into(),
+                    public_key_hex: "11".repeat(32),
                     revoked: false,
                     allowed_actions: vec!["change".into()],
+                    claims: BTreeMap::new(),
                 }],
                 initial_policy_allowed_audiences: vec!["nixward-change-v1".into()],
                 initial_policy_emergency_revoked_signers: vec![],
+                policy_epochs: vec![],
                 events_sha256: sha256_hex(&event_bytes),
                 events,
                 artifacts: vec![],
@@ -2239,8 +2306,12 @@ mod tests {
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
             new_policy_keys: vec![PolicySignerAuthorization {
-                signer_key_id: "owner-key".into(), revoked: false,
+                signer_key_id: "owner-key".into(),
+                issuer: "owner-root".into(),
+                public_key_hex: "11".repeat(32),
+                revoked: false,
                 allowed_actions: vec![],
+                claims: BTreeMap::new(),
             }],
             new_policy_allowed_audiences: vec![],
             emergency_revoked_signers: vec![],
@@ -2280,8 +2351,12 @@ mod tests {
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
             new_policy_keys: vec![PolicySignerAuthorization {
-                signer_key_id: "owner-key".into(), revoked: true,
+                signer_key_id: "owner-key".into(),
+                issuer: "owner-root".into(),
+                public_key_hex: "11".repeat(32),
+                revoked: true,
                 allowed_actions: vec!["change".into()],
+                claims: BTreeMap::new(),
             }],
             new_policy_allowed_audiences: vec!["nixward-change-v1".into()],
             emergency_revoked_signers: vec!["owner-key".into()],
