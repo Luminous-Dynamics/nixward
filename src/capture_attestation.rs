@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const CAPTURE_PAYLOAD_TYPE: &str = "application/vnd.in-toto+json";
 pub const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
 pub const CAPTURE_PREDICATE_TYPE: &str =
-    "https://nixward.dev/attestation/payload-release-capture/v1";
+    "https://github.com/Luminous-Dynamics/nixward/attestations/payload-release-capture/v1";
 const TRUST_POLICY_SCHEMA: &str = "org.luminousdynamics.nixward.capture-trust-policy";
 const CHALLENGE_SCHEMA: &str = "org.luminousdynamics.nixward.capture-challenge";
 const REPORT_SCHEMA: &str = "org.luminousdynamics.nixward.capture-verification";
@@ -218,7 +218,8 @@ pub struct DsseEnvelope {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DsseSignature {
-    pub keyid: Option<String>,
+    #[serde(rename = "keyid")]
+    pub _keyid_hint: Option<String>,
     pub sig: String,
 }
 
@@ -248,6 +249,17 @@ fn now_unix_ms() -> CaptureResult<u64> {
         .map_err(|error| CaptureAttestationError::InvalidInput(format!("system clock: {error}")))?;
     u64::try_from(duration.as_millis())
         .map_err(|_| CaptureAttestationError::InvalidInput("system time overflow".into()))
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
 }
 
 fn valid_hex(value: &str, length: usize) -> bool {
@@ -382,33 +394,9 @@ pub fn verify_dsse_statement(
         return Err(CaptureAttestationError::InvalidEnvelope);
     }
     let pre_auth = dsse_pae(&envelope.payload_type, &payload);
-    let statement: InTotoStatement = serde_json::from_slice(&payload)
-        .map_err(|_| CaptureAttestationError::InvalidEnvelope)?;
-    if statement.type_uri != IN_TOTO_STATEMENT_V1
-        || statement.predicate_type != CAPTURE_PREDICATE_TYPE
-        || statement.subject.is_empty()
-    {
-        return Err(CaptureAttestationError::InvalidEnvelope);
-    }
 
-    let predicate = &statement.predicate;
-    if predicate.schema_version != 1
-        || predicate.kind != "nixward-payload-release-capture-v1"
-        || predicate.assurance_mode != "software_only"
-    {
-        return Err(if predicate.assurance_mode == "tpm2_quote" {
-            CaptureAttestationError::UnsupportedMachineAttestation
-        } else {
-            CaptureAttestationError::PredicateMismatch
-        });
-    }
-    if !valid_hex(machine_binding_digest, 64)
-        || predicate.machine_binding_digest != machine_binding_digest
-        || predicate.scenario_id != scenario_id
-    {
-        return Err(CaptureAttestationError::PredicateMismatch);
-    }
-
+    // Verify the exact decoded payload bytes before parsing the statement. DSSE
+    // signatures authenticate both payloadType and payload through PAE.
     let mut verified_signers = BTreeSet::new();
     for signature_entry in &envelope.signatures {
         let signature_bytes = decode_canonical_base64(&signature_entry.sig)?;
@@ -426,23 +414,52 @@ pub fn verify_dsse_statement(
                 break;
             }
         }
-        // Untrusted, invalid signatures do not contribute to threshold. The
-        // keyid is deliberately not used as a trust filter: it is unauthenticated.
-        let Some(signer) = matched else {
-            continue;
-        };
-        if signer.revoked
-            || captured_at_ms < signer.not_before_ms
-            || captured_at_ms > signer.not_after_ms
-            || !signer.allowed_machine_bindings.iter().any(|value| value == machine_binding_digest)
-            || !signer.allowed_scenarios.iter().any(|value| value == scenario_id)
-        {
+        // keyid is unauthenticated: try every trusted key, never filter by hint.
+        let Some(signer) = matched else { continue };
+        if signer.revoked {
             return Err(CaptureAttestationError::SignerNotAuthorized(signer.key_id.clone()));
         }
         verified_signers.insert(signer.key_id.clone());
     }
     if verified_signers.len() < policy.threshold {
         return Err(CaptureAttestationError::SignatureThreshold);
+    }
+
+    // Only signature-verified payload bytes are parsed as an in-toto Statement.
+    let statement: InTotoStatement = serde_json::from_slice(&payload)
+        .map_err(|_| CaptureAttestationError::InvalidEnvelope)?;
+    if statement.type_uri != IN_TOTO_STATEMENT_V1
+        || statement.predicate_type != CAPTURE_PREDICATE_TYPE
+        || statement.subject.is_empty()
+    {
+        return Err(CaptureAttestationError::InvalidEnvelope);
+    }
+    let predicate = &statement.predicate;
+    if predicate.schema_version != 1
+        || predicate.kind != "nixward-payload-release-capture-v1"
+        || predicate.assurance_mode != "software_only"
+    {
+        return Err(if predicate.assurance_mode == "tpm2_quote" {
+            CaptureAttestationError::UnsupportedMachineAttestation
+        } else {
+            CaptureAttestationError::PredicateMismatch
+        });
+    }
+    if !valid_hex(machine_binding_digest, 64)
+        || predicate.machine_binding_digest != machine_binding_digest
+        || predicate.scenario_id != scenario_id
+        || predicate.captured_at_ms > captured_at_ms
+    {
+        return Err(CaptureAttestationError::PredicateMismatch);
+    }
+    for signer in policy.signers.iter().filter(|signer| verified_signers.contains(&signer.key_id)) {
+        if captured_at_ms < signer.not_before_ms
+            || captured_at_ms > signer.not_after_ms
+            || !signer.allowed_machine_bindings.iter().any(|value| value == machine_binding_digest)
+            || !signer.allowed_scenarios.iter().any(|value| value == scenario_id)
+        {
+            return Err(CaptureAttestationError::SignerNotAuthorized(signer.key_id.clone()));
+        }
     }
     Ok((statement, verified_signers.into_iter().collect()))
 }
@@ -480,7 +497,7 @@ pub fn validate_capture_challenge(challenge: &CaptureChallenge, now_ms: u64) -> 
         || !valid_hex(&challenge.flake_lock_sha256, 64)
         || !valid_hex(&challenge.capture_policy_sha256, 64)
         || challenge.trial_id.trim().is_empty()
-        || challenge.scenario_ids.is_empty()
+        || challenge.scenario_ids.len() != 1
         || challenge.scenario_ids.iter().any(|value| value.trim().is_empty())
         || challenge.scenario_ids.windows(2).any(|pair| pair[0] >= pair[1])
         || !valid_hex(&challenge.machine_binding_digest, 64)
@@ -517,7 +534,7 @@ fn ensure_private_ledger_path(path: &Path) -> CaptureResult<()> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::PermissionsExt;
         if parent_meta.mode() & 0o077 != 0 {
             return Err(CaptureAttestationError::InvalidLedger(
                 "ledger parent permissions must be private (no group/other access)".into(),
@@ -557,8 +574,14 @@ impl CaptureChallengeLedger {
         .map_err(|error| CaptureAttestationError::InvalidLedger(error.to_string()))?;
         connection.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| CaptureAttestationError::InvalidLedger(error.to_string()))?;
-        connection.pragma_update(None, "journal_mode", "WAL")
-            .map_err(|error| CaptureAttestationError::InvalidLedger(error.to_string()))?;
+        let journal_mode: String = connection.query_row(
+            "PRAGMA journal_mode=WAL",
+            [],
+            |row| row.get(0),
+        ).map_err(|error| CaptureAttestationError::InvalidLedger(error.to_string()))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            return Err(CaptureAttestationError::InvalidLedger("SQLite refused WAL mode".into()));
+        }
         connection.pragma_update(None, "synchronous", "FULL")
             .map_err(|error| CaptureAttestationError::InvalidLedger(error.to_string()))?;
         connection.pragma_update(None, "foreign_keys", "ON")
@@ -669,10 +692,8 @@ impl CaptureChallengeLedger {
 
     pub fn issue(&self, challenge: &CaptureChallenge) -> CaptureResult<()> {
         let _now = now_unix_ms()?;
-        if challenge.schema != CHALLENGE_SCHEMA
-            || challenge.version != 1
-            || derive_challenge_id(challenge)? != challenge.challenge_id
-        {
+        validate_capture_challenge(challenge, challenge.issued_at_ms)?;
+        if derive_challenge_id(challenge)? != challenge.challenge_id {
             return Err(CaptureAttestationError::InvalidChallenge);
         }
         let challenge_json = serde_json::to_vec(challenge)
@@ -883,6 +904,10 @@ pub fn verify_capture_attestation(
     }
     if predicate.trial_id != challenge.trial_id
         || predicate.scenario_id != challenge.scenario_ids[0]
+        || predicate.boot_id != expected.boot_id
+        || predicate.started_monotonic_ns != expected.started_monotonic_ns
+        || predicate.finished_monotonic_ns != expected.finished_monotonic_ns
+        || predicate.assurance_mode != expected.assurance_mode
         || predicate.source_commit_sha != challenge.source_commit_sha
         || predicate.flake_lock_sha256 != challenge.flake_lock_sha256
         || predicate.corpus_sha256 != challenge.corpus_sha256
@@ -898,7 +923,7 @@ pub fn verify_capture_attestation(
         || !valid_hex(&predicate.source_commit_sha, 40)
         || !valid_hex(&predicate.flake_lock_sha256, 64)
         || !valid_hex(&predicate.corpus_sha256, 64)
-        || !valid_hex(&predicate.boot_id, 36)
+        || !valid_uuid(&predicate.boot_id)
         || !valid_hex(&predicate.machine_binding_digest, 64)
         || !valid_hex(&predicate.capture_tool_sha256, 64)
     {
@@ -1060,7 +1085,8 @@ mod tests {
     #[test]
     fn dsse_threshold_counts_distinct_keys_not_signature_entries() {
         let (signing, trusted) = signer(7, "capture-a");
-        let trust = policy(vec![trusted], 2);
+        let (_, second) = signer(8, "capture-b");
+        let trust = policy(vec![trusted, second], 2);
         let statement = statement(&challenge(&context_subjects()), context_subjects());
         let bytes = envelope(&statement, &[("capture-a", &signing), ("capture-a", &signing)]);
         assert!(matches!(
@@ -1093,7 +1119,8 @@ mod tests {
     fn revoked_or_out_of_scope_signer_cannot_satisfy_threshold() {
         let (signing, mut trusted) = signer(7, "capture-a");
         trusted.revoked = true;
-        let trust = policy(vec![trusted], 1);
+        let (_, active) = signer(8, "capture-b");
+        let trust = policy(vec![trusted, active], 1);
         let statement = statement(&challenge(&context_subjects()), context_subjects());
         let bytes = envelope(&statement, &[("capture-a", &signing)]);
         assert!(matches!(
