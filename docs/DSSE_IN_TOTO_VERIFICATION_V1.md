@@ -43,9 +43,10 @@ The first application profile uses predicate type `https://luminousdynamics.io/a
 - `source.repository_uri` and `source.commit_sha`;
 - `materials.flake_lock_sha256` and `materials.corpus_sha256`;
 - `builder.id`;
-- exactly one in-toto subject named `nixward-source-inputs` with a SHA-256 digest.
+- exactly one in-toto subject naming the produced artifact or closure-manifest bytes, with their expected SHA-256 digest;
+- `materials.source_inputs_sha256`, a separate digest over the source inputs.
 
-The subject digest is independently recomputed as SHA-256 over a domain-separated, length-prefixed sequence of repository URI, source commit SHA, flake.lock SHA-256 and benchmark corpus SHA-256. This binds the four input materials without relying on JSON key order or ambiguous concatenation. After generic signature verification, the typed source verifier compares every predicate claim and the builder ID with values supplied by the local caller. A valid signature over a foreign repository, commit, flake, corpus or builder is therefore rejected.
+The subject name and digest are supplied by the local caller and bind the actual produced artifact or a canonical Nix closure-manifest file, not merely a source-input tuple. Separately, `source_inputs_sha256` is recomputed as SHA-256 over a domain-separated, length-prefixed sequence of repository URI, source commit SHA, flake.lock SHA-256 and benchmark corpus SHA-256. After generic signature verification, the typed source verifier compares every predicate claim, source-input digest and builder ID with values supplied by the local caller. A valid signature over a foreign repository, commit, flake, corpus, output subject or builder is therefore rejected.
 
 The predicate schema is deliberately Nixward-specific; it is not advertised as a SLSA provenance predicate. A later integration step can map and validate the corresponding SLSA Source/Build predicate fields while keeping this local acceptance contract explicit.
 
