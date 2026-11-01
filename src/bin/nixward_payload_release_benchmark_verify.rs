@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process;
 
@@ -22,6 +23,7 @@ const MANIFEST_SCHEMA: &str =
 const REPORT_SCHEMA: &str =
     "org.luminousdynamics.nixward.payload-release-trial-verification";
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_TRIALS: usize = 100_000;
 const MAX_EVENTS_PER_TRIAL: usize = 100_000;
 const MAX_ARTIFACTS_PER_TRIAL: usize = 10_000;
@@ -492,12 +494,54 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
-    let metadata = fs::metadata(path)
+    let file = fs::File::open(path)
+        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+    let metadata = file.metadata()
         .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > MAX_JSON_BYTES {
-        return Err(format!("{} is not a regular file within the size limit", path.display()));
+        return Err(format!("{} is not a regular file within the JSON size limit", path.display()));
     }
-    fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    let capacity = usize::try_from(metadata.len()).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut bounded = file.take(MAX_JSON_BYTES + 1);
+    bounded.read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(format!("{} grew beyond the JSON size limit while reading", path.display()));
+    }
+    Ok(bytes)
+}
+
+fn sha256_file_bounded(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("cannot open artifact {}: {error}", path.display()))?;
+    let before = file.metadata()
+        .map_err(|error| format!("cannot stat artifact {}: {error}", path.display()))?;
+    if !before.is_file() || before.len() > MAX_ARTIFACT_BYTES {
+        return Err(format!("artifact {} is not a regular file within the artifact size limit", path.display()));
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = file.read(&mut buffer)
+            .map_err(|error| format!("cannot stream artifact {}: {error}", path.display()))?;
+        if count == 0 {
+            break;
+        }
+        total = total.checked_add(count as u64)
+            .ok_or_else(|| format!("artifact size overflow for {}", path.display()))?;
+        if total > MAX_ARTIFACT_BYTES {
+            return Err(format!("artifact {} grew beyond the artifact size limit", path.display()));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let after = file.metadata()
+        .map_err(|error| format!("cannot restat artifact {}: {error}", path.display()))?;
+    if total != before.len() || after.len() != before.len() {
+        return Err(format!("artifact {} changed size while being hashed", path.display()));
+    }
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn resolve_artifact_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -541,8 +585,8 @@ fn validate_artifacts(root: &Path, artifacts: &[ArtifactReceipt]) -> Result<(), 
             return Err(format!("invalid or duplicate artifact receipt: {}", artifact.relative_path));
         }
         let path = resolve_artifact_path(root, &artifact.relative_path)?;
-        let bytes = read_bounded(&path)?;
-        if sha256_hex(&bytes) != artifact.sha256 {
+        let digest = sha256_file_bounded(&path)?;
+        if digest != artifact.sha256 {
             return Err(format!("artifact digest mismatch: {}", artifact.relative_path));
         }
     }
@@ -684,9 +728,16 @@ fn scenario_expectation_met(
             }) && attempts.is_empty()
         }
         "attempt_reserved" => attempts.len() == 1,
-        "uncertain_no_resend" => attempts.len() == 1 && !uncertain.is_empty(),
+        "uncertain_no_resend" => {
+            attempts.len() == 1
+                && attempts.keys().any(|release_id| uncertain.contains(release_id))
+                && receipts.is_empty()
+        }
         "acknowledge_original_attempt" => {
-            attempts.len() == 1 && !uncertain.is_empty() && !receipts.is_empty()
+            attempts.len() == 1
+                && attempts.keys().any(|release_id| {
+                    uncertain.contains(release_id) && receipts.contains_key(release_id)
+                })
         }
         "one_barrier_only" => barriers.len() == 1,
         "one_linearized_order" => {
@@ -949,6 +1000,8 @@ fn verify_trial(
                 request_id, expected_epoch, expected_record_digest, at_ns, ..
             } => {
                 if request_id.trim().is_empty()
+                    || *expected_epoch != current_policy_epoch
+                    || expected_record_digest != &current_policy_record_digest
                     || !valid_hex(expected_record_digest, 64)
                     || policy_requests.insert(
                         request_id.clone(),
@@ -1035,10 +1088,18 @@ fn verify_trial(
                     violations.push("next policy signer authorization is malformed or duplicated".into());
                 }
                 let mut next_audiences = BTreeSet::new();
-                if new_policy_allowed_audiences.iter().any(|audience| {
-                    audience.trim().is_empty() || !next_audiences.insert(audience.as_str())
+                if new_policy_allowed_audiences.is_empty()
+                    || new_policy_allowed_audiences.iter().any(|audience| {
+                        audience.trim().is_empty() || !next_audiences.insert(audience.as_str())
+                    })
+                {
+                    violations.push("next policy audience list is empty, malformed or duplicated".into());
+                }
+                let mut next_emergency_revocations = BTreeSet::new();
+                if emergency_revoked_signers.iter().any(|key| {
+                    key.trim().is_empty() || !next_emergency_revocations.insert(key.as_str())
                 }) {
-                    violations.push("next policy audience list is malformed or duplicated".into());
+                    violations.push("next emergency-revocation set is malformed or duplicated".into());
                 }
                 current_policy_id = new_policy_id.clone();
                 current_policy_epoch = *to_epoch;
@@ -1101,6 +1162,8 @@ fn verify_trial(
                 };
                 if payload_digest != &attempt.payload_digest
                     || *at_ns < attempt.at_ns
+                    || uncertain.contains(release_id)
+                    || receipts.contains_key(release_id)
                     || writes_started.contains_key(release_id)
                 {
                     violations.push("payload write is duplicate or not bound to its attempt".into());
@@ -1138,7 +1201,14 @@ fn verify_trial(
                     violations.push("worker receipt exists without a durable attempt".into());
                     continue;
                 };
+                let write_completed_before_receipt = writes_started.get(release_id)
+                    .is_some_and(|(written_payload_digest, started_at)| {
+                        written_payload_digest == payload_digest
+                            && *worker_completed_at_ns >= *started_at
+                            && writes_completed.contains(release_id)
+                    });
                 if payload_digest != &attempt.payload_digest
+                    || !write_completed_before_receipt
                     || *worker_completed_at_ns < attempt.at_ns
                     || *worker_completed_at_ns > *at_ns
                     || worker_unit.trim().is_empty()
