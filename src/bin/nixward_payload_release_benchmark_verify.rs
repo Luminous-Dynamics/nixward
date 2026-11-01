@@ -7,12 +7,13 @@
 //! checks evidence consistency and artifact digests; it does not authenticate
 //! the machine that captured the records or perform host-mutating operations.
 
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process;
 
@@ -421,6 +422,7 @@ struct TrialReport {
     receipt_count: usize,
     uncertain_count: usize,
     resolution_count: usize,
+    sqlite_snapshot_audit: String,
     violations: Vec<String>,
 }
 
@@ -1365,6 +1367,7 @@ fn verify_trial(
             receipt_count: receipts.len(),
             uncertain_count: uncertain.len(),
             resolution_count: resolutions.len(),
+            sqlite_snapshot_audit: "not_checked".into(),
             violations,
         },
         measurements,
@@ -1424,6 +1427,928 @@ fn scenario_observations_present(
             _ => false,
         })
     }
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotAuditError {
+    UnsupportedSchema(i64),
+    BarrierDigestMismatch(String),
+    AttemptDigestMismatch(String),
+    Other(String),
+}
+
+#[derive(Debug, Clone)]
+struct PolicySnapshot {
+    policy_id: String,
+    epoch: u64,
+    policy_digest: String,
+    record_digest: String,
+    previous_record_digest: String,
+    emergency_revoked_signers: Vec<String>,
+    signer_authorizations: Vec<PolicySignerAuthorization>,
+    allowed_audiences: Vec<String>,
+}
+
+fn blake3_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn digest_domain(domain: &[u8], bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_hex().to_string()
+}
+
+fn update_hash_field(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn policy_record_digest(
+    epoch: u64,
+    policy_id: &str,
+    policy_digest: &str,
+    emergency_digest: &str,
+    previous_record_digest: &str,
+    update_provenance_digest: &str,
+    created_at_ms: u64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nixward-authority-policy-epoch-record-v1\\0");
+    let epoch_bytes = epoch.to_le_bytes();
+    let created_bytes = created_at_ms.to_le_bytes();
+    for field in [
+        epoch_bytes.as_slice(),
+        policy_id.as_bytes(),
+        policy_digest.as_bytes(),
+        emergency_digest.as_bytes(),
+        previous_record_digest.as_bytes(),
+        update_provenance_digest.as_bytes(),
+        created_bytes.as_slice(),
+    ] {
+        update_hash_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn payload_barrier_digest(barrier: &BarrierState) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nixward-payload-release-barrier-record-v1\\0");
+    let epoch = barrier.policy_epoch.to_le_bytes();
+    let expiry = barrier.expires_at_ms.to_le_bytes();
+    let committed = barrier.barrier_wall_time_ms.to_le_bytes();
+    for field in [
+        barrier.release_id.as_bytes(),
+        barrier.admission_commit_id.as_bytes(),
+        barrier.transaction_id.as_bytes(),
+        barrier.attempt_id.as_bytes(),
+        barrier.replay_key.as_bytes(),
+        barrier.permit_digest.as_bytes(),
+        barrier.plan_digest.as_bytes(),
+        barrier.machine_binding_digest.as_bytes(),
+        barrier.authority_provenance_digest.as_bytes(),
+        barrier.policy_id.as_bytes(),
+        epoch.as_slice(),
+        barrier.policy_digest.as_bytes(),
+        barrier.policy_record_digest.as_bytes(),
+        barrier.signer_key_id.as_bytes(),
+        barrier.authority_subject_digest.as_bytes(),
+        barrier.authority_audience.as_bytes(),
+        barrier.payload_digest.as_bytes(),
+        expiry.as_slice(),
+        committed.as_slice(),
+    ] {
+        update_hash_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn release_attempt_digest(release_id: &str, attempt_id: &str, started_at_ms: u64) -> String {
+    digest_domain(
+        b"nixward-payload-release-attempt-v1\\0",
+        format!("{release_id}:{attempt_id}:{started_at_ms}").as_bytes(),
+    )
+}
+
+fn release_uncertainty_digest(release_id: &str, observed_at_ms: u64) -> String {
+    digest_domain(
+        b"nixward-payload-release-uncertain-v1\\0",
+        format!("{release_id}:{observed_at_ms}").as_bytes(),
+    )
+}
+
+fn release_receipt_record_digest(
+    release_id: &str,
+    payload_digest: &str,
+    worker_unit: &str,
+    invocation_id: &str,
+    receipt_digest: &str,
+    acknowledged_at_ms: u64,
+) -> String {
+    digest_domain(
+        b"nixward-payload-release-receipt-v1\\0",
+        format!(
+            "{release_id}:{payload_digest}:{worker_unit}:{invocation_id}:{receipt_digest}:{acknowledged_at_ms}"
+        )
+        .as_bytes(),
+    )
+}
+
+fn release_policy_decision_digest(
+    release_id: &str,
+    policy_epoch: u64,
+    policy_record_digest: &str,
+    disposition: &str,
+    created_at_ms: u64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nixward-payload-release-policy-decision-v1\\0");
+    let epoch = policy_epoch.to_le_bytes();
+    let created = created_at_ms.to_le_bytes();
+    for field in [
+        release_id.as_bytes(),
+        epoch.as_slice(),
+        policy_record_digest.as_bytes(),
+        disposition.as_bytes(),
+        created.as_slice(),
+    ] {
+        update_hash_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn derive_admission_commit_id(
+    transaction_id: &str,
+    attempt_id: &str,
+    replay_key: &str,
+    plan_digest: &str,
+    machine_binding_digest: &str,
+    approval_proof_digest: &str,
+    authority_provenance_digest: &str,
+    permit_digest: &str,
+    event_digest: &str,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"nixward-supervisor-admission-commit-v2\\0");
+    for field in [
+        transaction_id.as_bytes(),
+        attempt_id.as_bytes(),
+        replay_key.as_bytes(),
+        plan_digest.as_bytes(),
+        machine_binding_digest.as_bytes(),
+        approval_proof_digest.as_bytes(),
+        authority_provenance_digest.as_bytes(),
+        permit_digest.as_bytes(),
+        event_digest.as_bytes(),
+    ] {
+        update_hash_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn policy_signers_equal(
+    expected: &[PolicySignerAuthorization],
+    actual: &[PolicySignerAuthorization],
+) -> bool {
+    let to_map = |values: &[PolicySignerAuthorization]| {
+        values
+            .iter()
+            .map(|value| (value.signer_key_id.as_str(), value))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let left = to_map(expected);
+    let right = to_map(actual);
+    left.len() == expected.len() && right.len() == actual.len() && left == right
+}
+
+fn read_policy_snapshot(
+    connection: &Connection,
+) -> Result<BTreeMap<u64, PolicySnapshot>, SnapshotAuditError> {
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT epoch, policy_id, policy_digest, policy_json,
+                   emergency_revocation_digest, emergency_revoked_key_ids_json,
+                   previous_record_digest, update_provenance_digest,
+                   update_provenance, created_at_ms, record_digest
+            FROM authority_policy_epochs ORDER BY epoch
+            "#,
+        )
+        .map_err(|error| SnapshotAuditError::Other(format!("policy query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Vec<u8>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(|error| SnapshotAuditError::Other(format!("policy rows: {error}")))?;
+
+    let mut snapshots = BTreeMap::new();
+    let mut expected_epoch = 1_u64;
+    let mut previous_digest = "0".repeat(64);
+    for row in rows {
+        let (
+            epoch_raw,
+            policy_id,
+            policy_digest,
+            policy_json,
+            emergency_digest,
+            emergency_json,
+            previous_record_digest,
+            update_provenance_digest,
+            update_provenance,
+            created_at_raw,
+            record_digest,
+        ) = row.map_err(|error| SnapshotAuditError::Other(format!("policy row: {error}")))?;
+        let epoch = u64::try_from(epoch_raw)
+            .map_err(|_| SnapshotAuditError::Other("non-positive policy epoch".into()))?;
+        let created_at_ms = u64::try_from(created_at_raw)
+            .map_err(|_| SnapshotAuditError::Other("negative policy timestamp".into()))?;
+        if epoch != expected_epoch
+            || !valid_hex(&policy_digest, 64)
+            || !valid_hex(&emergency_digest, 64)
+            || !valid_hex(&previous_record_digest, 64)
+            || !valid_hex(&update_provenance_digest, 64)
+            || !valid_hex(&record_digest, 64)
+            || policy_id.trim().is_empty()
+            || previous_record_digest != previous_digest
+            || digest_domain(b"symthaea-authority-policy-v1\\0", &policy_json) != policy_digest
+            || digest_domain(b"nixward-authority-emergency-revocations-v1\\0", &emergency_json)
+                != emergency_digest
+            || digest_domain(b"nixward-authority-policy-update-provenance-v1\\0", &update_provenance)
+                != update_provenance_digest
+        {
+            return Err(SnapshotAuditError::Other(format!(
+                "policy epoch {epoch} failed its stored digest/chain checks"
+            )));
+        }
+        let emergency_revoked_signers: Vec<String> = serde_json::from_slice(&emergency_json)
+            .map_err(|error| SnapshotAuditError::Other(format!("policy emergency revocations: {error}")))?;
+        if serde_json::to_vec(&emergency_revoked_signers).ok().as_deref() != Some(emergency_json.as_slice())
+            || emergency_revoked_signers.iter().any(|key| key.trim().is_empty())
+            || emergency_revoked_signers.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(SnapshotAuditError::Other(format!(
+                "policy epoch {epoch} emergency revocation set is not canonical"
+            )));
+        }
+
+        let policy_value: serde_json::Value = serde_json::from_slice(&policy_json)
+            .map_err(|error| SnapshotAuditError::Other(format!("policy JSON: {error}")))?;
+        if policy_value.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+            || policy_value.get("kind").and_then(serde_json::Value::as_str)
+                != Some("symthaea-authority-trust-policy-v1")
+            || policy_value.get("policy_id").and_then(serde_json::Value::as_str)
+                != Some(policy_id.as_str())
+            || policy_value.get("policy_epoch").and_then(serde_json::Value::as_u64) != Some(epoch)
+        {
+            return Err(SnapshotAuditError::Other(format!(
+                "policy epoch {epoch} JSON identity is inconsistent"
+            )));
+        }
+        let key_values = policy_value.get("keys").and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SnapshotAuditError::Other("policy keys are absent".into()))?;
+        let mut signer_authorizations = Vec::new();
+        for key in key_values {
+            let signer_key_id = key.get("key_id").and_then(serde_json::Value::as_str)
+                .ok_or_else(|| SnapshotAuditError::Other("policy key ID is absent".into()))?;
+            let revoked = key.get("revoked").and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| SnapshotAuditError::Other("policy key revoked flag is absent".into()))?;
+            let allowed_actions = key.get("allowed_actions").and_then(serde_json::Value::as_array)
+                .ok_or_else(|| SnapshotAuditError::Other("policy key actions are absent".into()))?
+                .iter()
+                .map(|value| value.as_str().map(str::to_owned)
+                    .ok_or_else(|| SnapshotAuditError::Other("policy action is not a string".into())))
+                .collect::<Result<Vec<_>, _>>()?;
+            signer_authorizations.push(PolicySignerAuthorization {
+                signer_key_id: signer_key_id.to_owned(),
+                revoked,
+                allowed_actions,
+            });
+        }
+        let allowed_audiences = policy_value.get("allowed_audiences")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SnapshotAuditError::Other("policy allowed audiences are absent".into()))?
+            .iter()
+            .map(|value| value.as_str().map(str::to_owned)
+                .ok_or_else(|| SnapshotAuditError::Other("policy audience is not a string".into())))
+            .collect::<Result<Vec<_>, _>>()?;
+        if allowed_audiences.is_empty()
+            || allowed_audiences.iter().any(|value| value.trim().is_empty())
+            || allowed_audiences.iter().collect::<BTreeSet<_>>().len() != allowed_audiences.len()
+        {
+            return Err(SnapshotAuditError::Other(format!(
+                "policy epoch {epoch} has malformed allowed audiences"
+            )));
+        }
+        let expected_record_digest = policy_record_digest(
+            epoch,
+            &policy_id,
+            &policy_digest,
+            &emergency_digest,
+            &previous_record_digest,
+            &update_provenance_digest,
+            created_at_ms,
+        );
+        if expected_record_digest != record_digest {
+            return Err(SnapshotAuditError::Other(format!(
+                "policy epoch {epoch} record digest mismatch"
+            )));
+        }
+        snapshots.insert(epoch, PolicySnapshot {
+            policy_id,
+            epoch,
+            policy_digest,
+            record_digest: record_digest.clone(),
+            previous_record_digest,
+            emergency_revoked_signers,
+            signer_authorizations,
+            allowed_audiences,
+        });
+        previous_digest = record_digest;
+        expected_epoch = expected_epoch.saturating_add(1);
+    }
+
+    let pointer: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT epoch, record_digest FROM authority_policy_current WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| SnapshotAuditError::Other(format!("policy current pointer: {error}")))?;
+    let Some((current_epoch_raw, current_digest)) = pointer else {
+        return Err(SnapshotAuditError::Other("policy current pointer is missing".into()));
+    };
+    let current_epoch = u64::try_from(current_epoch_raw)
+        .map_err(|_| SnapshotAuditError::Other("policy current epoch is invalid".into()))?;
+    if snapshots.len() as u64 != current_epoch
+        || snapshots.get(&current_epoch).map(|value| value.record_digest.as_str())
+            != Some(current_digest.as_str())
+    {
+        return Err(SnapshotAuditError::Other("policy current pointer is not at the history head".into()));
+    }
+    Ok(snapshots)
+}
+
+fn verify_release_schema_inventory(connection: &Connection) -> Result<(), SnapshotAuditError> {
+    const EXPECTED: [(&str, &str); 40] = [
+        ("table", "admission_commits"),
+        ("table", "authority_replays"),
+        ("table", "supervisor_permits"),
+        ("table", "transaction_attempts"),
+        ("table", "admission_events"),
+        ("index", "one_unresolved_attempt_per_transaction"),
+        ("trigger", "admission_commits_immutable_update"),
+        ("trigger", "admission_commits_immutable_delete"),
+        ("trigger", "authority_replays_immutable_update"),
+        ("trigger", "authority_replays_immutable_delete"),
+        ("trigger", "supervisor_permits_immutable_update"),
+        ("trigger", "supervisor_permits_immutable_delete"),
+        ("trigger", "admission_events_immutable_update"),
+        ("trigger", "admission_events_immutable_delete"),
+        ("trigger", "transaction_attempts_one_way_resolution"),
+        ("trigger", "transaction_attempts_no_delete"),
+        ("table", "authority_policy_epochs"),
+        ("table", "authority_policy_current"),
+        ("trigger", "authority_policy_epochs_immutable_update"),
+        ("trigger", "authority_policy_epochs_no_delete"),
+        ("trigger", "authority_policy_epochs_monotonic_insert"),
+        ("trigger", "authority_policy_current_initial_only"),
+        ("trigger", "authority_policy_current_only_advance"),
+        ("trigger", "authority_policy_current_no_delete"),
+        ("table", "payload_release_barriers"),
+        ("table", "payload_release_attempts"),
+        ("table", "payload_release_uncertain"),
+        ("table", "payload_release_receipts"),
+        ("table", "payload_release_policy_decisions"),
+        ("trigger", "payload_release_barriers_immutable_update"),
+        ("trigger", "payload_release_barriers_no_delete"),
+        ("trigger", "payload_release_attempts_immutable_update"),
+        ("trigger", "payload_release_attempts_no_delete"),
+        ("trigger", "payload_release_uncertain_immutable_update"),
+        ("trigger", "payload_release_uncertain_no_delete"),
+        ("trigger", "payload_release_receipts_immutable_update"),
+        ("trigger", "payload_release_receipts_no_delete"),
+        ("trigger", "payload_release_policy_decisions_immutable_update"),
+        ("trigger", "payload_release_policy_decisions_no_delete"),
+        ("trigger", "payload_release_policy_decisions_no_downgrade"),
+    ];
+    let mut statement = connection
+        .prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+        .map_err(|error| SnapshotAuditError::Other(format!("schema inventory query: {error}")))?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| SnapshotAuditError::Other(format!("schema inventory rows: {error}")))?;
+    let actual = rows.collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| SnapshotAuditError::Other(format!("schema inventory values: {error}")))?;
+    let expected = EXPECTED.iter()
+        .map(|(kind, name)| ((*kind).to_owned(), (*name).to_owned()))
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(SnapshotAuditError::Other(format!(
+            "SQLite v4 schema inventory mismatch (expected {} objects, found {})",
+            expected.len(), actual.len()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_sqlite_snapshot(
+    path: &Path,
+    trial: &TrialRecord,
+) -> Result<(), SnapshotAuditError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| SnapshotAuditError::Other(format!("open SQLite snapshot: {error}")))?;
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite application ID: {error}")))?;
+    let schema_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite schema version: {error}")))?;
+    if application_id != 0x4e58_5744 {
+        return Err(SnapshotAuditError::Other("SQLite application ID mismatch".into()));
+    }
+    if schema_version == 3 {
+        return Err(SnapshotAuditError::UnsupportedSchema(3));
+    }
+    if schema_version != 4 {
+        return Err(SnapshotAuditError::UnsupportedSchema(schema_version));
+    }
+    connection.pragma_update(None, "query_only", "ON")
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite query_only: {error}")))?;
+    connection.pragma_update(None, "trusted_schema", "OFF")
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite trusted_schema: {error}")))?;
+    connection.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite foreign_keys: {error}")))?;
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite journal mode: {error}")))?;
+    if !journal_mode.eq_ignore_ascii_case("delete") {
+        return Err(SnapshotAuditError::Other(
+            "raw SQLite artifact is not a standalone DELETE-journal backup snapshot".into()
+        ));
+    }
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite integrity_check: {error}")))?;
+    if integrity != "ok" {
+        return Err(SnapshotAuditError::Other(format!("SQLite integrity_check reported {integrity}")));
+    }
+    let mut fk_statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite foreign_key_check: {error}")))?;
+    let fk_rows = fk_statement
+        .query_map([], |_| Ok(()))
+        .map_err(|error| SnapshotAuditError::Other(format!("SQLite foreign_key_check rows: {error}")))?;
+    if fk_rows.count() != 0 {
+        return Err(SnapshotAuditError::Other("SQLite foreign-key check failed".into()));
+    }
+    verify_release_schema_inventory(&connection)?;
+
+    let policies = read_policy_snapshot(&connection)?;
+    let initial_policy = policies.get(&trial.initial_policy_epoch)
+        .ok_or_else(|| SnapshotAuditError::Other("trial initial policy epoch is absent from SQLite".into()))?;
+    if initial_policy.policy_id != trial.initial_policy_id
+        || initial_policy.policy_digest != trial.initial_policy_digest
+        || initial_policy.record_digest != trial.initial_policy_record_digest
+        || !policy_signers_equal(&initial_policy.signer_authorizations, &trial.initial_policy_keys)
+        || initial_policy.allowed_audiences.iter().collect::<BTreeSet<_>>()
+            != trial.initial_policy_allowed_audiences.iter().collect::<BTreeSet<_>>()
+        || initial_policy.emergency_revoked_signers != trial.initial_policy_emergency_revoked_signers
+    {
+        return Err(SnapshotAuditError::Other("trial initial policy does not match the archived SQLite policy".into()));
+    }
+    for event in &trial.events {
+        if let EvidenceEvent::PolicyAdvanced {
+            to_epoch, new_policy_id, new_policy_digest, new_record_digest,
+            previous_record_digest, new_policy_keys, new_policy_allowed_audiences,
+            emergency_revoked_signers, ..
+        } = event {
+            let stored = policies.get(to_epoch)
+                .ok_or_else(|| SnapshotAuditError::Other(format!("policy epoch {to_epoch} is absent from SQLite")))?;
+            if stored.policy_id != *new_policy_id
+                || stored.policy_digest != *new_policy_digest
+                || stored.record_digest != *new_record_digest
+                || stored.previous_record_digest != *previous_record_digest
+                || !policy_signers_equal(&stored.signer_authorizations, new_policy_keys)
+                || stored.allowed_audiences.iter().collect::<BTreeSet<_>>()
+                    != new_policy_allowed_audiences.iter().collect::<BTreeSet<_>>()
+                || stored.emergency_revoked_signers != *emergency_revoked_signers
+            {
+                return Err(SnapshotAuditError::Other(format!(
+                    "policy epoch {to_epoch} event does not match archived SQLite policy"
+                )));
+            }
+        }
+    }
+
+    let requested_commit_ids = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::BarrierCreateRequested { admission_commit_id, .. } => Some(admission_commit_id.clone()),
+        _ => None,
+    }).collect::<BTreeSet<_>>();
+    if requested_commit_ids.is_empty() {
+        return Err(SnapshotAuditError::Other("trial has no admission identity request".into()));
+    }
+    let admission_count: i64 = connection.query_row("SELECT COUNT(*) FROM admission_commits", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("admission count: {error}")))?;
+    if admission_count != requested_commit_ids.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite admission count differs from trial request set".into()));
+    }
+    for commit_id in &requested_commit_ids {
+        let admission: (String, String, String, String, String, String, Vec<u8>, String, Vec<u8>, String, Vec<u8>, String, i64) =
+            connection.query_row(
+                r#"
+                SELECT transaction_id, attempt_id, replay_key, plan_digest,
+                       machine_binding_digest, approval_proof_digest, approval_material,
+                       authority_provenance_digest, authority_provenance,
+                       permit_digest, permit_wire, event_digest, created_at_ms
+                FROM admission_commits WHERE commit_id = ?1
+                "#,
+                [commit_id],
+                |row| Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+                    row.get(10)?, row.get(11)?, row.get(12)?,
+                )),
+            )
+            .map_err(|error| SnapshotAuditError::Other(format!("admission {commit_id}: {error}")))?;
+        let (transaction_id, attempt_id, replay_key, plan_digest, machine_digest,
+            approval_digest, approval_material, provenance_digest, provenance,
+            permit_digest, permit_wire, event_digest, created_at_raw) = admission;
+        if created_at_raw < 0
+            || blake3_hex(&approval_material) != approval_digest
+            || blake3_hex(&provenance) != provenance_digest
+            || blake3_hex(&permit_wire) != permit_digest
+        {
+            return Err(SnapshotAuditError::Other(format!("admission {commit_id} content digest mismatch")));
+        }
+        let event_payload: Vec<u8> = connection.query_row(
+            "SELECT event_payload FROM admission_events WHERE commit_id = ?1 AND event_digest = ?2 AND event_kind = 'supervisor_admission_committed'",
+            params![commit_id, event_digest],
+            |row| row.get(0),
+        ).map_err(|error| SnapshotAuditError::Other(format!("admission event {commit_id}: {error}")))?;
+        if blake3_hex(&event_payload) != event_digest {
+            return Err(SnapshotAuditError::Other(format!("admission event {commit_id} digest mismatch")));
+        }
+        let calculated_commit = derive_admission_commit_id(
+            &transaction_id, &attempt_id, &replay_key, &plan_digest, &machine_digest,
+            &approval_digest, &provenance_digest, &permit_digest, &event_digest,
+        );
+        if calculated_commit != *commit_id {
+            return Err(SnapshotAuditError::Other(format!("admission {commit_id} commit ID mismatch")));
+        }
+        let replay: (String, String, String, String, String) = connection.query_row(
+            "SELECT commit_id, transaction_id, plan_digest, machine_binding_digest, approval_proof_digest FROM authority_replays WHERE replay_key = ?1",
+            [&replay_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).map_err(|error| SnapshotAuditError::Other(format!("authority replay {commit_id}: {error}")))?;
+        if replay != (*commit_id, transaction_id.clone(), plan_digest.clone(), machine_digest.clone(), approval_digest.clone()) {
+            return Err(SnapshotAuditError::Other(format!("authority replay {commit_id} is not bound to admission")));
+        }
+        let permit: (String, String) = connection.query_row(
+            "SELECT commit_id, attempt_id FROM supervisor_permits WHERE permit_digest = ?1",
+            [&permit_digest],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|error| SnapshotAuditError::Other(format!("supervisor permit {commit_id}: {error}")))?;
+        if permit != (*commit_id, attempt_id.clone()) {
+            return Err(SnapshotAuditError::Other(format!("supervisor permit {commit_id} is not bound to admission")));
+        }
+        let resolved_by_event = trial.events.iter().any(|event| matches!(
+            event,
+            EvidenceEvent::ResolutionCommitted { admission_commit_id, .. } if admission_commit_id == commit_id
+        ));
+        let attempt_row: (String, String, String, Option<String>, Option<i64>) = connection.query_row(
+            "SELECT attempt_id, transaction_id, state, resolution_digest, resolved_at_ms FROM transaction_attempts WHERE commit_id = ?1",
+            [commit_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).map_err(|error| SnapshotAuditError::Other(format!("transaction attempt {commit_id}: {error}")))?;
+        if attempt_row.0 != attempt_id
+            || attempt_row.1 != transaction_id
+            || (attempt_row.2 == "resolved") != resolved_by_event
+            || (attempt_row.2 == "resolved" && (attempt_row.3.is_none() || attempt_row.4.is_none()))
+            || (attempt_row.2 == "unresolved" && (attempt_row.3.is_some() || attempt_row.4.is_some()))
+        {
+            return Err(SnapshotAuditError::Other(format!("transaction attempt {commit_id} state differs from receipt/resolution events")));
+        }
+    }
+
+    let barrier_events = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::BarrierCommitted { .. } => Some(event),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let barrier_count: i64 = connection.query_row("SELECT COUNT(*) FROM payload_release_barriers", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("barrier count: {error}")))?;
+    if barrier_count != barrier_events.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite barrier count differs from committed barrier events".into()));
+    }
+    for event in &barrier_events {
+        let EvidenceEvent::BarrierCommitted {
+            release_id, admission_commit_id, transaction_id, attempt_id, replay_key,
+            permit_digest, plan_digest, machine_binding_digest, authority_provenance_digest,
+            policy_id, policy_epoch, policy_digest, policy_record_digest, signer_key_id,
+            authority_subject_digest, authority_audience, payload_digest, expires_at_ms,
+            wall_time_ms, ..
+        } = event else { unreachable!() };
+        let row: (
+            String, String, String, String, String, String, String, String, String,
+            i64, String, String, String, String, String, String, i64, i64, String
+        ) = connection.query_row(
+            r#"
+            SELECT commit_id, transaction_id, attempt_id, replay_key, permit_digest,
+                   plan_digest, machine_binding_digest, authority_provenance_digest,
+                   policy_id, policy_epoch, policy_digest, policy_record_digest,
+                   signer_key_id, authority_subject_digest, authority_audience,
+                   payload_digest, expires_at_ms, barrier_committed_at_ms, barrier_digest
+            FROM payload_release_barriers WHERE release_id = ?1
+            "#,
+            [release_id],
+            |row| Ok((
+                row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+                row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,
+                row.get(10)?,row.get(11)?,row.get(12)?,row.get(13)?,row.get(14)?,
+                row.get(15)?,row.get(16)?,row.get(17)?,row.get(18)?,
+            )),
+        ).map_err(|error| SnapshotAuditError::Other(format!("barrier {release_id}: {error}")))?;
+        let (
+            db_commit, db_transaction, db_attempt, db_replay, db_permit,
+            db_plan, db_machine, db_provenance, db_policy_id, db_epoch,
+            db_policy_digest, db_policy_record, db_signer, db_subject, db_audience,
+            db_payload, db_expiry, db_created, db_digest,
+        ) = row;
+        if db_commit != *admission_commit_id
+            || db_transaction != *transaction_id
+            || db_attempt != *attempt_id
+            || db_replay != *replay_key
+            || db_permit != *permit_digest
+            || db_plan != *plan_digest
+            || db_machine != *machine_binding_digest
+            || db_provenance != *authority_provenance_digest
+            || db_policy_id != *policy_id
+            || db_epoch < 0 || db_epoch as u64 != *policy_epoch
+            || db_policy_digest != *policy_digest
+            || db_policy_record != *policy_record_digest
+            || db_signer != *signer_key_id
+            || db_subject != *authority_subject_digest
+            || db_audience != *authority_audience
+            || db_payload != *payload_digest
+            || db_expiry < 0 || db_expiry as u64 != *expires_at_ms
+            || db_created < 0 || db_created as u64 != *wall_time_ms
+        {
+            return Err(SnapshotAuditError::Other(format!("barrier {release_id} does not match raw event evidence")));
+        }
+        let barrier = BarrierState {
+            release_id: release_id.clone(),
+            admission_commit_id: admission_commit_id.clone(),
+            transaction_id: transaction_id.clone(),
+            attempt_id: attempt_id.clone(),
+            replay_key: replay_key.clone(),
+            permit_digest: permit_digest.clone(),
+            plan_digest: plan_digest.clone(),
+            machine_binding_digest: machine_binding_digest.clone(),
+            authority_provenance_digest: authority_provenance_digest.clone(),
+            authority_subject_digest: authority_subject_digest.clone(),
+            authority_audience: authority_audience.clone(),
+            policy_id: policy_id.clone(),
+            policy_digest: policy_digest.clone(),
+            signer_key_id: signer_key_id.clone(),
+            policy_epoch: *policy_epoch,
+            policy_record_digest: policy_record_digest.clone(),
+            payload_digest: payload_digest.clone(),
+            expires_at_ms: *expires_at_ms,
+            barrier_wall_time_ms: *wall_time_ms,
+            committed_at_ns: 0,
+            decision: None,
+        };
+        if payload_barrier_digest(&barrier) != db_digest {
+            return Err(SnapshotAuditError::BarrierDigestMismatch(release_id.clone()));
+        }
+    }
+
+    let attempt_events = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::ReleaseAttemptReserved { .. } => Some(event),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let attempt_count: i64 = connection.query_row("SELECT COUNT(*) FROM payload_release_attempts", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("release attempt count: {error}")))?;
+    if attempt_count != attempt_events.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite release attempt count differs from raw events".into()));
+    }
+    for event in &attempt_events {
+        let EvidenceEvent::ReleaseAttemptReserved {
+            release_id, attempt_id, payload_digest, wall_time_ms, ..
+        } = event else { unreachable!() };
+        let (db_attempt, started_at, db_digest): (String, i64, String) = connection.query_row(
+            "SELECT attempt_id, started_at_ms, attempt_digest FROM payload_release_attempts WHERE release_id = ?1",
+            [release_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).map_err(|error| SnapshotAuditError::Other(format!("release attempt {release_id}: {error}")))?;
+        if db_attempt != *attempt_id || started_at < 0 || started_at as u64 != *wall_time_ms {
+            return Err(SnapshotAuditError::Other(format!("release attempt {release_id} differs from event")));
+        }
+        if release_attempt_digest(release_id, &db_attempt, started_at as u64) != db_digest {
+            return Err(SnapshotAuditError::AttemptDigestMismatch(release_id.clone()));
+        }
+        let barrier_payload: String = connection.query_row(
+            "SELECT payload_digest FROM payload_release_barriers WHERE release_id = ?1",
+            [release_id],
+            |row| row.get(0),
+        ).map_err(|error| SnapshotAuditError::Other(format!("release attempt barrier {release_id}: {error}")))?;
+        if barrier_payload != *payload_digest {
+            return Err(SnapshotAuditError::Other(format!("attempt {release_id} payload differs from barrier")));
+        }
+    }
+
+    let uncertainty_events = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::ReleaseUncertain { release_id, .. } => Some(release_id),
+        _ => None,
+    }).collect::<BTreeSet<_>>();
+    let uncertainty_count: i64 = connection.query_row("SELECT COUNT(*) FROM payload_release_uncertain", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("release uncertainty count: {error}")))?;
+    if uncertainty_count != uncertainty_events.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite uncertainty count differs from raw events".into()));
+    }
+    let mut uncertain_statement = connection.prepare(
+        "SELECT release_id, observed_at_ms, uncertainty_digest FROM payload_release_uncertain"
+    ).map_err(|error| SnapshotAuditError::Other(format!("uncertainty query: {error}")))?;
+    let uncertain_rows = uncertain_statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+    }).map_err(|error| SnapshotAuditError::Other(format!("uncertainty rows: {error}")))?;
+    for row in uncertain_rows {
+        let (release_id, observed_at, digest) =
+            row.map_err(|error| SnapshotAuditError::Other(format!("uncertainty row: {error}")))?;
+        if !uncertainty_events.contains(&release_id) || observed_at < 0
+            || release_uncertainty_digest(&release_id, observed_at as u64) != digest
+        {
+            return Err(SnapshotAuditError::Other(format!("uncertainty marker {release_id} is inconsistent")));
+        }
+    }
+
+    let receipt_events = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::WorkerReceiptPersisted { .. } => Some(event),
+        _ => None,
+    }).collect::<Vec<_>>();
+    let receipt_count: i64 = connection.query_row("SELECT COUNT(*) FROM payload_release_receipts", [], |row| row.get(0))
+        .map_err(|error| SnapshotAuditError::Other(format!("receipt count: {error}")))?;
+    if receipt_count != receipt_events.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite receipt count differs from raw events".into()));
+    }
+    for event in &receipt_events {
+        let EvidenceEvent::WorkerReceiptPersisted {
+            release_id, payload_digest, worker_unit, invocation_id, receipt_digest, ..
+        } = event else { unreachable!() };
+        let (db_payload, db_unit, db_invocation, db_receipt, acknowledged_at, record_digest):
+            (String, String, String, String, i64, String) = connection.query_row(
+                r#"
+                SELECT payload_digest, worker_unit, invocation_id, receipt_digest,
+                       acknowledged_at_ms, receipt_record_digest
+                FROM payload_release_receipts WHERE release_id = ?1
+                "#,
+                [release_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+            ).map_err(|error| SnapshotAuditError::Other(format!("receipt {release_id}: {error}")))?;
+        if db_payload != *payload_digest || db_unit != *worker_unit
+            || db_invocation != *invocation_id || db_receipt != *receipt_digest
+            || acknowledged_at < 0
+        {
+            return Err(SnapshotAuditError::Other(format!("receipt {release_id} differs from raw event evidence")));
+        }
+        if release_receipt_record_digest(
+            release_id, &db_payload, &db_unit, &db_invocation, &db_receipt, acknowledged_at as u64
+        ) != record_digest {
+            return Err(SnapshotAuditError::Other(format!("receipt record {release_id} digest mismatch")));
+        }
+        let started: i64 = connection.query_row(
+            "SELECT started_at_ms FROM payload_release_attempts WHERE release_id = ?1",
+            [release_id],
+            |row| row.get(0),
+        ).map_err(|error| SnapshotAuditError::Other(format!("receipt attempt {release_id}: {error}")))?;
+        if acknowledged_at < started {
+            return Err(SnapshotAuditError::Other(format!("receipt {release_id} predates its attempt")));
+        }
+    }
+
+    let expected_decisions = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::PolicyAdvanced { to_epoch, new_record_digest, decisions, .. } => {
+            Some((*to_epoch, new_record_digest.as_str(), decisions.as_slice()))
+        }
+        _ => None,
+    }).flat_map(|(epoch, record_digest, decisions)| {
+        decisions.iter().map(move |decision| (
+            decision.release_id.as_str(),
+            epoch,
+            record_digest,
+            match decision.disposition {
+                PolicyDisposition::PreserveExistingBarrier => "preserve_existing_barrier",
+                PolicyDisposition::StopOrRecoveryRequired => "stop_or_recovery_required",
+            },
+        ))
+    }).collect::<BTreeSet<_>>();
+    let decision_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM payload_release_policy_decisions", [], |row| row.get(0)
+    ).map_err(|error| SnapshotAuditError::Other(format!("policy decision count: {error}")))?;
+    if decision_count != expected_decisions.len() as i64 {
+        return Err(SnapshotAuditError::Other("SQLite policy decision count differs from raw events".into()));
+    }
+    let mut decision_statement = connection.prepare(
+        r#"
+        SELECT release_id, policy_epoch, policy_record_digest, disposition,
+               decision_digest, created_at_ms
+        FROM payload_release_policy_decisions
+        "#,
+    ).map_err(|error| SnapshotAuditError::Other(format!("policy decisions query: {error}")))?;
+    let decision_rows = decision_statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    }).map_err(|error| SnapshotAuditError::Other(format!("policy decision rows: {error}")))?;
+    for row in decision_rows {
+        let (release_id, epoch_raw, record_digest, disposition, digest, created_at_raw) =
+            row.map_err(|error| SnapshotAuditError::Other(format!("policy decision row: {error}")))?;
+        let epoch = u64::try_from(epoch_raw)
+            .map_err(|_| SnapshotAuditError::Other("negative policy decision epoch".into()))?;
+        let created_at = u64::try_from(created_at_raw)
+            .map_err(|_| SnapshotAuditError::Other("negative policy decision timestamp".into()))?;
+        let tuple = (release_id.as_str(), epoch, record_digest.as_str(), disposition.as_str());
+        if !expected_decisions.contains(&tuple) {
+            return Err(SnapshotAuditError::Other(format!("policy decision {release_id}/{epoch} is absent from raw events")));
+        }
+        if release_policy_decision_digest(
+            &release_id, epoch, &record_digest, &disposition, created_at
+        ) != digest {
+            return Err(SnapshotAuditError::Other(format!("policy decision {release_id}/{epoch} digest mismatch")));
+        }
+    }
+
+    let resolved_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM transaction_attempts WHERE state = 'resolved'", [], |row| row.get(0)
+    ).map_err(|error| SnapshotAuditError::Other(format!("resolved attempt count: {error}")))?;
+    let expected_resolved = trial.events.iter().filter(|event| matches!(
+        event, EvidenceEvent::ResolutionCommitted { .. }
+    )).count() as i64;
+    if resolved_count != expected_resolved {
+        return Err(SnapshotAuditError::Other("resolved transaction count differs from resolution events".into()));
+    }
+    Ok(())
+}
+
+fn stage_verified_sqlite_artifact(
+    artifact_root: &Path,
+    receipt: &ArtifactReceipt,
+) -> Result<tempfile::NamedTempFile, String> {
+    let source_path = resolve_artifact_path(artifact_root, &receipt.relative_path)?;
+    let mut source = fs::File::open(&source_path)
+        .map_err(|error| format!("cannot open SQLite artifact: {error}"))?;
+    let metadata = source.metadata()
+        .map_err(|error| format!("cannot stat SQLite artifact: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_ARTIFACT_BYTES {
+        return Err("SQLite artifact is not a regular file within the artifact size limit".into());
+    }
+    let mut destination = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("cannot stage SQLite artifact: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let count = source.read(&mut buffer)
+            .map_err(|error| format!("cannot read SQLite artifact: {error}"))?;
+        if count == 0 { break; }
+        total = total.saturating_add(count as u64);
+        if total > MAX_ARTIFACT_BYTES {
+            return Err("SQLite artifact exceeded size limit while staging".into());
+        }
+        hasher.update(&buffer[..count]);
+        destination.write_all(&buffer[..count])
+            .map_err(|error| format!("cannot stage SQLite artifact bytes: {error}"))?;
+    }
+    let actual = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    if actual != receipt.sha256 {
+        return Err("SQLite artifact SHA-256 mismatch while staging".into());
+    }
+    destination.as_file().sync_all()
+        .map_err(|error| format!("cannot flush staged SQLite artifact: {error}"))?;
+    Ok(destination)
+}
 
 fn verify_manifest(
     corpus_bytes: &[u8],
@@ -1789,6 +2714,35 @@ mod tests {
         trial.events_sha256 = sha256_hex(&serde_json::to_vec(&trial.events).unwrap());
     }
 
+
+
+    #[test]
+    fn standalone_sqlite_snapshot_accepts_only_application_v4_or_classified_v3() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("snapshot.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection.pragma_update(None, "application_id", 0x4e58_5744_i64).unwrap();
+        connection.pragma_update(None, "user_version", 3_i64).unwrap();
+        drop(connection);
+        let (trial, _) = clean_trial();
+        let result = verify_sqlite_snapshot(&path, &trial);
+        assert_eq!(result, Err(SnapshotAuditError::UnsupportedSchema(3)));
+    }
+
+    #[test]
+    fn release_database_digest_helpers_are_deterministic_and_domain_separated() {
+        let first = release_attempt_digest(&digest('1'), &digest('2'), 1234);
+        assert_eq!(first, release_attempt_digest(&digest('1'), &digest('2'), 1234));
+        assert_ne!(first, release_attempt_digest(&digest('1'), &digest('2'), 1235));
+        assert_ne!(
+            digest_domain(b"one\\0", b"same"),
+            digest_domain(b"two\\0", b"same")
+        );
+        assert_ne!(
+            policy_record_digest(1, "root", &digest('3'), &digest('4'), &digest('5'), &digest('6'), 7),
+            policy_record_digest(2, "root", &digest('3'), &digest('4'), &digest('5'), &digest('6'), 7)
+        );
+    }
 
     #[test]
     fn release_id_is_deterministic_and_binds_every_authority_and_plan_field() {
