@@ -55,7 +55,17 @@ jobs:
       - name: Evaluate crash-cut corpus flake check
         run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-corpus --no-link -L
       - name: Build and execute disposable NixOS/QEMU crash-cut campaign
-        run: NIXWARD_SOURCE_REVISION="${GITHUB_SHA}" nix build --impure .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
+        run: |
+          NIXWARD_SOURCE_REVISION="${GITHUB_SHA}" nix build --impure .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --out-link "$RUNNER_TEMP/nixward-crash-cut-vm-result" -L
+          cp -aL "$RUNNER_TEMP/nixward-crash-cut-vm-result" "$RUNNER_TEMP/nixward-crash-cut-vm-campaign"
+      - name: Publish disposable VM campaign evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: nixward-crash-cut-vm-${{ github.sha }}
+          path: ${{ runner.temp }}/nixward-crash-cut-vm-campaign
+          if-no-files-found: error
+          retention-days: 30
       - name: Install pinned Rust toolchain for isolated production-source regression
         run: |
           rustup toolchain install 1.96.0 --profile minimal
