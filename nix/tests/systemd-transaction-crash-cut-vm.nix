@@ -83,6 +83,11 @@ pkgs.testers.runNixOSTest {
       graphics = false;
       memorySize = 1024;
       cores = 2;
+      # runNixOSTest defaults to a tmpfs root in the disposable guest. Use
+      # one explicit qcow2 image so /var/lib survives machine.crash()/reboot.
+      # The test driver reuses this exact image between VM starts.
+      diskImage = "nixward-crash-cut-vm.qcow2";
+      diskSize = 4096;
     };
 
     system.stateVersion = "26.05";
@@ -95,6 +100,9 @@ pkgs.testers.runNixOSTest {
 
     machine.start()
     machine.wait_for_unit("multi-user.target", timeout=120)
+    # The root must be a real writable image, not runNixOSTest's tmpfs mode.
+    root_fs = machine.succeed("findmnt -n -o FSTYPE /var/lib").strip()
+    assert root_fs not in ["tmpfs", "ramfs"], root_fs
 
     state_root = "/var/lib/nixward-crash-cut-vm"
     attempts = []
