@@ -37,7 +37,7 @@
       "required": [
         "attempt_id", "unit_name", "boot_id_before", "boot_id_after",
         "invocation_id", "effect_marker_persisted", "process_receipt_persisted",
-        "invocation_count_after_reboot", "disposition"
+        "observed_invocation_count", "disposition"
       ],
       "properties": {
         "attempt_id": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" },
@@ -47,7 +47,9 @@
         "invocation_id": { "type": "string", "pattern": "^[a-fA-F0-9]{32}$" },
         "effect_marker_persisted": { "type": "boolean" },
         "process_receipt_persisted": { "type": "boolean" },
+        "observed_invocation_count": { "type": "integer", "const": 1 },
         "invocation_count_after_reboot": { "type": "integer", "const": 1 },
+        "invocation_count_after_completion": { "type": "integer", "const": 1 },
         "disposition": {
           "enum": [
             "attempt_started_effect_not_recorded_reconciliation_required",
@@ -55,7 +57,6 @@
             "complete_positive_control"
           ]
         },
-        "invocation_count_after_completion": { "type": "integer", "const": 1 }
       }
     }
   }
