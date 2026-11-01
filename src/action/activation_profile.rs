@@ -28,6 +28,10 @@ fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn valid_git_revision(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivationMode {
@@ -131,7 +135,7 @@ impl ActivationProfile {
         }
         if !valid_token(&self.profile_id)
             || !valid_token(&self.nixos_release)
-            || !valid_token(&self.nixpkgs_revision)
+            || !valid_git_revision(&self.nixpkgs_revision)
             || !valid_sha256(&self.switch_to_configuration_sha256)
             || !valid_token(&self.activation_semantics_revision)
             || !valid_token(&self.systemd_version)
@@ -175,6 +179,9 @@ impl ActivationProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Query identity must be assembled from a host-owned, source-pinned observation
+/// and verifier-owned profile policy. Never populate it from an agent proposal.
+/// The expected digest is a verifier policy pin, not a value chosen by the agent.
 pub struct ActivationProfileQuery<'a> {
     pub nixos_release: &'a str,
     pub nixpkgs_revision: &'a str,
