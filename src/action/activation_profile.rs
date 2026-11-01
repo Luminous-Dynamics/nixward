@@ -342,8 +342,10 @@ impl ActivationProfile {
                 "PIDFD attribution is absent and no process-start-tuple fallback is qualified",
             ));
         }
-        if self.mode_contracts.is_empty() || self.mode_contracts.len() > MAX_MODE_CONTRACTS {
-            return Err(ActivationProfileError::InvalidProfile("mode contract count"));
+        if self.mode_contracts.len() != MAX_MODE_CONTRACTS {
+            return Err(ActivationProfileError::InvalidProfile(
+                "a qualified profile must describe all four activation modes",
+            ));
         }
 
         let mut seen_modes = std::collections::BTreeSet::new();
@@ -748,14 +750,14 @@ mod tests {
         ActivationProfile {
             schema: ACTIVATION_PROFILE_SCHEMA.into(),
             version: ACTIVATION_PROFILE_VERSION,
-            profile_id: "nixos-26.05-qualified-build-001".into(),
-            nixos_release: "26.05".into(),
+            profile_id: "synthetic-test-profile-only".into(),
+            nixos_release: "26.05-test-fixture".into(),
             nixpkgs_revision: revision('a'),
             switch_to_configuration_sha256: digest('b'),
             activation_semantics_revision: "nixos-switch-semantics-v1".into(),
             activation_semantics_digest: digest('c'),
             systemd: SystemdCapabilityProfile {
-                version: "systemd-257".into(),
+                version: "systemd-test-fixture".into(),
                 job_removed_evidence: true,
                 unit_invocation_id: true,
                 get_unit_by_pidfd: true,
@@ -980,6 +982,14 @@ mod tests {
         assert!(matches!(p.validate(), Err(ActivationProfileError::InvalidProfile(_))));
         let mut p = profile();
         p.mode_contracts.push(p.mode_contracts[0].clone());
+        assert!(matches!(p.validate(), Err(ActivationProfileError::InvalidProfile(_))));
+    }
+
+
+    #[test]
+    fn registry_profile_must_qualify_all_four_activation_modes() {
+        let mut p = profile();
+        p.mode_contracts.retain(|contract| contract.mode != ActivationMode::DryActivate);
         assert!(matches!(p.validate(), Err(ActivationProfileError::InvalidProfile(_))));
     }
 

@@ -225,7 +225,7 @@
         },
         "mode_contracts": {
           "type": "array",
-          "minItems": 1,
+          "minItems": 4,
           "maxItems": 4,
           "items": {
             "$ref": "#/$defs/modeContract"

@@ -1,6 +1,6 @@
 # NixOS activation profile registry v1
 
-Status: **pure resolver and adversarial unit tests authored; no real NixOS release profile is qualified yet**
+Status: **pure resolver and 35 adversarial unit tests authored; no real NixOS release profile is qualified yet**
 
 ## Why a registry
 
