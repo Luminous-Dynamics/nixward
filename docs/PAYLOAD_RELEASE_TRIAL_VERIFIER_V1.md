@@ -28,7 +28,30 @@ Event sequences are typed and ordered. The verifier requires contiguous sequence
 
 Each artifact receipt is relative to the artifact root, includes an artifact kind and SHA-256 over the exact file bytes. Artifact content is streamed rather than loaded into the JSON buffer; each artifact is capped at 8 GiB, while corpus/manifest JSON is capped at 64 MiB. Absolute paths, parent traversal and symlink escapes are rejected. Every trial must include exactly one each of `raw_sqlite`, `supervisor_log` and `source_manifest`.
 
-The `source_manifest` is a compact JSON document with schema `org.luminousdynamics.nixward.source-evidence`, version 1, and the exact `source_commit_sha`, `flake_lock_sha256` and `corpus_sha256` values from the trial manifest. The verifier checks the artifact SHA-256 and then compares all three values. It is an integrity/consistency receipt, not a signature or proof that the claimed binary was built from those inputs. A separate trusted capture/signature layer is still required to authenticate the producer.
+The `source_manifest` is a compact JSON document with schema `org.luminousdynamics.nixward.source-evidence`, version 1, and the exact `source_commit_sha`, `flake_lock_sha256` and `corpus_sha256` values from the trial manifest. The verifier checks the artifact SHA-256 and then compares all three values. This is only a content-integrity/consistency receipt.
+
+### Optional authenticated source mode
+
+The verifier also supports the offline DSSE v1 / in-toto Statement v1 profile from `src/dsse.rs`. Each trial must then include exactly one additional artifact with kind `dsse_source_attestation`. Its signed in-toto subject must be named `nixward-source-and-flake-lock` and its SHA-256 must equal the exact bytes of that trial's `source_manifest` artifact. The typed Nixward predicate must match the fixed repository URI `https://github.com/Luminous-Dynamics/nixward`, the source commit, flake.lock and corpus digests taken from the run manifest/verifier, and the expected builder ID supplied by the operator.
+
+Supply the trust policy from a separately controlled local path, outside the artifact root, with an independently pinned digest. For example:
+
+```sh
+nixward-payload-release-benchmark-verify \
+  --corpus docs/fixtures/payload-release-assurance-benchmark-v1.json \
+  --manifest trials/manifest.json \
+  --artifacts-root trials/artifacts \
+  --source-trust-policy /etc/nixward/source-trust-policy.json \
+  --source-trust-policy-sha256 EXPECTED_LOCAL_POLICY_SHA256 \
+  --expected-builder-id https://ci.example.net/builders/nixward-release \
+  --verification-time-ms TRUSTED_UNIX_TIME_MS \
+  --require-authenticated-source \
+  --output trials/verification-report.json
+```
+
+The trust-policy file is never read from the evidence bundle. The verifier checks its SHA-256 against the separately supplied pin, then applies its local validity window, predicate allowlist, trusted Ed25519 keys, key revocation/validity and distinct-signer threshold. DSSE envelope `keyid` remains an untrusted hint; only locally trusted public keys that actually verify the PAE contribute to the reported signer IDs. The signed Statement is over the exact payload bytes and duplicate JSON keys are rejected.
+
+With no DSSE trust options, the report labels the mode `integrity_only_legacy`; source manifest hashes are not producer authentication. When trust options are supplied, the DSSE attestation is mandatory for every trial. `--require-authenticated-source` additionally makes omission of the trust-policy arguments a hard input error. The report separately counts source-manifest integrity, source-signature verification and builder-claim matches. A builder-claim match means only that the signed `builder.id` equals the operator-supplied expected value. It does **not** prove the CI workload identity, runner image, builder isolation or actual build execution. Those require a separately qualified workload-identity/capture attestation path. The source attestation also does not authenticate the raw host capture, SQLite snapshot producer or systemd observer; these remain separate evidence-ingress claims.
 
 The `raw_sqlite` artifact must be a **standalone consistent backup snapshot**, not a byte-copy of a live WAL database. Capture it using SQLite's online backup API into a new database, change the destination journal mode to `DELETE`, close it and hash that exact file. Do not copy only the live main DB while WAL may contain committed pages. The verifier stages the hash-checked artifact into a private temporary file and opens that staged file read-only. It verifies application ID, schema version, journal mode, SQLite `integrity_check`, `foreign_key_check`, and the exact v4 40-object schema inventory. It recomputes the policy epoch hash chain and admission commit IDs, then cross-checks the stored admission/replay/permit/transaction records and all five release-record families against the typed event stream.
 
@@ -42,7 +65,7 @@ The verifier recomputes the release ID using the same NUL-terminated domain sepa
 
 Worker receipts must follow an attempt and a completed write of the same payload, and match the exact release and payload digest. A new write-start after uncertainty is rejected; a late receipt may still reconcile the original attempt when the worker-completion timestamp precedes the receipt-persistence timestamp. Resolution without that exact receipt is unsafe. A runner cannot make an invalid sequence valid by supplying a positive summary.
 
-Artifacts are hash-checked, not authenticated. The verifier does not prove that a log was produced by the claimed machine; capture provenance and signature verification belong to a separately trusted evidence-ingress layer. The verifier itself makes no D-Bus calls, executes no shell command and changes no host state. The report includes the exact event-stream digest and the artifact paths, kinds and digests for each trial. A report output must be outside the artifact root, must not alias the corpus or manifest, and must not already exist; the verifier never overwrites source evidence.
+Artifacts are hash-checked, not authenticated. The verifier does not prove that a log was produced by the claimed machine; capture provenance and signature verification belong to a separately trusted evidence-ingress layer. The verifier itself makes no D-Bus calls, executes no shell command and changes no host state. The report includes the exact event-stream digest and the artifact paths, kinds and digests for each trial, plus separate source-integrity, source-signature and builder-claim match fields. A report output must be outside the artifact root, must not alias the corpus or manifest, and must not already exist; the verifier never overwrites source evidence.
 
 ## Statistics
 
@@ -54,4 +77,4 @@ Latency is derived only from matching request and commit events. The report sepa
 
 ## Test status
 
-The binary contains **32 authored deterministic Rust tests** (the symlink escape test is Unix-gated), including negative controls for duplicate release attempts, payload write before reservation, write restart after uncertainty, receipt without completed write, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, stale policy snapshots, percentile suppression, path traversal, outside-root symlink escape, wall-clock rollback, release-ID mutation, wrong-operation/target rejection events, unknown runner-summary fields, streaming artifact hashing, exact source-manifest checks, source-manifest field rejection and raw SQLite schema-v3 classification. Cargo tests and the Nix test target are authored but not executed in this environment.
+The binary contains **38 authored deterministic Rust tests** (the symlink escape test is Unix-gated), including negative controls for duplicate release attempts, payload write before reservation, write restart after uncertainty, receipt without completed write, resolution before receipt, uncertainty followed by a late receipt, emergency-revoked signer preservation, stale policy snapshots, percentile suppression, path traversal, outside-root symlink escape, wall-clock rollback, release-ID mutation, wrong-operation/target rejection events, unknown runner-summary fields, streaming artifact hashing, exact source-manifest checks, source-manifest field rejection, raw SQLite schema-v3 classification, valid DSSE/in-toto source evidence, incorrect builder-claim rejection, trust-policy digest substitution and trust-policy separation from the artifact root. Cargo tests and the Nix test target are authored but not executed in this environment.
