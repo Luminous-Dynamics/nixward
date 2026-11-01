@@ -547,6 +547,41 @@
               touch $out
             '';
 
+
+        # Build and test the read-only raw-trial payload assurance verifier.
+        checks.payload-release-trial-verifier-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-payload-release-trial-verifier-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+            cargoBuildFlags = [
+              "-p" "nixward" "--bin" "nixward-payload-release-benchmark-verify"
+            ];
+            cargoTestFlags = [
+              "-p" "nixward" "--bin" "nixward-payload-release-benchmark-verify"
+            ];
+
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out/bin"
+              cp "target/release/nixward-payload-release-benchmark-verify" "$out/bin/"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain

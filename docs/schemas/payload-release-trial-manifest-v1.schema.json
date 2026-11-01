@@ -1,0 +1,1066 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/payload-release-trial-manifest-v1.schema.json",
+  "title": "Nixward payload-release trial manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "corpus_sha256",
+    "source_commit_sha",
+    "flake_lock_sha256",
+    "environment",
+    "trials"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.payload-release-trial-manifest"
+    },
+    "version": {
+      "const": 1
+    },
+    "corpus_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "flake_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kernel_release",
+        "systemd_version",
+        "sqlite_version",
+        "nix_version",
+        "filesystem",
+        "mount_options",
+        "device_model",
+        "device_firmware",
+        "cpu_model",
+        "boot_id"
+      ],
+      "properties": {
+        "kernel_release": {
+          "type": "string",
+          "minLength": 1
+        },
+        "systemd_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sqlite_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nix_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "filesystem": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mount_options": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_firmware": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cpu_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "boot_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "trials": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "trial_id",
+          "scenario_id",
+          "started_monotonic_ns",
+          "finished_monotonic_ns",
+          "initial_policy_epoch",
+          "initial_policy_id",
+          "initial_policy_digest",
+          "initial_policy_record_digest",
+          "events_sha256",
+          "events",
+          "artifacts",
+          "initial_policy_keys",
+          "initial_policy_allowed_audiences",
+          "initial_policy_emergency_revoked_signers"
+        ],
+        "properties": {
+          "trial_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scenario_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "started_monotonic_ns": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "finished_monotonic_ns": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "initial_policy_epoch": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "initial_policy_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "initial_policy_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "initial_policy_record_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "events_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "events": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100000,
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "admission_commit_id",
+                    "expected_policy_epoch",
+                    "expected_policy_record_digest",
+                    "signer_key_id",
+                    "expected_authority_subject_digest",
+                    "expected_authority_audience",
+                    "payload_digest",
+                    "expires_at_ms",
+                    "expected_policy_id",
+                    "expected_policy_digest",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "barrier_create_requested"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "admission_commit_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "expected_policy_epoch": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "expected_policy_record_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "signer_key_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected_authority_subject_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "expected_authority_audience": {
+                      "enum": [
+                        "nixward-change-v1",
+                        "nixward-execution-intent-v1"
+                      ]
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "expires_at_ms": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "expected_policy_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected_policy_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "release_id",
+                    "admission_commit_id",
+                    "transaction_id",
+                    "attempt_id",
+                    "replay_key",
+                    "permit_digest",
+                    "plan_digest",
+                    "machine_binding_digest",
+                    "policy_id",
+                    "policy_epoch",
+                    "policy_digest",
+                    "policy_record_digest",
+                    "signer_key_id",
+                    "authority_provenance_digest",
+                    "authority_subject_digest",
+                    "authority_audience",
+                    "payload_digest",
+                    "expires_at_ms",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "barrier_committed"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "admission_commit_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "transaction_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "attempt_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "replay_key": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "permit_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "plan_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "machine_binding_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "policy_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "policy_epoch": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "policy_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "policy_record_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "signer_key_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "authority_provenance_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "authority_subject_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "authority_audience": {
+                      "enum": [
+                        "nixward-change-v1",
+                        "nixward-execution-intent-v1"
+                      ]
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "expires_at_ms": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "release_id"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "barrier_retry_existing"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "expected_epoch",
+                    "expected_record_digest"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "policy_advance_requested"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "expected_epoch": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "expected_record_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "from_epoch",
+                    "to_epoch",
+                    "previous_record_digest",
+                    "new_policy_id",
+                    "new_policy_digest",
+                    "new_record_digest",
+                    "emergency_revoked_signers",
+                    "decisions",
+                    "new_policy_allowed_audiences",
+                    "new_policy_keys",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "policy_advanced"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "from_epoch": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "to_epoch": {
+                      "type": "integer",
+                      "minimum": 2
+                    },
+                    "previous_record_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "new_policy_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "new_policy_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "new_record_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "emergency_revoked_signers": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "uniqueItems": true
+                    },
+                    "decisions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "release_id",
+                          "disposition"
+                        ],
+                        "properties": {
+                          "release_id": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "disposition": {
+                            "enum": [
+                              "preserve_existing_barrier",
+                              "stop_or_recovery_required"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "new_policy_allowed_audiences": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "uniqueItems": true
+                    },
+                    "new_policy_keys": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "signer_key_id",
+                          "revoked",
+                          "allowed_actions"
+                        ],
+                        "properties": {
+                          "signer_key_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "revoked": {
+                            "type": "boolean"
+                          },
+                          "allowed_actions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "uniqueItems": true
+                          }
+                        }
+                      }
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "release_id",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "release_attempt_requested"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "request_id",
+                    "release_id",
+                    "attempt_id",
+                    "payload_digest",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "release_attempt_reserved"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "attempt_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "release_id",
+                    "payload_digest"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "payload_write_started"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "release_id",
+                    "payload_digest",
+                    "bytes_written"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "payload_write_completed"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "bytes_written": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "release_id",
+                    "wall_time_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "release_uncertain"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "worker_completed_at_ns",
+                    "release_id",
+                    "payload_digest",
+                    "worker_unit",
+                    "invocation_id",
+                    "receipt_digest",
+                    "acknowledged_at_ms"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "worker_receipt_persisted"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "worker_completed_at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "payload_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "worker_unit": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "invocation_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "receipt_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "acknowledged_at_ms": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "release_id",
+                    "admission_commit_id",
+                    "receipt_digest"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "resolution_committed"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "release_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "admission_commit_id": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "receipt_digest": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "operation",
+                    "request_id",
+                    "target_id",
+                    "reason_code"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "operation_rejected"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "operation": {
+                      "enum": [
+                        "create_payload_release_barrier",
+                        "advance_authority_policy_epoch",
+                        "begin_payload_release_attempt",
+                        "acknowledge_payload_release",
+                        "record_resolution",
+                        "verify_integrity",
+                        "open_store"
+                      ]
+                    },
+                    "reason_code": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "request_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "target_id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "duration_ns",
+                    "wal_bytes",
+                    "busy_readers",
+                    "oldest_reader_age_ns",
+                    "wal_frames",
+                    "checkpointed_frames"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "checkpoint_completed"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "duration_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "wal_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "busy_readers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "oldest_reader_age_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "wal_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "checkpointed_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "seq",
+                    "at_ns",
+                    "duration_ns"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "writer_lock_wait"
+                    },
+                    "seq": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "at_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "duration_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "artifacts": {
+            "type": "array",
+            "maxItems": 10000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "relative_path",
+                "sha256",
+                "artifact_kind"
+              ],
+              "properties": {
+                "relative_path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "artifact_kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "enum": [
+                    "raw_sqlite",
+                    "supervisor_log",
+                    "source_manifest",
+                    "auxiliary_log",
+                    "system_metadata"
+                  ]
+                }
+              }
+            }
+          },
+          "initial_policy_keys": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "signer_key_id",
+                "revoked",
+                "allowed_actions"
+              ],
+              "properties": {
+                "signer_key_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revoked": {
+                  "type": "boolean"
+                },
+                "allowed_actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "uniqueItems": true
+                }
+              }
+            }
+          },
+          "initial_policy_allowed_audiences": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          },
+          "initial_policy_emergency_revoked_signers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

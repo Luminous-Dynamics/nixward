@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/payload-release-source-evidence-v1.schema.json",
+  "title": "Nixward payload-release source evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "source_commit_sha",
+    "flake_lock_sha256",
+    "corpus_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.source-evidence"
+    },
+    "version": {
+      "const": 1
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "flake_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "corpus_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
