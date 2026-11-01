@@ -35,7 +35,8 @@
       "additionalProperties": false,
       "required": [
         "flake_lock_sha256",
-        "corpus_sha256"
+        "corpus_sha256",
+        "source_inputs_sha256"
       ],
       "properties": {
         "flake_lock_sha256": {
@@ -43,6 +44,10 @@
           "pattern": "^[0-9a-f]{64}$"
         },
         "corpus_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_inputs_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         }

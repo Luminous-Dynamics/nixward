@@ -810,7 +810,7 @@ mod tests {
             verify_nixward_source_evidence(
                 &envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
             ),
-            Err(DsseVerificationError::SubjectMismatch)
+            Err(DsseVerificationError::SourceProvenanceMismatch)
         ));
     }
 
@@ -846,6 +846,24 @@ mod tests {
                 &foreign_builder_envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
             ),
             Err(DsseVerificationError::SourceBuilderMismatch)
+        ));
+    }
+
+
+    #[test]
+    fn typed_profile_rejects_a_valid_signature_over_the_wrong_output_subject() {
+        let key = signing_key(27);
+        let payload = source_statement(
+            OUTPUT_SUBJECT_NAME, &"f".repeat(64),
+            SOURCE_REPOSITORY, SOURCE_COMMIT, FLAKE_LOCK, CORPUS, BUILDER
+        );
+        let envelope = envelope(&payload, &[key.clone()], DSSE_IN_TOTO_PAYLOAD_TYPE);
+        let policy = policy_bytes(vec![trusted_key(&key)], 1);
+        assert!(matches!(
+            verify_nixward_source_evidence(
+                &envelope, &policy, &sha256_hex(&policy), 1_000, source_expectation()
+            ),
+            Err(DsseVerificationError::SubjectMismatch)
         ));
     }
 
