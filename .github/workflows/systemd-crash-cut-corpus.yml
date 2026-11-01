@@ -11,6 +11,8 @@ on:
       - "src/action/systemd_job_evidence.rs"
       - "docs/fixtures/systemd-transaction-crash-cuts-v1.json"
       - "docs/fixtures/systemd-transaction-crash-cuts-v1.schema.json"
+      - "docs/fixtures/systemd-transaction-crash-cut-vm-campaign-v1.schema.json"
+      - "nix/tests/systemd-transaction-crash-cut-vm.nix"
       - ".github/workflows/systemd-crash-cut-corpus.yml"
   push:
     branches: [main]
@@ -23,6 +25,8 @@ on:
       - "src/action/systemd_job_evidence.rs"
       - "docs/fixtures/systemd-transaction-crash-cuts-v1.json"
       - "docs/fixtures/systemd-transaction-crash-cuts-v1.schema.json"
+      - "docs/fixtures/systemd-transaction-crash-cut-vm-campaign-v1.schema.json"
+      - "nix/tests/systemd-transaction-crash-cut-vm.nix"
       - ".github/workflows/systemd-crash-cut-corpus.yml"
 
 permissions:
@@ -36,7 +40,7 @@ jobs:
   corpus-guard:
     name: Nix and Rust crash-cut corpus guards
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -48,5 +52,7 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Evaluate crash-cut corpus flake check
         run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-corpus --no-link -L
+      - name: Build and execute disposable NixOS/QEMU crash-cut campaign
+        run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
       - name: Run Rust corpus regression test with pinned toolchain
         run: nix develop --command cargo test --locked --lib action::systemd_job_evidence::tests::crash_cut_corpus_is_complete_and_replay_forbidding -- --exact
