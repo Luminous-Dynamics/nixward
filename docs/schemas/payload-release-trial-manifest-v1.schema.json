@@ -1004,7 +1004,7 @@
                   "enum": [
                     "raw_sqlite",
                     "supervisor_log",
-                    "source_manifest",
+                    "dsse_source_attestation",
                     "auxiliary_log",
                     "system_metadata"
                   ]

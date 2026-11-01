@@ -720,6 +720,10 @@ fn verify_source_evidence_artifact(
         ));
     }
     let path = resolve_artifact_path(artifact_root, &matches[0].relative_path)?;
+    let artifact_digest = sha256_file_bounded(&path)?;
+    if artifact_digest != matches[0].sha256 {
+        return Err("DSSE source attestation artifact hash mismatch".into());
+    }
     let envelope_bytes = read_bounded(&path)?;
     let verified = verify_nixward_source_evidence(
         &envelope_bytes,
@@ -3394,72 +3398,168 @@ mod tests {
     }
 
 
+
+    const TEST_SOURCE_REPOSITORY: &str = "https://github.com/Luminous-Dynamics/nixward";
+    const TEST_SOURCE_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_FLAKE_LOCK: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const TEST_SOURCE_CORPUS: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const TEST_BUILDER: &str = "https://github.com/actions/runner";
+
+    fn signed_source_bundle() -> (Vec<u8>, Vec<u8>, String) {
+        let signing_key = SigningKey::from_bytes(&[0x37; 32]);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let trusted_key = DsseTrustedKey {
+            key_id: sha256_hex(&public_key),
+            public_key: STANDARD.encode(public_key),
+            revoked: false,
+            not_before_ms: 100,
+            not_after_ms: 10_000,
+            allowed_predicate_types: vec![NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE.into()],
+        };
+        let trust_policy = DsseTrustPolicy {
+            schema: TRUST_POLICY_SCHEMA.into(),
+            version: 1,
+            policy_id: "nixward-benchmark-source-root".into(),
+            epoch: 1,
+            not_before_ms: 100,
+            not_after_ms: 10_000,
+            signature_threshold: 1,
+            allowed_payload_types: vec![DSSE_IN_TOTO_PAYLOAD_TYPE.into()],
+            allowed_predicate_types: vec![NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE.into()],
+            keys: vec![trusted_key],
+        };
+        let trust_policy_bytes = serde_json::to_vec(&trust_policy).unwrap();
+        let trust_policy_digest = sha256_hex(&trust_policy_bytes);
+        let subject_digest = nixward_source_inputs_subject_sha256(
+            TEST_SOURCE_REPOSITORY,
+            TEST_SOURCE_COMMIT,
+            TEST_FLAKE_LOCK,
+            TEST_SOURCE_CORPUS,
+        ).unwrap();
+        let statement = serde_json::to_vec(&serde_json::json!({
+            "_type": "https://in-toto.io/Statement/v1",
+            "subject": [{
+                "name": NIXWARD_SOURCE_INPUTS_SUBJECT_NAME,
+                "digest": { "sha256": subject_digest }
+            }],
+            "predicateType": NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE,
+            "predicate": {
+                "source": {
+                    "repository_uri": TEST_SOURCE_REPOSITORY,
+                    "commit_sha": TEST_SOURCE_COMMIT
+                },
+                "materials": {
+                    "flake_lock_sha256": TEST_FLAKE_LOCK,
+                    "corpus_sha256": TEST_SOURCE_CORPUS
+                },
+                "builder": { "id": TEST_BUILDER }
+            }
+        })).unwrap();
+        let signed_bytes = signing_key.sign(&pae(DSSE_IN_TOTO_PAYLOAD_TYPE, &statement));
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "payloadType": DSSE_IN_TOTO_PAYLOAD_TYPE,
+            "payload": STANDARD.encode(&statement),
+            "signatures": [{ "sig": STANDARD.encode(signed_bytes.to_bytes()) }]
+        })).unwrap();
+        (envelope, trust_policy_bytes, trust_policy_digest)
+    }
+
+    fn source_attestation_receipt(temp: &tempfile::TempDir, bytes: &[u8]) -> ArtifactReceipt {
+        let path = temp.path().join("source-attestation.dsse.json");
+        fs::write(&path, bytes).unwrap();
+        ArtifactReceipt {
+            relative_path: "source-attestation.dsse.json".into(),
+            sha256: sha256_hex(bytes),
+            artifact_kind: "dsse_source_attestation".into(),
+        }
+    }
+
     #[test]
-    fn requires_exact_source_manifest_artifact_and_compares_all_digests() {
+    fn requires_and_verifies_signed_source_attestation_before_acceptance() {
         let temp = tempfile::tempdir().unwrap();
-        let evidence = serde_json::json!({
+        let (envelope, policy, policy_digest) = signed_source_bundle();
+        let receipt = source_attestation_receipt(&temp, &envelope);
+        let verified = verify_source_evidence_artifact(
+            temp.path(),
+            &[receipt],
+            &policy,
+            &policy_digest,
+            TEST_SOURCE_REPOSITORY,
+            TEST_SOURCE_COMMIT,
+            TEST_FLAKE_LOCK,
+            TEST_SOURCE_CORPUS,
+            TEST_BUILDER,
+            1_000,
+        ).unwrap();
+        assert!(verified.verified);
+        assert_eq!(verified.source_commit_sha, TEST_SOURCE_COMMIT);
+        assert_eq!(verified.flake_lock_sha256, TEST_FLAKE_LOCK);
+        assert_eq!(verified.verified_key_ids.len(), 1);
+        assert_eq!(verified.trust_policy_epoch, 1);
+    }
+
+    #[test]
+    fn signed_source_attestation_cannot_be_replaced_by_self_hashed_unsigned_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let unsigned = serde_json::to_vec(&serde_json::json!({
             "schema": "org.luminousdynamics.nixward.source-evidence",
             "version": 1,
-            "source_commit_sha": "a".repeat(40),
-            "flake_lock_sha256": digest('b'),
-            "corpus_sha256": digest('c')
-        });
-        let path = temp.path().join("source-evidence.json");
-        let bytes = serde_json::to_vec(&evidence).unwrap();
-        fs::write(&path, &bytes).unwrap();
-        let receipt = ArtifactReceipt {
-            relative_path: "source-evidence.json".into(),
-            sha256: sha256_hex(&bytes),
-            artifact_kind: "source_manifest".into(),
-        };
+            "source_commit_sha": TEST_SOURCE_COMMIT,
+            "flake_lock_sha256": TEST_FLAKE_LOCK,
+            "corpus_sha256": TEST_SOURCE_CORPUS,
+            "runner_claimed_success": true
+        })).unwrap();
+        let receipt = source_attestation_receipt(&temp, &unsigned);
+        let (_envelope, policy, policy_digest) = signed_source_bundle();
         assert!(verify_source_evidence_artifact(
             temp.path(),
-            std::slice::from_ref(&receipt),
-            &"a".repeat(40),
-            &digest('b'),
-            &digest('c'),
-        ).is_ok());
-        assert!(verify_source_evidence_artifact(
-            temp.path(),
-            std::slice::from_ref(&receipt),
-            &"d".repeat(40),
-            &digest('b'),
-            &digest('c'),
-        ).is_err());
-        assert!(verify_source_evidence_artifact(
-            temp.path(),
-            &[],
-            &"a".repeat(40),
-            &digest('b'),
-            &digest('c'),
+            &[receipt],
+            &policy,
+            &policy_digest,
+            TEST_SOURCE_REPOSITORY,
+            TEST_SOURCE_COMMIT,
+            TEST_FLAKE_LOCK,
+            TEST_SOURCE_CORPUS,
+            TEST_BUILDER,
+            1_000,
         ).is_err());
     }
 
     #[test]
-    fn rejects_unknown_source_evidence_fields() {
+    fn updating_envelope_hash_does_not_hide_a_changed_signed_payload() {
         let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("source-evidence.json");
-        let value = serde_json::json!({
-            "schema": "org.luminousdynamics.nixward.source-evidence",
-            "version": 1,
-            "source_commit_sha": "a".repeat(40),
-            "flake_lock_sha256": digest('b'),
-            "corpus_sha256": digest('c'),
-            "runner_claimed_success": true
-        });
-        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-        let receipt = ArtifactReceipt {
-            relative_path: "source-evidence.json".into(),
-            sha256: sha256_hex(&fs::read(path).unwrap()),
-            artifact_kind: "source_manifest".into(),
-        };
+        let (envelope, policy, policy_digest) = signed_source_bundle();
+        let mut json: serde_json::Value = serde_json::from_slice(&envelope).unwrap();
+        json["payload"] = serde_json::Value::String(
+            STANDARD.encode(b"{\"_type\":\"https://in-toto.io/Statement/v1\"}")
+        );
+        let tampered = serde_json::to_vec(&json).unwrap();
+        // The receipt is deliberately recomputed over the tampered envelope.
+        let receipt = source_attestation_receipt(&temp, &tampered);
         assert!(verify_source_evidence_artifact(
             temp.path(),
             &[receipt],
-            &"a".repeat(40),
-            &digest('b'),
-            &digest('c'),
+            &policy,
+            &policy_digest,
+            TEST_SOURCE_REPOSITORY,
+            TEST_SOURCE_COMMIT,
+            TEST_FLAKE_LOCK,
+            TEST_SOURCE_CORPUS,
+            TEST_BUILDER,
+            1_000,
         ).is_err());
+    }
+
+    #[test]
+    fn source_trust_policy_must_be_outside_the_evidence_artifact_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy_path = temp.path().join("trust-policy.json");
+        fs::write(&policy_path, b"{}").unwrap();
+        assert!(validate_external_trust_policy_path(&policy_path, temp.path()).is_err());
+        let external = tempfile::tempdir().unwrap();
+        let external_policy = external.path().join("trust-policy.json");
+        fs::write(&external_policy, b"{}").unwrap();
+        assert!(validate_external_trust_policy_path(&external_policy, temp.path()).is_ok());
     }
 
     #[test]
