@@ -863,11 +863,139 @@ pub fn compute_evidence_set_sha256(subjects: &[CaptureSubject]) -> CaptureResult
     Ok(hash_domain(b"nixward-capture-evidence-subject-set-v1\0", &encoded))
 }
 
+
+#[derive(Debug, Clone)]
+pub struct CaptureSubjectFile {
+    pub name: String,
+    pub relative_path: String,
+    pub expected_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifiedCaptureEvidence {
+    subjects: Vec<CaptureSubject>,
+    evidence_set_sha256: String,
+}
+
+impl VerifiedCaptureEvidence {
+    pub fn subjects(&self) -> &[CaptureSubject] { &self.subjects }
+    pub fn evidence_set_sha256(&self) -> &str { &self.evidence_set_sha256 }
+}
+
+fn validate_relative_evidence_path(value: &str) -> CaptureResult<()> {
+    let path = Path::new(value);
+    if value.trim().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        ))
+    {
+        return Err(CaptureAttestationError::InvalidInput("evidence path must be relative and confined".into()));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path, max_bytes: u64) -> CaptureResult<String> {
+    use std::io::Read;
+    let metadata = fs::metadata(path)
+        .map_err(|error| CaptureAttestationError::InvalidInput(format!("stat evidence file: {error}")))?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(CaptureAttestationError::InvalidInput("evidence file is not regular or exceeds size limit".into()));
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|error| CaptureAttestationError::InvalidInput(format!("open evidence file: {error}")))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = file.read(&mut buffer)
+            .map_err(|error| CaptureAttestationError::InvalidInput(format!("read evidence file: {error}")))?;
+        if read == 0 { break; }
+        total = total.checked_add(read as u64)
+            .ok_or_else(|| CaptureAttestationError::InvalidInput("evidence file size overflow".into()))?;
+        if total > max_bytes {
+            return Err(CaptureAttestationError::InvalidInput("evidence file exceeds size limit".into()));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Hash the actual files under a private evidence root, reject symlinks and
+/// path traversal, and return an opaque subject-set token for attestation.
+pub fn verify_capture_subject_files(
+    evidence_root: &Path,
+    files: &[CaptureSubjectFile],
+    extra_subjects: &[CaptureSubject],
+) -> CaptureResult<VerifiedCaptureEvidence> {
+    if files.is_empty() {
+        return Err(CaptureAttestationError::InvalidInput("evidence subject file set is empty".into()));
+    }
+    let root_meta = fs::symlink_metadata(evidence_root)
+        .map_err(|error| CaptureAttestationError::InvalidInput(format!("evidence root: {error}")))?;
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Err(CaptureAttestationError::InvalidInput("evidence root must be a real directory".into()));
+    }
+    let root = fs::canonicalize(evidence_root)
+        .map_err(|error| CaptureAttestationError::InvalidInput(error.to_string()))?;
+    let mut subjects = Vec::with_capacity(files.len() + extra_subjects.len());
+    let mut names = BTreeSet::new();
+    for input in files {
+        validate_relative_evidence_path(&input.relative_path)?;
+        if input.name.trim().is_empty()
+            || !valid_hex(&input.expected_sha256, 64)
+            || !names.insert(input.name.clone())
+        {
+            return Err(CaptureAttestationError::InvalidInput("invalid/duplicate evidence subject".into()));
+        }
+        let mut current = root.clone();
+        for component in Path::new(&input.relative_path).components() {
+            if let std::path::Component::Normal(part) = component {
+                current.push(part);
+                let metadata = fs::symlink_metadata(&current)
+                    .map_err(|error| CaptureAttestationError::InvalidInput(format!("evidence path {}: {error}", input.relative_path)))?;
+                if metadata.file_type().is_symlink() {
+                    return Err(CaptureAttestationError::InvalidInput(format!(
+                        "symlink is forbidden in evidence path {}", input.relative_path
+                    )));
+                }
+            }
+        }
+        let canonical = fs::canonicalize(&current)
+            .map_err(|error| CaptureAttestationError::InvalidInput(format!("resolve evidence path: {error}")))?;
+        if !canonical.starts_with(&root) {
+            return Err(CaptureAttestationError::InvalidInput("evidence path escaped root".into()));
+        }
+        let actual = sha256_file(&canonical, 8 * 1024 * 1024 * 1024)?;
+        if actual != input.expected_sha256 {
+            return Err(CaptureAttestationError::InvalidInput(format!(
+                "evidence digest mismatch for {}", input.relative_path
+            )));
+        }
+        subjects.push(CaptureSubject {
+            name: input.name.clone(),
+            digest: StrictDigestMap(BTreeMap::from([("sha256".into(), actual)])),
+        });
+    }
+    for subject in extra_subjects {
+        if !names.insert(subject.name.clone()) {
+            return Err(CaptureAttestationError::InvalidInput("duplicate evidence subject name".into()));
+        }
+        subjects.push(subject.clone());
+    }
+    subjects.sort_by(|left, right| left.name.cmp(&right.name));
+    let evidence_set_sha256 = compute_evidence_set_sha256(&subjects)?;
+    Ok(VerifiedCaptureEvidence { subjects, evidence_set_sha256 })
+}
+
 pub fn verify_capture_attestation(
     envelope_bytes: &[u8],
     trust_policy_bytes: &[u8],
     challenge: &CaptureChallenge,
-    expected_subjects: &[CaptureSubject],
+    expected_subjects: &VerifiedCaptureEvidence,
     expected: &CapturePredicate,
     ledger: &CaptureChallengeLedger,
     now_ms: u64,
@@ -883,7 +1011,7 @@ pub fn verify_capture_attestation(
     if challenge.capture_policy_sha256 != policy_sha {
         return Err(CaptureAttestationError::PolicyDigestMismatch);
     }
-    let evidence_digest = compute_evidence_set_sha256(expected_subjects)?;
+    let evidence_digest = expected_subjects.evidence_set_sha256.clone();
     if evidence_digest != challenge.evidence_set_sha256 {
         return Err(CaptureAttestationError::InvalidChallenge);
     }
@@ -897,8 +1025,7 @@ pub fn verify_capture_attestation(
     let predicate = &statement.predicate;
     let mut subjects = statement.subject.clone();
     subjects.sort_by(|left, right| left.name.cmp(&right.name));
-    let mut expected_sorted = expected_subjects.to_vec();
-    expected_sorted.sort_by(|left, right| left.name.cmp(&right.name));
+    let expected_sorted = expected_subjects.subjects.clone();
     if subjects != expected_sorted {
         return Err(CaptureAttestationError::SubjectSetMismatch);
     }
