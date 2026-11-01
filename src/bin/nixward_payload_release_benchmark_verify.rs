@@ -7,6 +7,7 @@
 //! checks evidence consistency and artifact digests; it does not authenticate
 //! the machine that captured the records or perform host-mutating operations.
 
+use nixward::authority_signature::AuthorityTrustPolicy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,9 +91,48 @@ struct TrialEnvironment {
 #[serde(deny_unknown_fields)]
 struct PolicySignerAuthorization {
     signer_key_id: String,
+    issuer: String,
+    public_key_hex: String,
     revoked: bool,
     allowed_actions: Vec<String>,
+    claims: BTreeMap<String, String>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyEpochEvidence {
+    epoch: u64,
+    policy_json_artifact_path: String,
+    policy_json_sha256: String,
+    emergency_revoked_signers: Vec<String>,
+    emergency_revocation_digest: String,
+    previous_record_digest: String,
+    update_provenance_artifact_path: String,
+    update_provenance_sha256: String,
+    update_provenance_digest: String,
+    created_at_ms: u64,
+    record_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedPolicySnapshot {
+    epoch: u64,
+    policy_id: String,
+    policy_digest: String,
+    record_digest: String,
+    previous_record_digest: String,
+    emergency_revoked_signers: Vec<String>,
+    keys: Vec<PolicySignerAuthorization>,
+    allowed_audiences: Vec<String>,
+}
+
+const POLICY_DIGEST_DOMAIN: &[u8] = b"symthaea-authority-policy-v1\\0";
+const POLICY_EMERGENCY_REVOCATION_DOMAIN: &[u8] = b"nixward-authority-emergency-revocations-v1\\0";
+const POLICY_UPDATE_PROVENANCE_DOMAIN: &[u8] = b"nixward-authority-policy-update-provenance-v1\\0";
+const POLICY_EPOCH_RECORD_DOMAIN: &[u8] = b"nixward-authority-policy-epoch-record-v1\\0";
+const GENESIS_POLICY_RECORD_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const MAX_POLICY_JSON_BYTES: usize = 1024 * 1024;
+const MAX_POLICY_UPDATE_PROVENANCE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -108,6 +148,7 @@ struct TrialRecord {
     initial_policy_keys: Vec<PolicySignerAuthorization>,
     initial_policy_allowed_audiences: Vec<String>,
     initial_policy_emergency_revoked_signers: Vec<String>,
+    policy_epochs: Vec<PolicyEpochEvidence>,
     events_sha256: String,
     events: Vec<EvidenceEvent>,
     artifacts: Vec<ArtifactReceipt>,
