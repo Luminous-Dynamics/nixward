@@ -482,6 +482,57 @@ mod tests {
     }
 
     #[test]
+    fn thirty_two_activation_profile_negative_vectors_are_denied() {
+        for vector in 0..32 {
+            let mut p = profile();
+            let mut registry = ActivationProfileRegistry::new();
+            let digest = registry.register(p.clone()).unwrap();
+            let mut q = query(&p, &digest);
+
+            let denied = match vector {
+                0 => { p.schema.push_str("-unknown"); p.validate().is_err() }
+                1 => { p.version = 2; p.validate().is_err() }
+                2 => { p.profile_id.clear(); p.validate().is_err() }
+                3 => { p.nixos_release.clear(); p.validate().is_err() }
+                4 => { p.nixpkgs_revision = "not-a-revision".into(); p.validate().is_err() }
+                5 => { p.switch_to_configuration_sha256 = "xyz".into(); p.validate().is_err() }
+                6 => { p.activation_semantics_revision.clear(); p.validate().is_err() }
+                7 => { p.systemd_version.clear(); p.validate().is_err() }
+                8 => { p.observer_adapter_revision.clear(); p.validate().is_err() }
+                9 => { p.supported_modes.clear(); p.validate().is_err() }
+                10 => { p.requires_deprecated_activation_callbacks = true; p.validate().is_err() }
+                11 => { p.requires_invocation_id = false; p.validate().is_err() }
+                12 => { q.nixos_release = "unknown-release"; registry.resolve_exact(&q).is_err() }
+                13 => { q.nixpkgs_revision = "ffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
+                14 => { q.switch_to_configuration_sha256 = &"b".repeat(64); registry.resolve_exact(&q).is_err() }
+                15 => { q.activation_semantics_revision = "unknown-semantics"; registry.resolve_exact(&q).is_err() }
+                16 => { q.systemd_version = "262"; registry.resolve_exact(&q).is_err() }
+                17 => { q.observer_adapter_revision = "unknown-observer"; registry.resolve_exact(&q).is_err() }
+                18 => { q.expected_profile_digest = &"0".repeat(64); registry.resolve_exact(&q).is_err() }
+                19 => { let duplicate = p.clone(); registry.register(duplicate).is_err() }
+                20 => { registry = ActivationProfileRegistry::new(); registry.resolve_exact(&q).is_err() }
+                21 => { q.nixos_release = "fixture-release-A-26.11"; registry.resolve_exact(&q).is_err() }
+                22 => { q.nixpkgs_revision = "0123456789abcdef0123456789abcdef01234568"; registry.resolve_exact(&q).is_err() }
+                23 => { q.switch_to_configuration_sha256 = &"c".repeat(64); registry.resolve_exact(&q).is_err() }
+                24 => { q.activation_semantics_revision = "fixture-activation-semantics-v2"; registry.resolve_exact(&q).is_err() }
+                25 => { q.systemd_version = "260"; registry.resolve_exact(&q).is_err() }
+                26 => { q.observer_adapter_revision = "fixture-systemd-observer-v2"; registry.resolve_exact(&q).is_err() }
+                27 => { q.expected_profile_digest = &"f".repeat(64); registry.resolve_exact(&q).is_err() }
+                28 => { p.requires_deprecated_activation_callbacks = true; registry.register(p).is_err() }
+                29 => { p.requires_invocation_id = false; registry.register(p).is_err() }
+                30 => { p.supported_modes.remove(&ActivationMode::DryActivate); p.expected_postconditions(ActivationMode::DryActivate).is_err() }
+                31 => validate_inhibitor_observation(
+                    InhibitorPolicy::RequiredComparison,
+                    InhibitorObservation::Bypassed,
+                    Some(&"f".repeat(64)),
+                ).is_err(),
+                _ => unreachable!("the conformance corpus is fixed"),
+            };
+            assert!(denied, "activation profile negative vector {vector} was accepted");
+        }
+    }
+
+    #[test]
     fn mode_postconditions_are_not_agent_supplied() {
         for mode in [ActivationMode::Switch, ActivationMode::Test, ActivationMode::Boot, ActivationMode::DryActivate] {
             let expected = ModePostconditions::for_mode(mode);
