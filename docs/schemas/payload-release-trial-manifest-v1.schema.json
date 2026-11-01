@@ -903,7 +903,11 @@
                     "seq",
                     "at_ns",
                     "duration_ns",
-                    "wal_bytes"
+                    "wal_bytes",
+                    "busy_readers",
+                    "oldest_reader_age_ns",
+                    "wal_frames",
+                    "checkpointed_frames"
                   ],
                   "properties": {
                     "kind": {
@@ -922,6 +926,22 @@
                       "minimum": 0
                     },
                     "wal_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "busy_readers": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "oldest_reader_age_ns": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "wal_frames": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "checkpointed_frames": {
                       "type": "integer",
                       "minimum": 0
                     }

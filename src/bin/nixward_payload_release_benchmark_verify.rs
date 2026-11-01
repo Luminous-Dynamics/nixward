@@ -900,7 +900,6 @@ fn verify_trial(
     let mut rejections = Vec::<RejectionState>::new();
     let mut policy_decisions_seen = Vec::<PolicyDecision>::new();
     let mut measurements = TrialMeasurements::default();
-    let mut checkpoint_count = 0_usize;
     let mut reader_blocked_checkpoints = 0_usize;
 
     for event in &trial.events {
@@ -1361,7 +1360,6 @@ fn verify_trial(
                 duration_ns, wal_bytes, busy_readers, oldest_reader_age_ns,
                 wal_frames, checkpointed_frames, ..
             } => {
-                checkpoint_count += 1;
                 measurements.checkpoint_latency_ns.push(*duration_ns);
                 measurements.wal_bytes.push(*wal_bytes);
                 if *busy_readers > 0
@@ -2490,6 +2488,19 @@ fn stage_verified_sqlite_artifact(
     Ok(destination)
 }
 
+
+fn validate_trial_floors(policy: &TrialPolicy) -> Result<(), String> {
+    if policy.clean_min_trials < 30
+        || policy.fault_min_trials < 100
+        || policy.concurrency_min_trials < 100
+        || policy.durability_min_trials < 100
+        || policy.p99_claim_min_trials < 1_000
+    {
+        return Err("benchmark corpus weakens the verifier's fixed trial/p99 evidence floors".into());
+    }
+    Ok(())
+}
+
 fn verify_manifest(
     corpus_bytes: &[u8],
     manifest_bytes: &[u8],
@@ -2537,14 +2548,7 @@ fn verify_manifest(
         "monotonic_timestamps",
         "raw_sqlite_and_supervisor_logs",
     ];
-    if corpus.trial_policy.clean_min_trials < 30
-        || corpus.trial_policy.fault_min_trials < 100
-        || corpus.trial_policy.concurrency_min_trials < 100
-        || corpus.trial_policy.durability_min_trials < 100
-        || corpus.trial_policy.p99_claim_min_trials < 1_000
-    {
-        return Err("benchmark corpus weakens the verifier's fixed trial/p99 evidence floors".into());
-    }
+    validate_trial_floors(&corpus.trial_policy)?;
     for scenario in &corpus.scenarios {
         if scenario.minimum_trials == 0
             || scenario.fault_boundary.trim().is_empty()
@@ -2874,6 +2878,44 @@ mod tests {
         std::iter::repeat(byte).take(64).collect()
     }
 
+
+    fn scenario_with_disposition(expected_disposition: &str) -> ScenarioDefinition {
+        ScenarioDefinition {
+            id: "test-scenario".into(),
+            trial_class: "fault".into(),
+            expected_disposition: expected_disposition.into(),
+            minimum_trials: 100,
+            fault_boundary: "test".into(),
+            required_observations: vec![],
+        }
+    }
+
+    fn test_barrier_state() -> BarrierState {
+        BarrierState {
+            release_id: digest('1'),
+            admission_commit_id: digest('2'),
+            transaction_id: "transaction-1".into(),
+            attempt_id: "attempt-1".into(),
+            replay_key: digest('3'),
+            permit_digest: digest('4'),
+            plan_digest: digest('5'),
+            machine_binding_digest: digest('6'),
+            authority_provenance_digest: digest('7'),
+            authority_subject_digest: digest('8'),
+            authority_audience: "nixward-change-v1".into(),
+            policy_id: "owner-root:1".into(),
+            policy_digest: digest('9'),
+            signer_key_id: "owner-1".into(),
+            policy_epoch: 1,
+            policy_record_digest: digest('a'),
+            payload_digest: digest('b'),
+            expires_at_ms: 10_000,
+            barrier_wall_time_ms: 1_000,
+            committed_at_ns: 1_000_000,
+            decision: None,
+        }
+    }
+
     fn test_release_id() -> String {
         derive_release_id(
             &digest('a'), &digest('4'), &digest('1'), &digest('b'),
@@ -2997,6 +3039,133 @@ mod tests {
     }
 
 
+
+
+    #[test]
+    fn fixed_trial_floors_cannot_be_lowered_by_editing_the_corpus() {
+        let valid = TrialPolicy {
+            clean_min_trials: 30,
+            fault_min_trials: 100,
+            concurrency_min_trials: 100,
+            durability_min_trials: 100,
+            p99_claim_min_trials: 1_000,
+        };
+        assert!(validate_trial_floors(&valid).is_ok());
+        let lowered = TrialPolicy {
+            clean_min_trials: 1,
+            fault_min_trials: 1,
+            concurrency_min_trials: 1,
+            durability_min_trials: 1,
+            p99_claim_min_trials: 10,
+        };
+        assert!(validate_trial_floors(&lowered).is_err());
+    }
+
+    #[test]
+    fn preserve_scenario_requires_exact_historical_retry() {
+        let scenario = scenario_with_disposition("preserve_historical_barrier");
+        let barrier = test_barrier_state();
+        let barriers = BTreeMap::from([(barrier.release_id.clone(), barrier)]);
+        let policies = vec![PolicyDecision {
+            release_id: digest('1'),
+            disposition: PolicyDisposition::PreserveExistingBarrier,
+        }];
+        let empty_attempts = BTreeMap::new();
+        let empty_receipts = BTreeMap::new();
+        let empty_uncertain = BTreeSet::new();
+        let empty_rejections = Vec::new();
+        assert!(!scenario_expectation_met(
+            &scenario, &barriers, &empty_attempts, &empty_receipts,
+            &empty_uncertain, &empty_rejections, &[], 0, &policies,
+        ));
+        assert!(scenario_expectation_met(
+            &scenario, &barriers, &empty_attempts, &empty_receipts,
+            &empty_uncertain, &empty_rejections,
+            &[("retry-1".into(), digest('1'))], 0, &policies,
+        ));
+    }
+
+    #[test]
+    fn uncertain_no_resend_requires_evidence_of_rejected_retry() {
+        let scenario = scenario_with_disposition("uncertain_no_resend");
+        let attempt = AttemptState {
+            attempt_id: "attempt-1".into(),
+            payload_digest: digest('b'),
+            at_ns: 100,
+        };
+        let attempts = BTreeMap::from([(digest('1'), attempt)]);
+        let uncertain = BTreeSet::from([digest('1')]);
+        let barriers = BTreeMap::new();
+        let receipts = BTreeMap::new();
+        let retries = Vec::new();
+        let policies = Vec::new();
+        assert!(!scenario_expectation_met(
+            &scenario, &barriers, &attempts, &receipts, &uncertain,
+            &[], &retries, 0, &policies,
+        ));
+        let rejection = RejectionState {
+            operation: "begin_payload_release_attempt".into(),
+            request_id: "retry-attempt-2".into(),
+            target_id: digest('1'),
+            reason_code: "release_attempt_already_started".into(),
+        };
+        assert!(scenario_expectation_met(
+            &scenario, &barriers, &attempts, &receipts, &uncertain,
+            &[rejection], &retries, 0, &policies,
+        ));
+    }
+
+    #[test]
+    fn stop_and_policy_race_scenarios_require_observed_transaction_outcomes() {
+        let stop = scenario_with_disposition("block_attempt");
+        let stop_policy = vec![PolicyDecision {
+            release_id: digest('1'),
+            disposition: PolicyDisposition::StopOrRecoveryRequired,
+        }];
+        assert!(!scenario_expectation_met(
+            &stop, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[], &[], 0, &stop_policy,
+        ));
+        let blocked_attempt = RejectionState {
+            operation: "begin_payload_release_attempt".into(),
+            request_id: "attempt-1".into(),
+            target_id: digest('1'),
+            reason_code: "release_attempt_blocked".into(),
+        };
+        assert!(scenario_expectation_met(
+            &stop, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[blocked_attempt], &[], 0, &stop_policy,
+        ));
+
+        let race = scenario_with_disposition("one_linearized_order");
+        assert!(!scenario_expectation_met(
+            &race, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[], &[], 0, &stop_policy,
+        ));
+        let stale_rejection = RejectionState {
+            operation: "create_payload_release_barrier".into(),
+            request_id: "barrier-1".into(),
+            target_id: digest('2'),
+            reason_code: "release_barrier_stale_policy".into(),
+        };
+        assert!(scenario_expectation_met(
+            &race, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[stale_rejection], &[], 0, &[],
+        ));
+    }
+
+    #[test]
+    fn long_reader_checkpoint_scenario_requires_partial_checkpoint_under_reader_pressure() {
+        let scenario = scenario_with_disposition("measure_tail_latency");
+        assert!(!scenario_expectation_met(
+            &scenario, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[], &[], 0, &[],
+        ));
+        assert!(scenario_expectation_met(
+            &scenario, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
+            &BTreeSet::new(), &[], &[], 1, &[],
+        ));
+    }
 
     #[test]
     fn classifies_schema_v3_snapshot_as_legacy_refusal() {
