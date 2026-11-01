@@ -98,6 +98,10 @@ pkgs.testers.runNixOSTest {
     import json
     import re
 
+    # Keep one stable test-driver state directory for every abrupt guest
+    # termination/reboot. The QEMU disk image and its write overlay must be
+    # reused rather than recreated from the pristine store image.
+    machine.state_dir = "/tmp/nixward-crash-cut-vm-state"
     machine.start()
     machine.wait_for_unit("multi-user.target", timeout=120)
     # The root must be a real writable image, not runNixOSTest's tmpfs mode.
