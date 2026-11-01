@@ -260,6 +260,10 @@ enum EvidenceEvent {
         at_ns: u64,
         duration_ns: u64,
         wal_bytes: u64,
+        busy_readers: u64,
+        oldest_reader_age_ns: u64,
+        wal_frames: u64,
+        checkpointed_frames: u64,
     },
     WriterLockWait {
         seq: u64,
@@ -428,6 +432,7 @@ struct TrialReport {
     uncertain_count: usize,
     resolution_count: usize,
     sqlite_snapshot_audit: String,
+    reader_blocked_checkpoints: usize,
     violations: Vec<String>,
 }
 
@@ -462,6 +467,7 @@ struct ScenarioSummary {
     checkpoint: MetricSummary,
     writer_lock_wait: MetricSummary,
     wal_bytes_max: Option<u64>,
+    reader_blocked_checkpoints: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -748,7 +754,7 @@ fn scenario_expectation_met(
     uncertain: &BTreeSet<String>,
     rejections: &[RejectionState],
     retries: &[(String, String)],
-    checkpoints: usize,
+    reader_blocked_checkpoints: usize,
     policies: &[PolicyDecision],
 ) -> bool {
     match scenario.expected_disposition.as_str() {
@@ -771,29 +777,46 @@ fn scenario_expectation_met(
                     && !rejection.target_id.trim().is_empty()
             })
         }
-        "preserve_historical_barrier" => policies
-            .iter()
-            .any(|decision| decision.disposition == PolicyDisposition::PreserveExistingBarrier),
+        "preserve_historical_barrier" => {
+            barriers.len() == 1
+                && policies.iter().any(|decision| {
+                    decision.disposition == PolicyDisposition::PreserveExistingBarrier
+                })
+                && retries.iter().any(|(_, release_id)| barriers.contains_key(release_id))
+        }
         "block_attempt" => {
             policies.iter().any(|decision| {
                 decision.disposition == PolicyDisposition::StopOrRecoveryRequired
-            }) && attempts.is_empty()
+            })
+                && attempts.is_empty()
+                && rejections.iter().any(|rejection| {
+                    rejection.operation == "begin_payload_release_attempt"
+                        && rejection.reason_code == "release_attempt_blocked"
+                })
         }
         "attempt_reserved" => attempts.len() == 1,
         "uncertain_no_resend" => {
             attempts.len() == 1
                 && attempts.keys().any(|release_id| uncertain.contains(release_id))
                 && receipts.is_empty()
+                && rejections.iter().any(|rejection| {
+                    rejection.operation == "begin_payload_release_attempt"
+                        && rejection.reason_code == "release_attempt_already_started"
+                })
         }
         "acknowledge_original_attempt" => {
             attempts.len() == 1
                 && attempts.keys().any(|release_id| {
                     uncertain.contains(release_id) && receipts.contains_key(release_id)
                 })
+                && rejections.iter().any(|rejection| {
+                    rejection.operation == "begin_payload_release_attempt"
+                        && rejection.reason_code == "release_attempt_already_started"
+                })
         }
         "one_barrier_only" => barriers.len() == 1,
         "one_linearized_order" => {
-            !policies.is_empty()
+            (barriers.len() == 1 && !policies.is_empty())
                 || rejections.iter().any(|rejection| {
                     rejection.reason_code == "release_barrier_stale_policy"
                         && rejection.operation == "create_payload_release_barrier"
@@ -801,7 +824,7 @@ fn scenario_expectation_met(
                         && !rejection.target_id.trim().is_empty()
                 })
         }
-        "measure_tail_latency" => checkpoints > 0,
+        "measure_tail_latency" => reader_blocked_checkpoints > 0,
         _ => false,
     }
 }
@@ -878,6 +901,7 @@ fn verify_trial(
     let mut policy_decisions_seen = Vec::<PolicyDecision>::new();
     let mut measurements = TrialMeasurements::default();
     let mut checkpoint_count = 0_usize;
+    let mut reader_blocked_checkpoints = 0_usize;
 
     for event in &trial.events {
         let sequence = event.sequence();
@@ -1333,10 +1357,19 @@ fn verify_trial(
                     reason_code: reason_code.clone(),
                 });
             }
-            EvidenceEvent::CheckpointCompleted { duration_ns, wal_bytes, .. } => {
+            EvidenceEvent::CheckpointCompleted {
+                duration_ns, wal_bytes, busy_readers, oldest_reader_age_ns,
+                wal_frames, checkpointed_frames, ..
+            } => {
                 checkpoint_count += 1;
                 measurements.checkpoint_latency_ns.push(*duration_ns);
                 measurements.wal_bytes.push(*wal_bytes);
+                if *busy_readers > 0
+                    && *oldest_reader_age_ns > 0
+                    && *wal_frames > *checkpointed_frames
+                {
+                    reader_blocked_checkpoints += 1;
+                }
             }
             EvidenceEvent::WriterLockWait { duration_ns, .. } => {
                 measurements.writer_lock_wait_ns.push(*duration_ns);
@@ -1393,7 +1426,7 @@ fn verify_trial(
         &uncertain,
         &rejections,
         &retries,
-        checkpoint_count,
+        reader_blocked_checkpoints,
         &policy_decisions_seen,
     );
     if !expectation_met {
@@ -1420,6 +1453,7 @@ fn verify_trial(
             uncertain_count: uncertain.len(),
             resolution_count: resolutions.len(),
             sqlite_snapshot_audit: "not_checked".into(),
+            reader_blocked_checkpoints,
             violations,
         },
         measurements,
@@ -2503,6 +2537,14 @@ fn verify_manifest(
         "monotonic_timestamps",
         "raw_sqlite_and_supervisor_logs",
     ];
+    if corpus.trial_policy.clean_min_trials < 30
+        || corpus.trial_policy.fault_min_trials < 100
+        || corpus.trial_policy.concurrency_min_trials < 100
+        || corpus.trial_policy.durability_min_trials < 100
+        || corpus.trial_policy.p99_claim_min_trials < 1_000
+    {
+        return Err("benchmark corpus weakens the verifier's fixed trial/p99 evidence floors".into());
+    }
     for scenario in &corpus.scenarios {
         if scenario.minimum_trials == 0
             || scenario.fault_boundary.trim().is_empty()
@@ -2739,6 +2781,9 @@ fn verify_manifest(
             checkpoint: metric_summary(&checkpoint, corpus.trial_policy.p99_claim_min_trials),
             writer_lock_wait: metric_summary(&writer_wait, corpus.trial_policy.p99_claim_min_trials),
             wal_bytes_max: wal.iter().max().copied(),
+            reader_blocked_checkpoints: selected.iter()
+                .map(|trial| trial.report.reader_blocked_checkpoints)
+                .sum(),
         });
     }
 
