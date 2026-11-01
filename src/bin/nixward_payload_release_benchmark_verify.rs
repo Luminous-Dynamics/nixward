@@ -114,7 +114,7 @@ struct TrialRecord {
     artifacts: Vec<ArtifactReceipt>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ArtifactReceipt {
     relative_path: String,
@@ -412,6 +412,8 @@ struct TrialMeasurements {
 struct TrialReport {
     trial_id: String,
     scenario_id: String,
+    events_sha256: String,
+    artifacts: Vec<ArtifactReceipt>,
     valid: bool,
     scenario_expectation_met: bool,
     duration_ns: u64,
@@ -591,6 +593,51 @@ fn validate_artifacts(root: &Path, artifacts: &[ArtifactReceipt]) -> Result<(), 
         if digest != artifact.sha256 {
             return Err(format!("artifact digest mismatch: {}", artifact.relative_path));
         }
+    }
+    Ok(())
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceEvidence {
+    schema: String,
+    version: u32,
+    source_commit_sha: String,
+    flake_lock_sha256: String,
+    corpus_sha256: String,
+}
+
+fn verify_source_evidence_artifact(
+    artifact_root: &Path,
+    artifacts: &[ArtifactReceipt],
+    source_commit_sha: &str,
+    flake_lock_sha256: &str,
+    corpus_sha256: &str,
+) -> Result<(), String> {
+    let matches = artifacts.iter()
+        .filter(|artifact| artifact.artifact_kind == "source_manifest")
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!(
+            "expected exactly one source_manifest artifact, found {}",
+            matches.len()
+        ));
+    }
+    let path = resolve_artifact_path(artifact_root, &matches[0].relative_path)?;
+    let bytes = read_bounded(&path)?;
+    let evidence: SourceEvidence = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid source_manifest artifact: {error}"))?;
+    if evidence.schema != "org.luminousdynamics.nixward.source-evidence"
+        || evidence.version != 1
+        || evidence.source_commit_sha != source_commit_sha
+        || evidence.flake_lock_sha256 != flake_lock_sha256
+        || evidence.corpus_sha256 != corpus_sha256
+        || !valid_hex(&evidence.source_commit_sha, 40)
+        || !valid_hex(&evidence.flake_lock_sha256, 64)
+        || !valid_hex(&evidence.corpus_sha256, 64)
+    {
+        return Err("source_manifest artifact does not bind exact source, flake.lock and corpus digests".into());
     }
     Ok(())
 }
@@ -1357,6 +1404,8 @@ fn verify_trial(
         report: TrialReport {
             trial_id: trial.trial_id.clone(),
             scenario_id: trial.scenario_id.clone(),
+            events_sha256: trial.events_sha256.clone(),
+            artifacts: trial.artifacts.clone(),
             valid: violations.is_empty(),
             scenario_expectation_met: expectation_met,
             duration_ns: trial.finished_monotonic_ns - trial.started_monotonic_ns,
@@ -1399,9 +1448,10 @@ fn scenario_observations_present(
         scenario: &ScenarioDefinition,
         trial: &TrialRecord,
         artifact_kinds: &BTreeSet<&str>,
+        source_evidence_verified: bool,
     ) -> bool {
         scenario.required_observations.iter().all(|required| match required.as_str() {
-            "source_sha_and_flake_lock" => true,
+            "source_sha_and_flake_lock" => source_evidence_verified,
             "admission_commit_and_release_id" => trial.events.iter().any(|event| matches!(
                 event,
                 EvidenceEvent::BarrierCreateRequested { .. }
@@ -2452,7 +2502,24 @@ fn verify_manifest(
         let artifact_kinds = trial.artifacts.iter()
             .map(|artifact| artifact.artifact_kind.as_str())
             .collect::<BTreeSet<_>>();
-        if !scenario_observations_present(scenario, trial, &artifact_kinds) {
+        let source_evidence = verify_source_evidence_artifact(
+            artifact_root,
+            &trial.artifacts,
+            &manifest.source_commit_sha,
+            &manifest.flake_lock_sha256,
+            &corpus_digest,
+        );
+        let source_evidence_verified = source_evidence.is_ok();
+        if let Err(error) = source_evidence {
+            result.report.valid = false;
+            result.report.violations.push(format!("source evidence verification failed: {error}"));
+        }
+        if !scenario_observations_present(
+            scenario,
+            trial,
+            &artifact_kinds,
+            source_evidence_verified,
+        ) {
             result.report.valid = false;
             result.report.violations.push(
                 "one or more scenario-required observations are missing".into()
