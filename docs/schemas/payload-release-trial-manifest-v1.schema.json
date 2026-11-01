@@ -449,7 +449,8 @@
                     "emergency_revoked_signers",
                     "decisions",
                     "new_policy_allowed_audiences",
-                    "new_policy_keys"
+                    "new_policy_keys",
+                    "wall_time_ms"
                   ],
                   "properties": {
                     "kind": {
@@ -559,6 +560,10 @@
                           }
                         }
                       }
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   }
                 },
@@ -722,7 +727,8 @@
                     "kind",
                     "seq",
                     "at_ns",
-                    "release_id"
+                    "release_id",
+                    "wall_time_ms"
                   ],
                   "properties": {
                     "kind": {
@@ -739,6 +745,10 @@
                     "release_id": {
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "wall_time_ms": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   }
                 },
@@ -754,7 +764,8 @@
                     "payload_digest",
                     "worker_unit",
                     "invocation_id",
-                    "receipt_digest"
+                    "receipt_digest",
+                    "acknowledged_at_ms"
                   ],
                   "properties": {
                     "kind": {
@@ -791,6 +802,10 @@
                     "receipt_digest": {
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "acknowledged_at_ms": {
+                      "type": "integer",
+                      "minimum": 0
                     }
                   }
                 },

@@ -3305,7 +3305,7 @@ mod tests {
         trial.events.truncate(4);
         trial.finished_monotonic_ns = 220;
         trial.events.push(EvidenceEvent::ReleaseUncertain {
-            seq: 5, at_ns: 150, release_id: test_release_id(),
+            seq: 5, at_ns: 150, wall_time_ms: 1_500, release_id: test_release_id(),
         });
         trial.events.push(EvidenceEvent::PayloadWriteStarted {
             seq: 6, at_ns: 160, release_id: test_release_id(), payload_digest: digest('9'),

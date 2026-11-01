@@ -41,7 +41,23 @@
       "initial_policy_emergency_revoked_signers": [],
       "events_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "events": [],
-      "artifacts": []
+      "artifacts": [
+        {
+          "relative_path": "source-manifest.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_kind": "source_manifest"
+        },
+        {
+          "relative_path": "database-snapshot.sqlite3",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_kind": "raw_sqlite"
+        },
+        {
+          "relative_path": "supervisor.jsonl",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "artifact_kind": "supervisor_log"
+        }
+      ]
     }
   ]
 }
