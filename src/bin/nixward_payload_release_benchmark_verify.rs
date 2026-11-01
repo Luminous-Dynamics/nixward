@@ -440,7 +440,7 @@ struct TrialReport {
     reader_blocked_checkpoints: usize,
     source_manifest_integrity_verified: bool,
     source_signature_verified: bool,
-    builder_identity_verified: bool,
+    builder_claim_matched: bool,
     source_attestation: Option<SourceAttestationSummary>,
     source_attestation_error: Option<String>,
     violations: Vec<String>,
@@ -496,7 +496,7 @@ struct VerificationReport {
     source_attestation_mode: String,
     source_integrity_verified_trials: usize,
     source_signature_verified_trials: usize,
-    builder_identity_verified_trials: usize,
+    builder_claim_matched_trials: usize,
     environment: TrialEnvironment,
     trials: Vec<TrialReport>,
     scenarios: Vec<ScenarioSummary>,
@@ -1669,7 +1669,7 @@ fn verify_trial(
             reader_blocked_checkpoints,
             source_manifest_integrity_verified: false,
             source_signature_verified: false,
-            builder_identity_verified: false,
+            builder_claim_matched: false,
             source_attestation: None,
             source_attestation_error: None,
             violations,
@@ -2847,7 +2847,7 @@ fn verify_manifest_with_source_attestation(
                     ) {
                         Ok(summary) => {
                             result.report.source_signature_verified = true;
-                            result.report.builder_identity_verified = true;
+                            result.report.builder_claim_matched = true;
                             result.report.source_attestation = Some(summary);
                         }
                         Err(error) => {
@@ -3086,8 +3086,8 @@ fn verify_manifest_with_source_attestation(
             .filter(|trial| trial.source_manifest_integrity_verified).count(),
         source_signature_verified_trials: trial_reports.iter()
             .filter(|trial| trial.source_signature_verified).count(),
-        builder_identity_verified_trials: trial_reports.iter()
-            .filter(|trial| trial.builder_identity_verified).count(),
+        builder_claim_matched_trials: trial_reports.iter()
+            .filter(|trial| trial.builder_claim_matched).count(),
         environment: manifest.environment,
         trials: trial_reports,
         scenarios: summaries,
@@ -4032,8 +4032,8 @@ mod tests {
             "schema": "org.luminousdynamics.nixward.source-evidence",
             "version": 1,
             "source_commit_sha": source_commit_sha,
-            "flake_lock_sha256": flake_lock_sha256,
-            "corpus_sha256": corpus_sha256
+            "flake_lock_sha256": &flake_lock_sha256,
+            "corpus_sha256": &corpus_sha256
         })).unwrap();
         let source_manifest_sha256 = sha256_hex(&source_manifest_bytes);
         fs::write(artifact_root.join("source-manifest.json"), &source_manifest_bytes).unwrap();
@@ -4052,7 +4052,7 @@ mod tests {
             "_type": nixward::dsse::IN_TOTO_STATEMENT_V1,
             "subject": [{
                 "name": NIXWARD_SOURCE_SUBJECT_NAME,
-                "digest": { "sha256": source_manifest_sha256 }
+                "digest": { "sha256": &source_manifest_sha256 }
             }],
             "predicateType": nixward::dsse::NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE,
             "predicate": {
@@ -4061,8 +4061,8 @@ mod tests {
                     "commit_sha": source_commit_sha
                 },
                 "materials": {
-                    "flake_lock_sha256": flake_lock_sha256,
-                    "corpus_sha256": corpus_sha256,
+                    "flake_lock_sha256": &flake_lock_sha256,
+                    "corpus_sha256": &corpus_sha256,
                     "source_inputs_sha256": source_inputs_digest
                 },
                 "builder": { "id": builder_id }
