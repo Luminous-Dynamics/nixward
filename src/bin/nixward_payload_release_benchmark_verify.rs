@@ -525,6 +525,51 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+
+fn validate_output_path(
+    output: &Path,
+    corpus: &Path,
+    manifest: &Path,
+    artifact_root: &Path,
+) -> Result<PathBuf, String> {
+    let file_name = output.file_name()
+        .ok_or_else(|| "report output path must name a file".to_string())?;
+    let parent = output.parent().filter(|value| !value.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|error| format!("cannot resolve report output directory {}: {error}", parent.display()))?;
+    let destination = canonical_parent.join(file_name);
+    let canonical_root = fs::canonicalize(artifact_root)
+        .map_err(|error| format!("cannot resolve artifact root {}: {error}", artifact_root.display()))?;
+    if destination.starts_with(&canonical_root) {
+        return Err("verification report must be written outside the evidence artifact root".into());
+    }
+    for input in [corpus, manifest] {
+        let canonical_input = fs::canonicalize(input)
+            .map_err(|error| format!("cannot resolve input {}: {error}", input.display()))?;
+        if destination == canonical_input {
+            return Err(format!("report output would overwrite input {}", input.display()));
+        }
+    }
+    if output.exists() {
+        return Err(format!("report output already exists; refusing to overwrite {}", output.display()));
+    }
+    Ok(destination)
+}
+
+fn write_report_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("cannot create report {} without overwriting: {error}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|error| format!("cannot write report {}: {error}", path.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("cannot sync report {}: {error}", path.display()))?;
+    Ok(())
+}
+
 fn sha256_file_bounded(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path)
         .map_err(|error| format!("cannot open artifact {}: {error}", path.display()))?;
@@ -2842,12 +2887,15 @@ fn run() -> Result<i32, String> {
     let artifact_root = artifact_root.ok_or("--artifacts-root is required")?;
     let corpus_bytes = read_bounded(&corpus_path)?;
     let manifest_bytes = read_bounded(&manifest_path)?;
+    let safe_output_path = match &output_path {
+        Some(path) => Some(validate_output_path(path, &corpus_path, &manifest_path, &artifact_root)?),
+        None => None,
+    };
     let report = verify_manifest(&corpus_bytes, &manifest_bytes, &artifact_root)?;
     let output = serde_json::to_string_pretty(&report)
         .map_err(|error| format!("cannot serialize report: {error}"))?;
-    if let Some(path) = output_path {
-        fs::write(&path, output.as_bytes())
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    if let Some(path) = safe_output_path {
+        write_report_new(&path, output.as_bytes())?;
     } else {
         println!("{output}");
     }
@@ -3165,6 +3213,39 @@ mod tests {
             &scenario, &BTreeMap::new(), &BTreeMap::new(), &BTreeMap::new(),
             &BTreeSet::new(), &[], &[], 1, &[],
         ));
+    }
+
+
+    #[test]
+    fn refuses_report_output_inside_artifact_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let corpus = temp.path().join("corpus.json");
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(&corpus, b"{}").unwrap();
+        std::fs::write(&manifest, b"{}").unwrap();
+        assert!(validate_output_path(
+            &artifacts.join("report.json"), &corpus, &manifest, &artifacts
+        ).is_err());
+    }
+
+    #[test]
+    fn refuses_report_output_that_would_overwrite_inputs_or_existing_reports() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let corpus = temp.path().join("corpus.json");
+        let manifest = temp.path().join("manifest.json");
+        std::fs::write(&corpus, b"{}").unwrap();
+        std::fs::write(&manifest, b"{}").unwrap();
+        assert!(validate_output_path(&corpus, &corpus, &manifest, &artifacts).is_err());
+        let existing = temp.path().join("existing-report.json");
+        std::fs::write(&existing, b"do not overwrite").unwrap();
+        assert!(validate_output_path(&existing, &corpus, &manifest, &artifacts).is_err());
+        assert!(validate_output_path(
+            &temp.path().join("new-report.json"), &corpus, &manifest, &artifacts
+        ).is_ok());
     }
 
     #[test]
