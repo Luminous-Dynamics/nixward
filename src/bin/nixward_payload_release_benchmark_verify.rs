@@ -181,6 +181,7 @@ enum EvidenceEvent {
     PolicyAdvanced {
         seq: u64,
         at_ns: u64,
+        wall_time_ms: u64,
         request_id: String,
         from_epoch: u64,
         to_epoch: u64,
@@ -225,12 +226,14 @@ enum EvidenceEvent {
     ReleaseUncertain {
         seq: u64,
         at_ns: u64,
+        wall_time_ms: u64,
         release_id: String,
     },
     WorkerReceiptPersisted {
         seq: u64,
         at_ns: u64,
         worker_completed_at_ns: u64,
+        acknowledged_at_ms: u64,
         release_id: String,
         payload_digest: String,
         worker_unit: String,
@@ -2241,9 +2244,10 @@ fn verify_sqlite_snapshot(
     }
 
     let uncertainty_events = trial.events.iter().filter_map(|event| match event {
-        EvidenceEvent::ReleaseUncertain { release_id, .. } => Some(release_id),
+        EvidenceEvent::ReleaseUncertain { release_id, wall_time_ms, .. } =>
+            Some((release_id.as_str(), *wall_time_ms)),
         _ => None,
-    }).collect::<BTreeSet<_>>();
+    }).collect::<BTreeMap<_, _>>();
     let uncertainty_count: i64 = connection.query_row("SELECT COUNT(*) FROM payload_release_uncertain", [], |row| row.get(0))
         .map_err(|error| SnapshotAuditError::Other(format!("release uncertainty count: {error}")))?;
     if uncertainty_count != uncertainty_events.len() as i64 {
@@ -2258,7 +2262,10 @@ fn verify_sqlite_snapshot(
     for row in uncertain_rows {
         let (release_id, observed_at, digest) =
             row.map_err(|error| SnapshotAuditError::Other(format!("uncertainty row: {error}")))?;
-        if !uncertainty_events.contains(&release_id) || observed_at < 0
+        let Some(expected_observed_at_ms) = uncertainty_events.get(release_id.as_str()) else {
+            return Err(SnapshotAuditError::Other(format!("uncertainty marker {release_id} has no raw event")));
+        };
+        if observed_at < 0 || observed_at as u64 != *expected_observed_at_ms
             || release_uncertainty_digest(&release_id, observed_at as u64) != digest
         {
             return Err(SnapshotAuditError::Other(format!("uncertainty marker {release_id} is inconsistent")));
@@ -2276,7 +2283,8 @@ fn verify_sqlite_snapshot(
     }
     for event in &receipt_events {
         let EvidenceEvent::WorkerReceiptPersisted {
-            release_id, payload_digest, worker_unit, invocation_id, receipt_digest, ..
+            release_id, payload_digest, worker_unit, invocation_id, receipt_digest,
+            acknowledged_at_ms, ..
         } = event else { unreachable!() };
         let (db_payload, db_unit, db_invocation, db_receipt, acknowledged_at, record_digest):
             (String, String, String, String, i64, String) = connection.query_row(
@@ -2290,7 +2298,7 @@ fn verify_sqlite_snapshot(
             ).map_err(|error| SnapshotAuditError::Other(format!("receipt {release_id}: {error}")))?;
         if db_payload != *payload_digest || db_unit != *worker_unit
             || db_invocation != *invocation_id || db_receipt != *receipt_digest
-            || acknowledged_at < 0
+            || acknowledged_at < 0 || acknowledged_at as u64 != *acknowledged_at_ms
         {
             return Err(SnapshotAuditError::Other(format!("receipt {release_id} differs from raw event evidence")));
         }
@@ -2310,15 +2318,16 @@ fn verify_sqlite_snapshot(
     }
 
     let expected_decisions = trial.events.iter().filter_map(|event| match event {
-        EvidenceEvent::PolicyAdvanced { to_epoch, new_record_digest, decisions, .. } => {
-            Some((*to_epoch, new_record_digest.as_str(), decisions.as_slice()))
-        }
+        EvidenceEvent::PolicyAdvanced {
+            to_epoch, new_record_digest, decisions, wall_time_ms, ..
+        } => Some((*to_epoch, new_record_digest.as_str(), *wall_time_ms, decisions.as_slice())),
         _ => None,
-    }).flat_map(|(epoch, record_digest, decisions)| {
+    }).flat_map(|(epoch, record_digest, created_at_ms, decisions)| {
         decisions.iter().map(move |decision| (
             decision.release_id.as_str(),
             epoch,
             record_digest,
+            created_at_ms,
             match decision.disposition {
                 PolicyDisposition::PreserveExistingBarrier => "preserve_existing_barrier",
                 PolicyDisposition::StopOrRecoveryRequired => "stop_or_recovery_required",
@@ -2355,7 +2364,9 @@ fn verify_sqlite_snapshot(
             .map_err(|_| SnapshotAuditError::Other("negative policy decision epoch".into()))?;
         let created_at = u64::try_from(created_at_raw)
             .map_err(|_| SnapshotAuditError::Other("negative policy decision timestamp".into()))?;
-        let tuple = (release_id.as_str(), epoch, record_digest.as_str(), disposition.as_str());
+        let tuple = (
+            release_id.as_str(), epoch, record_digest.as_str(), created_at, disposition.as_str()
+        );
         if !expected_decisions.contains(&tuple) {
             return Err(SnapshotAuditError::Other(format!("policy decision {release_id}/{epoch} is absent from raw events")));
         }
@@ -2835,7 +2846,7 @@ mod tests {
                 release_id: test_release_id(), attempt_id: digest('4'), payload_digest: digest('9'),
             },
             EvidenceEvent::PayloadWriteStarted {
-                seq: 5, at_ns: 150, release_id: test_release_id(), payload_digest: digest('9'),
+                seq: 5, at_ns: 150, wall_time_ms: 1_500, release_id: test_release_id(), payload_digest: digest('9'),
             },
             EvidenceEvent::PayloadWriteCompleted {
                 seq: 6, at_ns: 170, release_id: test_release_id(), payload_digest: digest('9'), bytes_written: 512,
@@ -2844,6 +2855,7 @@ mod tests {
                 seq: 7, at_ns: 200, worker_completed_at_ns: 190, release_id: test_release_id(),
                 payload_digest: digest('9'), worker_unit: "nixward-release.service".into(),
                 invocation_id: "invocation-1".into(), receipt_digest: digest('8'),
+                acknowledged_at_ms: 1_300,
             },
             EvidenceEvent::ResolutionCommitted {
                 seq: 8, at_ns: 210, release_id: test_release_id(), admission_commit_id: digest('1'),
@@ -3191,12 +3203,13 @@ mod tests {
     fn permits_late_receipt_to_reconcile_uncertain_original_attempt() {
         let (mut trial, scenario) = clean_trial();
         trial.events.insert(6, EvidenceEvent::ReleaseUncertain {
-            seq: 7, at_ns: 195, release_id: test_release_id(),
+            seq: 7, at_ns: 195, wall_time_ms: 1_600, release_id: test_release_id(),
         });
-        if let EvidenceEvent::WorkerReceiptPersisted { seq, at_ns, worker_completed_at_ns, .. } = &mut trial.events[7] {
+        if let EvidenceEvent::WorkerReceiptPersisted { seq, at_ns, worker_completed_at_ns, acknowledged_at_ms, .. } = &mut trial.events[7] {
             *seq = 8;
             *at_ns = 220;
             *worker_completed_at_ns = 190;
+            *acknowledged_at_ms = 1_500;
         }
         if let EvidenceEvent::ResolutionCommitted { seq, at_ns, .. } = &mut trial.events[8] {
             *seq = 9;
@@ -3225,6 +3238,8 @@ mod tests {
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
+            wall_time_ms: 1_100,
+            wall_time_ms: 1_100,
             new_policy_keys: vec![PolicySignerAuthorization {
                 signer_key_id: "owner-key".into(), revoked: false,
                 allowed_actions: vec![],
