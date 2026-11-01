@@ -1,0 +1,46 @@
+name: activation profile registry v0.1
+
+on:
+  pull_request:
+    paths:
+      - "src/action/activation_profile.rs"
+      - "src/action/mod.rs"
+      - "docs/fixtures/nixos-activation-profile-v0.1.schema.json"
+      - "docs/NIXOS_ACTIVATION_PROFILE_REGISTRY_V0_1.md"
+      - ".github/workflows/activation-profile-registry-v0.1.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/action/activation_profile.rs"
+      - "src/action/mod.rs"
+      - "docs/fixtures/nixos-activation-profile-v0.1.schema.json"
+      - "docs/NIXOS_ACTIVATION_PROFILE_REGISTRY_V0_1.md"
+      - ".github/workflows/activation-profile-registry-v0.1.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activation-profile-registry-v0.1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  activation-profile:
+    name: Exact activation profile and adversarial tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install pinned Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Parse strict activation profile schema
+        run: python3 -m json.tool docs/fixtures/nixos-activation-profile-v0.1.schema.json > /dev/null
+      - name: Run activation profile Rust tests
+        run: nix develop --command cargo test --locked --lib action::activation_profile::tests -- --nocapture
+      - name: Check activation profile formatting
+        run: nix develop --command cargo fmt --all -- --check
