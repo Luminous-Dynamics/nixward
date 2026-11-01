@@ -3417,6 +3417,21 @@ mod tests {
         assert!(resolve_artifact_path(Path::new("."), "/etc/passwd").is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rejects_artifact_symlink_that_resolves_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("outside.log");
+        fs::write(&secret, b"outside evidence").unwrap();
+        let link = root.path().join("escape.log");
+        symlink(&secret, &link).unwrap();
+
+        assert!(resolve_artifact_path(root.path(), "escape.log").is_err());
+    }
+
     #[test]
     fn unknown_runner_summary_fields_are_rejected() {
         let value = serde_json::json!({

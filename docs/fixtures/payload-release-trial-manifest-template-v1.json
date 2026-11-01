@@ -16,48 +16,5 @@
     "cpu_model": "REPLACE_WITH_CPU_MODEL",
     "boot_id": "REPLACE_WITH_KERNEL_BOOT_ID"
   },
-  "trials": [
-    {
-      "trial_id": "replace-with-unique-trial-id",
-      "scenario_id": "barrier-create-clean",
-      "started_monotonic_ns": 1,
-      "finished_monotonic_ns": 2,
-      "initial_policy_id": "replace-with-policy-id",
-      "initial_policy_epoch": 1,
-      "initial_policy_digest": "0000000000000000000000000000000000000000000000000000000000000000",
-      "initial_policy_record_digest": "0000000000000000000000000000000000000000000000000000000000000000",
-      "initial_policy_keys": [
-        {
-          "signer_key_id": "replace-with-key-id",
-          "revoked": false,
-          "allowed_actions": [
-            "change"
-          ]
-        }
-      ],
-      "initial_policy_allowed_audiences": [
-        "nixward-change-v1"
-      ],
-      "initial_policy_emergency_revoked_signers": [],
-      "events_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "events": [],
-      "artifacts": [
-        {
-          "relative_path": "source-manifest.json",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "artifact_kind": "source_manifest"
-        },
-        {
-          "relative_path": "database-snapshot.sqlite3",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "artifact_kind": "raw_sqlite"
-        },
-        {
-          "relative_path": "supervisor.jsonl",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "artifact_kind": "supervisor_log"
-        }
-      ]
-    }
-  ]
+  "trials": []
 }
