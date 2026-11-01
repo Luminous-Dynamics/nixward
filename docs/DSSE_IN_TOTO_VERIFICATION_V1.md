@@ -55,6 +55,6 @@ Nixward can keep its stronger local semantics—policy epoch, permit, release ba
 
 ## Implemented negative controls
 
-Eighteen Rust tests are authored for byte-length PAE, exact payload verification, untrusted keyid hints, altered payload, payload-type confusion, trust-policy pin mismatch, untrusted signer, duplicate signer threshold, distinct signer threshold, revoked signer, policy/key expiry, wrong predicate/subject, per-key predicate restriction, URL-safe unpadded Base64, signed source-material binding, repository/builder mismatch and source-subject digest mutation.
+Nineteen Rust tests are authored for byte-length PAE, exact payload verification, untrusted keyid hints, altered payload, payload-type confusion, trust-policy pin mismatch, untrusted signer, duplicate signer threshold, distinct signer threshold, revoked signer, policy/key expiry, wrong predicate/subject, per-key predicate restriction, URL-safe unpadded Base64, signed source-material binding, repository/builder mismatch, source-subject digest mutation and duplicate-key JSON rejection.
 
 The Nix target is a pure library test target with default/native features disabled. It is authored but has not been executed; no compile, test, or runtime result is claimed.
