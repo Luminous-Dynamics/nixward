@@ -1979,12 +1979,77 @@ mod tests {
     }
 
     fn test_release_id() -> String {
+        test_release_id_for_policy("owner-root:1", &digest('5'), &digest('2'))
+    }
+
+    fn test_release_id_for_policy(
+        policy_id: &str,
+        policy_digest: &str,
+        policy_record_digest: &str,
+    ) -> String {
         derive_release_id(
             &digest('a'), &digest('4'), &digest('1'), &digest('b'),
             &digest('c'), &digest('d'), &digest('e'), &digest('6'),
             "owner-key", &digest('7'), "nixward-change-v1",
-            &digest('9'), "owner-root:1", 1, &digest('5'), &digest('2'), 5_000,
+            &digest('9'), policy_id, 1, policy_digest, policy_record_digest, 5_000,
         )
+    }
+
+    fn bind_clean_trial_to_policy(
+        trial: &mut TrialRecord,
+        policy: &VerifiedPolicySnapshot,
+    ) {
+        trial.initial_policy_id = policy.policy_id.clone();
+        trial.initial_policy_epoch = policy.epoch;
+        trial.initial_policy_digest = policy.policy_digest.clone();
+        trial.initial_policy_record_digest = policy.record_digest.clone();
+        let release_id = test_release_id_for_policy(
+            &policy.policy_id,
+            &policy.policy_digest,
+            &policy.record_digest,
+        );
+        for event in &mut trial.events {
+            match event {
+                EvidenceEvent::BarrierCreateRequested {
+                    expected_policy_id,
+                    expected_policy_epoch,
+                    expected_policy_digest,
+                    expected_policy_record_digest,
+                    ..
+                } => {
+                    *expected_policy_id = policy.policy_id.clone();
+                    *expected_policy_epoch = policy.epoch;
+                    *expected_policy_digest = policy.policy_digest.clone();
+                    *expected_policy_record_digest = policy.record_digest.clone();
+                }
+                EvidenceEvent::BarrierCommitted {
+                    release_id: event_release_id,
+                    policy_id,
+                    policy_epoch,
+                    policy_digest,
+                    policy_record_digest,
+                    ..
+                } => {
+                    *event_release_id = release_id.clone();
+                    *policy_id = policy.policy_id.clone();
+                    *policy_epoch = policy.epoch;
+                    *policy_digest = policy.policy_digest.clone();
+                    *policy_record_digest = policy.record_digest.clone();
+                }
+                EvidenceEvent::BarrierRetryExisting { release_id: event_release_id, .. }
+                | EvidenceEvent::ReleaseAttemptRequested { release_id: event_release_id, .. }
+                | EvidenceEvent::ReleaseAttemptReserved { release_id: event_release_id, .. }
+                | EvidenceEvent::PayloadWriteStarted { release_id: event_release_id, .. }
+                | EvidenceEvent::PayloadWriteCompleted { release_id: event_release_id, .. }
+                | EvidenceEvent::ReleaseUncertain { release_id: event_release_id, .. }
+                | EvidenceEvent::WorkerReceiptPersisted { release_id: event_release_id, .. }
+                | EvidenceEvent::ResolutionCommitted { release_id: event_release_id, .. } => {
+                    *event_release_id = release_id.clone();
+                }
+                _ => {}
+            }
+        }
+        rehash(trial);
     }
 
 
@@ -2315,6 +2380,7 @@ mod tests {
         let snapshots = validate_policy_epoch_history(&trial, &root).unwrap();
         let initial = snapshots.get(&1).unwrap();
         let advanced = snapshots.get(&2).unwrap();
+        bind_clean_trial_to_policy(&mut trial, initial);
         trial.events.extend(policy_update_events(&initial.record_digest, advanced));
         trial.finished_monotonic_ns = 300;
         rehash(&mut trial);
@@ -2341,6 +2407,7 @@ mod tests {
         let snapshots = validate_policy_epoch_history(&trial, &root).unwrap();
         let initial = snapshots.get(&1).unwrap();
         let advanced = snapshots.get(&2).unwrap();
+        bind_clean_trial_to_policy(&mut trial, initial);
         let mut events = policy_update_events(&initial.record_digest, advanced);
         if let EvidenceEvent::PolicyAdvanced { new_policy_digest, .. } = &mut events[1] {
             *new_policy_digest = digest('f');
