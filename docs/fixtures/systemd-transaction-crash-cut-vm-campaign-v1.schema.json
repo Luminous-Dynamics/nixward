@@ -8,7 +8,7 @@
     "schema", "version", "status", "claim_ceiling",
     "nixward_source_revision", "nixpkgs_revision", "flake_lock_sha256",
     "worker_derivation", "worker_output", "guest_kernel",
-    "guest_nixos_version", "guest_systemd_version", "attempts"
+    "guest_nixos_version", "guest_systemd_version", "guest_qemu_version", "attempts"
   ],
   "properties": {
     "schema": { "const": "org.luminousdynamics.nixward.systemd-crash-cut-vm-campaign" },
@@ -23,6 +23,7 @@
     "guest_kernel": { "type": "string", "minLength": 1, "maxLength": 128 },
     "guest_nixos_version": { "type": "string", "minLength": 1, "maxLength": 128 },
     "guest_systemd_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "guest_qemu_version": { "type": "string", "minLength": 1, "maxLength": 128 },
     "attempts": {
       "type": "array",
       "minItems": 3,
