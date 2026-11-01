@@ -159,9 +159,11 @@ pkgs.testers.runNixOSTest {
         machine.crash()
         machine.wait_for_unit("multi-user.target", timeout=120)
 
-    # Cut A: systemd started the exact invocation, but the test-only mock
-    # participant effect has not been committed before abrupt guest loss.
+    # Cut A: the invocation/start record is synchronously flushed, but the
+    # test-only mock participant effect has not been committed before guest loss.
     before_effect = start_blocked_worker("cut-before-effect")
+    # Flush the invocation/start record to the virtual disk before cutting power.
+    machine.succeed("sync")
     abrupt_guest_crash_and_reboot()
     before_effect["boot_id_after"] = boot_id()
     assert before_effect["boot_id_before"] != before_effect["boot_id_after"]
@@ -176,14 +178,16 @@ pkgs.testers.runNixOSTest {
     before_effect["disposition"] = "attempt_started_effect_not_recorded_reconciliation_required"
     attempts.append(before_effect)
 
-    # Cut B: mock participant effect is durable, but the process receipt has
-    # not been published when the whole guest is abruptly terminated.
+    # Cut B: the mock participant effect is synchronously flushed, but the
+    # process receipt has not been published when the guest is terminated.
     after_effect = start_blocked_worker("cut-after-effect-before-receipt")
     machine.succeed(f"touch {runtime_path('cut-after-effect-before-receipt', 'allow-effect')}")
     machine.wait_for_file(
         state_path("cut-after-effect-before-receipt", "effect-committed"),
         timeout=120,
     )
+    # The mock participant effect is considered durable only after this flush.
+    machine.succeed("sync")
     abrupt_guest_crash_and_reboot()
     after_effect["boot_id_after"] = boot_id()
     assert after_effect["boot_id_before"] != after_effect["boot_id_after"]
