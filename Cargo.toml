@@ -45,6 +45,11 @@ name = "nixward-payload-release-benchmark-verify"
 path = "src/bin/nixward_payload_release_benchmark_verify.rs"
 required-features = ["native"]
 
+[[bin]]
+name = "nixward-capture-attestation"
+path = "src/bin/nixward_capture_attestation.rs"
+required-features = ["native"]
+
 [dependencies]
 # Pin the cognitive core to a content-addressed upstream revision. This is the
 # only cross-repository source dependency; all other dependencies are resolved

@@ -616,6 +616,40 @@
             '';
           };
 
+
+        # Build and test the capture challenge / DSSE attestation CLI.
+        checks.capture-attestation-cli-tests =
+          rustToolchainPlatform.buildRustPackage {
+            pname = "nixward-capture-attestation-cli-tests";
+            version = "0.1.0";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+
+            buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
+            checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
+            cargoBuildFlags = [
+              "-p" "nixward" "--bin" "nixward-capture-attestation"
+            ];
+            cargoTestFlags = [
+              "-p" "nixward" "--bin" "nixward-capture-attestation"
+            ];
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out/bin"
+              cp "target/release/nixward-capture-attestation" "$out/bin/"
+            '';
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
