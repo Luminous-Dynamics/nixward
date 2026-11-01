@@ -484,24 +484,35 @@ mod tests {
     #[test]
     fn thirty_two_activation_profile_negative_vectors_are_denied() {
         for vector in 0..32 {
-            let mut p = profile();
+            // Profile-validation mutations are completed before building a query
+            // borrowing the original good profile.
+            if vector <= 11 {
+                let mut invalid = profile();
+                match vector {
+                    0 => invalid.schema.push_str("-unknown"),
+                    1 => invalid.version = 2,
+                    2 => invalid.profile_id.clear(),
+                    3 => invalid.nixos_release.clear(),
+                    4 => invalid.nixpkgs_revision = "not-a-revision".into(),
+                    5 => invalid.switch_to_configuration_sha256 = "xyz".into(),
+                    6 => invalid.activation_semantics_revision.clear(),
+                    7 => invalid.systemd_version.clear(),
+                    8 => invalid.observer_adapter_revision.clear(),
+                    9 => invalid.supported_modes.clear(),
+                    10 => invalid.requires_deprecated_activation_callbacks = true,
+                    11 => invalid.requires_invocation_id = false,
+                    _ => unreachable!("validation vector range is fixed"),
+                }
+                assert!(invalid.validate().is_err(),
+                    "profile-validation vector {vector} was accepted");
+                continue;
+            }
+
+            let p = profile();
             let mut registry = ActivationProfileRegistry::new();
             let digest = registry.register(p.clone()).unwrap();
             let mut q = query(&p, &digest);
-
             let denied = match vector {
-                0 => { p.schema.push_str("-unknown"); p.validate().is_err() }
-                1 => { p.version = 2; p.validate().is_err() }
-                2 => { p.profile_id.clear(); p.validate().is_err() }
-                3 => { p.nixos_release.clear(); p.validate().is_err() }
-                4 => { p.nixpkgs_revision = "not-a-revision".into(); p.validate().is_err() }
-                5 => { p.switch_to_configuration_sha256 = "xyz".into(); p.validate().is_err() }
-                6 => { p.activation_semantics_revision.clear(); p.validate().is_err() }
-                7 => { p.systemd_version.clear(); p.validate().is_err() }
-                8 => { p.observer_adapter_revision.clear(); p.validate().is_err() }
-                9 => { p.supported_modes.clear(); p.validate().is_err() }
-                10 => { p.requires_deprecated_activation_callbacks = true; p.validate().is_err() }
-                11 => { p.requires_invocation_id = false; p.validate().is_err() }
                 12 => { q.nixos_release = "unknown-release"; registry.resolve_exact(&q).is_err() }
                 13 => { q.nixpkgs_revision = "ffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
                 14 => { q.switch_to_configuration_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; registry.resolve_exact(&q).is_err() }
@@ -509,7 +520,7 @@ mod tests {
                 16 => { q.systemd_version = "262"; registry.resolve_exact(&q).is_err() }
                 17 => { q.observer_adapter_revision = "unknown-observer"; registry.resolve_exact(&q).is_err() }
                 18 => { q.expected_profile_digest = "0000000000000000000000000000000000000000000000000000000000000000"; registry.resolve_exact(&q).is_err() }
-                19 => { let duplicate = p.clone(); registry.register(duplicate).is_err() }
+                19 => { registry.register(p.clone()).is_err() }
                 20 => { registry = ActivationProfileRegistry::new(); registry.resolve_exact(&q).is_err() }
                 21 => { q.nixos_release = "fixture-release-A-26.11"; registry.resolve_exact(&q).is_err() }
                 22 => { q.nixpkgs_revision = "0123456789abcdef0123456789abcdef01234568"; registry.resolve_exact(&q).is_err() }
@@ -518,13 +529,25 @@ mod tests {
                 25 => { q.systemd_version = "260"; registry.resolve_exact(&q).is_err() }
                 26 => { q.observer_adapter_revision = "fixture-systemd-observer-v2"; registry.resolve_exact(&q).is_err() }
                 27 => { q.expected_profile_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
-                28 => { p.requires_deprecated_activation_callbacks = true; registry.register(p).is_err() }
-                29 => { p.requires_invocation_id = false; registry.register(p).is_err() }
-                30 => { p.supported_modes.remove(&ActivationMode::DryActivate); p.expected_postconditions(ActivationMode::DryActivate).is_err() }
+                28 => {
+                    let mut invalid = p.clone();
+                    invalid.requires_deprecated_activation_callbacks = true;
+                    registry.register(invalid).is_err()
+                }
+                29 => {
+                    let mut invalid = p.clone();
+                    invalid.requires_invocation_id = false;
+                    registry.register(invalid).is_err()
+                }
+                30 => {
+                    let mut invalid = p.clone();
+                    invalid.supported_modes.remove(&ActivationMode::DryActivate);
+                    invalid.expected_postconditions(ActivationMode::DryActivate).is_err()
+                }
                 31 => validate_inhibitor_observation(
                     InhibitorPolicy::RequiredComparison,
                     InhibitorObservation::Bypassed,
-                    Some(&"f".repeat(64)),
+                    Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
                 ).is_err(),
                 _ => unreachable!("the conformance corpus is fixed"),
             };
