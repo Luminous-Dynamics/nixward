@@ -453,9 +453,7 @@ pub fn verify_dsse_statement(
         return Err(CaptureAttestationError::PredicateMismatch);
     }
     for signer in policy.signers.iter().filter(|signer| verified_signers.contains(&signer.key_id)) {
-        if captured_at_ms < signer.not_before_ms
-            || captured_at_ms > signer.not_after_ms
-            || !signer.allowed_machine_bindings.iter().any(|value| value == machine_binding_digest)
+        if !signer.allowed_machine_bindings.iter().any(|value| value == machine_binding_digest)
             || !signer.allowed_scenarios.iter().any(|value| value == scenario_id)
         {
             return Err(CaptureAttestationError::SignerNotAuthorized(signer.key_id.clone()));
@@ -1029,20 +1027,33 @@ pub fn verify_capture_attestation(
     if subjects != expected_sorted {
         return Err(CaptureAttestationError::SubjectSetMismatch);
     }
-    if predicate.trial_id != challenge.trial_id
+    if predicate.schema_version != expected.schema_version
+        || predicate.kind != expected.kind
+        || predicate.trial_id != challenge.trial_id
+        || predicate.trial_id != expected.trial_id
         || predicate.scenario_id != challenge.scenario_ids[0]
+        || predicate.scenario_id != expected.scenario_id
+        || predicate.source_commit_sha != challenge.source_commit_sha
+        || predicate.source_commit_sha != expected.source_commit_sha
+        || predicate.flake_lock_sha256 != challenge.flake_lock_sha256
+        || predicate.flake_lock_sha256 != expected.flake_lock_sha256
+        || predicate.corpus_sha256 != challenge.corpus_sha256
+        || predicate.corpus_sha256 != expected.corpus_sha256
         || predicate.boot_id != expected.boot_id
+        || predicate.machine_binding_digest != challenge.machine_binding_digest
+        || predicate.machine_binding_digest != expected.machine_binding_digest
+        || predicate.capture_tool_sha256 != challenge.capture_tool_sha256
+        || predicate.capture_tool_sha256 != expected.capture_tool_sha256
         || predicate.started_monotonic_ns != expected.started_monotonic_ns
         || predicate.finished_monotonic_ns != expected.finished_monotonic_ns
-        || predicate.assurance_mode != expected.assurance_mode
-        || predicate.source_commit_sha != challenge.source_commit_sha
-        || predicate.flake_lock_sha256 != challenge.flake_lock_sha256
-        || predicate.corpus_sha256 != challenge.corpus_sha256
-        || predicate.machine_binding_digest != challenge.machine_binding_digest
-        || predicate.capture_tool_sha256 != challenge.capture_tool_sha256
         || predicate.challenge_id != challenge.challenge_id
+        || predicate.challenge_id != expected.challenge_id
         || predicate.challenge_nonce != challenge.nonce
+        || predicate.challenge_nonce != expected.challenge_nonce
         || predicate.evidence_set_sha256 != evidence_digest
+        || predicate.evidence_set_sha256 != expected.evidence_set_sha256
+        || predicate.assurance_mode != "software_only"
+        || predicate.assurance_mode != expected.assurance_mode
         || predicate.started_monotonic_ns >= predicate.finished_monotonic_ns
         || predicate.captured_at_ms < challenge.issued_at_ms
         || predicate.captured_at_ms > challenge.expires_at_ms
@@ -1055,6 +1066,13 @@ pub fn verify_capture_attestation(
         || !valid_hex(&predicate.capture_tool_sha256, 64)
     {
         return Err(CaptureAttestationError::PredicateMismatch);
+    }
+    for signer in trust_policy.signers.iter().filter(|signer| verified_signer_key_ids.contains(&signer.key_id)) {
+        if predicate.captured_at_ms < signer.not_before_ms
+            || predicate.captured_at_ms > signer.not_after_ms
+        {
+            return Err(CaptureAttestationError::SignerNotAuthorized(signer.key_id.clone()));
+        }
     }
     let envelope_sha = sha256_hex(envelope_bytes);
     // Consume only after all signature, subject, predicate and trust checks have
