@@ -347,6 +347,18 @@
               touch $out
             '';
 
+        # Execute the lifecycle cuts in a disposable QEMU guest. Unlike the
+        # pure corpus guard above, this starts real systemd units and abruptly
+        # terminates/reboots the same guest disk. It still does not model
+        # physical storage-controller power loss or production Nixward IO.
+        checks.systemd-transaction-crash-cut-vm =
+          import ./nix/tests/systemd-transaction-crash-cut-vm.nix {
+            inherit pkgs;
+            nixwardSourceRevision = if self ? rev then self.rev else "unversioned";
+            nixpkgsRevision = if nixpkgs ? rev then nixpkgs.rev else "unlocked";
+            flakeLockSha256 = builtins.hashFile "sha256" ./flake.lock;
+          };
+
         devShells.default = pkgs.mkShell {
           buildInputs = commonBuildInputs ++ [
             rustToolchain
