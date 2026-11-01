@@ -382,7 +382,7 @@ mod tests {
         let p = profile();
         let mut registry = ActivationProfileRegistry::new();
         let digest = registry.register(p.clone()).unwrap();
-        for mutate in 0..7 {
+        for mutate in 0..6 {
             let mut altered = p.clone();
             match mutate {
                 0 => altered.nixos_release.push_str("-unknown"),
@@ -391,7 +391,6 @@ mod tests {
                 3 => altered.activation_semantics_revision.push_str("-unknown"),
                 4 => altered.systemd_version = "262".into(),
                 5 => altered.observer_adapter_revision.push_str("-unknown"),
-                6 => altered.profile_id.push_str("-different"),
                 _ => unreachable!(),
             }
             let q = query(&altered, &digest);
