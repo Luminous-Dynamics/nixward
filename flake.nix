@@ -359,7 +359,10 @@
             assert campaignSchema.title == "Nixward disposable systemd crash-cut VM campaign receipt v1";
             import ./nix/tests/systemd-transaction-crash-cut-vm.nix {
               inherit pkgs;
-              nixwardSourceRevision = if self ? rev then self.rev else "unversioned";
+              nixwardSourceRevision =
+                let ciRevision = builtins.getEnv "NIXWARD_SOURCE_REVISION";
+                in if ciRevision != "" then ciRevision
+                  else if self ? rev then self.rev else "unversioned";
               nixpkgsRevision = if nixpkgs ? rev then nixpkgs.rev else "unlocked";
               flakeLockSha256 = builtins.hashFile "sha256" ./flake.lock;
             };
