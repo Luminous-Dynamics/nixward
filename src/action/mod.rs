@@ -8,6 +8,7 @@
 //! the exact machine/config/command intent; execution capabilities remain
 //! exact-command scoped and rollback-bound.
 
+pub mod activation_profile;
 pub mod authority_approval;
 pub mod authority_replay;
 pub mod change_covenant;
@@ -22,6 +23,15 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 
+pub use activation_profile::{
+    ActivationCompatibilityReceipt, ActivationMode, ActivationModeContract, ActivationPlan,
+    ActivationPlanRequest, ActivationPostconditions, ActivationProfile,
+    ActivationProfileError, ActivationProfileQuery, ActivationProfileRegistry,
+    ActivationStepKind, ActivationStepSpec, ActivationTarget, GenerationExpectation,
+    InhibitorDisposition, InhibitorPolicy, ResolvedActivationPlan, SwitchInhibitorEvidence,
+    SystemdCapabilityProfile, ACTIVATION_PROFILE_REGISTRY_SCHEMA, ACTIVATION_PROFILE_SCHEMA,
+    ACTIVATION_PROFILE_VERSION,
+};
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,

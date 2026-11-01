@@ -136,6 +136,37 @@
         };
 
       in {
+
+        # Exact NixOS release/binary/activation-semantics profile resolver.
+        # The empty registry fixture qualifies no release by default; unit tests
+        # use synthetic pins only to exercise deny-by-default resolver logic.
+        checks.activation-profile-registry-tests =
+          pkgs.rustPlatform.buildRustPackage {
+            pname = "nixward-activation-profile-registry-tests";
+            version = "0.1.0";
+            src = monorepoSrc;
+            sourceRoot = "luminous-dynamics-nixward-src/symthaea";
+            cargoLock = {
+              lockFile = ../../../Cargo.lock;
+              allowBuiltinFetchGit = true;
+            };
+            buildFeatures = [ "native" ];
+            checkFeatures = [ "native" ];
+            cargoTestFlags = [
+              "-p" "nixward" "--lib" "--features" "native"
+              "action::activation_profile::tests"
+            ];
+            buildInputs = commonBuildInputs;
+            nativeBuildInputs = commonNativeBuildInputs;
+            env.HOME = "$TMPDIR";
+            env.RUSTC_WRAPPER = "";
+            doCheck = true;
+            installPhase = ''
+              mkdir -p "$out"
+              touch "$out/activation-profile-registry-tests-authored"
+            '';
+          };
+
         checks.network-runtime-lab = import ./tests/network-runtime-lab/network-runtime-lab.nix {
           inherit pkgs;
           lib = pkgs.lib;
