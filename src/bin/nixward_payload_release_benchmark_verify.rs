@@ -1364,13 +1364,13 @@ fn verify_trial(
                 if let Some(snapshots) = &policy_snapshots {
                     let snapshot = snapshots.get(to_epoch)
                         .ok_or_else(|| format!("policy epoch {to_epoch} is absent from archived history"))?;
-                    if snapshot.previous_record_digest != *previous_record_digest
-                        || snapshot.policy_id != *new_policy_id
-                        || snapshot.policy_digest != *new_policy_digest
-                        || snapshot.record_digest != *new_record_digest
-                        || snapshot.keys != *new_policy_keys
-                        || snapshot.allowed_audiences != *new_policy_allowed_audiences
-                        || snapshot.emergency_revoked_signers != *emergency_revoked_signers
+                    if snapshot.previous_record_digest.as_str() != previous_record_digest.as_str()
+                        || snapshot.policy_id.as_str() != new_policy_id.as_str()
+                        || snapshot.policy_digest.as_str() != new_policy_digest.as_str()
+                        || snapshot.record_digest.as_str() != new_record_digest.as_str()
+                        || snapshot.keys.as_slice() != new_policy_keys.as_slice()
+                        || snapshot.allowed_audiences.as_slice() != new_policy_allowed_audiences.as_slice()
+                        || snapshot.emergency_revoked_signers.as_slice() != emergency_revoked_signers.as_slice()
                     {
                         violations.push(format!(
                             "policy epoch {to_epoch} event differs from the archived raw policy record"
@@ -2171,7 +2171,6 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
-        let (_artifacts, policy_epochs) = policy_archive_fixture(&root);
         let (mut trial, _) = clean_trial();
         let (artifacts, policy_epochs) = policy_archive_fixture(&root);
         trial.artifacts = artifacts;
