@@ -10,6 +10,7 @@
 
 pub mod authority_approval;
 pub mod authority_replay;
+pub mod activation_profile;
 pub mod change_covenant;
 pub mod config_writer;
 pub mod execution_intent;
@@ -30,6 +31,12 @@ pub use authority_approval::{
 };
 pub use authority_replay::{
     AuthorityReplayError, AuthorityReplayLedger, DEFAULT_AUTHORITY_REPLAY_DB,
+};
+pub use activation_profile::{
+    ActivationCompatibilityReceipt, ActivationMode, ActivationProfile,
+    ActivationProfileError, ActivationProfileQuery, ActivationProfileRegistry,
+    GenerationExpectation, InhibitorObservation, InhibitorPolicy, ModePostconditions,
+    ACTIVATION_PROFILE_SCHEMA, ACTIVATION_PROFILE_VERSION,
 };
 pub use change_covenant::{
     ApprovalEvidenceKind, ChangeAuthorization, ChangePlan, ConfigMutationBinding, MachineBinding,

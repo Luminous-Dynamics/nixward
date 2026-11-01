@@ -1,0 +1,55 @@
+name: activation profile registry v0.1
+
+on:
+  pull_request:
+    paths:
+      - "src/action/activation_profile.rs"
+      - "src/action/mod.rs"
+      - "research/activation-profile-check/**"
+      - "docs/fixtures/nixos-activation-profile-v0.1.schema.json"
+      - "docs/NIXOS_ACTIVATION_PROFILE_REGISTRY_V0_1.md"
+      - ".github/workflows/activation-profile-registry-v0.1.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/action/activation_profile.rs"
+      - "src/action/mod.rs"
+      - "research/activation-profile-check/**"
+      - "docs/fixtures/nixos-activation-profile-v0.1.schema.json"
+      - "docs/NIXOS_ACTIVATION_PROFILE_REGISTRY_V0_1.md"
+      - ".github/workflows/activation-profile-registry-v0.1.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: activation-profile-registry-v0.1-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  activation-profile:
+    name: Exact activation profile and adversarial tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+          rustup override set 1.96.0
+      - name: Parse strict activation profile schema
+        run: python3 -m json.tool docs/fixtures/nixos-activation-profile-v0.1.schema.json > /dev/null
+      - name: Resolve isolated test harness dependencies
+        run: cargo generate-lockfile --manifest-path research/activation-profile-check/Cargo.toml
+      - name: Run exact production-source activation profile tests
+        run: cargo test --manifest-path research/activation-profile-check/Cargo.toml --locked -- --nocapture
+      - name: Check exact production-source activation profile formatting
+        run: cargo fmt --manifest-path research/activation-profile-check/Cargo.toml -- --check
+      - name: Run Clippy with warnings denied
+        run: cargo clippy --manifest-path research/activation-profile-check/Cargo.toml --locked -- -D warnings
+      - name: Record generated dependency lock digest
+        run: sha256sum research/activation-profile-check/Cargo.lock
