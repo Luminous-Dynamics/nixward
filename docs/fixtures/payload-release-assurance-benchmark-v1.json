@@ -183,7 +183,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -198,7 +199,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -213,7 +215,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -228,7 +231,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -243,7 +247,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -258,7 +263,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -273,7 +279,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -288,7 +295,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -303,7 +311,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -318,7 +327,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -333,7 +343,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -348,7 +359,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -363,7 +375,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -378,7 +391,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -393,7 +407,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -408,7 +423,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -423,7 +439,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -438,7 +455,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -453,7 +471,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -468,7 +487,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -483,7 +503,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -498,7 +519,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -513,7 +535,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -528,7 +551,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -543,7 +567,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -558,7 +583,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     },
     {
@@ -573,7 +599,8 @@
         "policy_epoch_and_record_digest",
         "payload_digest_and_attempt_state",
         "monotonic_timestamps",
-        "raw_sqlite_and_supervisor_logs"
+        "raw_sqlite_and_supervisor_logs",
+        "raw_policy_epoch_archive"
       ]
     }
   ]

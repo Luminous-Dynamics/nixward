@@ -110,7 +110,8 @@
           "artifacts",
           "initial_policy_keys",
           "initial_policy_allowed_audiences",
-          "initial_policy_emergency_revoked_signers"
+          "initial_policy_emergency_revoked_signers",
+          "policy_epochs"
         ],
         "properties": {
           "trial_id": {
@@ -539,7 +540,10 @@
                         "required": [
                           "signer_key_id",
                           "revoked",
-                          "allowed_actions"
+                          "allowed_actions",
+                          "issuer",
+                          "public_key_hex",
+                          "claims"
                         ],
                         "properties": {
                           "signer_key_id": {
@@ -556,6 +560,20 @@
                               "minLength": 1
                             },
                             "uniqueItems": true
+                          },
+                          "issuer": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "public_key_hex": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "claims": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "type": "string"
+                            }
                           }
                         }
                       }
@@ -979,7 +997,10 @@
               "required": [
                 "signer_key_id",
                 "revoked",
-                "allowed_actions"
+                "allowed_actions",
+                "issuer",
+                "public_key_hex",
+                "claims"
               ],
               "properties": {
                 "signer_key_id": {
@@ -996,6 +1017,20 @@
                     "minLength": 1
                   },
                   "uniqueItems": true
+                },
+                "issuer": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "public_key_hex": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "claims": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -1016,6 +1051,77 @@
               "minLength": 1
             },
             "uniqueItems": true
+          },
+          "policy_epochs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "epoch",
+                "policy_json_artifact_path",
+                "policy_json_sha256",
+                "emergency_revoked_signers",
+                "emergency_revocation_digest",
+                "previous_record_digest",
+                "update_provenance_artifact_path",
+                "update_provenance_sha256",
+                "update_provenance_digest",
+                "created_at_ms",
+                "record_digest"
+              ],
+              "properties": {
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "policy_json_artifact_path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "policy_json_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "emergency_revoked_signers": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "emergency_revocation_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "previous_record_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "update_provenance_artifact_path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "update_provenance_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "update_provenance_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "created_at_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "record_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            }
           }
         }
       }

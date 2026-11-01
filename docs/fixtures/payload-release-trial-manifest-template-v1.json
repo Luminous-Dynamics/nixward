@@ -32,7 +32,10 @@
           "revoked": false,
           "allowed_actions": [
             "change"
-          ]
+          ],
+          "issuer": "owner-root",
+          "public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+          "claims": {}
         }
       ],
       "initial_policy_allowed_audiences": [
@@ -41,7 +44,22 @@
       "initial_policy_emergency_revoked_signers": [],
       "events_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "events": [],
-      "artifacts": []
+      "artifacts": [],
+      "policy_epochs": [
+        {
+          "epoch": 1,
+          "policy_json_artifact_path": "policy/epoch-1.json",
+          "policy_json_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "emergency_revoked_signers": [],
+          "emergency_revocation_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "previous_record_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "update_provenance_artifact_path": "policy/epoch-1-update.json",
+          "update_provenance_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "update_provenance_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+          "created_at_ms": 1700000000000,
+          "record_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
     }
   ]
 }
