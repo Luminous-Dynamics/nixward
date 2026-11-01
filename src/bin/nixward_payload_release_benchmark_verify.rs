@@ -7,7 +7,7 @@
 //! checks evidence consistency and artifact digests; it does not authenticate
 //! the machine that captured the records or perform host-mutating operations.
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1798,7 +1798,10 @@ fn read_policy_snapshot(
     Ok(snapshots)
 }
 
-fn verify_release_schema_inventory(connection: &Connection) -> Result<(), SnapshotAuditError> {
+fn verify_release_schema_inventory(
+    connection: &Connection,
+    tolerated_missing_trigger: Option<&str>,
+) -> Result<(), SnapshotAuditError> {
     const EXPECTED: [(&str, &str); 40] = [
         ("table", "admission_commits"),
         ("table", "authority_replays"),
@@ -1852,7 +1855,17 @@ fn verify_release_schema_inventory(connection: &Connection) -> Result<(), Snapsh
     let expected = EXPECTED.iter()
         .map(|(kind, name)| ((*kind).to_owned(), (*name).to_owned()))
         .collect::<BTreeSet<_>>();
-    if actual != expected {
+    if let Some(trigger) = tolerated_missing_trigger {
+        let without_one = expected.iter()
+            .filter(|(_, name)| name.as_str() != trigger)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if actual != without_one {
+            return Err(SnapshotAuditError::Other(format!(
+                "SQLite v4 schema inventory mismatch with expected tamper trigger {trigger}"
+            )));
+        }
+    } else if actual != expected {
         return Err(SnapshotAuditError::Other(format!(
             "SQLite v4 schema inventory mismatch (expected {} objects, found {})",
             expected.len(), actual.len()
@@ -1914,7 +1927,12 @@ fn verify_sqlite_snapshot(
     if fk_rows.count() != 0 {
         return Err(SnapshotAuditError::Other("SQLite foreign-key check failed".into()));
     }
-    verify_release_schema_inventory(&connection)?;
+    let tolerated_missing_trigger = match trial.scenario_id.as_str() {
+        "release-barrier-tamper-detection" => Some("payload_release_barriers_immutable_update"),
+        "attempt-digest-tamper-detection" => Some("payload_release_attempts_immutable_update"),
+        _ => None,
+    };
+    verify_release_schema_inventory(&connection, tolerated_missing_trigger)?;
 
     let policies = read_policy_snapshot(&connection)?;
     let initial_policy = policies.get(&trial.initial_policy_epoch)
@@ -2436,6 +2454,119 @@ fn verify_manifest(
             result.report.violations.push(
                 "one or more scenario-required observations are missing".into()
             );
+        }
+
+        let sqlite_receipts = trial.artifacts.iter()
+            .filter(|artifact| artifact.artifact_kind == "raw_sqlite")
+            .collect::<Vec<_>>();
+        if sqlite_receipts.len() != 1 {
+            result.report.valid = false;
+            result.report.sqlite_snapshot_audit = "missing_or_duplicate_snapshot".into();
+            result.report.violations.push(
+                "each trial must contain exactly one raw SQLite snapshot artifact".into()
+            );
+        } else {
+            match stage_verified_sqlite_artifact(artifact_root, sqlite_receipts[0]) {
+                Err(error) => {
+                    result.report.valid = false;
+                    result.report.sqlite_snapshot_audit = "artifact_staging_failed".into();
+                    result.report.violations.push(format!("SQLite snapshot staging failed: {error}"));
+                }
+                Ok(snapshot) => match verify_sqlite_snapshot(snapshot.path(), trial) {
+                    Ok(()) if scenario.expected_disposition == "detect_corruption" => {
+                        result.report.valid = false;
+                        result.report.sqlite_snapshot_audit = "unexpectedly_consistent".into();
+                        result.report.violations.push(
+                            "corruption scenario did not contain the expected persisted digest mismatch".into()
+                        );
+                    }
+                    Ok(()) if scenario.expected_disposition == "refuse_legacy" => {
+                        result.report.valid = false;
+                        result.report.sqlite_snapshot_audit = "unexpected_v4_schema".into();
+                        result.report.violations.push(
+                            "legacy-schema refusal scenario supplied a schema-v4 database".into()
+                        );
+                    }
+                    Ok(()) => {
+                        result.report.sqlite_snapshot_audit = "verified_v4_snapshot".into();
+                    }
+                    Err(SnapshotAuditError::UnsupportedSchema(3))
+                        if scenario.expected_disposition == "refuse_legacy" =>
+                    {
+                        let refusal_recorded = trial.events.iter().any(|event| matches!(
+                            event,
+                            EvidenceEvent::OperationRejected {
+                                operation,
+                                request_id,
+                                target_id,
+                                reason_code,
+                                ..
+                            } if operation == "open_store"
+                                && request_id == &format!("open-store:{}", trial.trial_id)
+                                && target_id == "schema-v3"
+                                && reason_code == "unsupported_schema_v3"
+                        ));
+                        if refusal_recorded {
+                            result.report.sqlite_snapshot_audit = "expected_v3_refusal".into();
+                        } else {
+                            result.report.valid = false;
+                            result.report.sqlite_snapshot_audit = "v3_without_refusal_evidence".into();
+                            result.report.violations.push(
+                                "schema-v3 artifact lacks its matching open-store refusal event".into()
+                            );
+                        }
+                    }
+                    Err(SnapshotAuditError::BarrierDigestMismatch(release_id))
+                        if scenario.id == "release-barrier-tamper-detection" =>
+                    {
+                        let rejection_matches = trial.events.iter().any(|event| matches!(
+                            event,
+                            EvidenceEvent::OperationRejected {
+                                operation, request_id, target_id, reason_code, ..
+                            } if operation == "verify_integrity"
+                                && request_id == &format!("integrity:{release_id}")
+                                && target_id == &release_id
+                                && reason_code == "inconsistent_storage"
+                        ));
+                        if rejection_matches {
+                            result.report.sqlite_snapshot_audit = "expected_barrier_digest_corruption".into();
+                        } else {
+                            result.report.valid = false;
+                            result.report.sqlite_snapshot_audit = "unattributed_barrier_corruption".into();
+                            result.report.violations.push(
+                                "SQLite barrier digest corruption is not matched by its exact verifier rejection event".into()
+                            );
+                        }
+                    }
+                    Err(SnapshotAuditError::AttemptDigestMismatch(release_id))
+                        if scenario.id == "attempt-digest-tamper-detection" =>
+                    {
+                        let rejection_matches = trial.events.iter().any(|event| matches!(
+                            event,
+                            EvidenceEvent::OperationRejected {
+                                operation, request_id, target_id, reason_code, ..
+                            } if operation == "verify_integrity"
+                                && request_id == &format!("integrity:{release_id}")
+                                && target_id == &release_id
+                                && reason_code == "inconsistent_storage"
+                        ));
+                        if rejection_matches {
+                            result.report.sqlite_snapshot_audit = "expected_attempt_digest_corruption".into();
+                        } else {
+                            result.report.valid = false;
+                            result.report.sqlite_snapshot_audit = "unattributed_attempt_corruption".into();
+                            result.report.violations.push(
+                                "SQLite attempt digest corruption is not matched by its exact verifier rejection event".into()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        result.report.valid = false;
+                        result.report.sqlite_snapshot_audit = "unexpected_database_failure".into();
+                        result.report.violations.push(format!("SQLite snapshot audit failed: {error:?}"));
+                    }
+                }
+            }
         }
         verified.push(result);
     }
