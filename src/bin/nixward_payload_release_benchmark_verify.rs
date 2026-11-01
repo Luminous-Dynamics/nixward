@@ -2179,6 +2179,102 @@ mod tests {
 
 
 
+
+    fn second_policy_epoch_fixture(
+        root: &Path,
+        previous_record_digest: &str,
+    ) -> (ArtifactReceipt, PolicyEpochEvidence) {
+        let policy_value = serde_json::json!({
+            "schema_version": 1,
+            "kind": "symthaea-authority-trust-policy-v1",
+            "policy_id": "owner-root:1",
+            "policy_epoch": 2,
+            "keys": [{
+                "key_id": "owner-key",
+                "issuer": "owner-root",
+                "public_key_hex": "11".repeat(32),
+                "allowed_actions": ["change"],
+                "revoked": false,
+                "claims": {}
+            }],
+            "max_ttl_ms": 900000,
+            "allowed_audiences": ["nixward-change-v1"]
+        });
+        let policy: AuthorityTrustPolicy = serde_json::from_value(policy_value).unwrap();
+        let policy_bytes = serde_json::to_vec(&policy).unwrap();
+        let emergency = Vec::<String>::new();
+        let emergency_json = serde_json::to_vec(&emergency).unwrap();
+        let update_provenance = br#"{"kind":"nixward-policy-update-v1","operator":"owner-root","epoch":2}"#.to_vec();
+        let policy_digest = policy.digest().unwrap();
+        let emergency_digest = domain_digest(POLICY_EMERGENCY_REVOCATION_DOMAIN, &emergency_json);
+        let update_digest = domain_digest(POLICY_UPDATE_PROVENANCE_DOMAIN, &update_provenance);
+        let record_digest = policy_epoch_record_digest(
+            2,
+            &policy.policy_id,
+            &policy_digest,
+            &emergency_digest,
+            previous_record_digest,
+            &update_digest,
+            1_700_000_001_000,
+        );
+        let policy_path = "policy/epoch-2.json";
+        let provenance_path = "policy/epoch-2-update.json";
+        let full_policy_path = root.join(policy_path);
+        let full_provenance_path = root.join(provenance_path);
+        std::fs::write(&full_policy_path, &policy_bytes).unwrap();
+        std::fs::write(&full_provenance_path, &update_provenance).unwrap();
+        (
+            ArtifactReceipt {
+                relative_path: policy_path.into(),
+                sha256: sha256_hex(&policy_bytes),
+                artifact_kind: "authority_policy_json".into(),
+            },
+            PolicyEpochEvidence {
+                epoch: 2,
+                policy_json_artifact_path: policy_path.into(),
+                policy_json_sha256: sha256_hex(&policy_bytes),
+                emergency_revoked_signers: emergency,
+                emergency_revocation_digest: emergency_digest,
+                previous_record_digest: previous_record_digest.into(),
+                update_provenance_artifact_path: provenance_path.into(),
+                update_provenance_sha256: sha256_hex(&update_provenance),
+                update_provenance_digest: update_digest,
+                created_at_ms: 1_700_000_001_000,
+                record_digest,
+            },
+        )
+    }
+
+    fn policy_update_events(
+        first_record_digest: &str,
+        snapshot: &VerifiedPolicySnapshot,
+    ) -> [EvidenceEvent; 2] {
+        [
+            EvidenceEvent::PolicyAdvanceRequested {
+                seq: 9,
+                at_ns: 220,
+                request_id: "policy-epoch-2".into(),
+                expected_epoch: 1,
+                expected_record_digest: first_record_digest.into(),
+            },
+            EvidenceEvent::PolicyAdvanced {
+                seq: 10,
+                at_ns: 230,
+                request_id: "policy-epoch-2".into(),
+                from_epoch: 1,
+                to_epoch: 2,
+                previous_record_digest: first_record_digest.into(),
+                new_policy_id: snapshot.policy_id.clone(),
+                new_policy_digest: snapshot.policy_digest.clone(),
+                new_record_digest: snapshot.record_digest.clone(),
+                new_policy_keys: snapshot.keys.clone(),
+                new_policy_allowed_audiences: snapshot.allowed_audiences.clone(),
+                emergency_revoked_signers: snapshot.emergency_revoked_signers.clone(),
+                decisions: vec![],
+            },
+        ]
+    }
+
     #[test]
     fn policy_epoch_archive_rederives_exact_policy_and_record_digests() {
         let root = std::env::temp_dir().join(format!(
@@ -2198,6 +2294,66 @@ mod tests {
         assert_eq!(snapshot.keys[0].issuer, "owner-root");
         assert_eq!(snapshot.allowed_audiences, vec!["nixward-change-v1"]);
         assert!(snapshot.emergency_revoked_signers.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+
+    #[test]
+    fn policy_advance_event_matches_exact_second_epoch_archive() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-event-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (mut trial, mut scenario) = clean_trial();
+        let (mut artifacts, mut epochs) = policy_archive_fixture(&root);
+        let (artifact2, epoch2) = second_policy_epoch_fixture(&root, &epochs[0].record_digest);
+        artifacts.push(artifact2);
+        epochs.push(epoch2);
+        trial.artifacts = artifacts;
+        trial.policy_epochs = epochs;
+        let snapshots = validate_policy_epoch_history(&trial, &root).unwrap();
+        let initial = snapshots.get(&1).unwrap();
+        let advanced = snapshots.get(&2).unwrap();
+        trial.events.extend(policy_update_events(&initial.record_digest, advanced));
+        trial.finished_monotonic_ns = 300;
+        rehash(&mut trial);
+        scenario.required_observations = vec!["raw_policy_epoch_archive".into()];
+        let result = verify_trial(&trial, &scenario, &root).unwrap();
+        assert!(result.report.valid);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn policy_advance_event_cannot_substitute_a_claimed_digest_for_raw_archive() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-event-tamper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (mut trial, mut scenario) = clean_trial();
+        let (mut artifacts, mut epochs) = policy_archive_fixture(&root);
+        let (artifact2, epoch2) = second_policy_epoch_fixture(&root, &epochs[0].record_digest);
+        artifacts.push(artifact2);
+        epochs.push(epoch2);
+        trial.artifacts = artifacts;
+        trial.policy_epochs = epochs;
+        let snapshots = validate_policy_epoch_history(&trial, &root).unwrap();
+        let initial = snapshots.get(&1).unwrap();
+        let advanced = snapshots.get(&2).unwrap();
+        let mut events = policy_update_events(&initial.record_digest, advanced);
+        if let EvidenceEvent::PolicyAdvanced { new_policy_digest, .. } = &mut events[1] {
+            *new_policy_digest = digest('f');
+        }
+        trial.events.extend(events);
+        trial.finished_monotonic_ns = 300;
+        rehash(&mut trial);
+        scenario.required_observations = vec!["raw_policy_epoch_archive".into()];
+        let result = verify_trial(&trial, &scenario, &root).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("differs from the archived raw policy record")
+        }));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
