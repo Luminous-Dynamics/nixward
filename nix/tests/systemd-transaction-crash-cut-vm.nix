@@ -103,6 +103,7 @@ pkgs.testers.runNixOSTest {
     # termination/reboot. The QEMU disk image and its write overlay must be
     # reused rather than recreated from the pristine store image.
     machine.state_dir = Path("/tmp/nixward-crash-cut-vm-state")
+    machine.state_dir.mkdir(parents=True, exist_ok=True)
     machine.start()
     machine.wait_for_unit("multi-user.target", timeout=120)
     # The root must be a real writable image, not runNixOSTest's tmpfs mode.
