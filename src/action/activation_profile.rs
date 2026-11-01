@@ -504,20 +504,20 @@ mod tests {
                 11 => { p.requires_invocation_id = false; p.validate().is_err() }
                 12 => { q.nixos_release = "unknown-release"; registry.resolve_exact(&q).is_err() }
                 13 => { q.nixpkgs_revision = "ffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
-                14 => { q.switch_to_configuration_sha256 = &"b".repeat(64); registry.resolve_exact(&q).is_err() }
+                14 => { q.switch_to_configuration_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; registry.resolve_exact(&q).is_err() }
                 15 => { q.activation_semantics_revision = "unknown-semantics"; registry.resolve_exact(&q).is_err() }
                 16 => { q.systemd_version = "262"; registry.resolve_exact(&q).is_err() }
                 17 => { q.observer_adapter_revision = "unknown-observer"; registry.resolve_exact(&q).is_err() }
-                18 => { q.expected_profile_digest = &"0".repeat(64); registry.resolve_exact(&q).is_err() }
+                18 => { q.expected_profile_digest = "0000000000000000000000000000000000000000000000000000000000000000"; registry.resolve_exact(&q).is_err() }
                 19 => { let duplicate = p.clone(); registry.register(duplicate).is_err() }
                 20 => { registry = ActivationProfileRegistry::new(); registry.resolve_exact(&q).is_err() }
                 21 => { q.nixos_release = "fixture-release-A-26.11"; registry.resolve_exact(&q).is_err() }
                 22 => { q.nixpkgs_revision = "0123456789abcdef0123456789abcdef01234568"; registry.resolve_exact(&q).is_err() }
-                23 => { q.switch_to_configuration_sha256 = &"c".repeat(64); registry.resolve_exact(&q).is_err() }
+                23 => { q.switch_to_configuration_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"; registry.resolve_exact(&q).is_err() }
                 24 => { q.activation_semantics_revision = "fixture-activation-semantics-v2"; registry.resolve_exact(&q).is_err() }
                 25 => { q.systemd_version = "260"; registry.resolve_exact(&q).is_err() }
                 26 => { q.observer_adapter_revision = "fixture-systemd-observer-v2"; registry.resolve_exact(&q).is_err() }
-                27 => { q.expected_profile_digest = &"f".repeat(64); registry.resolve_exact(&q).is_err() }
+                27 => { q.expected_profile_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
                 28 => { p.requires_deprecated_activation_callbacks = true; registry.register(p).is_err() }
                 29 => { p.requires_invocation_id = false; registry.register(p).is_err() }
                 30 => { p.supported_modes.remove(&ActivationMode::DryActivate); p.expected_postconditions(ActivationMode::DryActivate).is_err() }
