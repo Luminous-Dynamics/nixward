@@ -55,7 +55,7 @@ jobs:
       - name: Evaluate crash-cut corpus flake check
         run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-corpus --no-link -L
       - name: Build and execute disposable NixOS/QEMU crash-cut campaign
-        run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
+        run: NIXWARD_SOURCE_REVISION="${GITHUB_SHA}" nix build --impure .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
       - name: Install pinned Rust toolchain for isolated production-source regression
         run: |
           rustup toolchain install 1.96.0 --profile minimal
