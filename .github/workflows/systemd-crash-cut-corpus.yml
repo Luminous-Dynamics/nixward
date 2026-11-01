@@ -56,5 +56,9 @@ jobs:
         run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-corpus --no-link -L
       - name: Build and execute disposable NixOS/QEMU crash-cut campaign
         run: nix build .#checks.x86_64-linux.systemd-transaction-crash-cut-vm --no-link -L
-      - name: Run Rust corpus regression test with pinned toolchain
-        run: nix develop --command cargo test --locked --lib action::systemd_job_evidence::tests::crash_cut_corpus_is_complete_and_replay_forbidding -- --exact
+      - name: Install pinned Rust toolchain for isolated production-source regression
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup override set 1.96.0
+      - name: Test exact production systemd evidence module in isolation
+        run: cargo test --manifest-path research/systemd-crash-cut-check/Cargo.toml --locked
