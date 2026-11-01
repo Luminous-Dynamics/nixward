@@ -7,6 +7,7 @@
 //! checks evidence consistency and artifact digests; it does not authenticate
 //! the machine that captured the records or perform host-mutating operations.
 
+use nixward::dsse::{verify_nixward_source_evidence, NixwardSourceEvidenceExpectation};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,10 @@ const MANIFEST_SCHEMA: &str =
     "org.luminousdynamics.nixward.payload-release-trial-manifest";
 const REPORT_SCHEMA: &str =
     "org.luminousdynamics.nixward.payload-release-trial-verification";
+const NIXWARD_SOURCE_REPOSITORY_URI: &str =
+    "https://github.com/Luminous-Dynamics/nixward";
+const NIXWARD_SOURCE_SUBJECT_NAME: &str = "nixward-source-and-flake-lock";
+const MAX_SOURCE_TRUST_POLICY_BYTES: u64 = 1024 * 1024;
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_TRIALS: usize = 100_000;
@@ -433,6 +438,11 @@ struct TrialReport {
     resolution_count: usize,
     sqlite_snapshot_audit: String,
     reader_blocked_checkpoints: usize,
+    source_manifest_integrity_verified: bool,
+    source_signature_verified: bool,
+    builder_identity_verified: bool,
+    source_attestation: Option<SourceAttestationSummary>,
+    source_attestation_error: Option<String>,
     violations: Vec<String>,
 }
 
@@ -483,9 +493,38 @@ struct VerificationReport {
     complete: bool,
     p99_claims_enabled: bool,
     outcome: String,
+    source_attestation_mode: String,
+    source_integrity_verified_trials: usize,
+    source_signature_verified_trials: usize,
+    builder_identity_verified_trials: usize,
     environment: TrialEnvironment,
     trials: Vec<TrialReport>,
     scenarios: Vec<ScenarioSummary>,
+}
+
+
+#[derive(Debug, Clone)]
+struct SourceAttestationOptions {
+    trust_policy_bytes: Vec<u8>,
+    trust_policy_sha256: String,
+    expected_builder_id: String,
+    verification_time_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SourceAttestationSummary {
+    predicate_type: String,
+    subject_name: String,
+    subject_sha256: String,
+    repository_uri: String,
+    source_commit_sha: String,
+    flake_lock_sha256: String,
+    corpus_sha256: String,
+    builder_id: String,
+    verified_key_ids: Vec<String>,
+    trust_policy_id: String,
+    trust_policy_epoch: u64,
+    trust_policy_sha256: String,
 }
 
 #[derive(Debug)]
@@ -662,13 +701,144 @@ struct SourceEvidence {
     corpus_sha256: String,
 }
 
+
 fn verify_source_evidence_artifact(
     artifact_root: &Path,
     artifacts: &[ArtifactReceipt],
     source_commit_sha: &str,
     flake_lock_sha256: &str,
     corpus_sha256: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    let matches = artifacts.iter()
+        .filter(|artifact| artifact.artifact_kind == "source_manifest")
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!(
+            "expected exactly one source_manifest artifact, found {}",
+            matches.len()
+        ));
+    }
+    let path = resolve_artifact_path(artifact_root, &matches[0].relative_path)?;
+    let bytes = read_bounded(&path)?;
+    if sha256_hex(&bytes) != matches[0].sha256 {
+        return Err("source_manifest artifact digest changed after initial validation".into());
+    }
+    let evidence: SourceEvidence = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid source_manifest artifact: {error}"))?;
+    if evidence.schema != "org.luminousdynamics.nixward.source-evidence"
+        || evidence.version != 1
+        || evidence.source_commit_sha != source_commit_sha
+        || evidence.flake_lock_sha256 != flake_lock_sha256
+        || evidence.corpus_sha256 != corpus_sha256
+        || !valid_hex(&evidence.source_commit_sha, 40)
+        || !valid_hex(&evidence.flake_lock_sha256, 64)
+        || !valid_hex(&evidence.corpus_sha256, 64)
+    {
+        return Err("source_manifest artifact does not bind exact source, flake.lock and corpus digests".into());
+    }
+    Ok(sha256_hex(&bytes))
+}
+
+fn verify_dsse_source_artifact(
+    artifact_root: &Path,
+    artifacts: &[ArtifactReceipt],
+    source_manifest_sha256: &str,
+    source_commit_sha: &str,
+    flake_lock_sha256: &str,
+    corpus_sha256: &str,
+    options: &SourceAttestationOptions,
+) -> Result<SourceAttestationSummary, String> {
+    let matches = artifacts.iter()
+        .filter(|artifact| artifact.artifact_kind == "dsse_source_attestation")
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(format!(
+            "expected exactly one dsse_source_attestation artifact, found {}",
+            matches.len()
+        ));
+    }
+    let path = resolve_artifact_path(artifact_root, &matches[0].relative_path)?;
+    let envelope_bytes = read_bounded(&path)?;
+    if sha256_hex(&envelope_bytes) != matches[0].sha256 {
+        return Err("DSSE source attestation digest changed after initial validation".into());
+    }
+    let expected = NixwardSourceEvidenceExpectation {
+        subject_name: NIXWARD_SOURCE_SUBJECT_NAME,
+        subject_digest_sha256: source_manifest_sha256,
+        repository_uri: NIXWARD_SOURCE_REPOSITORY_URI,
+        source_commit_sha,
+        flake_lock_sha256,
+        corpus_sha256,
+        builder_id: &options.expected_builder_id,
+    };
+    let verified = verify_nixward_source_evidence(
+        &envelope_bytes,
+        &options.trust_policy_bytes,
+        &options.trust_policy_sha256,
+        options.verification_time_ms,
+        expected,
+    ).map_err(|error| format!("DSSE/in-toto source verification failed: {error}"))?;
+    let attestation = verified.attestation();
+    Ok(SourceAttestationSummary {
+        predicate_type: attestation.predicate_type().to_string(),
+        subject_name: attestation.subject_name().to_string(),
+        subject_sha256: attestation.subject_digest().to_string(),
+        repository_uri: verified.repository_uri().to_string(),
+        source_commit_sha: verified.source_commit_sha().to_string(),
+        flake_lock_sha256: verified.flake_lock_sha256().to_string(),
+        corpus_sha256: verified.corpus_sha256().to_string(),
+        builder_id: verified.builder_id().to_string(),
+        verified_key_ids: attestation.verified_key_ids().to_vec(),
+        trust_policy_id: attestation.trust_policy_id().to_string(),
+        trust_policy_epoch: attestation.trust_policy_epoch(),
+        trust_policy_sha256: attestation.trust_policy_sha256().to_string(),
+    })
+}
+
+fn load_pinned_source_trust_policy(
+    path: &Path,
+    expected_sha256: &str,
+    artifact_root: &Path,
+    corpus_path: &Path,
+    manifest_path: &Path,
+) -> Result<Vec<u8>, String> {
+    if !valid_hex(expected_sha256, 64) {
+        return Err("source trust-policy SHA-256 must be 64 lowercase hexadecimal characters".into());
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect source trust policy {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file()
+        || metadata.len() > MAX_SOURCE_TRUST_POLICY_BYTES
+    {
+        return Err("source trust policy must be a non-symlink regular file no larger than 1 MiB".into());
+    }
+    let canonical_policy = fs::canonicalize(path)
+        .map_err(|error| format!("cannot resolve source trust policy {}: {error}", path.display()))?;
+    let canonical_root = fs::canonicalize(artifact_root)
+        .map_err(|error| format!("cannot resolve artifact root {}: {error}", artifact_root.display()))?;
+    if canonical_policy.starts_with(&canonical_root) {
+        return Err("source trust policy must be outside the untrusted artifact root".into());
+    }
+    for input in [corpus_path, manifest_path] {
+        let canonical_input = fs::canonicalize(input)
+            .map_err(|error| format!("cannot resolve input {}: {error}", input.display()))?;
+        if canonical_input == canonical_policy {
+            return Err("source trust policy must be separate from corpus and trial manifest".into());
+        }
+    }
+    let mut file = fs::File::open(&canonical_policy)
+        .map_err(|error| format!("cannot open source trust policy {}: {error}", canonical_policy.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE_TRUST_POLICY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read source trust policy {}: {error}", canonical_policy.display()))?;
+    if bytes.len() as u64 > MAX_SOURCE_TRUST_POLICY_BYTES || sha256_hex(&bytes) != expected_sha256 {
+        return Err("source trust policy exceeds size limit or does not match its pinned SHA-256".into());
+    }
+    Ok(bytes)
+}
+
+
     let matches = artifacts.iter()
         .filter(|artifact| artifact.artifact_kind == "source_manifest")
         .collect::<Vec<_>>();
@@ -1497,6 +1667,11 @@ fn verify_trial(
             resolution_count: resolutions.len(),
             sqlite_snapshot_audit: "not_checked".into(),
             reader_blocked_checkpoints,
+            source_manifest_integrity_verified: false,
+            source_signature_verified: false,
+            builder_identity_verified: false,
+            source_attestation: None,
+            source_attestation_error: None,
             violations,
         },
         measurements,
@@ -2551,6 +2726,18 @@ fn verify_manifest(
     manifest_bytes: &[u8],
     artifact_root: &Path,
 ) -> Result<VerificationReport, String> {
+    verify_manifest_with_source_attestation(
+        corpus_bytes, manifest_bytes, artifact_root, None, false
+    )
+}
+
+fn verify_manifest_with_source_attestation(
+    corpus_bytes: &[u8],
+    manifest_bytes: &[u8],
+    artifact_root: &Path,
+    source_attestation_options: Option<&SourceAttestationOptions>,
+    require_authenticated_source: bool,
+) -> Result<VerificationReport, String> {
     let corpus: BenchmarkCorpus = serde_json::from_slice(corpus_bytes)
         .map_err(|error| format!("invalid corpus: {error}"))?;
     if corpus.schema != CORPUS_SCHEMA || corpus.version != 1 || corpus.status != "proposed-not-executed" {
@@ -2633,23 +2820,58 @@ fn verify_manifest(
         let artifact_kinds = trial.artifacts.iter()
             .map(|artifact| artifact.artifact_kind.as_str())
             .collect::<BTreeSet<_>>();
-        let source_evidence = verify_source_evidence_artifact(
+        let source_manifest_digest = verify_source_evidence_artifact(
             artifact_root,
             &trial.artifacts,
             &manifest.source_commit_sha,
             &manifest.flake_lock_sha256,
             &corpus_digest,
         );
-        let source_evidence_verified = source_evidence.is_ok();
-        if let Err(error) = source_evidence {
+        let source_integrity_verified = source_manifest_digest.is_ok();
+        result.report.source_manifest_integrity_verified = source_integrity_verified;
+        match &source_manifest_digest {
+            Err(error) => {
+                result.report.valid = false;
+                result.report.violations.push(format!("source evidence integrity verification failed: {error}"));
+            }
+            Ok(subject_digest) => {
+                if let Some(options) = source_attestation_options {
+                    match verify_dsse_source_artifact(
+                        artifact_root,
+                        &trial.artifacts,
+                        subject_digest,
+                        &manifest.source_commit_sha,
+                        &manifest.flake_lock_sha256,
+                        &corpus_digest,
+                        options,
+                    ) {
+                        Ok(summary) => {
+                            result.report.source_signature_verified = true;
+                            result.report.builder_identity_verified = true;
+                            result.report.source_attestation = Some(summary);
+                        }
+                        Err(error) => {
+                            result.report.source_attestation_error = Some(error.clone());
+                            result.report.violations.push(error);
+                            result.report.valid = false;
+                        }
+                    }
+                } else if require_authenticated_source {
+                    let error = "authenticated source evidence was required but no pinned DSSE trust policy was supplied";
+                    result.report.source_attestation_error = Some(error.into());
+                    result.report.violations.push(error.into());
+                    result.report.valid = false;
+                }
+            }
+        }
+        if require_authenticated_source && !result.report.source_signature_verified {
             result.report.valid = false;
-            result.report.violations.push(format!("source evidence verification failed: {error}"));
         }
         if !scenario_observations_present(
             scenario,
             trial,
             &artifact_kinds,
-            source_evidence_verified,
+            source_integrity_verified,
         ) {
             result.report.valid = false;
             result.report.violations.push(
@@ -2857,6 +3079,15 @@ fn verify_manifest(
         complete,
         p99_claims_enabled,
         outcome: outcome.into(),
+        source_attestation_mode: if source_attestation_options.is_some() {
+            if require_authenticated_source { "dsse_required" } else { "dsse_verified_when_supplied" }
+        } else { "integrity_only_legacy" }.into(),
+        source_integrity_verified_trials: trial_reports.iter()
+            .filter(|trial| trial.source_manifest_integrity_verified).count(),
+        source_signature_verified_trials: trial_reports.iter()
+            .filter(|trial| trial.source_signature_verified).count(),
+        builder_identity_verified_trials: trial_reports.iter()
+            .filter(|trial| trial.builder_identity_verified).count(),
         environment: manifest.environment,
         trials: trial_reports,
         scenarios: summaries,
@@ -2869,14 +3100,26 @@ fn run() -> Result<i32, String> {
     let mut manifest_path = None;
     let mut artifact_root = None;
     let mut output_path = None;
+    let mut source_trust_policy_path = None;
+    let mut source_trust_policy_sha256 = None;
+    let mut expected_builder_id = None;
+    let mut verification_time_ms = None;
+    let mut require_authenticated_source = false;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--corpus" => corpus_path = args.next().map(PathBuf::from),
             "--manifest" => manifest_path = args.next().map(PathBuf::from),
             "--artifacts-root" => artifact_root = args.next().map(PathBuf::from),
             "--output" => output_path = args.next().map(PathBuf::from),
+            "--source-trust-policy" => source_trust_policy_path = args.next().map(PathBuf::from),
+            "--source-trust-policy-sha256" => source_trust_policy_sha256 = args.next(),
+            "--expected-builder-id" => expected_builder_id = args.next(),
+            "--verification-time-ms" => {
+                verification_time_ms = args.next().and_then(|value| value.parse::<u64>().ok())
+            }
+            "--require-authenticated-source" => require_authenticated_source = true,
             "--help" | "-h" => {
-                println!("nixward-payload-release-benchmark-verify --corpus CORPUS.json --manifest TRIALS.json --artifacts-root DIR [--output REPORT.json]");
+                println!("nixward-payload-release-benchmark-verify --corpus CORPUS.json --manifest TRIALS.json --artifacts-root DIR [--output REPORT.json] [--source-trust-policy POLICY.json --source-trust-policy-sha256 SHA256 --expected-builder-id ID --verification-time-ms UNIX_MS [--require-authenticated-source]]");
                 process::exit(0);
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -2887,11 +3130,45 @@ fn run() -> Result<i32, String> {
     let artifact_root = artifact_root.ok_or("--artifacts-root is required")?;
     let corpus_bytes = read_bounded(&corpus_path)?;
     let manifest_bytes = read_bounded(&manifest_path)?;
+    let supplied_auth_options = source_trust_policy_path.is_some()
+        || source_trust_policy_sha256.is_some()
+        || expected_builder_id.is_some()
+        || verification_time_ms.is_some();
+    if require_authenticated_source && !supplied_auth_options {
+        return Err("--require-authenticated-source requires a pinned local DSSE trust policy, expected builder ID and verification time".into());
+    }
+    let source_attestation_options = if supplied_auth_options {
+        let policy_path = source_trust_policy_path.as_deref()
+            .ok_or("--source-trust-policy is required with DSSE source options")?;
+        let policy_sha = source_trust_policy_sha256.as_deref()
+            .ok_or("--source-trust-policy-sha256 is required with DSSE source options")?;
+        let builder = expected_builder_id.as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("--expected-builder-id must be non-empty")?;
+        let now_ms = verification_time_ms
+            .ok_or("--verification-time-ms is required with DSSE source options")?;
+        Some(SourceAttestationOptions {
+            trust_policy_bytes: load_pinned_source_trust_policy(
+                policy_path, policy_sha, &artifact_root, &corpus_path, &manifest_path
+            )?,
+            trust_policy_sha256: policy_sha.to_string(),
+            expected_builder_id: builder.to_string(),
+            verification_time_ms: now_ms,
+        })
+    } else {
+        None
+    };
     let safe_output_path = match &output_path {
         Some(path) => Some(validate_output_path(path, &corpus_path, &manifest_path, &artifact_root)?),
         None => None,
     };
-    let report = verify_manifest(&corpus_bytes, &manifest_bytes, &artifact_root)?;
+    let report = verify_manifest_with_source_attestation(
+        &corpus_bytes,
+        &manifest_bytes,
+        &artifact_root,
+        source_attestation_options.as_ref(),
+        require_authenticated_source,
+    )?;
     let output = serde_json::to_string_pretty(&report)
         .map_err(|error| format!("cannot serialize report: {error}"))?;
     if let Some(path) = safe_output_path {
