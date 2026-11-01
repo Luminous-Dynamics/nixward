@@ -194,6 +194,100 @@ struct DsseSignature {
     keyid: Option<String>,
 }
 
+
+#[derive(Debug)]
+struct UniqueJsonValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct UniqueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+            type Value = UniqueJsonValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON with no duplicate object keys")
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::Bool(value)))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::Number(value.into())))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::Number(value.into())))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let number = serde_json::Number::from_f64(value)
+                    .ok_or_else(|| E::custom("non-finite JSON number"))?;
+                Ok(UniqueJsonValue(Value::Number(number)))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::String(value.to_string())))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::String(value)))
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::Null))
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJsonValue(Value::Null))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<UniqueJsonValue>()? {
+                    values.push(value.0);
+                }
+                Ok(UniqueJsonValue(Value::Array(values)))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut values = serde_json::Map::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if values.contains_key(&key) {
+                        return Err(serde::de::Error::custom("duplicate JSON object key"));
+                    }
+                    let value = map.next_value::<UniqueJsonValue>()?;
+                    values.insert(key, value.0);
+                }
+                Ok(UniqueJsonValue(Value::Object(values)))
+            }
+        }
+
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
+fn parse_unique_json(bytes: &[u8]) -> Result<Value, DsseVerificationError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let parsed = UniqueJsonValue::deserialize(&mut deserializer)
+        .map_err(|_| DsseVerificationError::InvalidStatement)?;
+    deserializer.end().map_err(|_| DsseVerificationError::InvalidStatement)?;
+    Ok(parsed.0)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -386,8 +480,7 @@ pub fn verify_in_toto_dsse(
 
     // Parse the exact bytes whose PAE was verified. Never re-read the envelope
     // to obtain an application-level payload after signature verification.
-    let statement: Value = serde_json::from_slice(&payload)
-        .map_err(|_| DsseVerificationError::InvalidStatement)?;
+    let statement = parse_unique_json(&payload)?;
     if statement.get("_type").and_then(Value::as_str) != Some(IN_TOTO_STATEMENT_V1) {
         return Err(DsseVerificationError::InvalidStatement);
     }
@@ -491,6 +584,15 @@ pub fn verify_nixward_source_evidence(
             subject_digest: &subject_digest,
         },
     )?;
+    let subjects = attestation.statement.get("subject")
+        .and_then(Value::as_array)
+        .ok_or(DsseVerificationError::InvalidStatement)?;
+    if subjects.len() != 1
+        || subjects[0].get("name").and_then(Value::as_str)
+            != Some(NIXWARD_SOURCE_INPUTS_SUBJECT_NAME)
+    {
+        return Err(DsseVerificationError::SubjectMismatch);
+    }
     let predicate = attestation.statement.get("predicate")
         .ok_or(DsseVerificationError::InvalidStatement)?;
     let source = predicate.get("source").ok_or(DsseVerificationError::InvalidStatement)?;
@@ -758,6 +860,25 @@ mod tests {
         expected.extend_from_slice(&[0xc3, 0xa9]);
         expected.extend_from_slice(b" 1 x");
         assert_eq!(pae("\u{e9}", b"x"), expected);
+    }
+
+
+    #[test]
+    fn rejects_duplicate_json_keys_even_when_the_duplicate_payload_is_signed() {
+        let key = signing_key(26);
+        let payload = format!(
+            r#"{{"_type":"{}","subject":[{{"name":"{}","digest":{{"sha256":"{}"}}}}],"predicateType":"{}","predicateType":"{}","predicate":{{}}}}"#,
+            IN_TOTO_STATEMENT_V1,
+            SUBJECT_NAME,
+            SUBJECT_SHA256,
+            PREDICATE,
+            PREDICATE
+        );
+        assert!(parse_unique_json(payload.as_bytes()).is_err());
+        assert!(matches!(
+            verify(payload.as_bytes(), &[key.clone()], vec![trusted_key(&key)], 1),
+            Err(DsseVerificationError::InvalidStatement)
+        ));
     }
 
     #[test]
