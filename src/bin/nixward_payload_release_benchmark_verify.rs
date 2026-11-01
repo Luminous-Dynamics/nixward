@@ -2064,6 +2064,82 @@ mod tests {
         assert!(result.report.violations.iter().any(|value| value.contains("emergency-revoked signer")));
     }
 
+
+    #[test]
+    fn payload_write_cannot_restart_after_uncertain_outcome() {
+        let (mut trial, _) = clean_trial();
+        trial.events.truncate(4);
+        trial.finished_monotonic_ns = 220;
+        trial.events.push(EvidenceEvent::ReleaseUncertain {
+            seq: 5, at_ns: 150, release_id: test_release_id(),
+        });
+        trial.events.push(EvidenceEvent::PayloadWriteStarted {
+            seq: 6, at_ns: 160, release_id: test_release_id(), payload_digest: digest('9'),
+        });
+        resequence(&mut trial.events);
+        rehash(&mut trial);
+        let scenario = ScenarioDefinition {
+            id: "crash-after-attempt-before-first-byte".into(),
+            trial_class: "durability".into(),
+            expected_disposition: "uncertain_no_resend".into(),
+            minimum_trials: 100,
+            fault_boundary: "after_attempt_before_io".into(),
+            required_observations: vec![],
+        };
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("payload write is duplicate or not bound to its attempt")
+        }));
+    }
+
+    #[test]
+    fn worker_receipt_requires_completed_write_of_same_payload() {
+        let (mut trial, scenario) = clean_trial();
+        trial.events.remove(5); // remove PayloadWriteCompleted but retain receipt
+        resequence(&mut trial.events);
+        rehash(&mut trial);
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("worker receipt is foreign, malformed or duplicated")
+        }));
+    }
+
+    #[test]
+    fn stale_policy_advance_request_is_rejected_before_any_policy_commit() {
+        let (mut trial, scenario) = clean_trial();
+        trial.finished_monotonic_ns = 300;
+        trial.events.push(EvidenceEvent::PolicyAdvanceRequested {
+            seq: 9, at_ns: 220, request_id: "stale-policy-request".into(),
+            expected_epoch: 2, expected_record_digest: digest('2'),
+        });
+        rehash(&mut trial);
+        let result = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
+        assert!(!result.report.valid);
+        assert!(result.report.violations.iter().any(|value| {
+            value.contains("malformed or duplicate policy request")
+        }));
+    }
+
+    #[test]
+    fn artifact_digest_streams_large_raw_files_without_json_buffering() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-artifact-stream-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("raw.sqlite");
+        let bytes = vec![0x5a_u8; 3 * 1024 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+        let expected = sha256_hex(&bytes);
+        assert_eq!(sha256_file_bounded(&path).unwrap(), expected);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
+
     #[test]
     fn nearest_rank_p99_is_suppressed_below_one_thousand_samples() {
         let samples = vec![10_000_000_u64; 999];
