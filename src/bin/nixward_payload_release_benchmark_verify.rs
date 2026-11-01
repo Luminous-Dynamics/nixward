@@ -923,6 +923,21 @@ fn validate_policy_epoch_history(
             return Err(format!("policy epoch {} raw and typed policy digests disagree", evidence.epoch));
         }
 
+        let mut policy_audiences = BTreeSet::new();
+        if policy.allowed_audiences.is_empty()
+            || policy.allowed_audiences.iter().any(|audience| {
+                audience.trim().is_empty() || !policy_audiences.insert(audience.as_str())
+            })
+        {
+            return Err(format!("policy epoch {} audiences are empty or duplicated", evidence.epoch));
+        }
+        for key in &policy.keys {
+            let mut actions = BTreeSet::new();
+            if key.allowed_actions.iter().any(|action| !actions.insert(*action)) {
+                return Err(format!("policy epoch {} has duplicated actions for key {}", evidence.epoch, key.key_id));
+            }
+        }
+
         let mut previous_emergency: Option<&str> = None;
         for key_id in &evidence.emergency_revoked_signers {
             if key_id.trim().is_empty()
