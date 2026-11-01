@@ -19,9 +19,9 @@ const PROFILE_DIGEST_DOMAIN: &[u8] = b"nixward-activation-profile-v0.1\0";
 fn valid_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b':')
-        })
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b':'))
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -147,7 +147,8 @@ impl ActivationProfile {
             return Err(ActivationProfileError::MalformedOrUnsafeProfile);
         }
         if self.supported_modes.contains(&ActivationMode::DryActivate)
-            && self.requires_deprecated_activation_callbacks {
+            && self.requires_deprecated_activation_callbacks
+        {
             return Err(ActivationProfileError::DeprecatedCallbackDependency);
         }
         Ok(())
@@ -157,8 +158,8 @@ impl ActivationProfile {
     /// plans and activation traces. Profile fields are scalar or BTreeSet ordered.
     pub fn profile_digest(&self) -> Result<String, ActivationProfileError> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self)
-            .map_err(|_| ActivationProfileError::SerializationFailure)?;
+        let bytes =
+            serde_json::to_vec(self).map_err(|_| ActivationProfileError::SerializationFailure)?;
         let mut hasher = Sha256::new();
         hasher.update(PROFILE_DIGEST_DOMAIN);
         hasher.update((bytes.len() as u64).to_be_bytes());
@@ -240,10 +241,8 @@ impl ActivationProfileRegistry {
         if self.profiles.iter().any(|existing| {
             existing.nixos_release == profile.nixos_release
                 && existing.nixpkgs_revision == profile.nixpkgs_revision
-                && existing.switch_to_configuration_sha256
-                    == profile.switch_to_configuration_sha256
-                && existing.activation_semantics_revision
-                    == profile.activation_semantics_revision
+                && existing.switch_to_configuration_sha256 == profile.switch_to_configuration_sha256
+                && existing.activation_semantics_revision == profile.activation_semantics_revision
                 && existing.systemd_version == profile.systemd_version
                 && existing.observer_adapter_revision == profile.observer_adapter_revision
         }) {
@@ -259,14 +258,18 @@ impl ActivationProfileRegistry {
         &self,
         query: &ActivationProfileQuery<'_>,
     ) -> Result<(&ActivationProfile, ActivationCompatibilityReceipt), ActivationProfileError> {
-        let profile = self.profiles.iter().find(|p| {
-            p.nixos_release == query.nixos_release
-                && p.nixpkgs_revision == query.nixpkgs_revision
-                && p.switch_to_configuration_sha256 == query.switch_to_configuration_sha256
-                && p.activation_semantics_revision == query.activation_semantics_revision
-                && p.systemd_version == query.systemd_version
-                && p.observer_adapter_revision == query.observer_adapter_revision
-        }).ok_or(ActivationProfileError::UnknownProfile)?;
+        let profile = self
+            .profiles
+            .iter()
+            .find(|p| {
+                p.nixos_release == query.nixos_release
+                    && p.nixpkgs_revision == query.nixpkgs_revision
+                    && p.switch_to_configuration_sha256 == query.switch_to_configuration_sha256
+                    && p.activation_semantics_revision == query.activation_semantics_revision
+                    && p.systemd_version == query.systemd_version
+                    && p.observer_adapter_revision == query.observer_adapter_revision
+            })
+            .ok_or(ActivationProfileError::UnknownProfile)?;
 
         let digest = profile.profile_digest()?;
         if digest != query.expected_profile_digest {
@@ -287,8 +290,12 @@ impl ActivationProfileRegistry {
         Ok((profile, receipt))
     }
 
-    pub fn len(&self) -> usize { self.profiles.len() }
-    pub fn is_empty(&self) -> bool { self.profiles.is_empty() }
+    pub fn len(&self) -> usize {
+        self.profiles.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.profiles.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,7 +322,10 @@ pub fn validate_inhibitor_observation(
             if policy != InhibitorPolicy::RequiredComparisonWithExplicitBypass {
                 return Err(ActivationProfileError::InhibitorBypassDenied);
             }
-            if !bypass_authorization_digest.map(valid_sha256).unwrap_or(false) {
+            if !bypass_authorization_digest
+                .map(valid_sha256)
+                .unwrap_or(false)
+            {
                 return Err(ActivationProfileError::InhibitorBypassMissingAuthorization);
             }
             Ok(())
@@ -353,7 +363,9 @@ mod tests {
                 ActivationMode::Test,
                 ActivationMode::Boot,
                 ActivationMode::DryActivate,
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             inhibitor_policy: InhibitorPolicy::RequiredComparisonWithExplicitBypass,
             requires_deprecated_activation_callbacks: false,
             requires_invocation_id: true,
@@ -401,8 +413,10 @@ mod tests {
                 _ => unreachable!(),
             }
             let q = query(&altered, &digest);
-            assert_eq!(registry.resolve_exact(&q).unwrap_err(),
-                ActivationProfileError::UnknownProfile);
+            assert_eq!(
+                registry.resolve_exact(&q).unwrap_err(),
+                ActivationProfileError::UnknownProfile
+            );
         }
     }
 
@@ -412,8 +426,10 @@ mod tests {
         let mut registry = ActivationProfileRegistry::new();
         registry.register(p.clone()).unwrap();
         let wrong = "0".repeat(64);
-        assert_eq!(registry.resolve_exact(&query(&p, &wrong)).unwrap_err(),
-            ActivationProfileError::ProfileDigestMismatch);
+        assert_eq!(
+            registry.resolve_exact(&query(&p, &wrong)).unwrap_err(),
+            ActivationProfileError::ProfileDigestMismatch
+        );
     }
 
     #[test]
@@ -423,43 +439,73 @@ mod tests {
         registry.register(p.clone()).unwrap();
         let mut duplicate = p;
         duplicate.profile_id = "a-second-name".into();
-        assert_eq!(registry.register(duplicate), Err(ActivationProfileError::DuplicateProfile));
+        assert_eq!(
+            registry.register(duplicate),
+            Err(ActivationProfileError::DuplicateProfile)
+        );
     }
 
     #[test]
     fn all_activation_modes_have_non_compensatory_postconditions() {
         let p = profile();
-        assert_eq!(p.expected_postconditions(ActivationMode::Switch).unwrap(),
+        assert_eq!(
+            p.expected_postconditions(ActivationMode::Switch).unwrap(),
             ModePostconditions {
                 running_generation: GenerationExpectation::Target,
                 boot_default_generation: GenerationExpectation::Target,
                 requires_post_reboot_observation: false,
                 runtime_mutation_permitted: true,
                 boot_default_mutation_permitted: true,
-            });
-        assert_eq!(p.expected_postconditions(ActivationMode::Test).unwrap().boot_default_generation,
-            GenerationExpectation::Unchanged);
-        assert_eq!(p.expected_postconditions(ActivationMode::Boot).unwrap().running_generation,
-            GenerationExpectation::Unchanged);
-        assert!(p.expected_postconditions(ActivationMode::Boot).unwrap().requires_post_reboot_observation);
-        assert_eq!(p.expected_postconditions(ActivationMode::DryActivate).unwrap().running_generation,
-            GenerationExpectation::Unchanged);
-        assert!(!p.expected_postconditions(ActivationMode::DryActivate).unwrap().runtime_mutation_permitted);
+            }
+        );
+        assert_eq!(
+            p.expected_postconditions(ActivationMode::Test)
+                .unwrap()
+                .boot_default_generation,
+            GenerationExpectation::Unchanged
+        );
+        assert_eq!(
+            p.expected_postconditions(ActivationMode::Boot)
+                .unwrap()
+                .running_generation,
+            GenerationExpectation::Unchanged
+        );
+        assert!(
+            p.expected_postconditions(ActivationMode::Boot)
+                .unwrap()
+                .requires_post_reboot_observation
+        );
+        assert_eq!(
+            p.expected_postconditions(ActivationMode::DryActivate)
+                .unwrap()
+                .running_generation,
+            GenerationExpectation::Unchanged
+        );
+        assert!(
+            !p.expected_postconditions(ActivationMode::DryActivate)
+                .unwrap()
+                .runtime_mutation_permitted
+        );
     }
 
     #[test]
     fn unsupported_mode_is_denied() {
         let mut p = profile();
         p.supported_modes.remove(&ActivationMode::Boot);
-        assert_eq!(p.expected_postconditions(ActivationMode::Boot),
-            Err(ActivationProfileError::UnsupportedMode));
+        assert_eq!(
+            p.expected_postconditions(ActivationMode::Boot),
+            Err(ActivationProfileError::UnsupportedMode)
+        );
     }
 
     #[test]
     fn deprecated_activation_callback_dependency_is_denied() {
         let mut p = profile();
         p.requires_deprecated_activation_callbacks = true;
-        assert_eq!(p.validate(), Err(ActivationProfileError::MalformedOrUnsafeProfile));
+        assert_eq!(
+            p.validate(),
+            Err(ActivationProfileError::MalformedOrUnsafeProfile)
+        );
     }
 
     #[test]
@@ -471,20 +517,38 @@ mod tests {
 
     #[test]
     fn inhibitor_comparison_and_bypass_are_separate() {
-        assert_eq!(validate_inhibitor_observation(
-            InhibitorPolicy::RequiredComparisonWithExplicitBypass,
-            InhibitorObservation::Passed, None), Ok(()));
-        assert_eq!(validate_inhibitor_observation(
-            InhibitorPolicy::RequiredComparison,
-            InhibitorObservation::Blocked, None), Err(ActivationProfileError::InhibitorBlocked));
-        assert_eq!(validate_inhibitor_observation(
-            InhibitorPolicy::RequiredComparison,
-            InhibitorObservation::Bypassed, Some(&"f".repeat(64))),
-            Err(ActivationProfileError::InhibitorBypassDenied));
-        assert_eq!(validate_inhibitor_observation(
-            InhibitorPolicy::RequiredComparisonWithExplicitBypass,
-            InhibitorObservation::Bypassed, None),
-            Err(ActivationProfileError::InhibitorBypassMissingAuthorization));
+        assert_eq!(
+            validate_inhibitor_observation(
+                InhibitorPolicy::RequiredComparisonWithExplicitBypass,
+                InhibitorObservation::Passed,
+                None
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_inhibitor_observation(
+                InhibitorPolicy::RequiredComparison,
+                InhibitorObservation::Blocked,
+                None
+            ),
+            Err(ActivationProfileError::InhibitorBlocked)
+        );
+        assert_eq!(
+            validate_inhibitor_observation(
+                InhibitorPolicy::RequiredComparison,
+                InhibitorObservation::Bypassed,
+                Some(&"f".repeat(64))
+            ),
+            Err(ActivationProfileError::InhibitorBypassDenied)
+        );
+        assert_eq!(
+            validate_inhibitor_observation(
+                InhibitorPolicy::RequiredComparisonWithExplicitBypass,
+                InhibitorObservation::Bypassed,
+                None
+            ),
+            Err(ActivationProfileError::InhibitorBypassMissingAuthorization)
+        );
     }
 
     #[test]
@@ -509,8 +573,10 @@ mod tests {
                     11 => invalid.requires_invocation_id = false,
                     _ => unreachable!("validation vector range is fixed"),
                 }
-                assert!(invalid.validate().is_err(),
-                    "profile-validation vector {vector} was accepted");
+                assert!(
+                    invalid.validate().is_err(),
+                    "profile-validation vector {vector} was accepted"
+                );
                 continue;
             }
 
@@ -519,22 +585,71 @@ mod tests {
             let digest = registry.register(p.clone()).unwrap();
             let mut q = query(&p, &digest);
             let denied = match vector {
-                12 => { q.nixos_release = "unknown-release"; registry.resolve_exact(&q).is_err() }
-                13 => { q.nixpkgs_revision = "ffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
-                14 => { q.switch_to_configuration_sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"; registry.resolve_exact(&q).is_err() }
-                15 => { q.activation_semantics_revision = "unknown-semantics"; registry.resolve_exact(&q).is_err() }
-                16 => { q.systemd_version = "262"; registry.resolve_exact(&q).is_err() }
-                17 => { q.observer_adapter_revision = "unknown-observer"; registry.resolve_exact(&q).is_err() }
-                18 => { q.expected_profile_digest = "0000000000000000000000000000000000000000000000000000000000000000"; registry.resolve_exact(&q).is_err() }
-                19 => { registry.register(p.clone()).is_err() }
-                20 => { registry = ActivationProfileRegistry::new(); registry.resolve_exact(&q).is_err() }
-                21 => { q.nixos_release = "fixture-release-A-26.11"; registry.resolve_exact(&q).is_err() }
-                22 => { q.nixpkgs_revision = "0123456789abcdef0123456789abcdef01234568"; registry.resolve_exact(&q).is_err() }
-                23 => { q.switch_to_configuration_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"; registry.resolve_exact(&q).is_err() }
-                24 => { q.activation_semantics_revision = "fixture-activation-semantics-v2"; registry.resolve_exact(&q).is_err() }
-                25 => { q.systemd_version = "260"; registry.resolve_exact(&q).is_err() }
-                26 => { q.observer_adapter_revision = "fixture-systemd-observer-v2"; registry.resolve_exact(&q).is_err() }
-                27 => { q.expected_profile_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"; registry.resolve_exact(&q).is_err() }
+                12 => {
+                    q.nixos_release = "unknown-release";
+                    registry.resolve_exact(&q).is_err()
+                }
+                13 => {
+                    q.nixpkgs_revision = "ffffffffffffffffffffffffffffffffffffffff";
+                    registry.resolve_exact(&q).is_err()
+                }
+                14 => {
+                    q.switch_to_configuration_sha256 =
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+                    registry.resolve_exact(&q).is_err()
+                }
+                15 => {
+                    q.activation_semantics_revision = "unknown-semantics";
+                    registry.resolve_exact(&q).is_err()
+                }
+                16 => {
+                    q.systemd_version = "262";
+                    registry.resolve_exact(&q).is_err()
+                }
+                17 => {
+                    q.observer_adapter_revision = "unknown-observer";
+                    registry.resolve_exact(&q).is_err()
+                }
+                18 => {
+                    q.expected_profile_digest =
+                        "0000000000000000000000000000000000000000000000000000000000000000";
+                    registry.resolve_exact(&q).is_err()
+                }
+                19 => registry.register(p.clone()).is_err(),
+                20 => {
+                    registry = ActivationProfileRegistry::new();
+                    registry.resolve_exact(&q).is_err()
+                }
+                21 => {
+                    q.nixos_release = "fixture-release-A-26.11";
+                    registry.resolve_exact(&q).is_err()
+                }
+                22 => {
+                    q.nixpkgs_revision = "0123456789abcdef0123456789abcdef01234568";
+                    registry.resolve_exact(&q).is_err()
+                }
+                23 => {
+                    q.switch_to_configuration_sha256 =
+                        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+                    registry.resolve_exact(&q).is_err()
+                }
+                24 => {
+                    q.activation_semantics_revision = "fixture-activation-semantics-v2";
+                    registry.resolve_exact(&q).is_err()
+                }
+                25 => {
+                    q.systemd_version = "260";
+                    registry.resolve_exact(&q).is_err()
+                }
+                26 => {
+                    q.observer_adapter_revision = "fixture-systemd-observer-v2";
+                    registry.resolve_exact(&q).is_err()
+                }
+                27 => {
+                    q.expected_profile_digest =
+                        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+                    registry.resolve_exact(&q).is_err()
+                }
                 28 => {
                     let mut invalid = p.clone();
                     invalid.requires_deprecated_activation_callbacks = true;
@@ -548,28 +663,50 @@ mod tests {
                 30 => {
                     let mut invalid = p.clone();
                     invalid.supported_modes.remove(&ActivationMode::DryActivate);
-                    invalid.expected_postconditions(ActivationMode::DryActivate).is_err()
+                    invalid
+                        .expected_postconditions(ActivationMode::DryActivate)
+                        .is_err()
                 }
                 31 => validate_inhibitor_observation(
                     InhibitorPolicy::RequiredComparison,
                     InhibitorObservation::Bypassed,
                     Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-                ).is_err(),
+                )
+                .is_err(),
                 _ => unreachable!("the conformance corpus is fixed"),
             };
-            assert!(denied, "activation profile negative vector {vector} was accepted");
+            assert!(
+                denied,
+                "activation profile negative vector {vector} was accepted"
+            );
         }
     }
 
     #[test]
     fn mode_postconditions_are_not_agent_supplied() {
-        for mode in [ActivationMode::Switch, ActivationMode::Test, ActivationMode::Boot, ActivationMode::DryActivate] {
+        for mode in [
+            ActivationMode::Switch,
+            ActivationMode::Test,
+            ActivationMode::Boot,
+            ActivationMode::DryActivate,
+        ] {
             let expected = ModePostconditions::for_mode(mode);
             match mode {
-                ActivationMode::Switch => assert!(expected.runtime_mutation_permitted && expected.boot_default_mutation_permitted),
-                ActivationMode::Test => assert!(expected.runtime_mutation_permitted && !expected.boot_default_mutation_permitted),
-                ActivationMode::Boot => assert!(!expected.runtime_mutation_permitted && expected.boot_default_mutation_permitted),
-                ActivationMode::DryActivate => assert!(!expected.runtime_mutation_permitted && !expected.boot_default_mutation_permitted),
+                ActivationMode::Switch => assert!(
+                    expected.runtime_mutation_permitted && expected.boot_default_mutation_permitted
+                ),
+                ActivationMode::Test => assert!(
+                    expected.runtime_mutation_permitted
+                        && !expected.boot_default_mutation_permitted
+                ),
+                ActivationMode::Boot => assert!(
+                    !expected.runtime_mutation_permitted
+                        && expected.boot_default_mutation_permitted
+                ),
+                ActivationMode::DryActivate => assert!(
+                    !expected.runtime_mutation_permitted
+                        && !expected.boot_default_mutation_permitted
+                ),
             }
         }
     }
