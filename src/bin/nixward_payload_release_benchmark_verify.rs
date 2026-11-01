@@ -1758,7 +1758,7 @@ fn verify_manifest(
     {
         return Err("trial count or environment metadata is invalid".into());
     }
-    const ALLOWED_OBSERVATIONS: [&str; 6] = [
+    const ALLOWED_OBSERVATIONS: [&str; 7] = [
         "source_sha_and_flake_lock",
         "admission_commit_and_release_id",
         "policy_epoch_and_record_digest",
@@ -1972,6 +1972,80 @@ mod tests {
         )
     }
 
+
+    fn policy_archive_fixture(
+        root: &Path,
+    ) -> (Vec<ArtifactReceipt>, Vec<PolicyEpochEvidence>) {
+        std::fs::create_dir_all(root).unwrap();
+        let policy_value = serde_json::json!({
+            "schema_version": 1,
+            "kind": "symthaea-authority-trust-policy-v1",
+            "policy_id": "owner-root:1",
+            "policy_epoch": 1,
+            "keys": [{
+                "key_id": "owner-key",
+                "issuer": "owner-root",
+                "public_key_hex": "11".repeat(32),
+                "allowed_actions": ["change"],
+                "revoked": false,
+                "claims": {}
+            }],
+            "max_ttl_ms": 900000,
+            "allowed_audiences": ["nixward-change-v1"]
+        });
+        let policy: AuthorityTrustPolicy =
+            serde_json::from_value(policy_value).unwrap();
+        let policy_bytes = serde_json::to_vec(&policy).unwrap();
+        let emergency = Vec::<String>::new();
+        let emergency_json = serde_json::to_vec(&emergency).unwrap();
+        let update_provenance = br#"{"kind":"nixward-policy-update-v1","operator":"owner-root"}"#.to_vec();
+        let policy_digest = policy.digest().unwrap();
+        let emergency_digest = domain_digest(POLICY_EMERGENCY_REVOCATION_DOMAIN, &emergency_json);
+        let update_digest = domain_digest(POLICY_UPDATE_PROVENANCE_DOMAIN, &update_provenance);
+        let record_digest = policy_epoch_record_digest(
+            1,
+            &policy.policy_id,
+            &policy_digest,
+            &emergency_digest,
+            GENESIS_POLICY_RECORD_DIGEST,
+            &update_digest,
+            1_700_000_000_000,
+        );
+        let policy_path = "policy/epoch-1.json";
+        let provenance_path = "policy/epoch-1-update.json";
+        let full_policy_path = root.join(policy_path);
+        let full_provenance_path = root.join(provenance_path);
+        std::fs::create_dir_all(full_policy_path.parent().unwrap()).unwrap();
+        std::fs::write(&full_policy_path, &policy_bytes).unwrap();
+        std::fs::write(&full_provenance_path, &update_provenance).unwrap();
+        let artifacts = vec![
+            ArtifactReceipt {
+                relative_path: policy_path.into(),
+                sha256: sha256_hex(&policy_bytes),
+                artifact_kind: "authority_policy_json".into(),
+            },
+            ArtifactReceipt {
+                relative_path: provenance_path.into(),
+                sha256: sha256_hex(&update_provenance),
+                artifact_kind: "policy_update_provenance".into(),
+            },
+        ];
+        let epochs = vec![PolicyEpochEvidence {
+            epoch: 1,
+            policy_json_artifact_path: policy_path.into(),
+            policy_json_sha256: sha256_hex(&policy_bytes),
+            emergency_revoked_signers: emergency,
+            emergency_revocation_digest: emergency_digest,
+            previous_record_digest: GENESIS_POLICY_RECORD_DIGEST.into(),
+            update_provenance_artifact_path: provenance_path.into(),
+            update_provenance_sha256: sha256_hex(&update_provenance),
+            update_provenance_digest: update_digest,
+            created_at_ms: 1_700_000_000_000,
+            record_digest,
+        }];
+        (artifacts, epochs)
+    }
+
     fn clean_trial() -> (TrialRecord, ScenarioDefinition) {
         let events = vec![
             EvidenceEvent::BarrierCreateRequested {
@@ -2088,6 +2162,83 @@ mod tests {
         trial.events_sha256 = sha256_hex(&serde_json::to_vec(&trial.events).unwrap());
     }
 
+
+
+    #[test]
+    fn policy_epoch_archive_rederives_exact_policy_and_record_digests() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-archive-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (_artifacts, policy_epochs) = policy_archive_fixture(&root);
+        let (mut trial, _) = clean_trial();
+        let (artifacts, policy_epochs) = policy_archive_fixture(&root);
+        trial.artifacts = artifacts;
+        trial.policy_epochs = policy_epochs;
+        let snapshots = validate_policy_epoch_history(&trial, &root).unwrap();
+        let snapshot = snapshots.get(&1).unwrap();
+        assert_eq!(snapshot.policy_id, "owner-root:1");
+        assert_eq!(snapshot.epoch, 1);
+        assert_eq!(snapshot.keys[0].signer_key_id, "owner-key");
+        assert_eq!(snapshot.keys[0].issuer, "owner-root");
+        assert_eq!(snapshot.allowed_audiences, vec!["nixward-change-v1"]);
+        assert!(snapshot.emergency_revoked_signers.is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn policy_epoch_archive_rejects_changed_raw_json_even_when_manifest_digest_is_stale() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-tamper-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (artifacts, policy_epochs) = policy_archive_fixture(&root);
+        let (mut trial, _) = clean_trial();
+        trial.artifacts = artifacts;
+        trial.policy_epochs = policy_epochs;
+        std::fs::write(root.join("policy/epoch-1.json"), b"{}").unwrap();
+        assert!(validate_policy_epoch_history(&trial, &root).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn policy_epoch_archive_rejects_noncanonical_typed_policy_json() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-canonical-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (mut artifacts, mut policy_epochs) = policy_archive_fixture(&root);
+        let policy_path = root.join("policy/epoch-1.json");
+        let mut bytes = std::fs::read(&policy_path).unwrap();
+        bytes.insert(0, b' ');
+        std::fs::write(&policy_path, &bytes).unwrap();
+        artifacts[0].sha256 = sha256_hex(&bytes);
+        policy_epochs[0].policy_json_sha256 = sha256_hex(&bytes);
+        let (mut trial, _) = clean_trial();
+        trial.artifacts = artifacts;
+        trial.policy_epochs = policy_epochs;
+        assert!(validate_policy_epoch_history(&trial, &root).unwrap_err().contains("not canonical"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn policy_epoch_archive_rejects_broken_genesis_parent_digest() {
+        let root = std::env::temp_dir().join(format!(
+            "nixward-policy-chain-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (artifacts, mut policy_epochs) = policy_archive_fixture(&root);
+        policy_epochs[0].previous_record_digest = digest('f');
+        let (mut trial, _) = clean_trial();
+        trial.artifacts = artifacts;
+        trial.policy_epochs = policy_epochs;
+        assert!(validate_policy_epoch_history(&trial, &root).unwrap_err().contains("broken chain"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn release_id_is_deterministic_and_binds_every_authority_and_plan_field() {
