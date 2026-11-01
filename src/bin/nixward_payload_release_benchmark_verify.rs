@@ -7,7 +7,7 @@
 //! checks evidence consistency and artifact digests; it does not authenticate
 //! the machine that captured the records or perform host-mutating operations.
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2925,7 +2925,7 @@ mod tests {
 
 
     #[test]
-    fn standalone_sqlite_snapshot_accepts_only_application_v4_or_classified_v3() {
+    fn classifies_schema_v3_snapshot_as_legacy_refusal() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("snapshot.sqlite3");
         let connection = Connection::open(&path).unwrap();
