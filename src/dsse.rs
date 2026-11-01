@@ -260,8 +260,10 @@ pub fn verify_in_toto_dsse(
     now_ms: u64,
     expected: InTotoExpectation<'_>,
 ) -> Result<VerifiedDsseAttestation, DsseVerificationError> {
-    if envelope_bytes.is_empty() || envelope_bytes.len() > MAX_ENVELOPE_BYTES
-        || trust_policy_bytes.is_empty() || trust_policy_bytes.len() > MAX_POLICY_BYTES
+    if envelope_bytes.is_empty() || envelope_bytes.len() > MAX_ENVELOPE_BYTES {
+        return Err(DsseVerificationError::InvalidEnvelope);
+    }
+    if trust_policy_bytes.is_empty() || trust_policy_bytes.len() > MAX_POLICY_BYTES
         || !valid_hex(trust_policy_sha256, 64)
         || sha256_hex(trust_policy_bytes) != trust_policy_sha256
     {
