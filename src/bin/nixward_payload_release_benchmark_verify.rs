@@ -3239,7 +3239,6 @@ mod tests {
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
             wall_time_ms: 1_100,
-            wall_time_ms: 1_100,
             new_policy_keys: vec![PolicySignerAuthorization {
                 signer_key_id: "owner-key".into(), revoked: false,
                 allowed_actions: vec![],
@@ -3281,6 +3280,7 @@ mod tests {
             from_epoch: 1, to_epoch: 2, previous_record_digest: digest('2'),
             new_policy_id: "owner-root:1".into(), new_policy_digest: digest('b'),
             new_record_digest: digest('a'),
+            wall_time_ms: 1_100,
             new_policy_keys: vec![PolicySignerAuthorization {
                 signer_key_id: "owner-key".into(), revoked: true,
                 allowed_actions: vec!["change".into()],
