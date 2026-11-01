@@ -1,5 +1,6 @@
 { pkgs
 , nixwardSourceRevision ? "unknown"
+, workflowCheckoutRevision ? "unknown"
 , nixpkgsRevision ? "unknown"
 , flakeLockSha256 ? "unknown"
 }:
@@ -239,6 +240,7 @@ pkgs.testers.runNixOSTest {
         "status": "executed_disposable_qemu_guest",
         "claim_ceiling": "The campaign exercises the pinned disposable guest and virtual disk only; it does not establish physical power-loss durability or production Nixward journal semantics.",
         "nixward_source_revision": "${nixwardSourceRevision}",
+        "workflow_checkout_revision": "${workflowCheckoutRevision}",
         "nixpkgs_revision": "${nixpkgsRevision}",
         "flake_lock_sha256": "${flakeLockSha256}",
         "worker_derivation": "${worker.drvPath}",
