@@ -2104,6 +2104,35 @@ fn verify_sqlite_snapshot(
             db_policy_digest, db_policy_record, db_signer, db_subject, db_audience,
             db_payload, db_expiry, db_created, db_digest,
         ) = row;
+        let stored_barrier = BarrierState {
+            release_id: release_id.clone(),
+            admission_commit_id: db_commit.clone(),
+            transaction_id: db_transaction.clone(),
+            attempt_id: db_attempt.clone(),
+            replay_key: db_replay.clone(),
+            permit_digest: db_permit.clone(),
+            plan_digest: db_plan.clone(),
+            machine_binding_digest: db_machine.clone(),
+            authority_provenance_digest: db_provenance.clone(),
+            authority_subject_digest: db_subject.clone(),
+            authority_audience: db_audience.clone(),
+            policy_id: db_policy_id.clone(),
+            policy_digest: db_policy_digest.clone(),
+            signer_key_id: db_signer.clone(),
+            policy_epoch: u64::try_from(db_epoch)
+                .map_err(|_| SnapshotAuditError::Other("negative barrier epoch".into()))?,
+            policy_record_digest: db_policy_record.clone(),
+            payload_digest: db_payload.clone(),
+            expires_at_ms: u64::try_from(db_expiry)
+                .map_err(|_| SnapshotAuditError::Other("negative barrier expiry".into()))?,
+            barrier_wall_time_ms: u64::try_from(db_created)
+                .map_err(|_| SnapshotAuditError::Other("negative barrier timestamp".into()))?,
+            committed_at_ns: 0,
+            decision: None,
+        };
+        if payload_barrier_digest(&stored_barrier) != db_digest {
+            return Err(SnapshotAuditError::BarrierDigestMismatch(release_id.clone()));
+        }
         if db_commit != *admission_commit_id
             || db_transaction != *transaction_id
             || db_attempt != *attempt_id
@@ -2113,43 +2142,17 @@ fn verify_sqlite_snapshot(
             || db_machine != *machine_binding_digest
             || db_provenance != *authority_provenance_digest
             || db_policy_id != *policy_id
-            || db_epoch < 0 || db_epoch as u64 != *policy_epoch
+            || db_epoch as u64 != *policy_epoch
             || db_policy_digest != *policy_digest
             || db_policy_record != *policy_record_digest
             || db_signer != *signer_key_id
             || db_subject != *authority_subject_digest
             || db_audience != *authority_audience
             || db_payload != *payload_digest
-            || db_expiry < 0 || db_expiry as u64 != *expires_at_ms
-            || db_created < 0 || db_created as u64 != *wall_time_ms
+            || db_expiry as u64 != *expires_at_ms
+            || db_created as u64 != *wall_time_ms
         {
             return Err(SnapshotAuditError::Other(format!("barrier {release_id} does not match raw event evidence")));
-        }
-        let barrier = BarrierState {
-            release_id: release_id.clone(),
-            admission_commit_id: admission_commit_id.clone(),
-            transaction_id: transaction_id.clone(),
-            attempt_id: attempt_id.clone(),
-            replay_key: replay_key.clone(),
-            permit_digest: permit_digest.clone(),
-            plan_digest: plan_digest.clone(),
-            machine_binding_digest: machine_binding_digest.clone(),
-            authority_provenance_digest: authority_provenance_digest.clone(),
-            authority_subject_digest: authority_subject_digest.clone(),
-            authority_audience: authority_audience.clone(),
-            policy_id: policy_id.clone(),
-            policy_digest: policy_digest.clone(),
-            signer_key_id: signer_key_id.clone(),
-            policy_epoch: *policy_epoch,
-            policy_record_digest: policy_record_digest.clone(),
-            payload_digest: payload_digest.clone(),
-            expires_at_ms: *expires_at_ms,
-            barrier_wall_time_ms: *wall_time_ms,
-            committed_at_ns: 0,
-            decision: None,
-        };
-        if payload_barrier_digest(&barrier) != db_digest {
-            return Err(SnapshotAuditError::BarrierDigestMismatch(release_id.clone()));
         }
     }
 

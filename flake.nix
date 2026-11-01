@@ -560,7 +560,9 @@
             };
 
             buildNoDefaultFeatures = true;
+            buildFeatures = [ "native" ];
             checkNoDefaultFeatures = true;
+            checkFeatures = [ "native" ];
             cargoBuildFlags = [
               "-p" "nixward" "--bin" "nixward-payload-release-benchmark-verify"
             ];
