@@ -363,6 +363,7 @@
                 let ciRevision = builtins.getEnv "NIXWARD_SOURCE_REVISION";
                 in if ciRevision != "" then ciRevision
                   else if self ? rev then self.rev else "unversioned";
+              workflowCheckoutRevision = builtins.getEnv "NIXWARD_CHECKOUT_REVISION";
               nixpkgsRevision = if nixpkgs ? rev then nixpkgs.rev else "unlocked";
               flakeLockSha256 = builtins.hashFile "sha256" ./flake.lock;
             };
