@@ -4004,6 +4004,226 @@ mod tests {
         assert!(resolve_artifact_path(root.path(), "escape.log").is_err());
     }
 
+
+    struct SourceAttestationFixture {
+        _temp: tempfile::TempDir,
+        artifact_root: PathBuf,
+        artifacts: Vec<ArtifactReceipt>,
+        options: SourceAttestationOptions,
+        source_manifest_sha256: String,
+        source_commit_sha: String,
+        flake_lock_sha256: String,
+        corpus_sha256: String,
+    }
+
+    fn make_source_attestation_fixture() -> SourceAttestationFixture {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let temp = tempfile::tempdir().unwrap();
+        let artifact_root = temp.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).unwrap();
+
+        let source_commit_sha = "b".repeat(40);
+        let flake_lock_sha256 = "c".repeat(64);
+        let corpus_sha256 = "d".repeat(64);
+        let source_manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": "org.luminousdynamics.nixward.source-evidence",
+            "version": 1,
+            "source_commit_sha": source_commit_sha,
+            "flake_lock_sha256": flake_lock_sha256,
+            "corpus_sha256": corpus_sha256
+        })).unwrap();
+        let source_manifest_sha256 = sha256_hex(&source_manifest_bytes);
+        fs::write(artifact_root.join("source-manifest.json"), &source_manifest_bytes).unwrap();
+
+        let key = SigningKey::from_bytes(&[0x42; 32]);
+        let public_key = key.verifying_key().to_bytes();
+        let key_id = sha256_hex(&public_key);
+        let builder_id = "https://ci.example.test/builders/nixward-prod";
+        let source_inputs_digest = nixward::dsse::nixward_source_inputs_digest_sha256(
+            NIXWARD_SOURCE_REPOSITORY_URI,
+            &source_commit_sha,
+            &flake_lock_sha256,
+            &corpus_sha256,
+        ).unwrap();
+        let statement = serde_json::json!({
+            "_type": nixward::dsse::IN_TOTO_STATEMENT_V1,
+            "subject": [{
+                "name": NIXWARD_SOURCE_SUBJECT_NAME,
+                "digest": { "sha256": source_manifest_sha256 }
+            }],
+            "predicateType": nixward::dsse::NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE,
+            "predicate": {
+                "source": {
+                    "repository_uri": NIXWARD_SOURCE_REPOSITORY_URI,
+                    "commit_sha": source_commit_sha
+                },
+                "materials": {
+                    "flake_lock_sha256": flake_lock_sha256,
+                    "corpus_sha256": corpus_sha256,
+                    "source_inputs_sha256": source_inputs_digest
+                },
+                "builder": { "id": builder_id }
+            }
+        });
+        let payload = serde_json::to_vec(&statement).unwrap();
+        let payload_type = nixward::dsse::DSSE_IN_TOTO_PAYLOAD_TYPE;
+        let mut pae = Vec::new();
+        pae.extend_from_slice(b"DSSEv1 ");
+        pae.extend_from_slice(payload_type.len().to_string().as_bytes());
+        pae.push(b' ');
+        pae.extend_from_slice(payload_type.as_bytes());
+        pae.push(b' ');
+        pae.extend_from_slice(payload.len().to_string().as_bytes());
+        pae.push(b' ');
+        pae.extend_from_slice(&payload);
+        let signature = key.sign(&pae);
+        let envelope = serde_json::to_vec(&serde_json::json!({
+            "payloadType": payload_type,
+            "payload": STANDARD.encode(&payload),
+            "signatures": [{
+                "sig": STANDARD.encode(signature.to_bytes()),
+                "keyid": "untrusted-envelope-key-hint"
+            }]
+        })).unwrap();
+        let envelope_sha256 = sha256_hex(&envelope);
+        fs::write(artifact_root.join("source.dsse.json"), &envelope).unwrap();
+
+        let trust_policy = nixward::dsse::DsseTrustPolicy {
+            schema: nixward::dsse::TRUST_POLICY_SCHEMA.into(),
+            version: 1,
+            policy_id: "nixward-benchmark-capture-root".into(),
+            epoch: 7,
+            not_before_ms: 1_000,
+            not_after_ms: 9_000,
+            signature_threshold: 1,
+            allowed_payload_types: vec![payload_type.into()],
+            allowed_predicate_types: vec![
+                nixward::dsse::NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE.into()
+            ],
+            keys: vec![nixward::dsse::DsseTrustedKey {
+                key_id,
+                public_key: STANDARD.encode(public_key),
+                revoked: false,
+                not_before_ms: 1_000,
+                not_after_ms: 9_000,
+                allowed_predicate_types: vec![
+                    nixward::dsse::NIXWARD_SOURCE_EVIDENCE_PREDICATE_TYPE.into()
+                ],
+            }],
+        };
+        let trust_policy_bytes = serde_json::to_vec(&trust_policy).unwrap();
+        let trust_policy_sha256 = sha256_hex(&trust_policy_bytes);
+        fs::write(temp.path().join("trust-policy.json"), &trust_policy_bytes).unwrap();
+
+        SourceAttestationFixture {
+            _temp: temp,
+            artifact_root,
+            artifacts: vec![
+                ArtifactReceipt {
+                    relative_path: "source-manifest.json".into(),
+                    sha256: source_manifest_sha256.clone(),
+                    artifact_kind: "source_manifest".into(),
+                },
+                ArtifactReceipt {
+                    relative_path: "source.dsse.json".into(),
+                    sha256: envelope_sha256,
+                    artifact_kind: "dsse_source_attestation".into(),
+                },
+            ],
+            options: SourceAttestationOptions {
+                trust_policy_bytes,
+                trust_policy_sha256,
+                expected_builder_id: builder_id.into(),
+                verification_time_ms: 5_000,
+            },
+            source_manifest_sha256,
+            source_commit_sha,
+            flake_lock_sha256,
+            corpus_sha256,
+        }
+    }
+
+    #[test]
+    fn dsse_source_attestation_verifies_exact_manifest_source_flake_corpus_and_builder() {
+        let fixture = make_source_attestation_fixture();
+        let integrity_digest = verify_source_evidence_artifact(
+            &fixture.artifact_root,
+            &fixture.artifacts,
+            &fixture.source_commit_sha,
+            &fixture.flake_lock_sha256,
+            &fixture.corpus_sha256,
+        ).unwrap();
+        assert_eq!(integrity_digest, fixture.source_manifest_sha256);
+
+        let verified = verify_dsse_source_artifact(
+            &fixture.artifact_root,
+            &fixture.artifacts,
+            &integrity_digest,
+            &fixture.source_commit_sha,
+            &fixture.flake_lock_sha256,
+            &fixture.corpus_sha256,
+            &fixture.options,
+        ).unwrap();
+        assert_eq!(verified.repository_uri, NIXWARD_SOURCE_REPOSITORY_URI);
+        assert_eq!(verified.subject_sha256, fixture.source_manifest_sha256);
+        assert_eq!(verified.source_commit_sha, fixture.source_commit_sha);
+        assert_eq!(verified.flake_lock_sha256, fixture.flake_lock_sha256);
+        assert_eq!(verified.corpus_sha256, fixture.corpus_sha256);
+        assert_eq!(verified.builder_id, fixture.options.expected_builder_id);
+        assert_eq!(verified.trust_policy_id, "nixward-benchmark-capture-root");
+        assert_eq!(verified.trust_policy_epoch, 7);
+        assert_eq!(verified.verified_key_ids.len(), 1);
+    }
+
+    #[test]
+    fn dsse_source_attestation_rejects_wrong_builder_and_wrong_policy_pin() {
+        let fixture = make_source_attestation_fixture();
+        let mut wrong_builder = fixture.options.clone();
+        wrong_builder.expected_builder_id = "https://attacker.invalid/builder".into();
+        assert!(verify_dsse_source_artifact(
+            &fixture.artifact_root,
+            &fixture.artifacts,
+            &fixture.source_manifest_sha256,
+            &fixture.source_commit_sha,
+            &fixture.flake_lock_sha256,
+            &fixture.corpus_sha256,
+            &wrong_builder,
+        ).is_err());
+
+        let mut wrong_pin = fixture.options.clone();
+        wrong_pin.trust_policy_sha256 = "f".repeat(64);
+        assert!(verify_dsse_source_artifact(
+            &fixture.artifact_root,
+            &fixture.artifacts,
+            &fixture.source_manifest_sha256,
+            &fixture.source_commit_sha,
+            &fixture.flake_lock_sha256,
+            &fixture.corpus_sha256,
+            &wrong_pin,
+        ).is_err());
+    }
+
+    #[test]
+    fn trust_policy_must_be_outside_untrusted_artifact_root() {
+        let fixture = make_source_attestation_fixture();
+        let inside_root = fixture.artifact_root.join("embedded-trust-policy.json");
+        fs::write(&inside_root, &fixture.options.trust_policy_bytes).unwrap();
+        let corpus_path = fixture._temp.path().join("corpus.json");
+        let manifest_path = fixture._temp.path().join("manifest.json");
+        fs::write(&corpus_path, b"{}").unwrap();
+        fs::write(&manifest_path, b"{}").unwrap();
+        assert!(load_pinned_source_trust_policy(
+            &inside_root,
+            &fixture.options.trust_policy_sha256,
+            &fixture.artifact_root,
+            &corpus_path,
+            &manifest_path,
+        ).is_err());
+    }
+
     #[test]
     fn unknown_runner_summary_fields_are_rejected() {
         let value = serde_json::json!({
