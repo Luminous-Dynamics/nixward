@@ -174,6 +174,9 @@ pkgs.testers.runNixOSTest {
     after_effect["boot_id_after"] = boot_id()
     assert after_effect["boot_id_before"] != after_effect["boot_id_after"]
     assert invocation_count("cut-after-effect-before-receipt") == 1
+    machine.fail(
+        f"test -e {runtime_path('cut-after-effect-before-receipt', 'allow-effect')}"
+    )
     machine.succeed(
         f"test -s {state_path('cut-after-effect-before-receipt', 'effect-committed')}"
     )
