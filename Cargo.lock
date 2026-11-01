@@ -2656,6 +2656,7 @@ dependencies = [
 name = "nixward"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "anyhow",
  "blake3",
  "chrono",
