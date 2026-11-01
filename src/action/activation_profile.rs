@@ -427,6 +427,8 @@ impl ActivationProfile {
                     if !has(ActivationStepKind::UpdateBootDefault)
                         || has(ActivationStepKind::RunActivationScript)
                         || has(ActivationStepKind::StopUnit)
+                        || has(ActivationStepKind::DaemonReexec)
+                        || has(ActivationStepKind::DaemonReload)
                         || has(ActivationStepKind::RestartUnit)
                         || has(ActivationStepKind::ReloadUnit)
                         || has(ActivationStepKind::StartUnit)
@@ -947,7 +949,7 @@ mod tests {
         let digest = registry.register_qualified_profile(p.clone()).unwrap();
         let mut q = query(&p);
         q.expected_profile_digest = digest;
-        q.switch_to_configuration_sha256 = digest::<'x'>(); // invalid compile marker removed below
+        q.switch_to_configuration_sha256 = std::iter::repeat('9').take(64).collect();
         assert!(matches!(registry.resolve(&q), Err(ActivationProfileError::UnknownProfile)));
     }
 
@@ -1153,6 +1155,36 @@ mod tests {
                    ActivationPostconditions::for_mode(ActivationMode::Switch));
         assert!(valid_hex(&resolved.compatibility.plan_digest, 64));
         assert!(valid_hex(&resolved.compatibility.receipt_digest, 64));
+    }
+
+
+    #[test]
+    fn supported_modes_are_exact_and_unsupported_mode_never_falls_back() {
+        let p = profile();
+        assert!(p.mode_contract(ActivationMode::Switch).is_ok());
+        let mut p = profile();
+        p.mode_contracts.retain(|contract| contract.mode != ActivationMode::Boot);
+        assert!(matches!(p.expected_postconditions(ActivationMode::Boot), Err(ActivationProfileError::UnsupportedMode)));
+    }
+
+    #[test]
+    fn all_modes_require_a_host_post_state_observation() {
+        let mut p = profile();
+        let boot = p.mode_contracts.iter_mut().find(|c| c.mode == ActivationMode::Boot).unwrap();
+        boot.steps.retain(|step| step.kind != ActivationStepKind::CaptureHostPostState);
+        assert!(matches!(p.validate(), Err(ActivationProfileError::InvalidProfile(_))));
+    }
+
+    #[test]
+    fn profile_digest_changes_when_a_qualified_step_sequence_changes() {
+        let p = profile();
+        let original = p.digest().unwrap();
+        let mut changed = profile();
+        let switch = changed.mode_contracts.iter_mut().find(|c| c.mode == ActivationMode::Switch).unwrap();
+        switch.steps.swap(2, 3);
+        // The profile is still syntactically valid, but its digest changes.
+        assert!(changed.validate().is_ok());
+        assert_ne!(original, changed.digest().unwrap());
     }
 
     #[test]
