@@ -795,6 +795,197 @@ fn scenario_expectation_met(
     }
 }
 
+
+fn domain_digest(domain: &[u8], bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_hex().to_string()
+}
+
+fn policy_epoch_record_digest(
+    epoch: u64,
+    policy_id: &str,
+    policy_digest: &str,
+    emergency_revocation_digest: &str,
+    previous_record_digest: &str,
+    update_provenance_digest: &str,
+    created_at_ms: u64,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(POLICY_EPOCH_RECORD_DOMAIN);
+    let epoch_bytes = epoch.to_le_bytes();
+    let created_at_bytes = created_at_ms.to_le_bytes();
+    for field in [
+        epoch_bytes.as_slice(),
+        policy_id.as_bytes(),
+        policy_digest.as_bytes(),
+        emergency_revocation_digest.as_bytes(),
+        previous_record_digest.as_bytes(),
+        update_provenance_digest.as_bytes(),
+        created_at_bytes.as_slice(),
+    ] {
+        update_hash_field(&mut hasher, field);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn read_policy_artifact(
+    root: &Path,
+    artifacts: &[ArtifactReceipt],
+    relative_path: &str,
+    expected_kind: &str,
+    expected_sha256: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let receipt = artifacts.iter()
+        .find(|artifact| artifact.relative_path == relative_path)
+        .ok_or_else(|| format!("missing policy evidence artifact receipt: {relative_path}"))?;
+    if receipt.artifact_kind != expected_kind || receipt.sha256 != expected_sha256 {
+        return Err(format!("policy evidence artifact receipt mismatch: {relative_path}"));
+    }
+    let path = resolve_artifact_path(root, relative_path)?;
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("cannot stat policy artifact {relative_path}: {error}"))?;
+    if metadata.len() == 0 || metadata.len() > max_bytes as u64 {
+        return Err(format!("policy artifact size is invalid: {relative_path}"));
+    }
+    let bytes = read_bounded(&path)?;
+    if bytes.len() > max_bytes || sha256_hex(&bytes) != expected_sha256 {
+        return Err(format!("policy artifact content or digest mismatch: {relative_path}"));
+    }
+    Ok(bytes)
+}
+
+/// Re-derive each machine-local policy epoch from its exact raw JSON and
+/// update-provenance artifacts. A manifest-supplied key list is never trusted
+/// as the source of policy semantics.
+fn validate_policy_epoch_history(
+    trial: &TrialRecord,
+    artifact_root: &Path,
+) -> Result<BTreeMap<u64, VerifiedPolicySnapshot>, String> {
+    if trial.policy_epochs.is_empty() {
+        return Err("raw policy epoch archive is missing".into());
+    }
+    let mut snapshots = BTreeMap::new();
+    let mut previous_record_digest = GENESIS_POLICY_RECORD_DIGEST.to_string();
+
+    for (index, evidence) in trial.policy_epochs.iter().enumerate() {
+        let expected_epoch = u64::try_from(index + 1)
+            .map_err(|_| "policy epoch index overflow".to_string())?;
+        if evidence.epoch != expected_epoch
+            || evidence.previous_record_digest != previous_record_digest
+            || !valid_hex(&evidence.policy_json_sha256, 64)
+            || !valid_hex(&evidence.emergency_revocation_digest, 64)
+            || !valid_hex(&evidence.previous_record_digest, 64)
+            || !valid_hex(&evidence.update_provenance_sha256, 64)
+            || !valid_hex(&evidence.update_provenance_digest, 64)
+            || !valid_hex(&evidence.record_digest, 64)
+        {
+            return Err(format!("policy epoch {} has malformed or broken chain metadata", evidence.epoch));
+        }
+
+        let policy_bytes = read_policy_artifact(
+            artifact_root,
+            &trial.artifacts,
+            &evidence.policy_json_artifact_path,
+            "authority_policy_json",
+            &evidence.policy_json_sha256,
+            MAX_POLICY_JSON_BYTES,
+        )?;
+        let update_provenance = read_policy_artifact(
+            artifact_root,
+            &trial.artifacts,
+            &evidence.update_provenance_artifact_path,
+            "policy_update_provenance",
+            &evidence.update_provenance_sha256,
+            MAX_POLICY_UPDATE_PROVENANCE_BYTES,
+        )?;
+
+        let policy: AuthorityTrustPolicy = serde_json::from_slice(&policy_bytes)
+            .map_err(|error| format!("policy epoch {} JSON is invalid: {error}", evidence.epoch))?;
+        policy.validate()
+            .map_err(|error| format!("policy epoch {} fails AuthorityTrustPolicy validation: {error}", evidence.epoch))?;
+        let canonical_policy_bytes = serde_json::to_vec(&policy)
+            .map_err(|error| format!("policy epoch {} cannot be serialized: {error}", evidence.epoch))?;
+        if canonical_policy_bytes != policy_bytes {
+            return Err(format!("policy epoch {} JSON is not canonical typed serialization", evidence.epoch));
+        }
+        if policy.policy_epoch != Some(evidence.epoch) {
+            return Err(format!("policy epoch {} policy JSON has a different epoch", evidence.epoch));
+        }
+
+        let policy_digest_from_bytes = domain_digest(POLICY_DIGEST_DOMAIN, &policy_bytes);
+        let policy_digest_from_type = policy.digest()
+            .map_err(|error| format!("policy epoch {} digest failed: {error}", evidence.epoch))?;
+        if policy_digest_from_bytes != policy_digest_from_type {
+            return Err(format!("policy epoch {} raw and typed policy digests disagree", evidence.epoch));
+        }
+
+        let mut previous_emergency: Option<&str> = None;
+        for key_id in &evidence.emergency_revoked_signers {
+            if key_id.trim().is_empty()
+                || previous_emergency.is_some_and(|prior| prior >= key_id.as_str())
+            {
+                return Err(format!("policy epoch {} emergency revocations are not sorted and unique", evidence.epoch));
+            }
+            previous_emergency = Some(key_id);
+        }
+        let emergency_json = serde_json::to_vec(&evidence.emergency_revoked_signers)
+            .map_err(|error| format!("policy epoch {} emergency list serialization failed: {error}", evidence.epoch))?;
+        let emergency_digest = domain_digest(POLICY_EMERGENCY_REVOCATION_DOMAIN, &emergency_json);
+        if emergency_digest != evidence.emergency_revocation_digest {
+            return Err(format!("policy epoch {} emergency-revocation digest mismatch", evidence.epoch));
+        }
+
+        let update_digest = domain_digest(POLICY_UPDATE_PROVENANCE_DOMAIN, &update_provenance);
+        if update_digest != evidence.update_provenance_digest {
+            return Err(format!("policy epoch {} update-provenance digest mismatch", evidence.epoch));
+        }
+
+        let record_digest = policy_epoch_record_digest(
+            evidence.epoch,
+            &policy.policy_id,
+            &policy_digest_from_bytes,
+            &emergency_digest,
+            &evidence.previous_record_digest,
+            &update_digest,
+            evidence.created_at_ms,
+        );
+        if record_digest != evidence.record_digest {
+            return Err(format!("policy epoch {} record digest mismatch", evidence.epoch));
+        }
+
+        let keys = policy.keys.iter().map(|key| PolicySignerAuthorization {
+            signer_key_id: key.key_id.clone(),
+            issuer: key.issuer.clone(),
+            public_key_hex: key.public_key_hex.clone(),
+            revoked: key.revoked,
+            allowed_actions: key.allowed_actions.iter()
+                .map(|action| action.as_str().to_string())
+                .collect(),
+            claims: key.claims.clone(),
+        }).collect::<Vec<_>>();
+
+        let snapshot = VerifiedPolicySnapshot {
+            epoch: evidence.epoch,
+            policy_id: policy.policy_id.clone(),
+            policy_digest: policy_digest_from_bytes,
+            record_digest: evidence.record_digest.clone(),
+            previous_record_digest: evidence.previous_record_digest.clone(),
+            emergency_revoked_signers: evidence.emergency_revoked_signers.clone(),
+            keys,
+            allowed_audiences: policy.allowed_audiences.clone(),
+        };
+        if snapshots.insert(evidence.epoch, snapshot).is_some() {
+            return Err(format!("duplicate policy epoch {}", evidence.epoch));
+        }
+        previous_record_digest = evidence.record_digest.clone();
+    }
+    Ok(snapshots)
+}
+
 fn verify_trial(
     trial: &TrialRecord,
     scenario: &ScenarioDefinition,
