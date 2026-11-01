@@ -8,8 +8,8 @@ let
   worker = pkgs.writeShellScriptBin "nixward-crash-cut-fixture" ''
     set -euo pipefail
 
-    : "''\${FIXTURE_ATTEMPT:?systemd template instance is required}"
-    : "''\${INVOCATION_ID:?systemd must provide InvocationID}"
+    : "''${FIXTURE_ATTEMPT:?systemd template instance is required}"
+    : "''${INVOCATION_ID:?systemd must provide InvocationID}"
 
     state="/var/lib/nixward-crash-cut-vm/$FIXTURE_ATTEMPT"
     runtime="/run/nixward-crash-cut-vm-$FIXTURE_ATTEMPT"
@@ -47,7 +47,7 @@ pkgs.testers.runNixOSTest {
       description = "Nixward crash-cut test-only harmless worker";
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "\${worker}/bin/nixward-crash-cut-fixture";
+        ExecStart = "${worker}/bin/nixward-crash-cut-fixture";
         Environment = "FIXTURE_ATTEMPT=%i";
         StateDirectory = "nixward-crash-cut-vm";
         StateDirectoryMode = "0700";
@@ -159,6 +159,7 @@ pkgs.testers.runNixOSTest {
     before_effect["effect_marker_persisted"] = False
     before_effect["process_receipt_persisted"] = False
     before_effect["invocation_count_after_reboot"] = invocation_count("cut-before-effect")
+    before_effect["observed_invocation_count"] = invocation_count("cut-before-effect")
     before_effect["disposition"] = "attempt_started_effect_not_recorded_reconciliation_required"
     attempts.append(before_effect)
 
@@ -185,6 +186,9 @@ pkgs.testers.runNixOSTest {
     after_effect["invocation_count_after_reboot"] = invocation_count(
         "cut-after-effect-before-receipt"
     )
+    after_effect["observed_invocation_count"] = invocation_count(
+        "cut-after-effect-before-receipt"
+    )
     after_effect["disposition"] = "effect_committed_receipt_missing_reconciliation_required"
     attempts.append(after_effect)
 
@@ -205,6 +209,7 @@ pkgs.testers.runNixOSTest {
     positive["effect_marker_persisted"] = True
     positive["process_receipt_persisted"] = True
     positive["invocation_count_after_completion"] = invocation_count("positive-control")
+    positive["observed_invocation_count"] = invocation_count("positive-control")
     positive["disposition"] = "complete_positive_control"
     attempts.append(positive)
 
@@ -213,11 +218,11 @@ pkgs.testers.runNixOSTest {
         "version": 1,
         "status": "executed_disposable_qemu_guest",
         "claim_ceiling": "The campaign exercises the pinned disposable guest and virtual disk only; it does not establish physical power-loss durability or production Nixward journal semantics.",
-        "nixward_source_revision": "\${nixwardSourceRevision}",
-        "nixpkgs_revision": "\${nixpkgsRevision}",
-        "flake_lock_sha256": "\${flakeLockSha256}",
-        "worker_derivation": "\${worker.drvPath}",
-        "worker_output": "\${worker}",
+        "nixward_source_revision": "${nixwardSourceRevision}",
+        "nixpkgs_revision": "${nixpkgsRevision}",
+        "flake_lock_sha256": "${flakeLockSha256}",
+        "worker_derivation": "${worker.drvPath}",
+        "worker_output": "${worker}",
         "guest_kernel": machine.succeed("uname -r").strip(),
         "guest_nixos_version": machine.succeed("nixos-version").strip(),
         "guest_systemd_version": machine.succeed("systemctl --version | head -n 1").strip(),
@@ -229,8 +234,8 @@ pkgs.testers.runNixOSTest {
         f"printf %s {encoded} | base64 -d > {state_root}/campaign.json"
     )
     machine.copy_from_machine(state_root, "raw-evidence")
-    t.assertEqual(len(attempts), 3)
-    t.assertEqual([a["disposition"] for a in attempts], [
+    assert len(attempts) == 3
+    assert [a["disposition"] for a in attempts] == [
         "attempt_started_effect_not_recorded_reconciliation_required",
         "effect_committed_receipt_missing_reconciliation_required",
         "complete_positive_control",
