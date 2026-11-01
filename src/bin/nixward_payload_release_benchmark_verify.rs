@@ -442,6 +442,12 @@ struct TrialReport {
     source_signature_verified: bool,
     /// Signed predicate builder.id matched the caller-supplied expectation; this is not workload identity attestation.
     builder_claim_matched: bool,
+    /// No host-capture signature envelope is verified by this source-provenance layer.
+    capture_origin_authenticated: bool,
+    /// No TPM/secure-boot measurement is verified by this source-provenance layer.
+    machine_attestation_verified: bool,
+    /// No external freshness/transparency witness is verified by this layer.
+    freshness_witness_verified: bool,
     source_attestation: Option<SourceAttestationSummary>,
     source_attestation_error: Option<String>,
     violations: Vec<String>,
@@ -498,6 +504,9 @@ struct VerificationReport {
     source_integrity_verified_trials: usize,
     source_signature_verified_trials: usize,
     builder_claim_matched_trials: usize,
+    capture_origin_authenticated_trials: usize,
+    machine_attestation_verified_trials: usize,
+    freshness_witness_verified_trials: usize,
     environment: TrialEnvironment,
     trials: Vec<TrialReport>,
     scenarios: Vec<ScenarioSummary>,
@@ -1671,6 +1680,9 @@ fn verify_trial(
             source_manifest_integrity_verified: false,
             source_signature_verified: false,
             builder_claim_matched: false,
+            capture_origin_authenticated: false,
+            machine_attestation_verified: false,
+            freshness_witness_verified: false,
             source_attestation: None,
             source_attestation_error: None,
             violations,
@@ -3089,6 +3101,12 @@ fn verify_manifest_with_source_attestation(
             .filter(|trial| trial.source_signature_verified).count(),
         builder_claim_matched_trials: trial_reports.iter()
             .filter(|trial| trial.builder_claim_matched).count(),
+        capture_origin_authenticated_trials: trial_reports.iter()
+            .filter(|trial| trial.capture_origin_authenticated).count(),
+        machine_attestation_verified_trials: trial_reports.iter()
+            .filter(|trial| trial.machine_attestation_verified).count(),
+        freshness_witness_verified_trials: trial_reports.iter()
+            .filter(|trial| trial.freshness_witness_verified).count(),
         environment: manifest.environment,
         trials: trial_reports,
         scenarios: summaries,
@@ -3741,6 +3759,9 @@ mod tests {
         let verified = verify_trial(&trial, &scenario, Path::new(".")).unwrap();
         assert!(verified.report.valid);
         assert!(verified.report.scenario_expectation_met);
+        assert!(!verified.report.capture_origin_authenticated);
+        assert!(!verified.report.machine_attestation_verified);
+        assert!(!verified.report.freshness_witness_verified);
         assert_eq!(verified.report.barrier_count, 1);
         assert_eq!(verified.report.attempt_count, 1);
         assert_eq!(verified.report.receipt_count, 1);
