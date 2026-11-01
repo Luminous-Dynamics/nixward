@@ -559,6 +559,7 @@ fn validate_output_path(
     output: &Path,
     corpus: &Path,
     manifest: &Path,
+    trust_policy: &Path,
     artifact_root: &Path,
 ) -> Result<PathBuf, String> {
     let file_name = output.file_name()
@@ -573,7 +574,7 @@ fn validate_output_path(
     if destination.starts_with(&canonical_root) {
         return Err("verification report must be written outside the evidence artifact root".into());
     }
-    for input in [corpus, manifest] {
+    for input in [corpus, manifest, trust_policy] {
         let canonical_input = fs::canonicalize(input)
             .map_err(|error| format!("cannot resolve input {}: {error}", input.display()))?;
         if destination == canonical_input {
@@ -3000,7 +3001,9 @@ fn run() -> Result<i32, String> {
     let corpus_bytes = read_bounded(&corpus_path)?;
     let manifest_bytes = read_bounded(&manifest_path)?;
     let safe_output_path = match &output_path {
-        Some(path) => Some(validate_output_path(path, &corpus_path, &manifest_path, &artifact_root)?),
+        Some(path) => Some(validate_output_path(
+            path, &corpus_path, &manifest_path, &trusted_policy_path, &artifact_root
+        )?),
         None => None,
     };
     let report = verify_manifest(
@@ -3346,8 +3349,10 @@ mod tests {
         let manifest = temp.path().join("manifest.json");
         std::fs::write(&corpus, b"{}").unwrap();
         std::fs::write(&manifest, b"{}").unwrap();
+        let trust_policy = temp.path().join("trust-policy.json");
+        std::fs::write(&trust_policy, b"{}").unwrap();
         assert!(validate_output_path(
-            &artifacts.join("report.json"), &corpus, &manifest, &artifacts
+            &artifacts.join("report.json"), &corpus, &manifest, &trust_policy, &artifacts
         ).is_err());
     }
 
@@ -3360,12 +3365,15 @@ mod tests {
         let manifest = temp.path().join("manifest.json");
         std::fs::write(&corpus, b"{}").unwrap();
         std::fs::write(&manifest, b"{}").unwrap();
-        assert!(validate_output_path(&corpus, &corpus, &manifest, &artifacts).is_err());
+        let trust_policy = temp.path().join("trust-policy.json");
+        std::fs::write(&trust_policy, b"{}").unwrap();
+        assert!(validate_output_path(&corpus, &corpus, &manifest, &trust_policy, &artifacts).is_err());
+        assert!(validate_output_path(&trust_policy, &corpus, &manifest, &trust_policy, &artifacts).is_err());
         let existing = temp.path().join("existing-report.json");
         std::fs::write(&existing, b"do not overwrite").unwrap();
-        assert!(validate_output_path(&existing, &corpus, &manifest, &artifacts).is_err());
+        assert!(validate_output_path(&existing, &corpus, &manifest, &trust_policy, &artifacts).is_err());
         assert!(validate_output_path(
-            &temp.path().join("new-report.json"), &corpus, &manifest, &artifacts
+            &temp.path().join("new-report.json"), &corpus, &manifest, &trust_policy, &artifacts
         ).is_ok());
     }
 
