@@ -167,6 +167,19 @@
             '';
           };
 
+
+        # The compatibility registry intentionally contains no fabricated profile pins.
+        checks.activation-profile-registry-template =
+          let
+            registry = builtins.fromJSON (builtins.readFile ./docs/fixtures/activation-profile-registry-v1.template.json);
+          in
+            assert registry.schema == "org.luminousdynamics.nixward.activation-profile-registry";
+            assert registry.version == 1;
+            assert registry.profiles == [ ];
+            pkgs.runCommand "nixward-empty-activation-profile-registry" {} ''
+              touch $out
+            '';
+
         checks.network-runtime-lab = import ./tests/network-runtime-lab/network-runtime-lab.nix {
           inherit pkgs;
           lib = pkgs.lib;

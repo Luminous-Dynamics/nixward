@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Luminous-Dynamics/nixward/blob/main/docs/schemas/activation-profile-registry-v1.schema.json",
+  "title": "Nixward verifier-owned NixOS activation profile registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "version",
+    "profiles"
+  ],
+  "properties": {
+    "schema": {
+      "const": "org.luminousdynamics.nixward.activation-profile-registry"
+    },
+    "version": {
+      "const": 1
+    },
+    "profiles": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/profile"
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 192,
+      "pattern": "^[A-Za-z0-9_.:+-]+$"
+    },
+    "mode": {
+      "enum": [
+        "switch",
+        "test",
+        "boot",
+        "dry_activate"
+      ]
+    },
+    "stepKind": {
+      "enum": [
+        "check_switch_inhibitors",
+        "validate_target_closure",
+        "dry_activation_preview",
+        "update_boot_default",
+        "run_activation_script",
+        "stop_unit",
+        "daemon_reexec",
+        "daemon_reload",
+        "reload_unit",
+        "restart_unit",
+        "start_unit",
+        "capture_host_post_state",
+        "deprecated_activation_script_service_callback"
+      ]
+    },
+    "postconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "running_generation",
+        "boot_default_generation",
+        "runtime_mutation_expected",
+        "boot_default_mutation_expected",
+        "running_target_requires_reboot_observation"
+      ],
+      "properties": {
+        "running_generation": {
+          "enum": [
+            "target_generation",
+            "preserve_pre_state"
+          ]
+        },
+        "boot_default_generation": {
+          "enum": [
+            "target_generation",
+            "preserve_pre_state"
+          ]
+        },
+        "runtime_mutation_expected": {
+          "type": "boolean"
+        },
+        "boot_default_mutation_expected": {
+          "type": "boolean"
+        },
+        "running_target_requires_reboot_observation": {
+          "type": "boolean"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "kind"
+      ],
+      "properties": {
+        "step_id": {
+          "$ref": "#/$defs/token"
+        },
+        "kind": {
+          "$ref": "#/$defs/stepKind"
+        }
+      }
+    },
+    "modeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "postconditions",
+        "steps",
+        "inhibitor_policy",
+        "authorized_inhibitor_bypass_allowed"
+      ],
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/mode"
+        },
+        "postconditions": {
+          "$ref": "#/$defs/postconditions"
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "inhibitor_policy": {
+          "enum": [
+            "required",
+            "not_applicable"
+          ]
+        },
+        "authorized_inhibitor_bypass_allowed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "profile_id",
+        "nixos_release",
+        "nixpkgs_revision",
+        "switch_to_configuration_sha256",
+        "activation_semantics_revision",
+        "activation_semantics_digest",
+        "systemd",
+        "observer_adapter_revision",
+        "mode_contracts"
+      ],
+      "properties": {
+        "schema": {
+          "const": "org.luminousdynamics.nixward.activation-profile"
+        },
+        "version": {
+          "const": 1
+        },
+        "profile_id": {
+          "$ref": "#/$defs/token"
+        },
+        "nixos_release": {
+          "$ref": "#/$defs/token"
+        },
+        "nixpkgs_revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "switch_to_configuration_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "activation_semantics_revision": {
+          "$ref": "#/$defs/token"
+        },
+        "activation_semantics_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "systemd": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "job_removed_evidence",
+            "unit_invocation_id",
+            "get_unit_by_pidfd",
+            "process_start_tuple_fallback"
+          ],
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/token"
+            },
+            "job_removed_evidence": {
+              "type": "boolean"
+            },
+            "unit_invocation_id": {
+              "type": "boolean"
+            },
+            "get_unit_by_pidfd": {
+              "type": "boolean"
+            },
+            "process_start_tuple_fallback": {
+              "type": "boolean"
+            }
+          }
+        },
+        "observer_adapter_revision": {
+          "$ref": "#/$defs/token"
+        },
+        "mode_contracts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/modeContract"
+          }
+        }
+      }
+    }
+  }
+}
