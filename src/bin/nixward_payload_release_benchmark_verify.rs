@@ -2024,6 +2024,35 @@ fn verify_sqlite_snapshot(
         }
     }
 
+
+    let expected_final_policy = trial.events.iter().filter_map(|event| match event {
+        EvidenceEvent::PolicyAdvanced {
+            to_epoch, new_policy_id, new_policy_digest, new_record_digest, ..
+        } => Some((
+            *to_epoch,
+            new_policy_id.as_str(),
+            new_policy_digest.as_str(),
+            new_record_digest.as_str(),
+        )),
+        _ => None,
+    }).last().unwrap_or((
+        trial.initial_policy_epoch,
+        trial.initial_policy_id.as_str(),
+        trial.initial_policy_digest.as_str(),
+        trial.initial_policy_record_digest.as_str(),
+    ));
+    let current_policy = policies.values().next_back()
+        .ok_or_else(|| SnapshotAuditError::Other("policy history is empty".into()))?;
+    if current_policy.epoch != expected_final_policy.0
+        || current_policy.policy_id != expected_final_policy.1
+        || current_policy.policy_digest != expected_final_policy.2
+        || current_policy.record_digest != expected_final_policy.3
+    {
+        return Err(SnapshotAuditError::Other(
+            "SQLite current policy pointer is ahead of or differs from the raw event replay".into()
+        ));
+    }
+
     let requested_commit_ids = trial.events.iter().filter_map(|event| match event {
         EvidenceEvent::BarrierCreateRequested { admission_commit_id, .. } => Some(admission_commit_id.clone()),
         _ => None,
