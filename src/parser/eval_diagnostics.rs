@@ -515,12 +515,17 @@ error:
 
     #[test]
     fn unknown_option_is_classified_without_guessing_a_replacement() {
-        let report = NixEvaluationReport::analyze(
-            "error: The option services.example.enable does not exist. Definition values:",
+        let delimiter = char::from(96);
+        let message = format!(
+            "error: The option {delimiter}services.example.enable{delimiter} does not exist. Definition values:"
         );
+        let report = NixEvaluationReport::analyze(&message);
         let primary = report.primary().unwrap();
         assert_eq!(primary.kind, EvaluationIssueKind::UnknownOption);
-        assert_eq!(primary.subject, None);
+        assert_eq!(
+            primary.subject.as_deref(),
+            Some("services.example.enable")
+        );
         assert!(primary.recommendations.iter().all(|item| !item.contains("replace")));
     }
 
