@@ -267,6 +267,7 @@ impl SovereignConfigGenerator {
         for (path, value) in &locale_decision.options {
             nix_options.push((path.clone(), value.clone()));
         }
+        warnings.extend(locale_decision.warnings);
         decisions.push(locale_decision.decision);
 
         // ── Step 6: Reason about networking ──

@@ -213,6 +213,14 @@ impl PlanExecutor {
 
         for i in (0..completed).rev() {
             if let Some(rollback_cmd) = self.steps[i].command.rollback_command() {
+                if matches!(rollback_cmd, NixOSCommand::ActivateSystemClosure { .. }) {
+                    failures.push((
+                        i,
+                        "exact system rollback requires the durable ConfigTransaction execution boundary"
+                            .into(),
+                    ));
+                    continue;
+                }
                 let rb_result = match self.steps[i]
                     .authorization
                     .as_ref()
@@ -281,6 +289,17 @@ mod tests {
         plan.set_step_authorization(index, authorization).unwrap();
     }
 
+    // nix-env and ambient nixos-rebuild are deliberately forbidden by host policy,
+    // including dry-run mode. Use explicit flake-bound Home Manager commands to
+    // test plan orchestration without weakening the mutation boundary.
+    fn explicit_home_manager_switch(label: &str) -> NixOSCommand {
+        NixOSCommand::HomeManagerSwitch {
+            flake: Some(format!(
+                "path:/tmp/nixward-plan-test#homeConfigurations.{label}.activationPackage"
+            )),
+        }
+    }
+
     #[test]
     fn test_plan_step_creation() {
         let mut executor = PlanExecutor::new(0.5);
@@ -337,9 +356,7 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
-            },
+            explicit_home_manager_switch("vim"),
             "Install vim",
         );
         authorize_step(&mut plan, 1);
@@ -381,9 +398,7 @@ mod tests {
             "Search for vim",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
-            },
+            explicit_home_manager_switch("vim"),
             "Install vim",
         );
         plan.add_step(
@@ -417,9 +432,7 @@ mod tests {
 
         // Step 0: install is explicitly authorized and should succeed
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
-            },
+            explicit_home_manager_switch("vim"),
             "Install vim",
         );
         // Step 1: rebuild lacks authorization and should fail
@@ -445,11 +458,12 @@ mod tests {
         assert_eq!(result.completed_count, 1, "Only step 0 should complete");
         assert_eq!(
             result.rolled_back_count, 1,
-            "Step 0 (EnvInstall) should be rolled back"
+            "Step 0 should receive one rollback attempt"
         );
+        assert_eq!(result.rollback_failures.len(), 1);
         assert_eq!(result.steps.len(), 3);
 
-        // Step 0: completed (then rolled back)
+        // Step 0 completed in dry-run; its legacy rollback attempt is blocked.
         assert!(result.steps[0].1.is_some());
         // Step 1: failed (PendingConfirmation)
         assert!(matches!(result.steps[1].0.status, StepStatus::Failed(_)));
@@ -691,21 +705,15 @@ mod tests {
 
         // 3 steps succeed, then step 3 fails critically
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["a".into()],
-            },
+            explicit_home_manager_switch("a"),
             "Install a",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["b".into()],
-            },
+            explicit_home_manager_switch("b"),
             "Install b",
         );
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["c".into()],
-            },
+            explicit_home_manager_switch("c"),
             "Install c",
         );
         // This modifying step is intentionally left unapproved → fail
@@ -723,8 +731,14 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 3);
-        // All 3 EnvInstall commands have rollback → 3 rolled back
+        // Legacy shell rollback attempts are rejected by the host policy, so
+        // these counts describe attempts, not evidence that mutations were undone.
         assert_eq!(result.rolled_back_count, 3);
+        assert_eq!(
+            result.rollback_failures.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            vec![2, 1, 0],
+            "rollback attempts must be in reverse completion order"
+        );
     }
 
     #[tokio::test]
@@ -734,9 +748,7 @@ mod tests {
 
         // Step 0: install (succeeds)
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
-            },
+            explicit_home_manager_switch("vim"),
             "Install vim",
         );
         // Step 1: rebuild is unapproved
@@ -751,11 +763,10 @@ mod tests {
 
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
-        // In dry-run mode, rollback "succeeds" — so rollback_failures should be empty
-        assert!(
-            result.rollback_failures.is_empty(),
-            "Dry-run rollbacks should not produce failures"
-        );
+        // The legacy shell rollback is blocked by the sovereign host policy;
+        // the result must not claim this was a successful restoration.
+        assert_eq!(result.rollback_failures.len(), 1);
+        assert!(result.rollback_failures[0].1.contains("Software Ingress Covenant"));
     }
 
     #[tokio::test]
@@ -789,9 +800,7 @@ mod tests {
         );
         // Install has rollback
         plan.add_step(
-            NixOSCommand::EnvInstall {
-                packages: vec!["vim".into()],
-            },
+            explicit_home_manager_switch("vim"),
             "Install (has rollback)",
         );
         // Rebuild is intentionally left unapproved
@@ -807,7 +816,9 @@ mod tests {
         let result = plan.execute(&mut nix_executor).await;
         assert!(!result.success);
         assert_eq!(result.completed_count, 2);
-        // Only EnvInstall has rollback, Search doesn't → 1 rolled back
+        // Only the explicit Home Manager step has a rollback command; Search
+        // has none. Its generic shell rollback attempt is policy-blocked.
         assert_eq!(result.rolled_back_count, 1);
+        assert_eq!(result.rollback_failures.len(), 1);
     }
 }
