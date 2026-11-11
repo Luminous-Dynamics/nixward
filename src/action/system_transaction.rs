@@ -687,8 +687,8 @@ mod tests {
         assert!(serde_json::from_value::<SystemTransaction>(root).is_err());
 
         let duplicate_schema = raw.replacen(
-            "\\"schema\\": \\"luminous-nixward-system-transaction-v1\\",",
-            "\\"schema\\": \\"luminous-nixward-system-transaction-v1\\",\\n  \\"schema\\": \\"luminous-nixward-system-transaction-v1\\",",
+            "\"schema\": \"luminous-nixward-system-transaction-v1\",",
+            "\"schema\": \"luminous-nixward-system-transaction-v1\",\n  \"schema\": \"luminous-nixward-system-transaction-v1\",",
             1,
         );
         assert_ne!(duplicate_schema, raw);
