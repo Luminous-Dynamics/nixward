@@ -46,6 +46,7 @@ pub enum TransactionPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthorizationReceipt {
     pub issuer: String,
     pub evidence_digest: String,
@@ -57,18 +58,21 @@ pub struct AuthorizationReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValidationReceipt {
     pub evidence_digest: String,
     pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotReceipt {
     pub pre_state_digest: String,
     pub recovery_binding_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApplicationReceipt {
     pub command_digest: String,
     pub started_at_ms: u64,
@@ -77,6 +81,7 @@ pub struct ApplicationReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerificationReceipt {
     pub post_state_digest: String,
     pub evidence_digest: String,
@@ -84,6 +89,7 @@ pub struct VerificationReceipt {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutcomeReceipt {
     pub phase: TransactionPhase,
     pub reason: Option<String>,
@@ -95,6 +101,7 @@ pub struct OutcomeReceipt {
 /// can exchange this envelope through browser/relay/IPC boundaries without
 /// exposing passwords, private keys, or raw filesystem state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SystemTransaction {
     pub schema: String,
     pub version: u16,
@@ -326,6 +333,9 @@ impl SystemTransaction {
             return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
         }
         let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err("recovery reason must not be empty".into());
+        }
         if reason.len() > MAX_REASON_BYTES {
             return Err("recovery reason exceeds wire limit".into());
         }
@@ -334,6 +344,125 @@ impl SystemTransaction {
             phase: TransactionPhase::Recovered,
             reason: Some(reason),
         });
+        Ok(())
+    }
+
+    fn validate_phase_consistency(&self) -> Result<(), String> {
+        let has_validation = self.validation.is_some();
+        let has_authorization = self.authorization.is_some();
+        let has_snapshot = self.snapshot.is_some();
+        let has_application = self.application.is_some();
+        let has_verification = self.verification.is_some();
+        let has_outcome = self.outcome.is_some();
+        let application_succeeded = self
+            .application
+            .as_ref()
+            .is_some_and(|receipt| receipt.exit_status == 0);
+        let application_failed = self
+            .application
+            .as_ref()
+            .is_some_and(|receipt| receipt.exit_status != 0);
+        let outcome_matches = |phase| {
+            self.outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.phase == phase)
+        };
+        let outcome_has_reason = self
+            .outcome
+            .as_ref()
+            .and_then(|outcome| outcome.reason.as_deref())
+            .is_some_and(|reason| !reason.trim().is_empty());
+
+        let valid = match self.phase {
+            TransactionPhase::Planned => {
+                !has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Validated => {
+                has_validation
+                    && !has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Authorized => {
+                has_validation
+                    && has_authorization
+                    && !has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Snapshotted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && !has_application
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Applied => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && application_succeeded
+                    && !has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Verified => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && application_succeeded
+                    && has_verification
+                    && !has_outcome
+            }
+            TransactionPhase::Promoted => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && application_succeeded
+                    && self
+                        .verification
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.boot_healthy != Some(false))
+                    && outcome_matches(TransactionPhase::Promoted)
+                    && self
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| outcome.reason.is_none())
+            }
+            TransactionPhase::Failed => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && application_failed
+                    && !has_verification
+                    && outcome_matches(TransactionPhase::Failed)
+                    && outcome_has_reason
+            }
+            TransactionPhase::Recovered => {
+                has_validation
+                    && has_authorization
+                    && has_snapshot
+                    && has_application
+                    && (application_failed || has_verification)
+                    && outcome_matches(TransactionPhase::Recovered)
+                    && outcome_has_reason
+            }
+        };
+
+        if !valid {
+            return Err(format!(
+                "transaction phase {:?} is inconsistent with its lifecycle receipts",
+                self.phase
+            ));
+        }
         Ok(())
     }
 
@@ -455,6 +584,7 @@ impl SystemTransaction {
             }
         }
 
+        self.validate_phase_consistency()?;
         Ok(())
     }
 
