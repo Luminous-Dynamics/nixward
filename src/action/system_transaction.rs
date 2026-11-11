@@ -654,7 +654,44 @@ mod tests {
         assert_eq!(parsed.version, SYSTEM_TRANSACTION_VERSION);
         assert_eq!(parsed.phase, TransactionPhase::Planned);
         assert!(!parsed.is_terminal());
+        assert!(parsed.validate_wire().is_ok());
         assert!(parsed.digest_hex().unwrap().len() == 64);
+    }
+
+    #[test]
+    fn wire_rejects_unknown_fields_at_root_and_receipt_levels() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/system-transaction-v1.json"
+        ));
+        let mut root: serde_json::Value = serde_json::from_str(raw).unwrap();
+        root.as_object_mut()
+            .unwrap()
+            .insert("implicit_authority".into(), serde_json::json!(true));
+        assert!(serde_json::from_value::<SystemTransaction>(root).is_err());
+
+        let mut tx = SystemTransaction::planned(&plan());
+        tx.record_validation(&plan(), [3; 32], "validated").unwrap();
+        let mut nested = serde_json::to_value(tx).unwrap();
+        nested["validation"]["unrecognized_policy"] = serde_json::json!("must not be ignored");
+        assert!(serde_json::from_value::<SystemTransaction>(nested).is_err());
+    }
+
+    #[test]
+    fn wire_rejects_phase_claims_without_matching_lifecycle_receipts() {
+        let raw = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/docs/fixtures/system-transaction-v1.json"
+        ));
+        let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+        value["phase"] = serde_json::json!("promoted");
+        let forged: SystemTransaction = serde_json::from_value(value).unwrap();
+        assert!(forged.validate_wire().is_err());
+
+        let mut tx = SystemTransaction::planned(&plan());
+        tx.record_validation(&plan(), [3; 32], "validation").unwrap();
+        tx.phase = TransactionPhase::Applied;
+        assert!(tx.validate_wire().is_err());
     }
 
     #[test]
@@ -698,6 +735,7 @@ mod tests {
 
         assert_eq!(tx.phase, TransactionPhase::Promoted);
         assert!(tx.is_terminal());
+        assert!(tx.validate_wire().is_ok());
         assert_eq!(tx.digest_hex().unwrap().len(), 64);
     }
 
@@ -714,10 +752,13 @@ mod tests {
         tx.record_application(&plan, command, 10, 20, 1).unwrap();
         assert_eq!(tx.phase, TransactionPhase::Failed);
         assert!(tx.promote(&plan).is_err());
+        assert!(tx.validate_wire().is_ok());
+        assert!(tx.recover(&plan, " ").is_err());
 
         tx.recover(&plan, "restored previous generation").unwrap();
         assert_eq!(tx.phase, TransactionPhase::Recovered);
         assert!(tx.is_terminal());
+        assert!(tx.validate_wire().is_ok());
     }
 
     #[test]
