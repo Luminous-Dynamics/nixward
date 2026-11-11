@@ -104,6 +104,189 @@ Validation is read-only and should establish, as applicable:
 
 Validation failure never becomes authorization.
 
+#### AI proposal provenance
+
+When an AI proposal participates in validation, the validation receipt may commit
+to an `AiProposalValidationEvidence` envelope. The envelope joins the exact
+ChangePlan digest, the ordinary validation-evidence digest, and the digest of
+an `AiProposalBinding` that names the model artifact, input, policy, proposal
+output, verifier artifact, and evaluation evidence.
+
+Nixward's `record_validation_with_ai_proposal` path rechecks the proposal
+binding against the exact plan and supplied artifact bytes before changing the
+transaction to `Validated`. It then records the envelope digest in the existing
+validation receipt and returns the typed envelope so the caller can persist it
+alongside the referenced evidence. Digest fields use strict 64-character
+lowercase hexadecimal JSON strings; see
+`docs/fixtures/ai-proposal-validation-evidence-v1.json` for the wire shape.
+
+This preserves the existing transaction wire shape and does not add a new
+authorization primitive. Provenance is not approval: the normal detached
+authority protocol, freshness and replay handling, exact-command enforcement,
+and observed post-state verification remain required.
+
+Schema-v1 proposal output is a typed AiProposalOutputIntent: its bound
+representation is canonical, compact serde_json bytes containing the machine
+identity, optional full configuration patch (target, original and modified
+contents, description), and optional structured NixOSCommand. Callers ingesting
+provider JSON may use from_json_bytes to accept harmless whitespace/key-order
+variation; it compares the parsed JSON value with the typed schema so unknown
+or unrepresented fields cannot be silently discarded, then callers bind
+canonical_bytes. The transaction validator requires canonical bytes and checks
+the structured fields against ChangePlan::matches_intent before validation can
+advance. A cross-language producer should follow the schema and exact byte
+fixture at
+[docs/fixtures/ai-proposal-output-intent-v1.json](fixtures/ai-proposal-output-intent-v1.json).
+
+This establishes equality between the supplied structured intent and the exact
+ChangePlan; it does not prove that free-form model text was faithfully converted
+into that structure, that inputs are true, a policy is appropriate, an AI or
+cryptographic proof is sound, or a real-world action is safe. The component
+translating model output into the structured representation remains an
+independent trust boundary. Callers must preserve the returned validation
+envelope and the referenced artifacts/evidence needed to resolve its digest.
+
+For consumers that need to evidence the *raw-response-to-structure* step, the
+higher-assurance path is `AiProposalResolutionReceipt` plus
+`SystemTransaction::record_validation_with_resolved_ai_proposal`:
+the built-in JSON resolver hashes the exact model-produced JSON content bytes
+(not the surrounding provider HTTP/API envelope), identifies the resolver
+contract and embedded resolver-source bytes, canonicalizes the typed intent,
+checks that intent against the exact plan, and emits a receipt joining the raw
+model-output digest, source digest, canonical-intent digest, and plan digest.
+The resolved validation envelope commits the receipt digest alongside ordinary
+validation evidence and the proposal binding in the existing transaction receipt.
+
+Only structured model-output JSON matching schema v1 is supported; this
+component does not extract content from provider-specific response envelopes or
+infer commands from free-form prose. Both raw ingestion and canonical output
+serialization enforce a 4 MiB maximum so oversized payloads fail before parsing
+or envelope construction. Persist the exact model-output bytes, canonical intent,
+resolution receipt, resolved validation envelope, proposal binding, and
+referenced evidence. Interchange fixtures are in
+[docs/fixtures/ai-proposal-resolution-receipt-v1.json](fixtures/ai-proposal-resolution-receipt-v1.json)
+and
+[docs/fixtures/ai-proposal-resolved-validation-evidence-v1.json](fixtures/ai-proposal-resolved-validation-evidence-v1.json).
+
+The resolver-source digest identifies source bytes embedded in the build. It
+does not attest that the running executable is untampered or prove deployment
+provenance. Establishing which binary actually ran still requires a separate
+trusted build/release and runtime-attestation mechanism. The receipt proves a
+reproducible resolution under the identified source implementation—not the
+truth of model claims, the suitability of a policy, or real-world safety.
+
+For deployments that need to check which executable is participating in resolution,
+use AiProposalResolutionReceipt::verify_current_runtime and
+SystemTransaction::record_validation_with_runtime_verified_ai_proposal.
+This reuses Nixward's existing offline Ed25519 SignedReleaseManifest verifier:
+the caller supplies the release manifest and a trusted release public key obtained
+from an independently provisioned trust root. Verification checks the signature,
+the strict release-manifest wire schemas (unknown fields fail closed), the
+declared release tree's exact file set and artifact bytes/sizes/executable modes,
+rejects unlisted files and symbolic links anywhere in the tree, rejects files
+with external/shared hard links, checks that no component of a manifest-listed
+artifact path is a symbolic link, verifies the current process's Linux
+/proc/self/exe bytes against the manifest-listed executable, and checks that a
+manifest-listed resolver source file matches the source digest in the resolution
+receipt. The offline signer also refuses to sign an artifact with more than one
+hard link: a file in a read-only release directory can still be modified through
+another hard-link name outside that directory. The resulting opaque in-memory runtime binding is committed
+through AiProposalRuntimeVerifiedValidationEvidence into the existing transaction
+validation digest before the transaction may advance.
+
+The release verifier treats the file set as closed-world: unlisted files,
+symlinks anywhere in the tree, and symlinked path components are rejected.
+This scan is not an atomic filesystem snapshot. The release root must be
+read-only or otherwise protected from untrusted concurrent writes during
+verification; this implementation does not claim race-free path resolution
+against a concurrent filesystem attacker or a compromised kernel.
+
+The signed release tree must include both the executable and the exact resolver
+source artifact, for example at a documented path under
+share/nixward/src/action/ai_proposal_binding.rs. The release signing process must
+bind source_revision to the reviewed source revision under its own release policy;
+the field is a signed release-root assertion, not independent proof of a build.
+The offline `nixward-release-sign` utility also rejects a signing-seed path
+inside the signed release root or supplied through a symlink, denies group/other
+permission bits on the seed file, rejects every seed with more than one hard
+link (inside or outside the release tree), and caps accepted seed input at 128
+bytes. Seed reads use a no-follow open and validate permissions, link count, and
+inode identity from the opened descriptor. The reader preallocates its bounded
+129-byte read window to avoid reallocating a secret-bearing buffer. Temporary
+seed input buffers and the decoded seed use `zeroize::Zeroizing`;
+`ed25519-dalek`'s `zeroize` feature is
+enabled so the signing key is zeroized on drop. These reduce process-memory
+residue and path substitution risk but cannot guarantee erasure of copies made
+by the OS, allocator, compiler, or hardware. Signing directories still require
+normal access controls against concurrent changes to parent directories.
+
+The signer canonicalizes output parent directories (including aliased parents)
+and rejects output paths inside the signed tree. It only creates a new manifest
+file: existing output paths are rejected, and `create_new` prevents overwriting
+an existing path between the pre-check and creation. This also rejects existing
+hard-link aliases to the seed or a release artifact. Focused binary tests cover
+these path-boundary and secret-handling cases. These controls reduce accidental
+secret inclusion and path confusion; they do not replace an appropriately
+protected signing-key store or an immutable release root. New manifests are
+written with exclusive creation, then both the file and its parent directory
+are synced before success is reported. On a handled write, file-sync, or
+directory-sync failure, the signer attempts to remove the incomplete or
+not-durably-published output and sync the cleanup in the parent directory.
+The signer walk and verifier scan both assume the release tree is not
+concurrently modified by an untrusted actor.
+
+**Important build-provenance limit:** this verifies that the trusted release signer
+signed both the current executable bytes and the matching resolver-source artifact
+as members of the same release. It does not independently prove that those source
+bytes were compiled to produce that executable. A stronger source-to-binary claim
+requires a controlled/reproducible build with independent rebuild comparison or
+a separately trusted build-provenance verifier whose claim binds the exact source
+revision and executable digest. The release signer must not be treated as proof of
+that relationship unless its build process actually establishes it.
+
+A standards-based source-to-binary profile should be a separate trust input, not
+another field asserted by the release manifest. Prefer an in-toto Statement with
+the [SLSA Build Provenance v1 predicate](https://slsa.dev/spec/v1.2/provenance);
+SLSA 1.2 is the current approved specification version at this review date.
+The verifier should require the statement's subject digest to equal the exact
+running executable digest, resolve the source repository to the expected immutable
+commit, check the declared build recipe and resolved dependencies/toolchain against
+policy, and authenticate an allowlisted builder identity. Set a policy minimum:
+SLSA Build L1 provenance alone is insufficient for the privileged acceptance
+path; require at least Build L2's authenticated provenance from a hosted build
+platform, and prefer Build L3's hardened build platform when the threat model
+includes build-time tampering. See the [current SLSA Build levels](https://slsa.dev/spec/v1.2/build-track-basics).
+The provenance must be verified independently of the claim being verified: a
+manifest signer repeating `source_revision` and `executable_digest` in another
+unsigned or same-root field does not add evidence.
+
+An optional reproducible-build profile can further require byte-for-byte identical
+outputs from independently administered builders using the same reviewed source,
+workspace lockfile, toolchain, target, build flags, and declared dependencies; the
+live executable must match that reproduced digest. Re-running twice on one runner
+is a useful diagnostic, but is not independent corroboration. The
+[NixOS Reproducible Builds project](https://reproducible.nixos.org/) describes the
+stronger criterion as bit-identical output from the same source on independent
+infrastructure and cautions that building twice alone does not prove
+reproducibility. If the build is nondeterministic, keep the claim at the current
+software-level release-binding boundary rather than relaxing digest equality.
+
+The future verifier should return an opaque, non-deserializable build-provenance
+token that joins the verified attestation digest, builder identity, source commit,
+build-recipe digest, executable digest, and verifier-policy version. Runtime
+validation must fail closed for a missing attestation, unknown builder, source or
+binary mismatch, incompatible schema, or failed independent rebuild. This would
+strengthen provenance only; owner authorization and post-state verification would
+remain separate requirements.
+
+This path uses the existing offline signing root; it adds no CI OIDC permission and
+does not trust a public key merely because the manifest embeds it. It provides
+software-level evidence under the assumption that the running OS/kernel and
+process memory are trustworthy. It is **not** TPM/secure-boot measured runtime
+attestation, proof against a compromised kernel, proof of reproducible source-to-
+binary linkage, or proof that the model's claims are true. Those remain separate
+assurance claims.
+
 ### 4. Authorize
 
 The owner/operator authorizes the exact plan.

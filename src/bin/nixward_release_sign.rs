@@ -7,9 +7,12 @@ use nixward::release_integrity::{
     RELEASE_MANIFEST_KIND, RELEASE_SCHEMA_VERSION, RELEASE_SIGNATURE_KIND, ReleaseArtifact,
     ReleaseManifest, SignedReleaseManifest,
 };
-use std::io::Read;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
+
+const MAX_SEED_INPUT_BYTES: u64 = 128;
 
 fn usage() -> ! {
     eprintln!(
@@ -22,31 +25,86 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn decode_hex_32(s: &str) -> Result<[u8; 32], String> {
+fn decode_hex_32(s: &str) -> Result<Zeroizing<[u8; 32]>, String> {
     let s = s.trim();
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("seed file must contain exactly 32 raw bytes or 64 hex characters".into());
     }
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     for i in 0..32 {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| "invalid hex seed")?;
     }
     Ok(out)
 }
 
-fn read_seed(path: &Path) -> Result<[u8; 32], String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read signing seed: {e}"))?;
-    if bytes.len() == 32 {
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        return Ok(out);
+fn read_seed(path: &Path) -> Result<(Zeroizing<[u8; 32]>, std::fs::Metadata), String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    // Open without following a leaf symlink, then derive the key bytes,
+    // permission check, and inode identity from this same file descriptor.
+    // This avoids validating one path target and later reading another.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("cannot securely open signing seed without following symlinks: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened signing seed: {error}"))?;
+    if !metadata.is_file() {
+        return Err("signing seed must be a regular file".into());
     }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| "seed is neither 32 raw bytes nor UTF-8 hex")?;
-    decode_hex_32(text)
+    if metadata.len() > MAX_SEED_INPUT_BYTES {
+        return Err(format!(
+            "signing seed input exceeds the {MAX_SEED_INPUT_BYTES}-byte limit"
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(
+            "signing seed permissions must deny group and other access (for example, mode 0600)"
+                .into(),
+        );
+    }
+    if metadata.nlink() != 1 {
+        return Err(
+            "signing seed must have exactly one hard link; external aliases are unsupported".into(),
+        );
+    }
+
+    // Cap the read as well as checking fstat size, so concurrent growth cannot
+    // turn a small seed file into an unbounded allocation. The temporary input
+    // buffer and decoded key are zeroized on drop.
+    // Allocate the entire capped read window up front, avoiding secret-bearing
+    // buffer reallocation if the underlying file grows while it is being read.
+    let mut bytes = Zeroizing::new(Vec::with_capacity((MAX_SEED_INPUT_BYTES + 1) as usize));
+    let mut limited_file = file.take(MAX_SEED_INPUT_BYTES + 1);
+    limited_file
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read opened signing seed: {error}"))?;
+    if bytes.len() as u64 > MAX_SEED_INPUT_BYTES {
+        return Err(format!(
+            "signing seed input exceeds the {MAX_SEED_INPUT_BYTES}-byte limit"
+        ));
+    }
+    let seed = if bytes.len() == 32 {
+        let mut out = Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&bytes);
+        out
+    } else {
+        let text =
+            std::str::from_utf8(&bytes).map_err(|_| "seed is neither 32 raw bytes nor UTF-8 hex")?;
+        decode_hex_32(text)?
+    };
+
+    // Keep the metadata from the opened descriptor so link checks use the
+    // exact inode from which these key bytes were read.
+    Ok((seed, metadata))
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
     let mut entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot enumerate {}: {e}", dir.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -72,6 +130,12 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), S
                 path.display()
             ));
         }
+        if meta.nlink() != 1 {
+            return Err(format!(
+                "release artifact {} has external or shared hard links; refusing to sign",
+                path.display()
+            ));
+        }
         let rel = path
             .strip_prefix(root)
             .map_err(|_| "release path escaped root")?;
@@ -91,11 +155,386 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<ReleaseArtifact>) -> Result<(), S
     Ok(())
 }
 
+fn resolve_seed_path(path: &Path, release_root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect signing seed path: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("signing seed must be a regular, non-symlink file".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize signing seed path: {error}"))?;
+    if canonical.starts_with(release_root) {
+        return Err("signing seed must be outside the signed release root".into());
+    }
+    Ok(canonical)
+}
+
+fn resolve_output_path(path: &Path) -> Result<PathBuf, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err("output manifest path must not be a symbolic link".into());
+            }
+            if !metadata.is_file() {
+                return Err("output manifest path must name a regular file".into());
+            }
+            Err("output manifest destination already exists; choose a new path".into())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| "output manifest path must name a file".to_string())?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|error| format!("cannot canonicalize output directory: {error}"))?;
+            Ok(canonical_parent.join(file_name))
+        }
+        Err(error) => Err(format!("cannot inspect output manifest path: {error}")),
+    }
+}
+
+fn require_outside_release_root(
+    release_root: &Path,
+    candidate: &Path,
+    label: &str,
+) -> Result<(), String> {
+    if candidate.starts_with(release_root) {
+        return Err(format!("{label} must be outside the signed release root"));
+    }
+    Ok(())
+}
+
+fn ensure_seed_not_linked_into_release_tree(
+    seed_metadata: &std::fs::Metadata,
+    release_root: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    fn scan(directory: &Path, seed_dev: u64, seed_ino: u64) -> Result<(), String> {
+        let mut entries = std::fs::read_dir(directory)
+            .map_err(|error| format!("cannot scan release directory {}: {error}", directory.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("cannot enumerate release directory: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("cannot inspect release path {}: {error}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "release tree contains symbolic link {}; refusing to sign",
+                    path.display()
+                ));
+            }
+            if metadata.is_dir() {
+                scan(&path, seed_dev, seed_ino)?;
+            } else if metadata.is_file() {
+                if metadata.dev() == seed_dev && metadata.ino() == seed_ino {
+                    return Err(format!(
+                        "signing seed shares a hard link with release artifact {}; refusing to sign",
+                        path.display()
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "release tree contains unsupported non-file {}; refusing to sign",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    scan(release_root, seed_metadata.dev(), seed_metadata.ino())
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = std::fs::File::open(parent)
+        .map_err(|error| format!("cannot open output parent directory for sync: {error}"))?;
+    directory
+        .sync_all()
+        .map_err(|error| format!("cannot sync output parent directory: {error}"))
+}
+
+fn remove_partial_output(path: &Path) -> Result<(), String> {
+    std::fs::remove_file(path)
+        .map_err(|error| format!("cannot remove incomplete manifest {}: {error}", path.display()))?;
+    sync_parent_directory(path)
+        .map_err(|error| format!("partial output removed but directory cleanup sync failed: {error}"))
+}
+
+fn write_new_manifest(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut output_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!("cannot create new output manifest without overwriting an existing path: {error}")
+        })?;
+
+    if let Err(error) = output_file.write_all(bytes).and_then(|_| output_file.sync_all()) {
+        drop(output_file);
+        return match remove_partial_output(path) {
+            Ok(()) => Err(format!("cannot persist signed manifest; incomplete output removed: {error}")),
+            Err(cleanup_error) => Err(format!(
+                "cannot persist signed manifest: {error}; cleanup was incomplete: {cleanup_error}"
+            )),
+        };
+    }
+
+    drop(output_file);
+    if let Err(error) = sync_parent_directory(path) {
+        return match remove_partial_output(path) {
+            Ok(()) => Err(format!(
+                "cannot establish durable manifest directory entry; output removed: {error}"
+            )),
+            Err(cleanup_error) => Err(format!(
+                "cannot establish durable manifest directory entry: {error}; cleanup was incomplete: {cleanup_error}"
+            )),
+        };
+    }
+
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn write_new_manifest_persists_bytes_and_never_overwrites() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("manifest.json");
+        let bytes = br#"{"kind":"test-manifest"}"#;
+
+        write_new_manifest(&output, bytes).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+
+        let error = write_new_manifest(&output, b"replacement").unwrap_err();
+        assert!(error.contains("without overwriting an existing path"));
+        assert_eq!(std::fs::read(&output).unwrap(), bytes);
+    }
+
+    #[test]
+    fn oversized_signing_seed_is_rejected_before_reading_contents() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, vec![0x41; (MAX_SEED_INPUT_BYTES + 1) as usize]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("exceeds the 128-byte limit"));
+    }
+
+    #[test]
+    fn signing_seed_with_group_or_other_permissions_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [11u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("deny group and other access"));
+
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_seed(&seed).is_ok());
+    }
+
+    #[test]
+    fn walk_rejects_release_artifact_hard_linked_outside_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let outside = temp.path().join("outside.bin");
+        let artifact = release_root.join("artifact.bin");
+        std::fs::write(&outside, b"external alias must not be signed").unwrap();
+        std::fs::hard_link(&outside, &artifact).unwrap();
+
+        let error = walk(&release_root, &release_root, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("external or shared hard links"));
+    }
+
+    #[test]
+    fn signing_seed_hard_linked_into_release_tree_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [12u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let leaked = release_root.join("artifact.bin");
+        std::fs::hard_link(&seed, &leaked).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("exactly one hard link"));
+    }
+
+    #[test]
+    fn signing_seed_hard_linked_outside_release_tree_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        let alias = temp.path().join("seed-alias");
+        std::fs::write(&seed, [14u8; 32]).unwrap();
+        std::fs::set_permissions(&seed, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&seed, &alias).unwrap();
+
+        assert!(read_seed(&seed)
+            .unwrap_err()
+            .contains("exactly one hard link"));
+        assert!(read_seed(&alias)
+            .unwrap_err()
+            .contains("exactly one hard link"));
+    }
+
+    #[test]
+    fn signing_seed_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = release_root.join("release-seed");
+        std::fs::write(&seed, [7u8; 32]).unwrap();
+        let canonical_root = release_root.canonicalize().unwrap();
+
+        assert!(resolve_seed_path(&seed, &canonical_root)
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn no_follow_seed_open_rejects_leaf_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("seed");
+        let alias = temp.path().join("seed-link");
+        std::fs::write(&seed, [13u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&seed, &alias).unwrap();
+
+        assert!(read_seed(&alias)
+            .unwrap_err()
+            .contains("without following symlinks"));
+    }
+
+    #[test]
+    fn signing_seed_symbolic_link_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let seed = temp.path().join("seed");
+        let alias = temp.path().join("seed-link");
+        std::fs::write(&seed, [8u8; 32]).unwrap();
+        symlink(&seed, &alias).unwrap();
+
+        assert!(resolve_seed_path(&alias, &release_root.canonicalize().unwrap())
+            .unwrap_err()
+            .contains("non-symlink"));
+    }
+
+    #[test]
+    fn output_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let canonical_root = release_root.canonicalize().unwrap();
+        let output = resolve_output_path(&release_root.join("manifest.json")).unwrap();
+
+        assert!(require_outside_release_root(&canonical_root, &output, "output manifest")
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn output_through_symlinked_parent_inside_release_root_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let alias = temp.path().join("release-alias");
+        symlink(&release_root, &alias).unwrap();
+
+        let output = resolve_output_path(&alias.join("manifest.json")).unwrap();
+        assert!(require_outside_release_root(&release_root.canonicalize().unwrap(), &output, "output manifest")
+            .unwrap_err()
+            .contains("outside the signed release root"));
+    }
+
+    #[test]
+    fn output_must_not_overwrite_the_signing_seed() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        std::fs::write(&seed, [9u8; 32]).unwrap();
+
+        assert!(resolve_output_path(&seed)
+            .unwrap_err()
+            .contains("already exists"));
+    }
+
+    #[test]
+    fn output_hard_link_to_signing_seed_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let seed = temp.path().join("signing.seed");
+        let output_alias = temp.path().join("manifest.json");
+        std::fs::write(&seed, [10u8; 32]).unwrap();
+        std::fs::hard_link(&seed, &output_alias).unwrap();
+
+        assert!(resolve_output_path(&output_alias)
+            .unwrap_err()
+            .contains("already exists"));
+    }
+
+    #[test]
+    fn output_hard_link_to_release_artifact_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let artifact = release_root.join("artifact.bin");
+        let output_alias = temp.path().join("manifest.json");
+        std::fs::write(&artifact, b"artifact payload").unwrap();
+        std::fs::hard_link(&artifact, &output_alias).unwrap();
+
+        assert!(resolve_output_path(&output_alias)
+            .unwrap_err()
+            .contains("already exists"));
+    }
+
+    #[test]
+    fn existing_output_symlink_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.json");
+        let alias = temp.path().join("manifest.json");
+        std::fs::write(&target, "{}").unwrap();
+        symlink(&target, &alias).unwrap();
+
+        assert!(resolve_output_path(&alias)
+            .unwrap_err()
+            .contains("must not be a symbolic link"));
+    }
 }
 
 fn main() {
@@ -125,17 +564,30 @@ fn main() {
         eprintln!("cannot canonicalize release root: {e}");
         std::process::exit(2)
     });
-    if output.starts_with(&root) {
-        eprintln!(
-            "output manifest must be outside the signed release root to avoid self-reference"
-        );
-        std::process::exit(2);
-    }
-    let seed = read_seed(&seed_file).unwrap_or_else(|e| {
-        eprintln!("{e}");
+    let seed_file = resolve_seed_path(&seed_file, &root).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    let (seed, seed_metadata) = read_seed(&seed_file).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    ensure_seed_not_linked_into_release_tree(&seed_metadata, &root).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    let output = resolve_output_path(&output).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    require_outside_release_root(&root, &output, "output manifest").unwrap_or_else(|error| {
+        eprintln!("{error}");
         std::process::exit(2)
     });
     let signing = SigningKey::from_bytes(&seed);
+    // The key object now owns the signing material; drop the separately decoded
+    // seed immediately rather than retaining a second copy through the full run.
+    drop(seed);
     let mut artifacts = Vec::new();
     walk(&root, &root, &mut artifacts).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -153,16 +605,19 @@ fn main() {
         eprintln!("manifest validation failed: {e}");
         std::process::exit(2)
     }));
+    // Capture public metadata before dropping the secret-bearing key object.
+    let signer_public_key_hex = hex(signing.verifying_key().as_bytes());
+    drop(signing);
     let signed = SignedReleaseManifest {
         kind: RELEASE_SIGNATURE_KIND.into(),
         algorithm: "ed25519".into(),
-        signer_public_key_hex: hex(signing.verifying_key().as_bytes()),
+        signer_public_key_hex,
         signature_hex: hex(&signature.to_bytes()),
         manifest,
     };
     let bytes = serde_json::to_vec_pretty(&signed).expect("release manifest serializes");
-    std::fs::write(&output, bytes).unwrap_or_else(|e| {
-        eprintln!("cannot write signed manifest: {e}");
+    write_new_manifest(&output, &bytes).unwrap_or_else(|error| {
+        eprintln!("{error}");
         std::process::exit(2)
     });
     eprintln!("release root public key: {}", signed.signer_public_key_hex);

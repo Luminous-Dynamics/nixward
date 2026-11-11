@@ -34,6 +34,7 @@ name = "nixward-owner-key"
 path = "src/bin/nixward_owner_key.rs"
 
 [dependencies]
+libc = "0.2"
 symthaea-core = { path = "../symthaea-core" }
 # Native-only (C FFI, async)
 tree-sitter = { workspace = true, optional = true }
@@ -57,7 +58,8 @@ dashmap = { workspace = true }
 nix = { version = "0.27", optional = true }
 rusqlite = { workspace = true, optional = true }
 rnix = "0.11"
-ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["alloc", "zeroize"] }
+zeroize = "1.8"
 
 # CLI (optional)
 clap = { workspace = true, optional = true }

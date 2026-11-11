@@ -9,6 +9,7 @@
 //! exact-command scoped and rollback-bound.
 
 pub mod authority_approval;
+pub mod ai_proposal_binding;
 pub mod authority_replay;
 pub mod change_covenant;
 pub mod config_writer;
@@ -22,6 +23,17 @@ pub mod plan_executor;
 pub mod service_manager;
 pub mod system_transaction;
 
+pub use ai_proposal_binding::{
+    digest_artifact, AiProposalBinding, AiProposalBindingError, AiProposalOutputIntent,
+    AiProposalResolutionReceipt, AiProposalResolvedValidationEvidence,
+    AiProposalRuntimeVerifiedValidationEvidence, AiProposalValidationEvidence,
+    ProposalArtifactKind, VerifiedResolverRuntimeBinding, AI_PROPOSAL_BINDING_SCHEMA_VERSION,
+    AI_PROPOSAL_JSON_RESOLVER_ID, AI_PROPOSAL_JSON_RESOLVER_VERSION,
+    AI_PROPOSAL_OUTPUT_SCHEMA_VERSION, AI_PROPOSAL_RESOLUTION_RECEIPT_SCHEMA_VERSION,
+    AI_PROPOSAL_RESOLVED_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+    AI_PROPOSAL_RUNTIME_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+    AI_PROPOSAL_VALIDATION_EVIDENCE_SCHEMA_VERSION,
+};
 pub use authority_approval::{
     NIXWARD_CHANGE_AUDIENCE, NIXWARD_EXECUTION_INTENT_AUDIENCE,
     build_execution_intent_change_challenge, build_general_change_challenge,

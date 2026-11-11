@@ -58,11 +58,16 @@ pub enum ReleaseIntegrityError {
     ArtifactSizeMismatch(String),
     #[error("release artifact executable mode mismatch: {0}")]
     ArtifactModeMismatch(String),
+    #[error("release tree contains an unlisted artifact: {0}")]
+    UnlistedArtifact(String),
+    #[error("release artifact has external or shared hard links: {0}")]
+    HardLinkedArtifact(String),
     #[error("unsafe release artifact path: {0}")]
     UnsafePath(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseArtifact {
     pub path: String,
     pub blake3: String,
@@ -71,6 +76,7 @@ pub struct ReleaseArtifact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseManifest {
     pub schema_version: u32,
     pub kind: String,
@@ -140,6 +146,7 @@ impl ReleaseManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SignedReleaseManifest {
     pub kind: String,
     pub algorithm: String,
@@ -181,6 +188,60 @@ pub fn verify_release_signature(
 }
 
 #[cfg(feature = "native")]
+fn collect_release_tree_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut std::collections::BTreeSet<String>,
+) -> Result<(), ReleaseIntegrityError> {
+    let mut entries = std::fs::read_dir(directory)
+        .map_err(|_| ReleaseIntegrityError::MissingArtifact(directory.display().to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ReleaseIntegrityError::MissingArtifact(directory.display().to_string()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| ReleaseIntegrityError::MissingArtifact(path.display().to_string()))?;
+        if metadata.file_type().is_symlink() {
+            let relative = path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|value| value.to_str())
+                .unwrap_or("<non-utf8-path>")
+                .replace('\\', "/");
+            return Err(ReleaseIntegrityError::UnsafePath(relative));
+        }
+
+        if metadata.is_dir() {
+            collect_release_tree_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| ReleaseIntegrityError::UnsafePath(path.display().to_string()))?
+                .to_str()
+                .ok_or_else(|| ReleaseIntegrityError::UnsafePath(path.display().to_string()))?
+                .replace('\\', "/");
+            if !safe_relative_path(&relative) {
+                return Err(ReleaseIntegrityError::UnsafePath(relative));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    return Err(ReleaseIntegrityError::HardLinkedArtifact(relative));
+                }
+            }
+            files.insert(relative);
+        } else {
+            return Err(ReleaseIntegrityError::UnsafePath(path.display().to_string()));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "native")]
 pub fn verify_release_tree(
     root: &std::path::Path,
     signed: &SignedReleaseManifest,
@@ -190,13 +251,63 @@ pub fn verify_release_tree(
     let canonical_root = root
         .canonicalize()
         .map_err(|_| ReleaseIntegrityError::MissingArtifact("release-root".into()))?;
+
+    // A signed release is a closed-world tree: extra files and symlinks must
+    // not be allowed to appear after signing but before verification.
+    let mut actual_files = std::collections::BTreeSet::new();
+    collect_release_tree_files(&canonical_root, &canonical_root, &mut actual_files)?;
+    let expected_files = signed
+        .manifest
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(unlisted) = actual_files
+        .iter()
+        .find(|path| !expected_files.contains(path.as_str()))
+    {
+        return Err(ReleaseIntegrityError::UnlistedArtifact(unlisted.clone()));
+    }
+
     for artifact in &signed.manifest.artifacts {
-        let path = root.join(&artifact.path);
-        let metadata = std::fs::symlink_metadata(&path)
-            .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        // Inspect each component, not just the leaf. Checking only the final
+        // file would allow an intermediate symlink to redirect a manifest path
+        // to another location within the release root.
+        let components = std::path::Path::new(&artifact.path)
+            .components()
+            .collect::<Vec<_>>();
+        if components.is_empty() {
             return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
         }
+
+        // Use the same canonical root that was enumerated above, rather than
+        // re-traversing the caller's possibly aliased root path.
+        let mut path = canonical_root.to_path_buf();
+        let mut leaf_metadata = None;
+        for (index, component) in components.iter().enumerate() {
+            match component {
+                std::path::Component::Normal(part) => path.push(part),
+                _ => return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone())),
+            }
+
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
+            if metadata.file_type().is_symlink() {
+                return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+            }
+
+            let is_leaf = index + 1 == components.len();
+            if is_leaf {
+                if !metadata.is_file() {
+                    return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+                }
+                leaf_metadata = Some(metadata);
+            } else if !metadata.is_dir() {
+                return Err(ReleaseIntegrityError::UnsafePath(artifact.path.clone()));
+            }
+        }
+        let metadata = leaf_metadata
+            .ok_or_else(|| ReleaseIntegrityError::UnsafePath(artifact.path.clone()))?;
         let canonical = path
             .canonicalize()
             .map_err(|_| ReleaseIntegrityError::MissingArtifact(artifact.path.clone()))?;
@@ -239,6 +350,46 @@ mod tests {
     }
 
     #[test]
+    fn release_manifest_wire_types_reject_unknown_fields() {
+        let artifact = r#"{
+            "path":"artifact.bin",
+            "blake3":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size_bytes":1,
+            "executable":false,
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<ReleaseArtifact>(artifact).is_err());
+
+        let manifest = r#"{
+            "schema_version":1,
+            "kind":"symthaea-release-manifest-v1",
+            "release_id":"strict-schema-test",
+            "created_at_ms":1,
+            "source_revision":"test-revision",
+            "artifacts":[],
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<ReleaseManifest>(manifest).is_err());
+
+        let signed = r#"{
+            "kind":"symthaea-release-signature-v1",
+            "algorithm":"ed25519",
+            "signer_public_key_hex":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "signature_hex":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "manifest":{
+                "schema_version":1,
+                "kind":"symthaea-release-manifest-v1",
+                "release_id":"strict-schema-test",
+                "created_at_ms":1,
+                "source_revision":"test-revision",
+                "artifacts":[]
+            },
+            "unrepresented":true
+        }"#;
+        assert!(serde_json::from_str::<SignedReleaseManifest>(signed).is_err());
+    }
+
+    #[test]
     fn signed_manifest_verifies_against_separate_release_root() {
         let signing = SigningKey::from_bytes(&[42u8; 32]);
         let manifest = ReleaseManifest {
@@ -265,4 +416,273 @@ mod tests {
         let verified = verify_release_signature(&signed, &signed.signer_public_key_hex).unwrap();
         assert_eq!(verified.artifact_count, 1);
     }
+
+    fn test_artifact(path: &str, bytes: &[u8], executable: bool) -> ReleaseArtifact {
+        ReleaseArtifact {
+            path: path.into(),
+            blake3: blake3::hash(bytes).to_hex().to_string(),
+            size_bytes: bytes.len() as u64,
+            executable,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    fn sign_test_tree(
+        signing: &SigningKey,
+        artifacts: Vec<ReleaseArtifact>,
+    ) -> SignedReleaseManifest {
+        let manifest = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "nixward-release-integrity-tree-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts,
+        };
+        let signature = signing.sign(&manifest.signing_bytes().unwrap());
+        SignedReleaseManifest {
+            kind: RELEASE_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            signer_public_key_hex: hex(signing.verifying_key().as_bytes()),
+            signature_hex: hex(&signature.to_bytes()),
+            manifest,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_accepts_matching_signed_file_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"verified release artifact";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        let verified = verify_release_tree(temp.path(), &signed, &trusted).unwrap();
+        assert_eq!(verified.release_id, "nixward-release-integrity-tree-test");
+        assert_eq!(verified.artifact_count, 1);
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_executable_mode_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"mode-bound artifact";
+        let path = temp.path().join("artifact.bin");
+        std::fs::write(&path, payload).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let signing = SigningKey::from_bytes(&[50u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::ArtifactModeMismatch(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_rejects_same_size_modified_artifact_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let expected = b"good";
+        let actual = b"evil";
+        assert_eq!(expected.len(), actual.len());
+        std::fs::write(temp.path().join("artifact.bin"), actual).unwrap();
+
+        let signing = SigningKey::from_bytes(&[44u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", expected, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::ArtifactDigestMismatch(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_symlinked_parent_directories_inside_release_root() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"intermediate directory must not be a symlink";
+        let linked_dir = temp.path().join("linked");
+        let target_dir = temp.path().join("payload");
+        std::fs::create_dir_all(linked_dir.join("nested")).unwrap();
+        std::fs::create_dir_all(target_dir.join("nested")).unwrap();
+        std::fs::write(linked_dir.join("nested/artifact.bin"), payload).unwrap();
+        std::fs::write(target_dir.join("nested/artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[47u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("linked/nested/artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        // Replace a previously ordinary parent directory with an in-root symlink.
+        std::fs::remove_dir_all(&linked_dir).unwrap();
+        symlink(&target_dir, &linked_dir).unwrap();
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "linked"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_artifact_hard_linked_outside_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_root = temp.path().join("release");
+        std::fs::create_dir_all(&release_root).unwrap();
+        let outside = temp.path().join("outside.bin");
+        let artifact = release_root.join("artifact.bin");
+        let payload = b"externally linked artifact bytes";
+        std::fs::write(&outside, payload).unwrap();
+        std::fs::hard_link(&outside, &artifact).unwrap();
+
+        let signing = SigningKey::from_bytes(&[51u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(&release_root, &signed, &trusted),
+            Err(ReleaseIntegrityError::HardLinkedArtifact(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn release_tree_rejects_unlisted_files_added_after_signing() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"listed release payload";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+        std::fs::write(temp.path().join("unlisted.bin"), b"late extra file").unwrap();
+
+        let signing = SigningKey::from_bytes(&[48u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnlistedArtifact(path))
+                if path == "unlisted.bin"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_unlisted_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"declared release payload";
+        std::fs::write(temp.path().join("artifact.bin"), payload).unwrap();
+
+        let signing = SigningKey::from_bytes(&[49u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        // This path is not in the manifest, so its link must still be rejected
+        // by the closed-world tree scan.
+        symlink(
+            temp.path().join("artifact.bin"),
+            temp.path().join("unlisted-link"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "unlisted-link"
+        ));
+    }
+
+    #[cfg(all(feature = "native", unix))]
+    #[test]
+    fn release_tree_rejects_symlinked_artifacts_even_when_target_bytes_match() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"symlink must not be a release artifact";
+        std::fs::write(temp.path().join("actual.bin"), payload).unwrap();
+        symlink(
+            temp.path().join("actual.bin"),
+            temp.path().join("artifact.bin"),
+        )
+        .unwrap();
+
+        let signing = SigningKey::from_bytes(&[45u8; 32]);
+        let signed = sign_test_tree(
+            &signing,
+            vec![test_artifact("artifact.bin", payload, false)],
+        );
+        let trusted = hex(signing.verifying_key().as_bytes());
+
+        assert!(matches!(
+            verify_release_tree(temp.path(), &signed, &trusted),
+            Err(ReleaseIntegrityError::UnsafePath(path))
+                if path == "artifact.bin"
+        ));
+    }
+
+    #[test]
+    fn release_manifest_rejects_parent_segments_and_duplicate_paths() {
+        let traversal = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "traversal-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts: vec![test_artifact("../outside.bin", b"x", false)],
+        };
+        assert!(matches!(
+            traversal.validate(),
+            Err(ReleaseIntegrityError::UnsafePath(path)) if path == "../outside.bin"
+        ));
+
+        let duplicate_artifact = test_artifact("same.bin", b"x", false);
+        let duplicate = ReleaseManifest {
+            schema_version: RELEASE_SCHEMA_VERSION,
+            kind: RELEASE_MANIFEST_KIND.into(),
+            release_id: "duplicate-path-test".into(),
+            created_at_ms: 1,
+            source_revision: "test-source-revision".into(),
+            artifacts: vec![duplicate_artifact.clone(), duplicate_artifact],
+        };
+        assert_eq!(duplicate.validate(), Err(ReleaseIntegrityError::InvalidManifest));
+
+    }
+
 }
