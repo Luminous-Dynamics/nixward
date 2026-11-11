@@ -1,0 +1,22 @@
+{
+  "schema": "luminous-nixward-execution-observation",
+  "version": 1,
+  "command_digest_blake3": "3333333333333333333333333333333333333333333333333333333333333333",
+  "primary": {
+    "Attempted": {
+      "evidence": {
+        "command_digest_blake3": "3333333333333333333333333333333333333333333333333333333333333333",
+        "started_at_ms": 2000,
+        "finished_at_ms": 2023,
+        "elapsed_ms": 23,
+        "disposition": {
+          "Exited": {
+            "code": 23
+          }
+        }
+      }
+    }
+  },
+  "rollback": null,
+  "dry_run": false
+}

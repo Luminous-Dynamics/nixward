@@ -1,0 +1,22 @@
+{
+  "schema": "luminous-nixward-execution-observation",
+  "version": 1,
+  "command_digest_blake3": "2222222222222222222222222222222222222222222222222222222222222222",
+  "primary": {
+    "Attempted": {
+      "evidence": {
+        "command_digest_blake3": "2222222222222222222222222222222222222222222222222222222222222222",
+        "started_at_ms": 1000,
+        "finished_at_ms": 1010,
+        "elapsed_ms": 10,
+        "disposition": {
+          "SpawnFailed": {
+            "error": "fixture-only spawn failure"
+          }
+        }
+      }
+    }
+  },
+  "rollback": null,
+  "dry_run": false
+}
