@@ -327,10 +327,22 @@ impl SystemTransaction {
 
     pub fn recover(&mut self, plan: &ChangePlan, reason: impl Into<String>) -> Result<(), String> {
         self.ensure_identity(plan)?;
-        if !matches!(self.phase, TransactionPhase::Failed | TransactionPhase::Verified)
-            || self.snapshot.is_none()
-        {
-            return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
+        if self.snapshot.is_none() {
+            return Err("recovery requires snapshot evidence".into());
+        }
+        match self.phase {
+            TransactionPhase::Failed => {}
+            TransactionPhase::Verified
+                if self
+                    .verification
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.boot_healthy == Some(false)) => {}
+            TransactionPhase::Verified => {
+                return Err("recovery after verification requires explicit unhealthy post-state evidence".into());
+            }
+            _ => {
+                return Err("recovery requires a failed/unhealthy transaction with snapshot evidence".into());
+            }
         }
         let reason = reason.into();
         if reason.trim().is_empty() {
@@ -450,8 +462,12 @@ impl SystemTransaction {
                 has_validation
                     && has_authorization
                     && has_snapshot
-                    && has_application
-                    && (application_failed || has_verification)
+                    && ((application_failed && !has_verification)
+                        || (application_succeeded
+                            && self
+                                .verification
+                                .as_ref()
+                                .is_some_and(|receipt| receipt.boot_healthy == Some(false))))
                     && outcome_matches(TransactionPhase::Recovered)
                     && outcome_has_reason
             }
@@ -695,6 +711,22 @@ mod tests {
     }
 
     #[test]
+    fn recovery_rejects_successfully_verified_healthy_state() {
+        let plan = plan();
+        let mut tx = SystemTransaction::planned(&plan);
+        tx.record_validation(&plan, [3; 32], "validation").unwrap();
+        tx.authorize(&plan, &authorization(&plan)).unwrap();
+        tx.record_snapshot(&plan, [4; 32], [5; 32]).unwrap();
+        let command = plan.command().unwrap().command_digest();
+        tx.record_application(&plan, command, 10, 20, 0).unwrap();
+        tx.record_verification(&plan, [6; 32], [8; 32], Some(true)).unwrap();
+
+        assert!(tx.recover(&plan, "unjustified rollback").is_err());
+        assert_eq!(tx.phase, TransactionPhase::Verified);
+        assert!(tx.validate_wire().is_ok());
+    }
+
+    #[test]
     fn transaction_id_is_bound_to_plan_and_nonce() {
         let plan = plan();
         let tx = SystemTransaction::planned(&plan);
@@ -774,5 +806,9 @@ mod tests {
         tx.record_verification(&plan, [6; 32], [8; 32], Some(false))
             .unwrap();
         assert!(tx.promote(&plan).is_err());
+        assert!(tx.validate_wire().is_ok());
+        tx.recover(&plan, "boot health predicate failed").unwrap();
+        assert_eq!(tx.phase, TransactionPhase::Recovered);
+        assert!(tx.validate_wire().is_ok());
     }
 }
