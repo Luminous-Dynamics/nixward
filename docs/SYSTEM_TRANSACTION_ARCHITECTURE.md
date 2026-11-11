@@ -8,6 +8,38 @@ consequential operations should converge on one safety model:
 
 **observe → plan → validate → authorize → snapshot → apply → verify → promote/recover**
 
+### Exact-realization boundary
+
+System-changing `nixos-rebuild switch/test/boot` commands are candidate/preview
+vocabulary, not privileged mutation primitives. Their command text can identify
+what the operator requested, but it does not by itself identify the immutable
+closure that will be realized.
+
+The privileged path therefore converges on:
+
+`candidate source/configuration`
+→ `deterministic realization`
+→ `source + lock + configuration identities`
+→ `exact /nix/store system closure`
+→ `execution-intent authority`
+→ `switch-to-configuration`
+→ `post-state verification`
+
+The CLI exposes this as a two-phase boundary:
+
+`closure prepare` → offline detached signature → `closure activate`
+
+Preparation is non-mutating and creates the exact ChangePlan plus authority
+challenge. Activation re-verifies the execution-intent/realization pair, the
+serialized plan, the detached Ed25519 authority, and the exact store closure
+before invoking `switch-to-configuration`. No local `--approve` convenience
+flag can substitute for this authority class.
+
+`ActivateSystemClosure` is the canonical executor primitive for that final
+mutation. This avoids a time-of-check/time-of-use gap in which the same rebuild
+command could resolve different source/configuration state between review and
+execution.
+
 The goal is not to make an AI more powerful than the owner. The goal is to make
 machine state transitions understandable, reproducible, cryptographically
 authorized, and recoverable.
@@ -332,10 +364,12 @@ transaction protocol.
    foundation.
 2. Add transaction/receipt types only where they collapse an actual duplicated
    lifecycle; do not introduce a second parallel authorization model.
-3. Add target-state observation and post-state verification to high-impact
+3. Treat direct system rebuilds as candidate/validation operations only; privileged
+   mutation must consume an exact realized closure through ActivateSystemClosure.
+4. Add target-state observation and post-state verification to high-impact
    operations.
-4. Connect generation-changing transactions to boot health and promotion.
-5. Convert installer and management UIs to display transaction identity,
+5. Connect generation-changing transactions to boot health and promotion.
+6. Convert installer and management UIs to display transaction identity,
    provenance, authorization, verification, and recovery.
 6. Complete the Spore/Nixward boundary extraction after contract fixtures prove
    compatibility.
