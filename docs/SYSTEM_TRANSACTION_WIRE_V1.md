@@ -54,6 +54,24 @@ promotion, and recovery without snapshot/recovery evidence.
 
 A transaction is terminal only in promoted, recovered, or failed.
 
+## Receipt/phase consistency (normative)
+
+A syntactically valid envelope is not necessarily a valid lifecycle history. Consumers must validate the receipt set against the declared phase and reject inconsistent combinations before they use the envelope to drive another transition.
+
+- `planned`: no validation, authorization, snapshot, application, verification, or outcome receipt.
+- `validated`: validation receipt only.
+- `authorized`: validation and authorization receipts.
+- `snapshotted`: validation, authorization, and snapshot receipts.
+- `applied`: the preceding receipts plus an application receipt whose exit status is zero; no verification or outcome receipt yet.
+- `verified`: the applied receipts plus verification; no terminal outcome yet.
+- `promoted`: verified receipts plus a promoted outcome that has no failure reason.
+- `failed`: the validated/authorized/snapshotted receipts plus a nonzero application exit status, no verification receipt, and a failed outcome with a non-empty reason.
+- `recovered`: the validated/authorized/snapshotted receipts plus a recovered outcome with a non-empty reason. If application exited zero, verification must be present; if application exited nonzero, verification must be absent.
+
+For terminal phases, `outcome.phase` must equal the envelope's `phase`. Nonterminal phases must not carry a terminal outcome. These checks establish internal lifecycle consistency only: digest syntax and phase consistency do not establish that the evidence is truthful or that the post-state digest satisfies the desired-state contract.
+
+The library's transition methods validate the incoming envelope before advancing it, so callers cannot use a manually edited public `phase` field to bypass lifecycle prerequisites. This tightens acceptance of malformed v1 envelopes without changing their serialized field layout.
+
 ## Provenance boundary
 
 This envelope is operational lifecycle evidence, not a replacement for build
