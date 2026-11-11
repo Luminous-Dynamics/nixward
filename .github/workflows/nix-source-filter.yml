@@ -1,0 +1,85 @@
+name: Nix source-filter regression
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "flake.nix"
+      - "nix/source-filter.nix"
+      - "tests/nix-source-filter/**"
+      - ".github/workflows/nix-source-filter.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-source-filter-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  filter-regression:
+    name: Evaluate Nix credential-path filter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact triggering revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Record Nix version
+        run: nix --version
+
+      - name: Parse Nix source and flake expressions
+        run: |
+          nix-instantiate --parse flake.nix >/dev/null
+          nix-instantiate --parse nix/source-filter.nix >/dev/null
+          nix-instantiate --parse tests/nix-source-filter/flake.nix >/dev/null
+          nix-instantiate --parse tests/nix-source-filter/check.nix >/dev/null
+
+      - name: Test actual symlinks against the shared filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture"' EXIT
+          printf 'fixture-only private data\n' > "$fixture/private.key"
+          printf 'ordinary fixture source\n' > "$fixture/keep.txt"
+          ln -s private.key "$fixture/.env.example"
+          ln -s private.key "$fixture/id_rsa.pub"
+          ln -s private.key "$fixture/.ssh"
+
+          filtered="$(
+            TEST_SOURCE="$fixture" nix eval --impure --raw --expr '
+              let
+                root = builtins.toPath (builtins.getEnv "TEST_SOURCE");
+                lock = builtins.fromJSON (builtins.readFile ./tests/nix-source-filter/flake.lock);
+                nixpkgsRev = lock.nodes.nixpkgs.locked.rev;
+                pkgs = import (builtins.getFlake ("github:NixOS/nixpkgs/" + nixpkgsRev)).outPath {
+                  system = "x86_64-linux";
+                };
+                filter = import ./nix/source-filter.nix { lib = pkgs.lib; inherit root; };
+              in toString (pkgs.lib.cleanSourceWith {
+                name = "nixward-actual-symlink-filter-fixture";
+                src = root;
+                inherit filter;
+              })
+            '
+          )"
+          test -f "$filtered/keep.txt"
+          for path in ".env.example" "id_rsa.pub" ".ssh" "private.key"; do
+            if [ -e "$filtered/$path" ] || [ -L "$filtered/$path" ]; then
+              echo "unexpected path in filtered Nix source: $path" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build isolated source-filter regression check
+        run: nix build --no-link --print-build-logs ./tests/nix-source-filter#checks.x86_64-linux.source-filter

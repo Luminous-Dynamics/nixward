@@ -66,18 +66,17 @@
         # SYMTHAEA_NIXOS_MANAGEMENT_IMPROVEMENT_PLAN_2026-07-26.md
         # "Remaining work plan" item 1.
         monorepoRoot = ../../../..;
-        excludedDirNames = [ "target" "node_modules" ".git" ".jj" "dist" "result" ];
+        # The build source remains broad enough for Cargo workspace resolution,
+        # but local credential material must not enter the Nix store closure.
+        # This is defense in depth, not a substitute for secret management.
+        sourceFilter = root: import ./nix/source-filter.nix {
+          lib = pkgs.lib;
+          inherit root;
+        };
         monorepoSrc = pkgs.lib.cleanSourceWith {
           name = "luminous-dynamics-nixward-src";
           src = monorepoRoot;
-          filter = path: type:
-            let
-              relPath = pkgs.lib.removePrefix (toString monorepoRoot) (toString path);
-              excluded =
-                builtins.elem (baseNameOf path) excludedDirNames
-                || builtins.any (d: pkgs.lib.hasInfix "/${d}/" relPath) excludedDirNames;
-            in
-            !excluded;
+          filter = sourceFilter monorepoRoot;
         };
 
         # Base package derivation
@@ -139,6 +138,10 @@
         checks.network-runtime-lab = import ./tests/network-runtime-lab/network-runtime-lab.nix {
           inherit pkgs;
           lib = pkgs.lib;
+        };
+
+        checks.nix-source-filter = import ./tests/nix-source-filter/check.nix {
+          inherit pkgs sourceFilter;
         };
 
         packages = {
