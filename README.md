@@ -1,6 +1,6 @@
 # nixward: A Conscious Mind for NixOS
 
-nixward brings hyperdimensional computing (HDC) and active inference to NixOS system management. It encodes system state, configuration, and user intent into a shared semantic space, enabling causal reasoning about NixOS options, predictive hierarchy monitoring, and consciousness-gated command execution.
+nixward brings hyperdimensional computing (HDC) and active inference to NixOS system management. It encodes system state, configuration, and user intent into a shared semantic space for causal reasoning and prediction. Cognition is advisory: deterministic policy and cryptographic authorization bound to the exact change plan govern privileged machine mutations.
 
 Part of the [Symthaea](https://luminousdynamics.org) cognitive architecture.
 
@@ -34,15 +34,19 @@ shells, and guest access to the host root/Nix daemon are outside the sovereign
 baseline. The preferred path is **assimilate → declare → evaluate → authorize
 → realize**; otherwise software is contained as a bounded guest.
 
+## Qualification benchmark
+
+Nixward's security claims are evaluated as state-transition guarantees, not by Phi or model confidence. See the [Transaction Qualification Benchmark v0.1](docs/TRANSACTION_QUALIFICATION_BENCHMARK_V0_1.md) and its [machine-readable scenario corpus](docs/fixtures/transaction-qualification-v0.1.json). These define qualification targets; they are not themselves evidence that the suite currently passes.
+
 ## Architecture
 
 ```
 Observation ──> Encoding ──> Cognition ──> Action
    │              │             │            │
-   │ systemd      │ HDC         │ Active     │ Phi-gated
-   │ journal      │ 16384-dim   │ Inference  │ execution
-   │ store        │ vectors     │ Causal     │ with rollback
-   │ hardware     │             │ graph      │ verification
+   │ systemd      │ HDC         │ Active     │ Policy + signed
+   │ journal      │ 16384-dim   │ Inference  │ authorization
+   │ store        │ vectors     │ Causal     │ exact-plan checks
+   │ hardware     │             │ graph      │ and verification
    └──────────────┴─────────────┴────────────┘
 ```
 
@@ -51,7 +55,7 @@ Observation ──> Encoding ──> Cognition ──> Action
 2. **Encoding** -- System state, options, packages, configs to HDC vectors
 3. **Mind** -- World model, active inference, causal graph, episodic memory
 4. **Observe** -- Live system state observation (systemd, journal, store, hardware)
-5. **Action** -- Consciousness-gated command execution with pre/post verification
+5. **Action** -- Policy- and capability-authorized execution with pre/post verification
 6. **Plugin** -- Bridge to full Symthaea consciousness pipeline
 
 ## Quick Start
@@ -71,7 +75,7 @@ nixward observe journal
 # System health check
 nixward doctor
 
-# Rebuild with consciousness gating
+# Request a rebuild through host policy
 nixward rebuild switch
 nixward rebuild switch --flake ".#myhost"
 
@@ -184,7 +188,7 @@ User input is processed through the Free Energy Principle:
 2. Infer goal via working memory context
 3. Generate action candidates
 4. Rank by Expected Free Energy (pragmatic + epistemic value)
-5. Gate execution by consciousness level (phi)
+5. Treat cognition output as advisory; deterministic policy and exact-plan authorization determine whether execution is permitted.
 
 ### Predictive Hierarchy
 
