@@ -686,6 +686,14 @@ mod tests {
             .insert("implicit_authority".into(), serde_json::json!(true));
         assert!(serde_json::from_value::<SystemTransaction>(root).is_err());
 
+        let duplicate_schema = raw.replacen(
+            "\\"schema\\": \\"luminous-nixward-system-transaction-v1\\",",
+            "\\"schema\\": \\"luminous-nixward-system-transaction-v1\\",\\n  \\"schema\\": \\"luminous-nixward-system-transaction-v1\\",",
+            1,
+        );
+        assert_ne!(duplicate_schema, raw);
+        assert!(serde_json::from_str::<SystemTransaction>(&duplicate_schema).is_err());
+
         let mut tx = SystemTransaction::planned(&plan());
         tx.record_validation(&plan(), [3; 32], "validated").unwrap();
         let mut nested = serde_json::to_value(tx).unwrap();
