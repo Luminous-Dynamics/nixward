@@ -412,7 +412,12 @@ mod tests {
 
     fn observation() -> AssimilationObservation {
         let plan = source_plan();
-        let contract = plan.spec.authority_digest_hex().unwrap();
+        let contract = match &plan.spec {
+            SoftwareIngressSpec::EphemeralCapsule(spec) => {
+                spec.permissions.digest_hex().unwrap()
+            }
+            _ => unreachable!("source_plan fixture is an ephemeral capsule"),
+        };
         let receipt = GuestRealizationReceipt::verify(
             &plan,
             GuestObservation::Capsule(CapsuleObservation {

@@ -7,17 +7,23 @@
 //! natural language input through the cognitive core.
 
 use clap::Parser;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use nixward::action::authority_approval::verify_execution_intent_change_authority;
 use nixward::action::change_covenant::{ChangeAuthorization, ChangePlan, MachineBinding};
 use nixward::action::config_writer::ConfigWriter;
 use nixward::action::executor::{
     ExecutionAuthorization, ExecutionResult, NixOSCommand, NixOSExecutor, SafetyLevel,
 };
+use nixward::action::execution_intent::verify_nixward_execution_bundle;
+use nixward::authority_signature::{AuthorityTrustPolicy, DetachedAuthoritySignature};
 use nixward::action::flake_ops::FlakeOps;
 use nixward::action::gc_manager::GcManager;
 use nixward::action::generation_manager::GenerationManager;
 use nixward::action::service_manager::ServiceManager;
 use nixward::cli::commands::{
-    Cli, Command, ConfigCommand, ObserveDomain, OutputFormat, RebuildMode,
+    Cli, ClosureAction, ClosureCommand, Command, ConfigCommand, ObserveDomain, OutputFormat,
+    RebuildMode,
 };
 use nixward::cli::completions;
 use nixward::cli::interactive;
@@ -65,6 +71,48 @@ fn main() {
                 RebuildMode::Boot => NixOSCommand::RebuildBoot { flake, extra_args },
             };
             cmd_execute(cmd, cli.dry_run, cli.phi, cli.approve);
+        }
+
+        Command::Closure { op } => match op {
+            ClosureCommand::Prepare {
+                intent,
+                realization_plan,
+                action,
+                holon_id,
+                plan_out,
+                challenge_out,
+                ttl_ms,
+            } => cmd_closure_prepare(
+                intent,
+                realization_plan,
+                action,
+                holon_id,
+                plan_out,
+                challenge_out,
+                ttl_ms,
+            ),
+            ClosureCommand::Activate {
+                intent,
+                realization_plan,
+                plan,
+                signature,
+                policy,
+                holon_id,
+            } => cmd_closure_activate(
+                intent,
+                realization_plan,
+                plan,
+                signature,
+                policy,
+                holon_id,
+                cli.dry_run,
+                cli.phi,
+                cli.format,
+            ),
+        },
+
+        Command::VerifySecureBoot { image } => {
+            cmd_verify_secure_boot(&image, cli.format);
         }
 
         Command::Rollback { generation } => {
@@ -333,6 +381,13 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
     let safety = cmd.safety_level();
     let (bin, args) = cmd.to_command();
 
+    // Host policy is evaluated before approval/preview handling so a forbidden
+    // operation can never be presented as an executable dry-run candidate.
+    if let nixward::action::HostExecutionPolicy::Forbidden { reason } = cmd.host_execution_policy() {
+        eprintln!("  Blocked: {reason}");
+        return;
+    }
+
     if safety != SafetyLevel::ReadOnly && !approve {
         if dry_run {
             println!("  [DRY-RUN] Would execute: {} {}", bin, args.join(" "));
@@ -436,10 +491,18 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
         ExecutionResult::RolledBack {
             error,
             rollback_output,
+            recovery_closure,
+            post_recovery_closure,
         } => {
             eprintln!("  Command failed and was rolled back: {error}");
             if !rollback_output.is_empty() {
-                eprintln!("  Rollback: {}", rollback_output.trim_end());
+                eprintln!("  Recovery: {}", rollback_output.trim_end());
+            }
+            if let Some(recovery_closure) = recovery_closure {
+                eprintln!("  Recovery closure: {recovery_closure}");
+            }
+            if let Some(post_recovery_closure) = post_recovery_closure {
+                eprintln!("  Verified post-recovery closure: {post_recovery_closure}");
             }
         }
         ExecutionResult::PendingConfirmation { .. } => {
@@ -458,6 +521,329 @@ fn cmd_execute(cmd: NixOSCommand, dry_run: bool, phi_override: Option<f64>, appr
             }
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn secure_entropy() -> Result<[u8; 32], String> {
+    let mut entropy = [0u8; 32];
+    let mut source = std::fs::File::open("/dev/urandom")
+        .map_err(|e| format!("secure OS entropy unavailable: {e}"))?;
+    source
+        .read_exact(&mut entropy)
+        .map_err(|e| format!("secure OS entropy read failed: {e}"))?;
+    Ok(entropy)
+}
+
+fn write_private_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
+
+    // Creation is deliberately exclusive. This prevents an existing file or
+    // attacker-created symlink from becoming the destination of a privileged
+    // preparation artifact.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("refusing to create {}: {e}", path.display()))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync {}: {e}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("failed to harden {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid JSON in {}: {e}", path.display()))
+}
+
+fn print_execution_result(result: ExecutionResult, dry_run: bool, format: OutputFormat) {
+    if matches!(format, OutputFormat::Json) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
+        return;
+    }
+
+    match result {
+        ExecutionResult::Success { stdout, stderr, .. } => {
+            if !stdout.is_empty() {
+                println!("{}", stdout.trim_end());
+            } else if dry_run {
+                println!("  [DRY-RUN] Exact closure activation was not executed.");
+            } else {
+                println!("  Exact closure activation completed.");
+            }
+            if !stderr.is_empty() {
+                eprintln!("{}", stderr.trim_end());
+            }
+        }
+        ExecutionResult::RolledBack {
+            error,
+            rollback_output,
+            recovery_closure,
+            post_recovery_closure,
+        } => {
+            eprintln!("  Activation command failed and exact recovery completed: {error}");
+            if !rollback_output.is_empty() {
+                eprintln!("  Recovery: {}", rollback_output.trim_end());
+            }
+            if let Some(recovery_closure) = recovery_closure {
+                eprintln!("  Recovery closure: {recovery_closure}");
+            }
+            if let Some(post_recovery_closure) = post_recovery_closure {
+                eprintln!("  Verified post-recovery closure: {post_recovery_closure}");
+            }
+        }
+        ExecutionResult::PendingConfirmation { .. } => {
+            eprintln!("  Blocked: exact closure activation requires cryptographic authority.");
+        }
+        ExecutionResult::Blocked { reason, .. } => {
+            eprintln!("  Blocked: {reason}");
+        }
+        ExecutionResult::FailedNoRollback {
+            error,
+            rollback_error,
+        } => {
+            eprintln!("  Activation command failed: {error}");
+            if let Some(rollback_error) = rollback_error {
+                eprintln!("  Rollback failed/unavailable: {rollback_error}");
+            }
+        }
+    }
+}
+
+fn cmd_closure_prepare(
+    intent_path: PathBuf,
+    realization_plan_path: PathBuf,
+    action: ClosureAction,
+    holon_id: String,
+    plan_out: PathBuf,
+    challenge_out: PathBuf,
+    ttl_ms: u64,
+) {
+    let result = (|| -> Result<(), String> {
+        let intent_json = std::fs::read(&intent_path)
+            .map_err(|e| format!("failed to read {}: {e}", intent_path.display()))?;
+        let realization_json = std::fs::read(&realization_plan_path).map_err(|e| {
+            format!(
+                "failed to read {}: {e}",
+                realization_plan_path.display()
+            )
+        })?;
+
+        let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
+        let prior_system_closure = GenerationManager::current_runtime_system_closure()
+            .map_err(|error| format!("failed to capture exact pre-state running system closure: {error}"))?;
+        let prior_system_profile_closure = GenerationManager::current_system_profile_closure()
+            .map_err(|error| format!("failed to capture exact pre-state system-profile closure: {error}"))?;
+        let machine = MachineBinding::new(bundle.execution_target_identity())?;
+        let candidate_store_path = bundle.expected_out_path().to_string();
+        let command = NixOSCommand::ActivateSystemClosure {
+            store_path: candidate_store_path.clone(),
+            profile_store_path: Some(candidate_store_path),
+            action: action.to_system_activation(),
+        };
+        // Recovery must preserve the same activation semantics as the
+        // transaction that failed: test must not silently become switch.
+        let recovery_action = action.to_system_activation();
+        let plan = ChangePlan::command_only_with_system_recovery(
+            machine,
+            command,
+            prior_system_closure.clone(),
+            prior_system_profile_closure.clone(),
+            recovery_action,
+            ttl_ms,
+        )?;
+
+        let challenge = nixward::action::authority_approval::build_execution_intent_change_challenge(
+            &plan,
+            &bundle,
+            holon_id,
+            secure_entropy()?,
+            now_ms(),
+            ttl_ms,
+        )?;
+
+        write_private_json(&plan_out, &plan)?;
+        write_private_json(&challenge_out, &challenge)?;
+
+        println!("  Exact realization verified.");
+        println!("  Pre-state running closure: {}", prior_system_closure);
+        println!("  Pre-state profile closure: {}", prior_system_profile_closure);
+        println!("  Store closure: {}", bundle.expected_out_path());
+        println!("  Recovery running closure: {}", prior_system_closure);
+        println!("  Recovery profile closure: {}", prior_system_profile_closure);
+        println!("  Recovery action: {:?}", recovery_action);
+        println!("  Plan digest: {}", hex32(&plan.digest()));
+        println!("  Authority challenge: {}", challenge.digest().map_err(|e| e.to_string())?);
+        println!("  Plan output: {}", plan_out.display());
+        println!("  Challenge output: {}", challenge_out.display());
+        println!("  Next step: sign the challenge with nixward-owner-key sign.");
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        eprintln!("  closure prepare: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn cmd_closure_activate(
+    intent_path: PathBuf,
+    realization_plan_path: PathBuf,
+    plan_path: PathBuf,
+    signature_path: PathBuf,
+    policy_path: PathBuf,
+    holon_id: String,
+    dry_run: bool,
+    phi_override: Option<f64>,
+    format: OutputFormat,
+) {
+    let result = (|| -> Result<ExecutionResult, String> {
+        let intent_json = std::fs::read(&intent_path)
+            .map_err(|e| format!("failed to read {}: {e}", intent_path.display()))?;
+        let realization_json = std::fs::read(&realization_plan_path).map_err(|e| {
+            format!(
+                "failed to read {}: {e}",
+                realization_plan_path.display()
+            )
+        })?;
+        let bundle = verify_nixward_execution_bundle(&intent_json, &realization_json)?;
+        let plan: ChangePlan = read_json(&plan_path)?;
+        let signed: DetachedAuthoritySignature = read_json(&signature_path)?;
+        let policy: AuthorityTrustPolicy = read_json(&policy_path)?;
+
+        // A valid owner signature does not authorize execution on another host.
+        // Bind the serialized plan to the machine actually performing activation.
+        let local_machine = MachineBinding::local()
+            .map_err(|e| format!("cannot bind activation to local machine identity: {e}"))?;
+        plan.validate_machine(&local_machine)?;
+
+        let command = plan
+            .command()
+            .ok_or_else(|| "serialized change plan contains no executable command".to_string())?;
+        match command {
+            NixOSCommand::ActivateSystemClosure {
+                store_path,
+                profile_store_path: Some(profile_store_path),
+                action: _,
+            } if store_path == bundle.expected_out_path()
+                && profile_store_path == bundle.expected_out_path()
+                && plan.machine().machine_id() == bundle.execution_target_identity() => {}
+            NixOSCommand::ActivateSystemClosure { .. } => {
+                return Err(
+                    "serialized plan does not match the verified execution target or exact store closure"
+                        .into(),
+                );
+            }
+            _ => {
+                return Err(
+                    "serialized change plan is not an ActivateSystemClosure mutation".into(),
+                );
+            }
+        }
+
+        let activation_path = match command {
+            NixOSCommand::ActivateSystemClosure { store_path, .. } => {
+                Path::new(store_path).join("bin/switch-to-configuration")
+            }
+            _ => unreachable!(),
+        };
+        let metadata = std::fs::metadata(&activation_path).map_err(|e| {
+            format!(
+                "exact closure activation binary is unavailable at {}: {e}",
+                activation_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "exact closure activation path is not a regular file: {}",
+                activation_path.display()
+            ));
+        }
+
+        let authorization = verify_execution_intent_change_authority(
+            &plan,
+            &bundle,
+            &policy,
+            &signed,
+            &holon_id,
+            now_ms(),
+        )?;
+        let execution_authorization =
+            ExecutionAuthorization::from_change_authorization(&plan, &authorization)?;
+
+        let decision_quality = phi_override
+            .map(|p| p as f32)
+            .unwrap_or(DEFAULT_CLI_DECISION_QUALITY);
+        let mut executor = NixOSExecutor::new().with_dry_run(dry_run);
+        let command = command.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to create Nixward CLI executor runtime: {e}"))?;
+        Ok(runtime.block_on(async move {
+            executor
+                .execute_authorized(
+                    command,
+                    execution_authorization,
+                    Some(decision_quality),
+                )
+                .await
+        }))
+    })();
+
+    match result {
+        Ok(result) => {
+            println!("  Exact closure: {}", match &result {
+                ExecutionResult::Success { .. } | ExecutionResult::RolledBack { .. } |
+                ExecutionResult::FailedNoRollback { .. } | ExecutionResult::Blocked { .. } |
+                ExecutionResult::PendingConfirmation { .. } => "verified",
+            });
+            print_execution_result(result, dry_run, format);
+        }
+        Err(error) => {
+            if matches!(format, OutputFormat::Json) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "blocked",
+                        "reason": error,
+                    })
+                );
+            } else {
+                eprintln!("  closure activate: {error}");
+            }
+        }
+    }
+}
+
+fn hex32(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Preview or apply a `configuration.nix` edit. Unlike `cmd_execute`, this
@@ -586,6 +972,57 @@ fn cmd_config(op: ConfigCommand) {
     }
 }
 
+fn cmd_verify_secure_boot(image: &Path, format: OutputFormat) {
+    match nixward::action::secure_boot::verify_image_against_live_secure_boot_databases(image) {
+        Ok(evidence) => {
+            match format {
+                OutputFormat::Json => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                    );
+                }
+                OutputFormat::Minimal => {
+                    println!("{:?}", evidence.state);
+                }
+                _ => {
+                    println!("  Secure Boot image verification: {:?}", evidence.state);
+                    println!("  Image BLAKE3: {:?}", evidence.image_blake3);
+                    println!(
+                        "  Authenticode SHA-256: {:?}",
+                        evidence.image_authenticode_sha256
+                    );
+                    println!("  db certificate anchors: {}", evidence.db_certificate_digests.len());
+                    println!("  dbx certificate anchors: {}", evidence.dbx_certificate_digests.len());
+                    println!(
+                        "  Verifying db certificate: {:?}",
+                        evidence.verifying_db_certificate
+                    );
+                    println!(
+                        "  Verifying dbx certificate: {:?}",
+                        evidence.verifying_dbx_certificate
+                    );
+                    println!("  db/dbx stable: {:?}", evidence.database_stability);
+                    println!("  Observed at: {:?}", evidence.observed_at_ms);
+                    println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                    println!("  Qualification: evidence only; firmware acceptance, closure binding, physical boot, and health remain separate.");
+                }
+            }
+
+            if !matches!(
+                evidence.state,
+                nixward::action::secure_boot::DbCertificateVerificationState::VerifiedAgainstDbCertificate
+            ) {
+                std::process::exit(2);
+            }
+        }
+        Err(error) => {
+            eprintln!("  Secure Boot image verification failed closed: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
     match domain {
         Some(ObserveDomain::Services) => {
@@ -652,6 +1089,121 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
         },
         Some(ObserveDomain::Generations) => {
             cmd_generations_list(format);
+        }
+        Some(ObserveDomain::BootSelection) => {
+            match nixward::action::boot_selection::observe_boot_selection() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                        );
+                    }
+                    OutputFormat::Minimal => {
+                        println!(
+                            "{}	{}",
+                            evidence
+                                .selected_entry_id
+                                .as_deref()
+                                .unwrap_or("unknown"),
+                            evidence
+                                .candidate_closure
+                                .as_deref()
+                                .unwrap_or("unbound")
+                        );
+                    }
+                    _ => {
+                        println!("  Bootloader: {:?}", evidence.bootloader_family);
+                        println!("  Selection: {:?}", evidence.selection_kind);
+                        println!(
+                            "  Entry: {}",
+                            evidence.selected_entry_id.as_deref().unwrap_or("Unknown")
+                        );
+                        println!(
+                            "  Candidate closure: {}",
+                            evidence.candidate_closure.as_deref().unwrap_or("Unbound")
+                        );
+                        println!("  Boot count: {:?}", evidence.boot_count_state);
+                        println!(
+                            "  Observed at: {}",
+                            evidence.observed_at_ms.unwrap_or_default()
+                        );
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: observation only; candidate binding must be checked separately.");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("  Boot selection is Unknown: {}", e.reason);
+                }
+            }
+        }
+        Some(ObserveDomain::SecureBoot) => {
+            match nixward::action::secure_boot::observe_secure_boot() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => println!("{:?}", evidence.state),
+                    _ => {
+                        println!("  Secure Boot: {:?}", evidence.state);
+                        println!("  SecureBoot variable: {:?}", evidence.secure_boot_variable);
+                        println!("  SetupMode variable: {:?}", evidence.setup_mode_variable);
+                        println!("  Observed at: {}", evidence.observed_at_ms.unwrap_or_default());
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: firmware policy observation only; image signature verification is separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot is Unknown: {reason}"),
+            }
+        }
+        Some(ObserveDomain::SecureBootSnapshot) => {
+            match nixward::action::secure_boot::observe_secure_boot_snapshot() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => {
+                        println!("{:?}", evidence.state);
+                    }
+                    _ => {
+                        println!("  Secure Boot: {:?}", evidence.state);
+                        println!("  SecureBoot variable: {:?}", evidence.secure_boot_variable);
+                        println!("  SetupMode variable: {:?}", evidence.setup_mode_variable);
+                        println!("  db state: {:?}", evidence.db_state);
+                        println!("  db payload BLAKE3: {:?}", evidence.db_payload_blake3);
+                        println!("  dbx state: {:?}", evidence.dbx_state);
+                        println!("  dbx payload BLAKE3: {:?}", evidence.dbx_payload_blake3);
+                        println!("  Observed at: {}", evidence.observed_at_ms.unwrap_or_default());
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: unified firmware-state observation only; signer authorization is separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot snapshot is Unknown: {reason}"),
+            }
+        }
+        Some(ObserveDomain::SecureBootDatabases) => {
+            match nixward::action::secure_boot::observe_secure_boot_databases() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&evidence).unwrap_or_default());
+                    }
+                    OutputFormat::Minimal => {
+                        println!(
+                            "db={:?}\tdbx={:?}",
+                            evidence.db_payload_blake3,
+                            evidence.dbx_payload_blake3
+                        );
+                    }
+                    _ => {
+                        println!("  db state: {:?}", evidence.db_state);
+                        println!("  db payload BLAKE3: {:?}", evidence.db_payload_blake3);
+                        println!("  dbx state: {:?}", evidence.dbx_state);
+                        println!("  dbx payload BLAKE3: {:?}", evidence.dbx_payload_blake3);
+                        println!("  Qualification: raw firmware database observation only; certificate-to-database authorization remains separate.");
+                    }
+                },
+                Err(reason) => eprintln!("  Secure Boot database evidence is Unknown: {reason}"),
+            }
         }
         Some(ObserveDomain::Hardware) => {
             match nixward::observe::hardware::HardwareObserver::probe() {

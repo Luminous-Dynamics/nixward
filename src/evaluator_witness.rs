@@ -139,6 +139,31 @@ pub struct DifferentialEvaluation {
     pub explanation: String,
 }
 
+fn first_nix_angle_path(source: &str) -> Option<(usize, String)> {
+    for (offset, ch) in source.char_indices() {
+        if ch != '<' {
+            continue;
+        }
+        let tail = &source[offset + 1..];
+        let Some(end) = tail.find('>') else {
+            continue;
+        };
+        let candidate = &tail[..end];
+        if candidate.is_empty()
+            || candidate.chars().any(char::is_whitespace)
+            || !candidate.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '/' | '.' | '_' | '-' | '+' | ':' | '@' | '~')
+            })
+            || !candidate.chars().any(|c| c.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        return Some((offset, format!("<{candidate}>")));
+    }
+    None
+}
+
 /// Validate source emitted by Symthaea against SNS-1.
 ///
 /// This intentionally operates on **generated source only**.  It is not an
@@ -155,11 +180,6 @@ pub fn validate_sns1(source: &str) -> SnsValidation {
         .collect::<Vec<_>>();
 
     const FORBIDDEN: &[(&str, &str, &str)] = &[
-        (
-            "sns1-no-angle-paths",
-            "<nixpkgs>",
-            "generated source must use declared/locked inputs instead of ambient NIX_PATH",
-        ),
         (
             "sns1-no-getenv",
             "builtins.getEnv",
@@ -192,7 +212,7 @@ pub fn validate_sns1(source: &str) -> SnsValidation {
         ),
     ];
 
-    let violations = FORBIDDEN
+    let mut violations = FORBIDDEN
         .iter()
         .filter_map(|(rule, needle, reason)| {
             source.find(needle).map(|offset| SnsViolation {
@@ -202,6 +222,14 @@ pub fn validate_sns1(source: &str) -> SnsValidation {
             })
         })
         .collect::<Vec<_>>();
+
+    if let Some((offset, path)) = first_nix_angle_path(source) {
+        violations.push(SnsViolation {
+            rule: "sns1-no-angle-paths",
+            reason: "generated source must use declared/locked inputs instead of ambient NIX_PATH",
+            evidence: format!("{path} at byte {offset}"),
+        });
+    }
 
     SnsValidation {
         schema_version: SNS_SCHEMA_VERSION,
