@@ -69,7 +69,7 @@ The declared phase must agree with the complete receipt set:
 - promoted: successful application, verification, promotion outcome, and no
   explicit unhealthy boot result;
 - failed: non-zero application result and a failure outcome;
-- recovered: snapshot plus a failed or verified application and a recovery outcome.
+- recovered: snapshot plus either a failed application with no verification receipt, or a successful application whose verification explicitly reports unhealthy boot; a recovery outcome is required.
 
 Missing, out-of-order, contradictory, or extra lifecycle receipts are invalid.
 
