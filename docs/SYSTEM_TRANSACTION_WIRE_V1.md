@@ -46,13 +46,32 @@ separate concerns.
 Consumer state transitions are ordered as planned -> validated -> authorized ->
 snapshotted -> applied -> verified -> promoted.
 
-A consumer must reject unsupported schema/version, plan or target mismatches,
+A consumer must reject unsupported schema/version, unknown fields, plan or target mismatches,
 validation after authorization, snapshot without authorization plus validation,
 application without authorization/validation/snapshot, command-digest mismatches,
 verification before successful application, promotion before verification, unhealthy
 promotion, and recovery without snapshot/recovery evidence.
 
 A transaction is terminal only in promoted, recovered, or failed.
+
+The v1 decoder is strict at the top-level envelope and every nested receipt. A
+v1 consumer must not silently ignore unknown fields: semantics can only be
+extended under a new schema/version. Duplicate JSON object keys are also
+rejected by the typed decoder.
+
+The declared phase must agree with the complete receipt set:
+- planned: no lifecycle receipts;
+- validated: validation only;
+- authorized: validation and authorization;
+- snapshotted: validation, authorization and snapshot;
+- applied: prior receipts plus successful application;
+- verified: prior receipts plus verification;
+- promoted: successful application, verification, promotion outcome, and no
+  explicit unhealthy boot result;
+- failed: non-zero application result and a failure outcome;
+- recovered: snapshot plus a failed or verified application and a recovery outcome.
+
+Missing, out-of-order, contradictory, or extra lifecycle receipts are invalid.
 
 ## Provenance boundary
 
