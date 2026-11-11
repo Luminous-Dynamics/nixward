@@ -338,6 +338,8 @@ pub enum ObserveDomain {
     Hardware,
     /// Flake inputs.
     Flakes,
+    /// Effective next-boot selection evidence (read-only).
+    BootSelection,
 }
 
 /// Flake subcommands.

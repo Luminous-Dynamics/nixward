@@ -1035,6 +1035,53 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
         Some(ObserveDomain::Generations) => {
             cmd_generations_list(format);
         }
+        Some(ObserveDomain::BootSelection) => {
+            match nixward::action::boot_selection::observe_systemd_boot() {
+                Ok(evidence) => match format {
+                    OutputFormat::Json => {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&evidence).unwrap_or_default()
+                        );
+                    }
+                    OutputFormat::Minimal => {
+                        println!(
+                            "{}	{}",
+                            evidence
+                                .selected_entry_id
+                                .as_deref()
+                                .unwrap_or("unknown"),
+                            evidence
+                                .candidate_closure
+                                .as_deref()
+                                .unwrap_or("unbound")
+                        );
+                    }
+                    _ => {
+                        println!("  Bootloader: {:?}", evidence.bootloader_family);
+                        println!("  Selection: {:?}", evidence.selection_kind);
+                        println!(
+                            "  Entry: {}",
+                            evidence.selected_entry_id.as_deref().unwrap_or("Unknown")
+                        );
+                        println!(
+                            "  Candidate closure: {}",
+                            evidence.candidate_closure.as_deref().unwrap_or("Unbound")
+                        );
+                        println!("  Boot count: {:?}", evidence.boot_count_state);
+                        println!(
+                            "  Observed at: {}",
+                            evidence.observed_at_ms.unwrap_or_default()
+                        );
+                        println!("  Evidence digest: {:?}", evidence.evidence_digest);
+                        println!("  Qualification: observation only; candidate binding must be checked separately.");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("  Boot selection is Unknown: {}", e.reason);
+                }
+            }
+        }
         Some(ObserveDomain::Hardware) => {
             match nixward::observe::hardware::HardwareObserver::probe() {
                 Ok(info) => match format {

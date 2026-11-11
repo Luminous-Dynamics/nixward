@@ -1,0 +1,113 @@
+{
+  "schema": "luminous-nixward-boot-selection-v1",
+  "cases": [
+    {
+      "id": "systemd-oneshot-exact",
+      "family": "systemd-boot",
+      "one_shot": "candidate.conf",
+      "persistent_default": "old.conf",
+      "entries": {
+        "candidate.conf": {
+          "title": "NixOS candidate",
+          "version": "6.12",
+          "machine-id": "0123456789abcdef0123456789abcdef",
+          "linux": "/EFI/nixos/abc-linux-6.12.efi",
+          "boot_count": "good",
+          "options": "init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet"
+        },
+        "old.conf": {
+          "title": "NixOS old",
+          "linux": "/EFI/nixos/old-linux-6.11.efi",
+          "boot_count": "good",
+          "options": "init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-old/init quiet"
+        }
+      },
+      "expected": {
+        "selection_kind": "OneShot",
+        "selected_entry_id": "candidate.conf",
+        "candidate_closure": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate"
+      }
+    },
+    {
+      "id": "systemd-pattern-default-unknown",
+      "family": "systemd-boot",
+      "one_shot": null,
+      "persistent_default": "nixos-*",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "pattern"
+      }
+    },
+    {
+      "id": "grub-next-entry-exact",
+      "family": "grub",
+      "environment": {
+        "next_entry": "candidate",
+        "saved_entry": "old"
+      },
+      "generated_default": null,
+      "expected": {
+        "selection_kind": "OneShot",
+        "selected_entry_id": "candidate"
+      }
+    },
+    {
+      "id": "grub-numeric-default-unknown",
+      "family": "grub",
+      "environment": {},
+      "generated_default": "0",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "menu position"
+      }
+    },
+    {
+      "id": "boot-count-bad",
+      "family": "systemd-boot",
+      "entry_id": "nixos+00-04.efi",
+      "expected": {
+        "boot_count_state": "Bad"
+      }
+    },
+    {
+      "id": "artifact-not-system-closure",
+      "family": "systemd-boot",
+      "entry_id": "kernel-only.conf",
+      "entry_text": "linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel",
+      "expected": {
+        "candidate_closure": null
+      }
+    },
+    {
+      "id": "candidate-binding-mismatch",
+      "family": "systemd-boot",
+      "selected_entry_id": "candidate.conf",
+      "observed_candidate_closure": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-other",
+      "authorized_candidate_closure": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate",
+      "expected": {
+        "result": "Unknown",
+        "reason_contains": "not the authorized candidate"
+      }
+    },
+    {
+      "id": "boot-count-not-tracked",
+      "family": "systemd-boot",
+      "entry_id": "nixos.conf",
+      "entry_text": "linux /EFI/nixos/kernel.efi\\noptions init=/nix/store/0123456789abcdfghijklmnpqrsvwxyz-nixos-system-candidate/init quiet\\n",
+      "expected": {
+        "boot_count_state": "NotTracked"
+      }
+    },
+    {
+      "id": "grub-generated-default-exact",
+      "family": "grub",
+      "generated_default": "NixOS - Configuration 42",
+      "grub_config": "menuentry \"NixOS - Configuration 42\" --class nixos {\n linux /nix/store/0123456789abcdfghijklmnpqrsvwxyz-linux-kernel init=/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate/init quiet\n initrd /nix/store/0123456789abcdfghijklmnpqrsvwxyz-initrd\n}\n",
+      "expected": {
+        "selection_kind": "GeneratedDefault",
+        "selected_entry_id": "NixOS - Configuration 42",
+        "candidate_closure": "/nix/store/abcdefabcdefabcdefabcdefabcdefab-nixos-system-candidate"
+      }
+    }
+  ]
+}
