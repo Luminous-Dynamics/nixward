@@ -4,6 +4,17 @@ nixward brings hyperdimensional computing (HDC) and active inference to NixOS sy
 
 Part of the [Symthaea](https://luminousdynamics.org) cognitive architecture.
 
+## Standalone qualification status
+
+This repository is undergoing a standalone extraction hardening pass in pull
+request #2. The standalone boundary is **not considered qualified** until the
+exact validated checkout has a completed successful CI run and emits its
+qualification receipt.
+
+The only cross-repository Rust dependency is `symthaea-core`, pinned to commit
+`77b872fd116c7b6f44fedd82bb8c6100240caa73`. The repository-local boundary
+checker rejects escaping local paths and floating Git branch/tag selectors.
+
 ## System Transaction Architecture
 
 Consequential machine changes use an evidence-bound transaction lifecycle:
@@ -39,10 +50,10 @@ baseline. The preferred path is **assimilate → declare → evaluate → author
 ```
 Observation ──> Encoding ──> Cognition ──> Action
    │              │             │            │
-   │ systemd      │ HDC         │ Active     │ Phi-gated
-   │ journal      │ 16384-dim   │ Inference  │ execution
-   │ store        │ vectors     │ Causal     │ with rollback
-   │ hardware     │             │ graph      │ verification
+   │ systemd      │ HDC         │ Active     │ Evidence-
+   │ journal      │ 16384-dim   │ Inference  │ bound
+   │ store        │ vectors     │ Causal     │ execution
+   │ hardware     │             │ graph       │
    └──────────────┴─────────────┴────────────┘
 ```
 
@@ -51,7 +62,7 @@ Observation ──> Encoding ──> Cognition ──> Action
 2. **Encoding** -- System state, options, packages, configs to HDC vectors
 3. **Mind** -- World model, active inference, causal graph, episodic memory
 4. **Observe** -- Live system state observation (systemd, journal, store, hardware)
-5. **Action** -- Consciousness-gated command execution with pre/post verification
+5. **Action** -- Evidence-bound command execution with pre/post verification
 6. **Plugin** -- Bridge to full Symthaea consciousness pipeline
 
 ## Quick Start
@@ -71,9 +82,37 @@ nixward observe journal
 # System health check
 nixward doctor
 
-# Rebuild with consciousness gating
+# Preview a rebuild candidate; direct privileged nixos-rebuild
+# mutation is intentionally blocked by the host boundary.
+# Use the exact-closure flow above for privileged system activation.
 nixward rebuild switch
 nixward rebuild switch --flake ".#myhost"
+
+# Exact closure activation
+# 1. Verify the exact framework execution-intent + realization-plan pair
+nixward closure prepare \
+  --intent intent.json \
+  --realization-plan realization-plan.json \
+  --action switch \
+  --holon-id <holon-digest> \
+  --plan-out change-plan.json \
+  --challenge-out authority-challenge.json
+
+# 2. Sign authority offline; keep the private seed off the host
+nixward-owner-key sign \
+  --seed-file /secure/owner-seed \
+  --challenge authority-challenge.json \
+  --signature-out authority-signature.json \
+  --key-id owner-root-1
+
+# 3. Re-verify the exact realization + signed authority, then activate
+nixward closure activate \
+  --intent intent.json \
+  --realization-plan realization-plan.json \
+  --plan change-plan.json \
+  --signature authority-signature.json \
+  --policy authority-policy.json \
+  --holon-id <holon-digest>
 
 # Generation management
 nixward rollback
@@ -116,7 +155,7 @@ The TUI displays six panels:
 
 Tab to switch focus. Type commands in the input panel. The TUI refreshes system data every ~4 seconds and shows `[daemon]` in the World Model title when the background daemon is running.
 
-### Daemon
+## Daemon
 
 ```bash
 nixward-daemon
@@ -134,12 +173,12 @@ Add to your `flake.nix`:
 
 ```nix
 {
-  inputs.symthaea.url = "github:luminous-dynamics/symthaea";
+  inputs.nixward.url = "github:Luminous-Dynamics/nixward";
 
-  outputs = { self, nixpkgs, symthaea, ... }: {
+  outputs = { self, nixpkgs, nixward, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       modules = [
-        symthaea.nixosModules.nixward
+        nixward.nixosModules.nixward
         {
           services.nixward = {
             enable = true;
@@ -184,7 +223,7 @@ User input is processed through the Free Energy Principle:
 2. Infer goal via working memory context
 3. Generate action candidates
 4. Rank by Expected Free Energy (pragmatic + epistemic value)
-5. Gate execution by consciousness level (phi)
+5. Gate execution by evidence-bound authorization and host policy
 
 ### Predictive Hierarchy
 
@@ -194,7 +233,7 @@ User input is processed through the Free Energy Principle:
 
 ```bash
 # Enter dev shell
-nix develop ./crates/nixward
+nix develop
 
 # Build
 cargo build -p nixward --features cli
@@ -202,10 +241,14 @@ cargo build -p nixward --features tui
 cargo build -p nixward --features daemon
 
 # Test
-cargo test -p nixward --features tui --lib       # 339 unit tests
-cargo test -p nixward --features cli --test cli_integration  # 24 integration tests
-cargo test -p nixward --test e2e_consciousness_loop  # 7 e2e tests
-cargo test -p nixward --test proptest_hdc            # 16 property tests
+cargo test -p nixward --features tui --lib
+cargo test -p nixward --features cli --test cli_integration
+cargo test -p nixward --test e2e_consciousness_loop
+cargo test -p nixward --test proptest_hdc
+
+# Standalone boundaries
+python3 scripts/verify-standalone-boundary.py
+python3 scripts/verify-workflow-boundary.py
 
 # Benchmarks
 cargo bench -p nixward --bench hdc_benchmarks
@@ -228,4 +271,4 @@ Measured on 16,384-dim vectors (criterion, release mode):
 
 ## License
 
-MIT
+AGPL-3.0-or-later. See [LICENSE](LICENSE) and [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).

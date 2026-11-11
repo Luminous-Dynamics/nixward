@@ -8,6 +8,38 @@ consequential operations should converge on one safety model:
 
 **observe → plan → validate → authorize → snapshot → apply → verify → promote/recover**
 
+### Exact-realization boundary
+
+System-changing `nixos-rebuild switch/test/boot` commands are candidate/preview
+vocabulary, not privileged mutation primitives. Their command text can identify
+what the operator requested, but it does not by itself identify the immutable
+closure that will be realized.
+
+The privileged path therefore converges on:
+
+`candidate source/configuration`
+→ `deterministic realization`
+→ `source + lock + configuration identities`
+→ `exact /nix/store system closure`
+→ `execution-intent authority`
+→ `switch-to-configuration`
+→ `post-state verification`
+
+The CLI exposes this as a two-phase boundary:
+
+`closure prepare` → offline detached signature → `closure activate`
+
+Preparation is non-mutating and creates the exact ChangePlan plus authority
+challenge. Activation re-verifies the execution-intent/realization pair, the
+serialized plan, the detached Ed25519 authority, and the exact store closure
+before invoking `switch-to-configuration`. No local `--approve` convenience
+flag can substitute for this authority class.
+
+`ActivateSystemClosure` is the canonical executor primitive for that final
+mutation. This avoids a time-of-check/time-of-use gap in which the same rebuild
+command could resolve different source/configuration state between review and
+execution.
+
 The goal is not to make an AI more powerful than the owner. The goal is to make
 machine state transitions understandable, reproducible, cryptographically
 authorized, and recoverable.
@@ -134,8 +166,16 @@ carry an explicit recovery strategy or be blocked.
 
 Only the already-authorized exact command/patch/capability may execute.
 
-The executor must not reinterpret the approved request or substitute a new
-command.
+For an exact NixOS system closure activation, Nixward first takes its
+cross-process transaction interlock before the final pre-state validation. The
+authorized profile target is then set and verified, after which the exact
+closure's `switch-to-configuration` action is invoked. Nixward does not hold
+the Nix profile lock across the child activation: `nix-env --set` owns its
+profile lock for its own mutation, while `switch-to-configuration` uses its
+own activation lock. This keeps the interlocks composable rather than creating
+self-deadlock. The executor must not reinterpret the approved request,
+substitute an ambient generation selector, or silently redirect the profile
+target.
 
 ### 7. Verify
 
@@ -307,6 +347,49 @@ Every consequential transaction should answer:
 
 **"How do we get back to the last known-good state?"**
 
+For generation-changing system transactions, "last known-good" is not a
+generation number or the ambient result of a later `--rollback` operation.
+Preparation captures the exact prior running `/nix/store/...-nixos-system-*` closure
+before authorization, and that closure becomes part of the signed ChangePlan's
+recovery binding.
+
+The exact recovery boundary is:
+
+```
+observe exact pre-state running closure
+        ↓
+authorize candidate exact closure + recovery closure
+        ↓
+re-check pre-state immediately before mutation
+        ↓
+activate exact candidate closure
+        ↓
+on failure, re-observe and refuse recovery if state is outside
+the transaction's {prior, candidate} closure set
+        ↓
+activate the exact bound prior closure
+        ↓
+verify the observed post-recovery running closure
+```
+
+Recovery evidence records the exact closure targeted for recovery and the exact
+post-recovery closure observed by Nixward.
+
+The exact system-profile transition is now part of the privileged activation
+primitive. The Nixward transaction interlock remains held across the exact
+profile transition, the immutable `switch-to-configuration` action, and
+post-state verification/recovery. The underlying Nix profile mutation and the
+closure activation retain their own Nix-managed locks; Nixward does not hold
+the profile lock across the child activation. This prevents concurrent Nixward
+transactions from interleaving while preserving Nix's native activation
+serialization. It does not authorize or claim to prevent arbitrary direct
+filesystem mutation that bypasses Nix's locking protocol, nor does it remove
+the unsupported external-writer compare-and-set gap documented in Issue #9.
+
+Bootloader-specific next-boot selection remains a separate evidence boundary
+tracked in Issue #8 and must not be silently folded into the runtime or profile
+claims.
+
 If no bounded recovery path exists, the action should either be classified as
 non-reversible and require stronger explicit treatment, or be refused.
 
@@ -332,10 +415,12 @@ transaction protocol.
    foundation.
 2. Add transaction/receipt types only where they collapse an actual duplicated
    lifecycle; do not introduce a second parallel authorization model.
-3. Add target-state observation and post-state verification to high-impact
+3. Treat direct system rebuilds as candidate/validation operations only; privileged
+   mutation must consume an exact realized closure through ActivateSystemClosure.
+4. Add target-state observation and post-state verification to high-impact
    operations.
-4. Connect generation-changing transactions to boot health and promotion.
-5. Convert installer and management UIs to display transaction identity,
+5. Connect generation-changing transactions to boot health and promotion.
+6. Convert installer and management UIs to display transaction identity,
    provenance, authorization, verification, and recovery.
 6. Complete the Spore/Nixward boundary extraction after contract fixtures prove
    compatibility.

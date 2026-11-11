@@ -1,0 +1,52 @@
+{
+  "schema": "luminous-nixward-secure-boot-v1",
+  "variable_guid": "8be4df61-93ca-11d2-aa0d-00e098032b8c",
+  "cases": [
+    {
+      "id": "enabled",
+      "secure_boot": true,
+      "setup_mode": false,
+      "expected_state": "Enabled"
+    },
+    {
+      "id": "disabled",
+      "secure_boot": false,
+      "setup_mode": false,
+      "expected_state": "Disabled"
+    },
+    {
+      "id": "setup-mode",
+      "secure_boot": false,
+      "setup_mode": true,
+      "expected_state": "SetupMode"
+    },
+    {
+      "id": "inconsistent",
+      "secure_boot": true,
+      "setup_mode": true,
+      "expected_state": "Unknown"
+    },
+    {
+      "id": "missing-secure-boot-variable",
+      "secure_boot": null,
+      "setup_mode": false,
+      "expected_state": "Unknown"
+    },
+    {
+      "id": "missing-setup-mode-variable",
+      "secure_boot": true,
+      "setup_mode": null,
+      "expected_state": "Unknown"
+    },
+    {
+      "id": "malformed-value",
+      "payload_hex": "0000000702",
+      "expected": "Unknown"
+    },
+    {
+      "id": "malformed-length",
+      "payload_hex": "00000007",
+      "expected": "Unknown"
+    }
+  ]
+}
