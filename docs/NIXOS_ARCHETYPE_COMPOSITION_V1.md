@@ -83,6 +83,8 @@ Initial archetypes:
 
 Hardware support is a separate composition axis. For example, research plus gpu.nvidia is a different composition from research plus cpu-only; an edge archetype must not silently import workstation or server hardware assumptions.
 
+A secure-worker archetype must be a real isolation boundary, not merely a separate HOME, XDG directory, or D-Bus session. Its default principal should be a dedicated unprivileged Unix identity outside wheel, docker, libvirtd, and Nix trusted-users. Filesystem write paths, secrets, network egress, device access, daemon sockets, and resource budgets must be explicit. VM qualification must test actual denied access, not just inspect the declared systemd properties.
+
 ### 2.4 Composition is monotonic for mandatory constraints
 
 Recommended policy layers:
