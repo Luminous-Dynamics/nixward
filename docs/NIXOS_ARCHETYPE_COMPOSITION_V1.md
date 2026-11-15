@@ -335,7 +335,7 @@ A smaller host configuration is not automatically better if it hides ten layers 
 
 The existing deployment benchmark issue proposes initial, provisional latency goals for local transaction control. Those should remain hypotheses until matched baseline measurements exist.
 
-For this archetype programme, set hard correctness and security gates first. Establish evaluation-time and resource baselines before setting optimization targets. Publish raw per-trial observations, version fingerprints, confidence intervals, and negative-control results. Never convert a target into a measured result or a prototype into a production qualification.
+For this archetype programme, set hard correctness and security gates first. Establish evaluation-time and resource baselines before setting optimization targets. Workstation-versus-builder Nix concurrency qualification is tracked in [issue #157](https://github.com/Luminous-Dynamics/nixward/issues/157). Publish raw per-trial observations, version fingerprints, confidence intervals, and negative-control results. Never convert a target into a measured result or a prototype into a production qualification.
 
 ## 8. Competitive positioning
 
@@ -422,7 +422,7 @@ Implement only base, workstation, and builder initially. Add server and edge aft
 1. Reproduce or disprove the public-flake parent-path dependency from a clean clone.
 2. Resolve the autonomyLevel documentation/API mismatch before recommending any autonomous archetype.
 3. Inventory existing module options and move duplicated configuration only when a stable capability boundary exists.
-4. Implement a pure capability-conflict fixture suite before adding more profiles.
+4. Implement the pure capability-contract and negative-fixture prototype tracked in [issue #156](https://github.com/Luminous-Dynamics/nixward/issues/156) before adding more profiles.
 5. Reuse the existing transaction benchmark and trust/evidence architecture; avoid a second deployment engine or signature format.
 
 The first release should be intentionally small. Three useful archetypes with clear capability contracts, clean-checkout builds, negative controls, and recovery evidence are more valuable than eight aspirational archetypes that have only been written down.
