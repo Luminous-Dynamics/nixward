@@ -220,7 +220,7 @@ This proposal preserves that boundary:
 - A missing or ambiguous result remains unknown; it cannot trigger a blind retry or a new mutation.
 - Recovery and promotion are separate outcomes. A rollback command is not proof that the old state was restored.
 
-**Implementation blocker to resolve:** the current public nix/module.nix exposes support.autonomyLevel values named advisory, semi-autonomous, and full-autonomous, with descriptions suggesting automatic execution. That vocabulary is in tension with the system-transaction architecture's statement that cognitive signals never authorize machine mutation. Before archetypes expose this option as a recommended setting, reconcile the contract: keep execution authority in the explicit transaction/authorization subsystem, and make any autonomous behavior a separately bounded, explicitly authorized capability. Do not treat a watchdog or a Phi/confidence score as owner authorization.
+**Contract mismatch to resolve:** the current public nix/module.nix exposes support.autonomyLevel values named advisory, semi-autonomous, and full-autonomous, with descriptions suggesting automatic execution. That vocabulary is in tension with the system-transaction architecture's statement that cognitive signals never authorize machine mutation. This source-level mismatch is not, by itself, proof that the daemon can perform privileged mutations; the actual executor path and runtime permissions must be reviewed. Before archetypes expose this option as a recommended setting, reconcile the contract: keep execution authority in the explicit transaction/authorization subsystem, and make any autonomous behavior a separately bounded, explicitly authorized capability. Do not treat a watchdog or a Phi/confidence score as owner authorization.
 
 ## 6. Evidence contract
 
@@ -362,16 +362,16 @@ The strategy is not to replace these projects. It is to assemble them behind a c
 
 ## 9. Public-flake portability gate
 
-The current public flake.nix reads ../../../rust-toolchain.toml and sets its source to ../../../.. . This appears to assume a larger monorepo checkout. That may be deliberate for the original integration, but it is a portability risk for consumers cloning Luminous-Dynamics/nixward as a standalone repository.
+The current main-branch flake.nix reads ../../../rust-toolchain.toml and sets its source to ../../../.. . This assumes a larger monorepo checkout and is a portability risk for consumers cloning Luminous-Dynamics/nixward as a standalone repository. This is not an untracked issue: open PR #2 (https://github.com/Luminous-Dynamics/nixward/pull/2) explicitly proposes the standalone extraction, removal of monorepo-relative source discovery, and repository-local dependency/toolchain declarations. Coordinate this RFC with PR #2; do not duplicate its implementation. The archetype release gate must be rerun on whichever supported standalone/monorepo boundary results from that PR.
 
 Before publishing archetypes as a reusable flake, qualify both supported modes explicitly:
 
 1. **Standalone mode:** a clean clone of the public Nixward repository can evaluate and build the public package/module using only declared, locked inputs and files inside the repository.
 2. **Monorepo integration mode:** the Symthaea workspace can consume the same module/package without path assumptions escaping the declared source boundary.
 
-If one mode is not supported, document the limitation and provide a deliberate adapter. Do not silently rely on sibling files, a developer's parent directory, or an undeclared workspace checkout.
+If one mode is not supported, document the limitation and provide a deliberate adapter. Do not silently rely on sibling files, a developer's parent directory, or an undeclared workspace checkout. PR #2 remains open at the time this proposal was authored, so its current head and exact-head CI outcome must be inspected before treating the standalone boundary as established.
 
-The clean-clone gate should include nix flake metadata, nix flake show, evaluation of exported modules, and the relevant package/dev-shell checks from a fresh checkout. This proposal has not executed those commands; the issue is an audit finding from the current flake source that requires local reproduction.
+The clean-clone gate should include nix flake metadata, nix flake show, evaluation of exported modules, and the relevant package/dev-shell checks from a fresh checkout. This proposal has not executed those commands; the main-branch path dependency is a source audit finding, while the proposed fix is tracked in PR #2 and still requires exact-head qualification.
 
 ## 10. Incremental implementation plan
 
