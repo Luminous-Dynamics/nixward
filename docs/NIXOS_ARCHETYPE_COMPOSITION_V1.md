@@ -220,7 +220,7 @@ This proposal preserves that boundary:
 - A missing or ambiguous result remains unknown; it cannot trigger a blind retry or a new mutation.
 - Recovery and promotion are separate outcomes. A rollback command is not proof that the old state was restored.
 
-**Contract mismatch to resolve:** the current public nix/module.nix exposes support.autonomyLevel values named advisory, semi-autonomous, and full-autonomous, with descriptions suggesting automatic execution. That vocabulary is in tension with the system-transaction architecture's statement that cognitive signals never authorize machine mutation. This source-level mismatch is not, by itself, proof that the daemon can perform privileged mutations; the actual executor path and runtime permissions must be reviewed. Before archetypes expose this option as a recommended setting, reconcile the contract: keep execution authority in the explicit transaction/authorization subsystem, and make any autonomous behavior a separately bounded, explicitly authorized capability. Do not treat a watchdog or a Phi/confidence score as owner authorization.
+**Contract mismatch to resolve:** the current public nix/module.nix exposes support.autonomyLevel values named advisory, semi-autonomous, and full-autonomous, with descriptions suggesting automatic execution. That vocabulary is in tension with the system-transaction architecture's statement that cognitive signals never authorize machine mutation. This source-level mismatch is not, by itself, proof that the daemon can perform privileged mutations; the actual executor path and runtime permissions must be reviewed. Before archetypes expose this option as a recommended setting, reconcile the contract: keep execution authority in the explicit transaction/authorization subsystem, and make any autonomous behavior a separately bounded, explicitly authorized capability. Do not treat a watchdog or a Phi/confidence score as owner authorization. The required source-to-runtime audit is tracked in [issue #155](https://github.com/Luminous-Dynamics/nixward/issues/155).
 
 ## 6. Evidence contract
 
@@ -304,7 +304,7 @@ Hard gates include zero unauthorized mutations, zero host-secret disclosure in g
 
 ### 7.4 Deployment and recovery
 
-Use the existing matched deployment-assurance programme in [issue #113](https://github.com/Luminous-Dynamics/nixward/issues/113), its independent evidence verifier in [issue #119](https://github.com/Luminous-Dynamics/nixward/issues/119), and the NixOS activation-semantics qualification work in [issue #143](https://github.com/Luminous-Dynamics/nixward/issues/143). Do not create a competing benchmark harness.
+Use the existing matched deployment-assurance programme in [issue #113](https://github.com/Luminous-Dynamics/nixward/issues/113), its independent evidence verifier in [issue #119](https://github.com/Luminous-Dynamics/nixward/issues/119), and the NixOS activation-semantics qualification work in [issue #143](https://github.com/Luminous-Dynamics/nixward/issues/143). Do not create a competing benchmark harness. The earlier evaluation-diagnostics prototype in [PR #152](https://github.com/Luminous-Dynamics/nixward/pull/152) is closed and unmerged; inspect and reuse its branch work if that capability is revived rather than duplicating the diagnostic core.
 
 Compare semantically matched workloads against:
 
