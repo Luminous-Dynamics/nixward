@@ -621,11 +621,11 @@ mod tests {
         let proc_root = tempfile::tempdir().unwrap();
         std::fs::write(
             proc_root.path().join("meminfo"),
-            "MemTotal: 1024 kB\\nMemAvailable: 512 kB\\nSwapTotal: 2048 kB\\nSwapFree: 1024 kB\\n",
+            "MemTotal: 1024 kB\nMemAvailable: 512 kB\nSwapTotal: 2048 kB\nSwapFree: 1024 kB\n",
         ).unwrap();
         std::fs::write(
             proc_root.path().join("vmstat"),
-            "pswpin 7\\npswpout 9\\n",
+            "pswpin 7\npswpout 9\n",
         ).unwrap();
 
         let snapshot = ResourcePressureObserver::with_proc_root(proc_root.path()).snapshot();
@@ -641,11 +641,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let group = root.path().join("user.slice/app.slice");
         std::fs::create_dir_all(&group).unwrap();
-        std::fs::write(group.join("memory.current"), "4096\\n").unwrap();
-        std::fs::write(group.join("memory.swap.current"), "512\\n").unwrap();
-        std::fs::write(group.join("pids.current"), "23\\n").unwrap();
-        std::fs::write(group.join("cpu.stat"), "usage_usec 900\\nuser_usec 700\\nsystem_usec 200\\n").unwrap();
-        std::fs::write(group.join("io.stat"), "8:0 rbytes=100 wbytes=200 rios=1 wios=2\\n").unwrap();
+        std::fs::write(group.join("memory.current"), "4096\n").unwrap();
+        std::fs::write(group.join("memory.swap.current"), "512\n").unwrap();
+        std::fs::write(group.join("pids.current"), "23\n").unwrap();
+        std::fs::write(group.join("cpu.stat"), "usage_usec 900\nuser_usec 700\nsystem_usec 200\n").unwrap();
+        std::fs::write(group.join("io.stat"), "8:0 rbytes=100 wbytes=200 rios=1 wios=2\n").unwrap();
 
         let observed = CgroupV2Observer::with_root(root.path())
             .observe("app-slice", "user.slice/app.slice")
