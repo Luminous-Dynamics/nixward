@@ -246,6 +246,8 @@ pub enum ObserveDomain {
     Generations,
     /// Hardware info.
     Hardware,
+    /// Read-only host resource pressure and swap counters.
+    Resources,
     /// Flake inputs.
     Flakes,
 }
@@ -429,6 +431,17 @@ mod tests {
     fn test_output_format_json() {
         let cli = Cli::parse_from(["nixward", "--format", "json", "search", "vim"]);
         assert_eq!(cli.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn test_parse_observe_resources() {
+        let cli = Cli::parse_from(["nixward", "observe", "resources"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Observe {
+                domain: Some(ObserveDomain::Resources)
+            })
+        ));
     }
 
     #[test]

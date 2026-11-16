@@ -15,6 +15,7 @@ pub mod flake_registry;
 pub mod generations;
 pub mod hardware;
 pub mod journal;
+pub mod resource_pressure;
 pub mod store;
 pub mod systemd;
 
@@ -23,6 +24,7 @@ pub use flake_registry::{FlakeInfo, FlakeRegistry};
 pub use generations::{GenerationDiff, GenerationInfo, GenerationObserver};
 pub use hardware::{DiskInfo, GpuInfo, HardwareInfo, HardwareObserver};
 pub use journal::{JournalEntry, JournalObserver};
+pub use resource_pressure::{CgroupV2Observer, ResourcePressureObserver};
 pub use store::{GcRoot, StoreInfo, StoreObserver};
 pub use systemd::{SystemdObserver, UnitInfo};
 
