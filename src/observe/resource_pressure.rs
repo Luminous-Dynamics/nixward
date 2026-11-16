@@ -593,10 +593,10 @@ mod tests {
 
     #[test]
     fn parses_monotonic_uptime_and_rejects_bad_values() {
-        assert_eq!(parse_uptime("123.45 100.25\\n").unwrap(), 123.45);
-        assert!(parse_uptime("-1.0 0.0\\n").is_err());
-        assert!(parse_uptime("NaN 0.0\\n").is_err());
-        assert!(parse_uptime("123.0\\n").is_err());
+        assert_eq!(parse_uptime("123.45 100.25\n").unwrap(), 123.45);
+        assert!(parse_uptime("-1.0 0.0\n").is_err());
+        assert!(parse_uptime("NaN 0.0\n").is_err());
+        assert!(parse_uptime("123.0\n").is_err());
     }
 
     #[test]
