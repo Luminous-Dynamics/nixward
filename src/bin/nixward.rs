@@ -653,6 +653,113 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
         Some(ObserveDomain::Generations) => {
             cmd_generations_list(format);
         }
+        Some(ObserveDomain::Resources) => {
+            use nixward::observe::resource_pressure::{
+                PsiPressure, ResourcePressureObserver,
+            };
+
+            let snapshot = ResourcePressureObserver::new().snapshot();
+            match format {
+                OutputFormat::Json => {
+                    let json = serde_json::json!({
+                        "schema_version": snapshot.schema_version,
+                        "captured_at_unix_ms": snapshot.captured_at_unix_ms,
+                        "memory": resource_observation_json(&snapshot.memory, |memory| {
+                            serde_json::json!({
+                                "total_bytes": memory.total_bytes,
+                                "available_bytes": memory.available_bytes,
+                                "swap_total_bytes": memory.swap_total_bytes,
+                                "swap_free_bytes": memory.swap_free_bytes,
+                            })
+                        }),
+                        "cpu_pressure": resource_observation_json(&snapshot.cpu_pressure, psi_pressure_json),
+                        "memory_pressure": resource_observation_json(&snapshot.memory_pressure, psi_pressure_json),
+                        "io_pressure": resource_observation_json(&snapshot.io_pressure, psi_pressure_json),
+                        "swap_io": resource_observation_json(&snapshot.swap_io, |swap| {
+                            serde_json::json!({
+                                "pages_in_since_boot": swap.pages_in,
+                                "pages_out_since_boot": swap.pages_out,
+                            })
+                        }),
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json).unwrap_or_default()
+                    );
+                }
+                OutputFormat::Minimal => {
+                    let available = snapshot.memory.value.as_ref()
+                        .map(|value| value.available_bytes.to_string())
+                        .unwrap_or_else(|| "NA".to_string());
+                    let cpu_some = snapshot.cpu_pressure.value.as_ref()
+                        .map(|value| format!("{:.2}", value.some.avg10))
+                        .unwrap_or_else(|| "NA".to_string());
+                    let memory_full = snapshot.memory_pressure.value.as_ref()
+                        .and_then(|value| value.full)
+                        .map(|value| format!("{:.2}", value.avg10))
+                        .unwrap_or_else(|| "NA".to_string());
+                    let io_some = snapshot.io_pressure.value.as_ref()
+                        .map(|value| format!("{:.2}", value.some.avg10))
+                        .unwrap_or_else(|| "NA".to_string());
+                    println!(
+                        "schema={} mem_available_bytes={} cpu_some_avg10_pct={} memory_full_avg10_pct={} io_some_avg10_pct={}",
+                        snapshot.schema_version, available, cpu_some, memory_full, io_some
+                    );
+                }
+                _ => {
+                    println!("  Resource pressure snapshot (schema v{})", snapshot.schema_version);
+                    println!(
+                        "  Captured at (Unix ms): {}",
+                        snapshot.captured_at_unix_ms
+                            .map_or_else(|| "unavailable".to_string(), |value| value.to_string())
+                    );
+                    println!(
+                        "  Memory: {}",
+                        resource_observation_text(&snapshot.memory, |memory| {
+                            format!(
+                                "available={} MiB / total={} MiB; swap-free={} MiB / swap-total={} MiB",
+                                memory.available_bytes / (1024 * 1024),
+                                memory.total_bytes / (1024 * 1024),
+                                memory.swap_free_bytes.map(|v| (v / (1024 * 1024)).to_string()).unwrap_or_else(|| "unavailable".into()),
+                                memory.swap_total_bytes.map(|v| (v / (1024 * 1024)).to_string()).unwrap_or_else(|| "unavailable".into())
+                            )
+                        })
+                    );
+                    println!(
+                        "  CPU PSI: {}",
+                        resource_observation_text(&snapshot.cpu_pressure, |pressure| {
+                            format!("some avg10={:.2}% avg60={:.2}% avg300={:.2}%", pressure.some.avg10, pressure.some.avg60, pressure.some.avg300)
+                        })
+                    );
+                    println!(
+                        "  Memory PSI: {}",
+                        resource_observation_text(&snapshot.memory_pressure, |pressure| {
+                            format!(
+                                "some avg10={:.2}%; full avg10={}",
+                                pressure.some.avg10,
+                                pressure.full.map(|full| format!("{:.2}%", full.avg10)).unwrap_or_else(|| "not exposed".into())
+                            )
+                        })
+                    );
+                    println!(
+                        "  I/O PSI: {}",
+                        resource_observation_text(&snapshot.io_pressure, |pressure| {
+                            format!(
+                                "some avg10={:.2}%; full avg10={}",
+                                pressure.some.avg10,
+                                pressure.full.map(|full| format!("{:.2}%", full.avg10)).unwrap_or_else(|| "not exposed".into())
+                            )
+                        })
+                    );
+                    println!(
+                        "  Swap I/O: {}",
+                        resource_observation_text(&snapshot.swap_io, |swap| {
+                            format!("pages-in={} pages-out={} (cumulative since boot)", swap.pages_in, swap.pages_out)
+                        })
+                    );
+                }
+            }
+        }
         Some(ObserveDomain::Hardware) => {
             match nixward::observe::hardware::HardwareObserver::probe() {
                 Ok(info) => match format {
@@ -733,6 +840,54 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                 Err(e) => eprintln!("  Failed to snapshot: {}", e),
             }
         }
+    }
+}
+
+
+fn resource_observation_json<T>(
+    observation: &nixward::observe::resource_pressure::Observation<T>,
+    encode: impl FnOnce(&T) -> serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "state": format!("{:?}", observation.state).to_ascii_lowercase(),
+        "source": observation.source,
+        "reason": observation.reason,
+        "value": observation.value.as_ref().map(encode),
+    })
+}
+
+fn psi_pressure_json(
+    pressure: &nixward::observe::resource_pressure::PsiPressure,
+) -> serde_json::Value {
+    let average = |value: nixward::observe::resource_pressure::PsiAverage| {
+        serde_json::json!({
+            "avg10_pct": value.avg10,
+            "avg60_pct": value.avg60,
+            "avg300_pct": value.avg300,
+            "total_stall_usec": value.total_usec,
+        })
+    };
+    serde_json::json!({
+        "some": average(pressure.some),
+        "full": pressure.full.map(average),
+    })
+}
+
+fn resource_observation_text<T>(
+    observation: &nixward::observe::resource_pressure::Observation<T>,
+    render: impl FnOnce(&T) -> String,
+) -> String {
+    match observation.value.as_ref() {
+        Some(value) => format!(
+            "{} ({})",
+            format!("{:?}", observation.state).to_ascii_lowercase(),
+            render(value)
+        ),
+        None => format!(
+            "{} ({})",
+            format!("{:?}", observation.state).to_ascii_lowercase(),
+            observation.reason.unwrap_or("no-value")
+        ),
     }
 }
 
