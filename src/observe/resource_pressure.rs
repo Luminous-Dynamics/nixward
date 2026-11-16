@@ -64,7 +64,7 @@ pub struct MemoryInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PsiAverage {
-    /// Percentage of wall time in which at least one task was stalled.
+    /// Percentage of the window stalled for this PSI scope (some or full).
     pub avg10: f64,
     pub avg60: f64,
     pub avg300: f64,
@@ -93,6 +93,8 @@ pub struct ResourcePressureSnapshot {
     pub schema_version: u32,
     /// Unix epoch milliseconds; None means the wall clock was unavailable.
     pub captured_at_unix_ms: Option<u128>,
+    /// Monotonic host uptime in seconds, suitable for ordering counter samples.
+    pub uptime_seconds: Observation<f64>,
     pub memory: Observation<MemoryInfo>,
     pub cpu_pressure: Observation<PsiPressure>,
     pub memory_pressure: Observation<PsiPressure>,
@@ -136,6 +138,11 @@ impl ResourcePressureObserver {
         ResourcePressureSnapshot {
             schema_version: RESOURCE_PRESSURE_SCHEMA_VERSION,
             captured_at_unix_ms,
+            uptime_seconds: read_observation(
+                &self.proc_root.join("uptime"),
+                "proc/uptime",
+                parse_uptime,
+            ),
             memory: read_observation(
                 &self.proc_root.join("meminfo"),
                 "proc/meminfo",
@@ -189,6 +196,8 @@ fn read_observation<T>(
 pub struct CgroupResourceSnapshot {
     /// Caller-supplied semantic label, for example app-slice or nix-daemon.
     pub target: String,
+    /// Capture wall-clock time, recorded before reading the cgroup files.
+    pub captured_at_unix_ms: Option<u128>,
     pub memory_current_bytes: Observation<u64>,
     pub memory_peak_bytes: Observation<u64>,
     pub memory_swap_current_bytes: Observation<u64>,
@@ -251,8 +260,14 @@ impl CgroupV2Observer {
             ));
         }
 
+        let captured_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis());
+
         Ok(CgroupResourceSnapshot {
             target: target.to_string(),
+            captured_at_unix_ms,
             memory_current_bytes: read_cgroup_scalar(
                 &canonical_dir,
                 "memory.current",
@@ -355,6 +370,23 @@ fn io_reason(kind: io::ErrorKind) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParseError;
+
+fn parse_uptime(content: &str) -> Result<f64, ParseError> {
+    let mut fields = content.split_whitespace();
+    let uptime = fields.next().ok_or(ParseError)?
+        .parse::<f64>().map_err(|_| ParseError)?;
+    let idle = fields.next().ok_or(ParseError)?
+        .parse::<f64>().map_err(|_| ParseError)?;
+    if fields.next().is_some()
+        || !uptime.is_finite()
+        || !idle.is_finite()
+        || uptime < 0.0
+        || idle < 0.0
+    {
+        return Err(ParseError);
+    }
+    Ok(uptime)
+}
 
 fn parse_meminfo(content: &str) -> Result<MemoryInfo, ParseError> {
     let mut values = std::collections::BTreeMap::<&str, u64>::new();
@@ -558,6 +590,14 @@ fn parse_u64_scalar(content: &str) -> Result<u64, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_monotonic_uptime_and_rejects_bad_values() {
+        assert_eq!(parse_uptime("123.45 100.25\\n").unwrap(), 123.45);
+        assert!(parse_uptime("-1.0 0.0\\n").is_err());
+        assert!(parse_uptime("NaN 0.0\\n").is_err());
+        assert!(parse_uptime("123.0\\n").is_err());
+    }
 
     #[test]
     fn parses_meminfo_with_byte_conversion() {
