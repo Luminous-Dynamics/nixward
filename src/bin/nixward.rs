@@ -662,6 +662,9 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                     let json = serde_json::json!({
                         "schema_version": snapshot.schema_version,
                         "captured_at_unix_ms": snapshot.captured_at_unix_ms,
+                        "uptime_seconds": resource_observation_json(&snapshot.uptime_seconds, |value| {
+                            serde_json::json!(value)
+                        }),
                         "memory": resource_observation_json(&snapshot.memory, |memory| {
                             serde_json::json!({
                                 "total_bytes": memory.total_bytes,
@@ -686,6 +689,9 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                     );
                 }
                 OutputFormat::Minimal => {
+                    let uptime = snapshot.uptime_seconds.value.as_ref()
+                        .map(|value| format!("{:.3}", value))
+                        .unwrap_or_else(|| "NA".to_string());
                     let available = snapshot.memory.value.as_ref()
                         .map(|value| value.available_bytes.to_string())
                         .unwrap_or_else(|| "NA".to_string());
@@ -700,8 +706,8 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                         .map(|value| format!("{:.2}", value.some.avg10))
                         .unwrap_or_else(|| "NA".to_string());
                     println!(
-                        "schema={} mem_available_bytes={} cpu_some_avg10_pct={} memory_full_avg10_pct={} io_some_avg10_pct={}",
-                        snapshot.schema_version, available, cpu_some, memory_full, io_some
+                        "schema={} uptime_seconds={} mem_available_bytes={} cpu_some_avg10_pct={} memory_full_avg10_pct={} io_some_avg10_pct={}",
+                        snapshot.schema_version, uptime, available, cpu_some, memory_full, io_some
                     );
                 }
                 _ => {
@@ -710,6 +716,12 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
                         "  Captured at (Unix ms): {}",
                         snapshot.captured_at_unix_ms
                             .map_or_else(|| "unavailable".to_string(), |value| value.to_string())
+                    );
+                    println!(
+                        "  Host uptime: {}",
+                        resource_observation_text(&snapshot.uptime_seconds, |value| {
+                            format!("{:.3} seconds", value)
+                        })
                     );
                     println!(
                         "  Memory: {}",
