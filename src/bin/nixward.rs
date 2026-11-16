@@ -654,9 +654,7 @@ fn cmd_observe(domain: Option<ObserveDomain>, format: OutputFormat) {
             cmd_generations_list(format);
         }
         Some(ObserveDomain::Resources) => {
-            use nixward::observe::resource_pressure::{
-                PsiPressure, ResourcePressureObserver,
-            };
+            use nixward::observe::resource_pressure::ResourcePressureObserver;
 
             let snapshot = ResourcePressureObserver::new().snapshot();
             match format {
