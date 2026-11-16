@@ -617,6 +617,61 @@ mod tests {
     }
 
     #[test]
+    fn host_snapshot_keeps_source_failures_independent() {
+        let proc_root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            proc_root.path().join("meminfo"),
+            "MemTotal: 1024 kB\\nMemAvailable: 512 kB\\nSwapTotal: 2048 kB\\nSwapFree: 1024 kB\\n",
+        ).unwrap();
+        std::fs::write(
+            proc_root.path().join("vmstat"),
+            "pswpin 7\\npswpout 9\\n",
+        ).unwrap();
+
+        let snapshot = ResourcePressureObserver::with_proc_root(proc_root.path()).snapshot();
+        assert_eq!(snapshot.schema_version, RESOURCE_PRESSURE_SCHEMA_VERSION);
+        assert_eq!(snapshot.memory.state, EvidenceState::Observed);
+        assert_eq!(snapshot.swap_io.state, EvidenceState::Observed);
+        assert_eq!(snapshot.cpu_pressure.state, EvidenceState::Unavailable);
+        assert_eq!(snapshot.memory_pressure.reason, Some("source-not-found"));
+    }
+
+    #[test]
+    fn cgroup_observer_preserves_missing_metrics_as_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let group = root.path().join("user.slice/app.slice");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("memory.current"), "4096\\n").unwrap();
+        std::fs::write(group.join("memory.swap.current"), "512\\n").unwrap();
+        std::fs::write(group.join("pids.current"), "23\\n").unwrap();
+        std::fs::write(group.join("cpu.stat"), "usage_usec 900\\nuser_usec 700\\nsystem_usec 200\\n").unwrap();
+        std::fs::write(group.join("io.stat"), "8:0 rbytes=100 wbytes=200 rios=1 wios=2\\n").unwrap();
+
+        let observed = CgroupV2Observer::with_root(root.path())
+            .observe("app-slice", "user.slice/app.slice")
+            .unwrap();
+        assert_eq!(observed.memory_current_bytes.value, Some(4096));
+        assert_eq!(observed.memory_peak_bytes.state, EvidenceState::Unavailable);
+        assert_eq!(observed.memory_peak_bytes.reason, Some("source-not-found"));
+        assert_eq!(observed.cpu_usage_usec.value, Some(900));
+        assert_eq!(observed.io_read_bytes.value, Some(100));
+        assert_eq!(observed.io_write_bytes.value, Some(200));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cgroup_observer_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let result = CgroupV2Observer::with_root(root.path()).observe("escaped", "escape");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
     fn labels_and_cgroup_paths_fail_closed() {
         assert!(validate_target_label("app-slice").is_ok());
         assert!(validate_target_label("bad\nlabel").is_err());
