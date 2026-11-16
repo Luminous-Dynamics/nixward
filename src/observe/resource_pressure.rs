@@ -194,8 +194,18 @@ pub struct CgroupResourceSnapshot {
     pub memory_swap_current_bytes: Observation<u64>,
     pub pids_current: Observation<u64>,
     pub cpu_usage_usec: Observation<u64>,
-    pub io_read_bytes: Observation<u64>,
-    pub io_write_bytes: Observation<u64>,
+    /// Per-device byte counters. Do not sum them without device topology:
+    /// stacked block devices can account the same I/O at multiple layers.
+    pub io_devices: Observation<Vec<IoDeviceCounters>>,
+}
+
+/// Byte counters for one cgroup-v2 block-device major:minor pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoDeviceCounters {
+    pub major: u32,
+    pub minor: u32,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
 }
 
 /// Read-only cgroup-v2 observer. Relative paths are resolved beneath root;
@@ -264,8 +274,7 @@ impl CgroupV2Observer {
                 "cgroup-v2/pids.current",
             ),
             cpu_usage_usec: read_cgroup_cpu_usage(&canonical_dir),
-            io_read_bytes: read_cgroup_io_bytes(&canonical_dir, true),
-            io_write_bytes: read_cgroup_io_bytes(&canonical_dir, false),
+            io_devices: read_cgroup_io_stat(&canonical_dir),
         })
     }
 }
@@ -325,13 +334,11 @@ fn read_cgroup_cpu_usage(directory: &Path) -> Observation<u64> {
     }
 }
 
-fn read_cgroup_io_bytes(directory: &Path, read: bool) -> Observation<u64> {
+fn read_cgroup_io_stat(directory: &Path) -> Observation<Vec<IoDeviceCounters>> {
     const SOURCE: &str = "cgroup-v2/io.stat";
     match fs::read_to_string(directory.join("io.stat")) {
-        Ok(content) => match parse_io_bytes(&content) {
-            Ok((read_bytes, write_bytes)) => {
-                Observation::observed(if read { read_bytes } else { write_bytes }, SOURCE)
-            }
+        Ok(content) => match parse_io_stat(&content) {
+            Ok(value) => Observation::observed(value, SOURCE),
             Err(_) => Observation::unavailable(SOURCE, "source-parse-error"),
         },
         Err(error) => Observation::unavailable(SOURCE, io_reason(error.kind())),
@@ -496,20 +503,17 @@ fn parse_key_value_lines<'a>(
     Ok(values)
 }
 
-fn parse_io_bytes(content: &str) -> Result<(u64, u64), ParseError> {
-    let mut read_total = 0_u64;
-    let mut write_total = 0_u64;
-    let mut devices = 0_usize;
+fn parse_io_stat(content: &str) -> Result<Vec<IoDeviceCounters>, ParseError> {
+    let mut devices = std::collections::BTreeMap::<(u32, u32), IoDeviceCounters>::new();
     for line in content.lines() {
         let mut fields = line.split_whitespace();
         let device = fields.next().ok_or(ParseError)?;
         let (major, minor) = device.split_once(':').ok_or(ParseError)?;
-        if major.parse::<u32>().is_err() || minor.parse::<u32>().is_err() {
-            return Err(ParseError);
-        }
-
+        let major = major.parse::<u32>().map_err(|_| ParseError)?;
+        let minor = minor.parse::<u32>().map_err(|_| ParseError)?;
         let mut read_bytes = None;
         let mut write_bytes = None;
+
         for field in fields {
             let (key, value) = field.split_once('=').ok_or(ParseError)?;
             match key {
@@ -521,20 +525,30 @@ fn parse_io_bytes(content: &str) -> Result<(u64, u64), ParseError> {
                     &mut write_bytes,
                     value.parse::<u64>().map_err(|_| ParseError)?,
                 )?,
-                // io.stat also exposes operation and discard counters.
-                _ => {}
+                // io.stat also exposes operation/discard counters. Parse them,
+                // but retain per-device byte counters only.
+                "rios" | "wios" | "dbytes" | "dios" => {
+                    value.parse::<u64>().map_err(|_| ParseError)?;
+                }
+                _ => return Err(ParseError),
             }
         }
 
-        read_total = read_total.checked_add(read_bytes.ok_or(ParseError)?).ok_or(ParseError)?;
-        write_total = write_total.checked_add(write_bytes.ok_or(ParseError)?).ok_or(ParseError)?;
-        devices += 1;
+        let counters = IoDeviceCounters {
+            major,
+            minor,
+            read_bytes: read_bytes.ok_or(ParseError)?,
+            write_bytes: write_bytes.ok_or(ParseError)?,
+        };
+        if devices.insert((major, minor), counters).is_some() {
+            return Err(ParseError);
+        }
     }
 
-    if devices == 0 {
+    if devices.is_empty() {
         return Err(ParseError);
     }
-    Ok((read_total, write_total))
+    Ok(devices.into_values().collect())
 }
 
 fn parse_u64_scalar(content: &str) -> Result<u64, ParseError> {
@@ -602,18 +616,21 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_io_bytes_across_devices() {
-        let parsed = parse_io_bytes(
+    fn preserves_per_device_io_counters_without_unsafe_aggregation() {
+        let parsed = parse_io_stat(
             "8:0 rbytes=100 wbytes=200 rios=1 wios=2\n259:0 rbytes=300 wbytes=400 rios=3 wios=4\n",
         ).unwrap();
-        assert_eq!(parsed, (400, 600));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], IoDeviceCounters { major: 8, minor: 0, read_bytes: 100, write_bytes: 200 });
+        assert_eq!(parsed[1], IoDeviceCounters { major: 259, minor: 0, read_bytes: 300, write_bytes: 400 });
     }
 
     #[test]
-    fn rejects_malformed_or_overflowing_io_stats() {
-        assert!(parse_io_bytes("device rbytes=1 wbytes=2\n").is_err());
-        assert!(parse_io_bytes("8:0 rbytes=1\n").is_err());
-        assert!(parse_io_bytes("8:0 rbytes=18446744073709551615 wbytes=0\n8:1 rbytes=1 wbytes=0\n").is_err());
+    fn rejects_malformed_duplicate_and_unknown_io_stats() {
+        assert!(parse_io_stat("device rbytes=1 wbytes=2\n").is_err());
+        assert!(parse_io_stat("8:0 rbytes=1\n").is_err());
+        assert!(parse_io_stat("8:0 rbytes=1 wbytes=2\n8:0 rbytes=3 wbytes=4\n").is_err());
+        assert!(parse_io_stat("8:0 rbytes=1 wbytes=2 future=3\n").is_err());
     }
 
     #[test]
@@ -654,8 +671,10 @@ mod tests {
         assert_eq!(observed.memory_peak_bytes.state, EvidenceState::Unavailable);
         assert_eq!(observed.memory_peak_bytes.reason, Some("source-not-found"));
         assert_eq!(observed.cpu_usage_usec.value, Some(900));
-        assert_eq!(observed.io_read_bytes.value, Some(100));
-        assert_eq!(observed.io_write_bytes.value, Some(200));
+        assert_eq!(
+            observed.io_devices.value.as_ref().unwrap(),
+            &[IoDeviceCounters { major: 8, minor: 0, read_bytes: 100, write_bytes: 200 }]
+        );
     }
 
     #[cfg(unix)]
