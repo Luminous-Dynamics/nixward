@@ -104,6 +104,7 @@ pub enum AuthorityAction {
     Change,
     GuestRealize,
     NetworkActivate,
+    NetworkResolve,
     SecurityEnrollment,
 }
 
@@ -116,6 +117,7 @@ impl AuthorityAction {
             Self::Change => "change",
             Self::GuestRealize => "guest-realize",
             Self::NetworkActivate => "network-activate",
+            Self::NetworkResolve => "network-resolve",
             Self::SecurityEnrollment => "security-enrollment",
         }
     }
@@ -290,15 +292,35 @@ pub struct DetachedAuthoritySignature {
 /// Result returned only by successful cryptographic verification. It is not
 /// deserializable and therefore cannot be materialized from an untrusted JSON
 /// payload as an authority capability.
+/// Result returned only by successful cryptographic verification.
+///
+/// Fields are private so downstream code cannot construct or mutate verified
+/// authority claims. The private seal also prevents struct-literal construction
+/// outside this module. Callers receive read-only accessors and must still
+/// atomically consume the replay key at the privileged mutation boundary.
 #[derive(Debug, Clone)]
 pub struct VerifiedSignatureEvidence {
-    pub issuer: String,
-    pub signer_key_id: String,
-    pub evidence_blake3: String,
-    pub subject_blake3: String,
-    pub challenge_blake3: String,
-    pub replay_key: String,
-    pub claims: BTreeMap<String, String>,
+    issuer: String,
+    signer_key_id: String,
+    evidence_blake3: String,
+    subject_blake3: String,
+    challenge_blake3: String,
+    replay_key: String,
+    claims: BTreeMap<String, String>,
+    _verified: VerifiedSignatureSeal,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedSignatureSeal;
+
+impl VerifiedSignatureEvidence {
+    pub fn issuer(&self) -> &str { &self.issuer }
+    pub fn signer_key_id(&self) -> &str { &self.signer_key_id }
+    pub fn evidence_blake3(&self) -> &str { &self.evidence_blake3 }
+    pub fn subject_blake3(&self) -> &str { &self.subject_blake3 }
+    pub fn challenge_blake3(&self) -> &str { &self.challenge_blake3 }
+    pub fn replay_key(&self) -> &str { &self.replay_key }
+    pub fn claims(&self) -> &BTreeMap<String, String> { &self.claims }
 }
 
 pub struct AuthorityVerifier<'a> {
@@ -393,6 +415,8 @@ impl<'a> AuthorityVerifier<'a> {
         claims.insert("authority_action".into(), expected_action.as_str().into());
         claims.insert("authority_audience".into(), challenge.audience.clone());
         claims.insert("challenge_blake3".into(), challenge_blake3.clone());
+        claims.insert("challenge_holon_blake3".into(), challenge.holon_id.clone());
+        claims.insert("challenge_nonce_blake3".into(), challenge.nonce_blake3.clone());
         claims.insert("replay_key".into(), replay_key.clone());
         claims.insert("signature_algorithm".into(), "ed25519".into());
         Ok(VerifiedSignatureEvidence {
@@ -403,6 +427,7 @@ impl<'a> AuthorityVerifier<'a> {
             challenge_blake3,
             replay_key,
             claims,
+            _verified: VerifiedSignatureSeal,
         })
     }
 }
