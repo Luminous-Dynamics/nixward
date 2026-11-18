@@ -165,19 +165,19 @@ impl AuthorizedNetworkActivation {
     ) -> Result<Self, NetworkActivationError> {
         intent.validate()?;
         let digest = intent.digest_hex()?;
-        if evidence.subject_blake3 != digest {
+        if evidence.subject_blake3() != digest {
             return Err(NetworkActivationError::AuthoritySubjectMismatch);
         }
-        if evidence.claims.get("authority_action").map(String::as_str) != Some("network-activate") {
+        if evidence.claims().get("authority_action").map(String::as_str) != Some("network-activate") {
             return Err(NetworkActivationError::AuthorityActionMismatch);
         }
-        validate_digest(&evidence.evidence_blake3)?;
-        validate_digest(&evidence.replay_key)?;
+        validate_digest(evidence.evidence_blake3())?;
+        validate_digest(evidence.replay_key())?;
         Ok(Self {
             intent,
-            authority_evidence_blake3: evidence.evidence_blake3.clone(),
-            signer_key_id: evidence.signer_key_id.clone(),
-            replay_key: evidence.replay_key.clone(),
+            authority_evidence_blake3: evidence.evidence_blake3().to_owned(),
+            signer_key_id: evidence.signer_key_id().to_owned(),
+            replay_key: evidence.replay_key().to_owned(),
         })
     }
 }
@@ -376,20 +376,66 @@ pub enum NetworkActivationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authority_signature::{
+        AuthorityAction, AuthorityChallenge, AuthorityTrustPolicy, AuthorityVerifier,
+        DetachedAuthoritySignature, TrustedAuthorityKey, AUTHORITY_POLICY_KIND,
+        AUTHORITY_SCHEMA_VERSION, AUTHORITY_SIGNATURE_KIND,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
     use std::collections::BTreeMap;
 
-    fn evidence(subject: String) -> VerifiedSignatureEvidence {
-        let mut claims = BTreeMap::new();
-        claims.insert("authority_action".into(), "network-activate".into());
-        VerifiedSignatureEvidence {
-            issuer: "owner".into(),
-            signer_key_id: "owner-root".into(),
-            evidence_blake3: "aa".repeat(32),
-            subject_blake3: subject,
-            challenge_blake3: "bb".repeat(32),
-            replay_key: "cc".repeat(32),
-            claims,
-        }
+    fn evidence(subject: String, action: AuthorityAction) -> VerifiedSignatureEvidence {
+        let signing = SigningKey::from_bytes(&[7u8; 32]);
+        let key_id = "owner-root";
+        let holon_id = "22".repeat(32);
+        let challenge = AuthorityChallenge::new(
+            action,
+            subject.clone(),
+            holon_id.clone(),
+            "nixward-test",
+            [3u8; 32],
+            1_000_000,
+            30_000,
+        )
+        .unwrap();
+        let signature = signing.sign(&challenge.signing_bytes().unwrap());
+        let signed = DetachedAuthoritySignature {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            key_id: key_id.into(),
+            public_key_hex: signing
+                .verifying_key()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            signature_hex: signature
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            challenge,
+        };
+        let policy = AuthorityTrustPolicy {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_POLICY_KIND.into(),
+            policy_id: "network-activation-test-policy".into(),
+            keys: vec![TrustedAuthorityKey {
+                key_id: key_id.into(),
+                issuer: "test-owner".into(),
+                public_key_hex: signed.public_key_hex.clone(),
+                allowed_actions: vec![AuthorityAction::NetworkActivate, AuthorityAction::Change],
+                revoked: false,
+                claims: BTreeMap::new(),
+            }],
+            max_ttl_ms: 60_000,
+            allowed_audiences: vec!["nixward-test".into()],
+        };
+        AuthorityVerifier::new(&policy)
+            .unwrap()
+            .verify(&signed, action, &subject, &holon_id, 1_010_000)
+            .unwrap()
     }
 
     #[test]
@@ -402,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_capability_requires_network_activate_action() {
+    fn authorization_capability_requires_verified_network_activate_action() {
         let intent = NetworkActivationIntent {
             schema_version: 1,
             holon_id: "holon-a".into(),
@@ -419,11 +465,10 @@ mod tests {
             reasoning_authority: "none".into(),
         };
         let subject = intent.digest_hex().unwrap();
-        assert!(AuthorizedNetworkActivation::authorize(intent.clone(), &evidence(subject)).is_ok());
-        let mut wrong = evidence(intent.digest_hex().unwrap());
-        wrong
-            .claims
-            .insert("authority_action".into(), "change".into());
+        let valid = evidence(subject.clone(), AuthorityAction::NetworkActivate);
+        assert!(AuthorizedNetworkActivation::authorize(intent.clone(), &valid).is_ok());
+
+        let wrong = evidence(subject, AuthorityAction::Change);
         assert!(matches!(
             AuthorizedNetworkActivation::authorize(intent, &wrong),
             Err(NetworkActivationError::AuthorityActionMismatch)
