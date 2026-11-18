@@ -328,3 +328,36 @@ This proposal does not claim:
 - OWASP SSRF Prevention Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
 - Envoy Dynamic Forward Proxy DNS cache: https://www.envoyproxy.io/docs/envoy/v1.40.0/api-v3/extensions/common/dynamic_forward_proxy/v3/dns_cache.proto
 - Cilium DNS-based policy: https://docs.cilium.io/en/stable/security/dns/
+
+
+## 13. Industry semantics reviewed on 2026-11-18
+
+The comparison is not that Envoy or Cilium lacks DNS security. Both have mature mechanisms and important trade-offs PEAB must model.
+
+### Envoy Dynamic Forward Proxy
+
+Envoy resolves asynchronously, can use the DNS record TTL with a configured minimum refresh interval (documented default 5 seconds), supports a resolver timeout, host-cache bounds and pending-request circuit breakers, and can filter resolved addresses. Its TLS integration can set SNI and verify the upstream SAN against the resolved hostname.
+
+A critical semantic: if a refresh returns only addresses excluded by `resolved_address_filter`, Envoy treats resolution as failed and retains the previously resolved host entry. This is documented behavior, not automatically a vulnerability. It makes the stale-answer transition a mandatory PEAB test: determine whether an older cached address remains usable, whether active connections survive, and how expiry/host removal interacts with a request.
+
+### Cilium FQDN policy
+
+Cilium obtains IPs by observing DNS proxy responses, caches them with DNS TTL semantics and turns matching names into L3 CIDR-like policy entries, which can be combined with L4 port restrictions. The threat model explicitly trusts the intercepted DNS responses from configured cluster DNS servers. Documentation also notes that IP observations from multiple pods managed by the Cilium instance can be used for the matching domain. This is a workload-policy learning model, not a per-HTTP-request signed resolution lease.
+
+Cilium's conntrack lifecycle is another important distinction: expired DNS entries may remain deferred while connection tracking determines whether an existing flow still uses them. Existing connections can remain allowed; a new connection after expiry requires refreshed DNS state. PEAB should measure both existing-flow and new-flow behavior around TTL expiry and DNS-proxy/agent restart.
+
+### What the proposed composition should test differently
+
+- Scope each lease to an exact workload identity, parent capability, hostname, port, policy generation and one logical HTTP hop.
+- Carry the same complete A/AAAA snapshot into both Prism's `resolve_to_addrs` pin and Nixward's exact IP:port cgroup rule.
+- Expire on the earliest of resolver validity, parent-authority expiry, Prism capability expiry and the local policy maximum. Envoy's minimum DNS refresh interval is not a substitute for a per-request lease expiry.
+- Require a fresh lease on each redirect or retry; do not inherit the first hop's IP set or trust context.
+- Keep both existing-flow and new-flow semantics explicit: a kernel cgroup lease is intended to bound new socket admission; it does not terminate an already established socket by itself. If the policy requires revocation of existing sessions, that needs a separate, tested connection teardown mechanism.
+
+References:
+- Envoy v1.40.0 DNS cache: https://www.envoyproxy.io/docs/envoy/v1.40.0/api-v3/extensions/common/dynamic_forward_proxy/v3/dns_cache.proto
+- Envoy HTTP dynamic forward proxy architecture: https://www.envoyproxy.io/docs/envoy/v1.40.0/intro/arch_overview/http/http_proxy
+- Cilium DNS policy and trusted DNS assumption: https://docs.cilium.io/en/stable/security/dns/
+- Cilium Layer 7 DNS proxy / FQDN policy: https://docs.cilium.io/en/stable/security/policy/layer7/
+- Cilium FQDN cache / conntrack expiry behavior: https://docs.cilium.io/en/latest/contributing/development/debugging/
+- OWASP SSRF guidance: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
