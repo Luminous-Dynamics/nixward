@@ -771,7 +771,7 @@ mod tests {
             audience,
             nonce_entropy,
             issued_at_ms,
-            30_000,
+            2_000,
         )
         .unwrap();
         let signature = signing.sign(&challenge.signing_bytes().unwrap());
