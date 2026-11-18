@@ -412,14 +412,17 @@ mod tests {
         (policy, capability, parent_lease)
     }
 
-    fn lease(parent_lease: &NetworkCapabilityLease) -> NetworkResolutionLeaseV1 {
+    fn lease(
+        capability: &NetworkCapability,
+        parent_lease: &NetworkCapabilityLease,
+    ) -> NetworkResolutionLeaseV1 {
         NetworkResolutionLeaseV1 {
             schema_version: 1,
             lease_id: "00112233445566778899aabbccddeeff".into(),
             logical_request_id: "102132435465768798a9bacbdcedfe0f".into(),
             redirect_hop: 0,
             holon_id: "holon-prism".into(),
-            workload_blake3: parent_lease.capability_blake3.clone(),
+            workload_blake3: capability.workload_blake3.clone(),
             network_policy_blake3: parent_lease.policy_blake3.clone(),
             parent_capability_blake3: parent_lease.capability_blake3.clone(),
             parent_authority_lease_blake3: parent_lease.digest_hex().unwrap(),
@@ -446,8 +449,8 @@ mod tests {
 
     #[test]
     fn valid_lease_is_structurally_canonical() {
-        let (_, _, parent_lease) = parent();
-        let lease = lease(&parent_lease);
+        let (_, capability, parent_lease) = parent();
+        let lease = lease(&capability, &parent_lease);
         assert!(lease.validate_structure().is_ok());
         assert_eq!(lease.digest_hex().unwrap().len(), 64);
     }
@@ -455,7 +458,7 @@ mod tests {
     #[test]
     fn lease_binds_exact_parent_policy_capability_and_authority_lease() {
         let (policy, capability, parent_lease) = parent();
-        let lease = lease(&parent_lease);
+        let lease = lease(&capability, &parent_lease);
         assert!(
             lease
                 .validate_parent_binding(&policy, &capability, &parent_lease, 112)
@@ -467,21 +470,21 @@ mod tests {
     fn lease_rejects_hostname_port_workload_and_generation_widening() {
         let (policy, capability, parent_lease) = parent();
 
-        let mut wrong_host = lease(&parent_lease);
+        let mut wrong_host = lease(&capability, &parent_lease);
         wrong_host.hostname = "attacker.example.org".into();
         assert_eq!(
             wrong_host.validate_parent_binding(&policy, &capability, &parent_lease, 112),
             Err(NetworkResolutionLeaseError::ParentScopeMismatch)
         );
 
-        let mut wrong_port = lease(&parent_lease);
+        let mut wrong_port = lease(&capability, &parent_lease);
         wrong_port.port = 8443;
         assert_eq!(
             wrong_port.validate_parent_binding(&policy, &capability, &parent_lease, 112),
             Err(NetworkResolutionLeaseError::ParentScopeMismatch)
         );
 
-        let mut wrong_workload = lease(&parent_lease);
+        let mut wrong_workload = lease(&capability, &parent_lease);
         wrong_workload.workload_blake3 = "66".repeat(32);
         assert_eq!(
             wrong_workload.validate_parent_binding(&policy, &capability, &parent_lease, 112),
@@ -493,34 +496,34 @@ mod tests {
     fn lease_rejects_expiry_beyond_dns_validity_or_parent_lease() {
         let (policy, capability, parent_lease) = parent();
 
-        let mut beyond_dns = lease(&parent_lease);
+        let mut beyond_dns = lease(&capability, &parent_lease);
         beyond_dns.expires_at_unix = 141;
         assert_eq!(
             beyond_dns.validate_structure(),
             Err(NetworkResolutionLeaseError::InvalidTimeWindow)
         );
 
-        let mut beyond_parent = lease(&parent_lease);
-        beyond_parent.expires_at_unix = 201;
-        beyond_parent.resolver_valid_until_unix = 240;
+        let mut short_parent_lease = parent_lease.clone();
+        short_parent_lease.expires_at_unix = 114;
+        let beyond_parent = lease(&capability, &short_parent_lease);
         assert_eq!(
-            beyond_parent.validate_parent_binding(&policy, &capability, &parent_lease, 112),
+            beyond_parent.validate_parent_binding(&policy, &capability, &short_parent_lease, 112),
             Err(NetworkResolutionLeaseError::ParentLeaseTimeMismatch)
         );
     }
 
     #[test]
     fn lease_rejects_unsorted_duplicate_or_empty_address_sets() {
-        let (_, _, parent_lease) = parent();
+        let (_, capability, parent_lease) = parent();
 
-        let mut empty = lease(&parent_lease);
+        let mut empty = lease(&capability, &parent_lease);
         empty.addresses.clear();
         assert_eq!(
             empty.validate_structure(),
             Err(NetworkResolutionLeaseError::InvalidAddressSet)
         );
 
-        let mut duplicate = lease(&parent_lease);
+        let mut duplicate = lease(&capability, &parent_lease);
         duplicate.addresses = vec![
             "93.184.216.34".parse().unwrap(),
             "93.184.216.34".parse().unwrap(),
@@ -530,7 +533,7 @@ mod tests {
             Err(NetworkResolutionLeaseError::InvalidAddressSet)
         );
 
-        let mut unsorted = lease(&parent_lease);
+        let mut unsorted = lease(&capability, &parent_lease);
         unsorted.addresses.reverse();
         assert_eq!(
             unsorted.validate_structure(),
@@ -540,23 +543,23 @@ mod tests {
 
     #[test]
     fn lease_rejects_noncanonical_hostnames_and_non_tcp_transports() {
-        let (_, _, parent_lease) = parent();
+        let (_, capability, parent_lease) = parent();
 
-        let mut uppercase = lease(&parent_lease);
+        let mut uppercase = lease(&capability, &parent_lease);
         uppercase.hostname = "API.example.org".into();
         assert_eq!(
             uppercase.validate_structure(),
             Err(NetworkResolutionLeaseError::InvalidHostname)
         );
 
-        let mut wildcard = lease(&parent_lease);
+        let mut wildcard = lease(&capability, &parent_lease);
         wildcard.hostname = "*.example.org".into();
         assert_eq!(
             wildcard.validate_structure(),
             Err(NetworkResolutionLeaseError::InvalidHostname)
         );
 
-        let mut udp = lease(&parent_lease);
+        let mut udp = lease(&capability, &parent_lease);
         udp.transport = NetworkProtocol::Udp;
         assert_eq!(
             udp.validate_structure(),
@@ -567,7 +570,7 @@ mod tests {
     #[test]
     fn lease_fails_closed_at_and_after_expiry() {
         let (policy, capability, parent_lease) = parent();
-        let lease = lease(&parent_lease);
+        let lease = lease(&capability, &parent_lease);
         assert_eq!(
             lease.validate_parent_binding(&policy, &capability, &parent_lease, 115),
             Err(NetworkResolutionLeaseError::Expired)
