@@ -216,12 +216,12 @@ impl AuthorityChallenge {
         let expires_at_ms = issued_at_ms
             .checked_add(ttl_ms)
             .ok_or(AuthorityError::InvalidFreshness)?;
-        let mut nonce = blake3::Hasher::new();
-        nonce.update(CHALLENGE_DOMAIN);
-        nonce.update(&nonce_entropy);
-        nonce.update(subject_blake3.as_bytes());
-        nonce.update(holon_id.as_bytes());
-        nonce.update(action.as_str().as_bytes());
+        let nonce_blake3 = Self::nonce_blake3(
+            action,
+            &subject_blake3,
+            &holon_id,
+            nonce_entropy,
+        )?;
         Ok(Self {
             schema_version: AUTHORITY_SCHEMA_VERSION,
             kind: AUTHORITY_CHALLENGE_KIND.into(),
@@ -229,10 +229,31 @@ impl AuthorityChallenge {
             subject_blake3,
             holon_id,
             audience: audience.into(),
-            nonce_blake3: nonce.finalize().to_hex().to_string(),
+            nonce_blake3,
             issued_at_ms,
             expires_at_ms,
         })
+    }
+
+    /// Derive the deterministic nonce digest for one exact action, subject,
+    /// Holon and entropy value. Lease protocols can use this to bind their
+    /// owner-generated one-shot nonce into the detached signature challenge.
+    pub fn nonce_blake3(
+        action: AuthorityAction,
+        subject_blake3: &str,
+        holon_id: &str,
+        nonce_entropy: [u8; 32],
+    ) -> Result<String, AuthorityError> {
+        if !valid_blake3_hex(subject_blake3) || !valid_blake3_hex(holon_id) {
+            return Err(AuthorityError::InvalidDigest);
+        }
+        let mut nonce = blake3::Hasher::new();
+        nonce.update(CHALLENGE_DOMAIN);
+        nonce.update(&nonce_entropy);
+        nonce.update(subject_blake3.as_bytes());
+        nonce.update(holon_id.as_bytes());
+        nonce.update(action.as_str().as_bytes());
+        Ok(nonce.finalize().to_hex().to_string())
     }
 
     /// Canonical signing payload. This intentionally does not use serde JSON so
