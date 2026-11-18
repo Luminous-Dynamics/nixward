@@ -23,8 +23,8 @@ This proposal reuses existing Nixward work:
 
 | Existing component | Current role | Boundary that remains |
 |---|---|---|
-| `src/network_covenant.rs` | Typed `WorkloadIdentity`, schema-v2 `NetworkCapability` with owner-bound `AddressScopePolicy`, `NetworkPolicyPlan`, expiring `NetworkCapabilityLease` | Parent address scope is explicit; trusted resolver, lease issuer and runtime map writer remain unimplemented |
-| `src/network_enforcement.rs` | Compiles workload policy into a fail-closed cgroup-BPF enforcement plan; requires kernel feature probe and exact cgroup binding | `DestinationSet::Hostnames` is explicitly unresolved until an authenticated DNS/resolution covenant exists |
+| `src/network_covenant.rs` | Typed `WorkloadIdentity`, schema-v2 `NetworkCapability` with owner-bound `AddressScopePolicy`, `NetworkPolicyPlan`, expiring `NetworkCapabilityLease` | Parent address scope is explicit; production trusted resolver, resolver signing service and runtime map writer remain unimplemented |
+| `src/authority_signature.rs` | Ed25519 `AuthorityVerifier`, explicit signer/action/audience trust policy, `NetworkResolve` action and sealed, read-only `VerifiedSignatureEvidence` | Verification primitive exists; resolver key provisioning, custody, distribution, rotation/revocation operations and service IPC are not deployed |
 | `src/network_runtime_lab.rs` | Validates an isolated runtime report with 14 required cases and emits a lab attestation | Lab attestation is not target-host activation evidence |
 | `tests/network-runtime-lab/` | Disposable NixOS VM; test-only cgroup-BPF object; real IPv4/IPv6 TCP/UDP allow/deny, lease expiry, generation swap, cgroup binding, stale replay and attach-failure cases | The current test BPF program is a small port/mode/generation/lease laboratory, not a production implementation of the typed CIDR/hostname policy compiler |
 | `src/network_activation.rs` | Exact owner-authorized activation intent and post-activation receipt contract | The existence of the receipt type does not itself prove that a production target has attached the reviewed program |
@@ -135,7 +135,7 @@ The lease binds:
 
 The lease intentionally excludes URL path, query, credentials, request/response bodies, cookies, Authorization headers, and other payload content. A public IP and hostname may still be sensitive operational metadata; storage/telemetry should use a digest or short-lived encrypted record where possible.
 
-The wire object is **not authority by itself**. The broker accepts it only with authenticated IPC caller identity and a verified owner/delegation authorization for the exact parent capability. Any detached signature/evidence envelope must bind the canonical lease bytes and the parent authority evidence. A BLAKE3 digest alone does not prove who issued a lease.
+The wire object is **not authority by itself**. The pure `AuthorizedNetworkResolutionLease` wrapper accepts it only with `VerifiedSignatureEvidence` produced by `AuthorityVerifier`, binding the canonical lease digest to the trusted resolver key ID, `network-resolve` action, dedicated audience, derived Holon identity and lease nonce. The eventual broker must additionally authenticate IPC caller identity, verify owner/delegation authorization for the exact parent capability, and validate the exact cgroup/workload binding. A BLAKE3 digest alone does not prove who issued a lease.
 
 ### 5.1 Lease lifetime
 
@@ -212,7 +212,7 @@ A cgroup `connect4/connect6` hook is an admission/connection-attempt observation
 
 Network telemetry remains payload-free. Avoid storing URL paths, query strings, cookies, headers, bodies or raw user identifiers in the shared ledger. The existing five-minute telemetry time bucket is appropriate for general monitoring, but a bounded short-lived incident correlation record may need a separate, access-controlled retention policy; do not weaken the default telemetry policy globally.
 
-Hash chains and digests establish integrity/linkage, not issuer authenticity. Signed attestations require a concrete signing/verifying provider, key custody, trust policy, rotation/revocation and offline verifier. Production activation still requires the existing exact owner-authorized Nixward activation flow.
+Hash chains and digests establish integrity/linkage, not issuer authenticity. A shared Ed25519 verifier and sealed evidence type now exist, and the pure resolution-lease wrapper accepts only verifier-produced evidence for the exact lease subject, resolver key, network-resolve action, audience, Holon and nonce. This does not deploy a resolver signing service or solve signer key custody, provisioning, rotation/revocation operations, authenticated broker IPC, or offline trust-policy distribution. Production activation still requires the existing exact owner-authorized Nixward activation flow.
 
 ## 8. Security and conformance corpus
 
