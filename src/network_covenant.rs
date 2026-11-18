@@ -10,14 +10,16 @@
 use crate::software_ingress::SoftwareTrustClass;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
-const WORKLOAD_DOMAIN: &[u8] = b"symthaea:nixward:workload-identity:v1\0";
-const CAPABILITY_DOMAIN: &[u8] = b"symthaea:nixward:network-capability:v1\0";
-const POLICY_DOMAIN: &[u8] = b"symthaea:nixward:network-policy:v1\0";
-const LEASE_DOMAIN: &[u8] = b"symthaea:nixward:network-capability-lease:v1\0";
+const WORKLOAD_DOMAIN: &[u8] = b"symthaea:nixward:workload-identity:v2\0";
+const CAPABILITY_DOMAIN: &[u8] = b"symthaea:nixward:network-capability:v2\0";
+const POLICY_DOMAIN: &[u8] = b"symthaea:nixward:network-policy:v2\0";
+const LEASE_DOMAIN: &[u8] = b"symthaea:nixward:network-capability-lease:v2\0";
+const ADDRESS_SCOPE_DOMAIN: &[u8] = b"symthaea:nixward:address-scope:v1\0";
 
-pub const NETWORK_COVENANT_SCHEMA_VERSION: u32 = 1;
+pub const NETWORK_COVENANT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -96,6 +98,185 @@ impl DestinationSet {
                 }
                 Ok(())
             }
+        }
+    }
+}
+
+
+/// Owner-authorized classification of addresses obtained for a hostname capability.
+///
+/// The scope is part of the parent capability digest. A resolution lease may
+/// narrow it, never select or broaden it. Hostname capabilities must declare
+/// one of these policies; a hostname string alone is never an IP policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AddressScopePolicy {
+    /// Permit only conservative public-unicast destinations.
+    PublicUnicastOnly,
+    /// Permit addresses inside this exact, canonical, sorted CIDR set.
+    /// Private/LAN ranges are usable only when explicitly listed here.
+    ExplicitCidrs { values: Vec<String> },
+}
+
+impl AddressScopePolicy {
+    pub fn validate(&self) -> Result<(), NetworkCovenantError> {
+        if let Self::ExplicitCidrs { values } = self {
+            if values.is_empty() {
+                return Err(NetworkCovenantError::InvalidDestination(
+                    "explicit address scope requires at least one CIDR".into(),
+                ));
+            }
+            let mut previous: Option<&str> = None;
+            for value in values {
+                if parse_canonical_cidr(value).is_none() {
+                    return Err(NetworkCovenantError::InvalidDestination(format!(
+                        "address-scope CIDR is invalid, non-canonical, unaligned, or too broad: {value}"
+                    )));
+                }
+                if previous.is_some_and(|last| last >= value.as_str()) {
+                    return Err(NetworkCovenantError::InvalidDestination(
+                        "address-scope CIDRs must be sorted and unique".into(),
+                    ));
+                }
+                previous = Some(value);
+            }
+        }
+        Ok(())
+    }
+
+    /// Digest the exact owner-authorized scope object using its own domain.
+    pub fn digest_hex(&self) -> Result<String, NetworkCovenantError> {
+        self.validate()?;
+        hash_json(ADDRESS_SCOPE_DOMAIN, self)
+    }
+
+    /// Check one address against the selected scope and mandatory exclusions.
+    pub fn permits_address(&self, address: IpAddr) -> bool {
+        if is_hard_denied_address(address) {
+            return false;
+        }
+        match self {
+            Self::PublicUnicastOnly => is_public_unicast(address),
+            Self::ExplicitCidrs { values } => values.iter().any(|cidr| {
+                parse_canonical_cidr(cidr)
+                    .is_some_and(|(network, prefix)| ip_in_prefix(address, network, prefix))
+            }),
+        }
+    }
+
+    /// A lease is accepted only when every resolved address fits the scope.
+    pub fn permits_all(&self, addresses: &[IpAddr]) -> bool {
+        !addresses.is_empty()
+            && addresses
+                .iter()
+                .copied()
+                .all(|address| self.permits_address(address))
+    }
+}
+
+/// Parse canonical CIDRs only. Host bits must be zero, prefix lengths must be
+/// canonical decimal, and /0 is deliberately forbidden.
+fn parse_canonical_cidr(value: &str) -> Option<(IpAddr, u8)> {
+    let (address_text, prefix_text) = value.split_once('/')?;
+    let address = address_text.parse::<IpAddr>().ok()?;
+    let prefix = prefix_text.parse::<u8>().ok()?;
+    if prefix == 0 || format!("{address}/{prefix}") != value {
+        return None;
+    }
+    let aligned = match address {
+        IpAddr::V4(ip) if prefix <= 32 => {
+            let mask = u32::MAX << u32::from(32 - prefix);
+            (u32::from(ip) & mask) == u32::from(ip)
+        }
+        IpAddr::V6(ip) if prefix <= 128 => {
+            let mask = u128::MAX << u32::from(128 - prefix);
+            (u128::from(ip) & mask) == u128::from(ip)
+        }
+        _ => false,
+    };
+    aligned.then_some((address, prefix))
+}
+
+fn ip_in_prefix(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) if prefix <= 32 => {
+            let mask = u32::MAX << u32::from(32 - prefix);
+            (u32::from(address) & mask) == u32::from(network)
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) if prefix <= 128 => {
+            let mask = u128::MAX << u32::from(128 - prefix);
+            (u128::from(address) & mask) == u128::from(network)
+        }
+        _ => false,
+    }
+}
+
+fn ipv4_in_prefix(address: Ipv4Addr, network: Ipv4Addr, prefix: u8) -> bool {
+    ip_in_prefix(IpAddr::V4(address), IpAddr::V4(network), prefix)
+}
+
+fn ipv6_in_prefix(address: Ipv6Addr, network: Ipv6Addr, prefix: u8) -> bool {
+    ip_in_prefix(IpAddr::V6(address), IpAddr::V6(network), prefix)
+}
+
+/// Addresses that are never accepted as hostname egress destinations, even
+/// under an explicit LAN CIDR scope.
+fn is_hard_denied_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                || ipv4_in_prefix(ip, Ipv4Addr::new(0, 0, 0, 0), 8)
+                || ipv4_in_prefix(ip, Ipv4Addr::new(240, 0, 0, 0), 4)
+                || ip == Ipv4Addr::new(169, 254, 169, 254)
+                || ip == Ipv4Addr::new(100, 100, 100, 200)
+                || ip == Ipv4Addr::new(168, 63, 129, 16)
+        }
+        IpAddr::V6(ip) => {
+            ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ip.is_unicast_link_local()
+                || ip == "fd00:ec2::254".parse::<Ipv6Addr>().expect("constant IPv6 address")
+                || ipv6_in_prefix(ip, "::ffff:0:0".parse().expect("constant IPv6 prefix"), 96)
+                || ipv6_in_prefix(ip, "64:ff9b::".parse().expect("constant IPv6 prefix"), 96)
+                || ipv6_in_prefix(ip, "64:ff9b:1::".parse().expect("constant IPv6 prefix"), 48)
+                || ipv6_in_prefix(ip, "100::".parse().expect("constant IPv6 prefix"), 64)
+                || ipv6_in_prefix(ip, "100:0:0:1::".parse().expect("constant IPv6 prefix"), 64)
+                || ipv6_in_prefix(ip, "2001:db8::".parse().expect("constant IPv6 prefix"), 32)
+                || ipv6_in_prefix(ip, "3fff::".parse().expect("constant IPv6 prefix"), 20)
+        }
+    }
+}
+
+/// Conservative public-unicast classification. Some more-specific globally
+/// reachable allocations inside special-purpose parent aggregates are blocked
+/// deliberately rather than creating resolver-policy exceptions.
+fn is_public_unicast(address: IpAddr) -> bool {
+    if is_hard_denied_address(address) {
+        return false;
+    }
+    match address {
+        IpAddr::V4(ip) => {
+            !ip.is_private()
+                && !ipv4_in_prefix(ip, Ipv4Addr::new(100, 64, 0, 0), 10)
+                && !ipv4_in_prefix(ip, Ipv4Addr::new(192, 0, 0, 0), 24)
+                && !ipv4_in_prefix(ip, Ipv4Addr::new(192, 88, 99, 0), 24)
+                && !ipv4_in_prefix(ip, Ipv4Addr::new(198, 18, 0, 0), 15)
+        }
+        IpAddr::V6(ip) => {
+            !ip.is_unique_local()
+                && !ipv6_in_prefix(ip, "fec0::".parse().expect("constant IPv6 prefix"), 10)
+                && !ipv6_in_prefix(ip, "::".parse().expect("constant IPv6 prefix"), 96)
+                && !ipv6_in_prefix(ip, "2001::".parse().expect("constant IPv6 prefix"), 23)
+                && !ipv6_in_prefix(ip, "2001:2::".parse().expect("constant IPv6 prefix"), 48)
+                && !ipv6_in_prefix(ip, "2001:20::".parse().expect("constant IPv6 prefix"), 28)
+                && !ipv6_in_prefix(ip, "2002::".parse().expect("constant IPv6 prefix"), 16)
+                && !ipv6_in_prefix(ip, "5f00::".parse().expect("constant IPv6 prefix"), 16)
         }
     }
 }
@@ -226,6 +407,8 @@ pub struct NetworkCapability {
     pub direction: NetworkDirection,
     pub protocol: NetworkProtocol,
     pub destinations: DestinationSet,
+    /// Required for hostname destinations and included in the capability digest.
+    pub address_scope: Option<AddressScopePolicy>,
     pub ports: Vec<PortRange>,
     pub justification: String,
 }
@@ -238,6 +421,20 @@ impl NetworkCapability {
         validate_token("capability id", &self.capability_id, 256)?;
         validate_digest(&self.workload_blake3)?;
         self.destinations.validate()?;
+        match (&self.destinations, &self.address_scope) {
+            (DestinationSet::Hostnames { .. }, Some(scope)) => scope.validate()?,
+            (DestinationSet::Hostnames { .. }, None) => {
+                return Err(NetworkCovenantError::InvalidDestination(
+                    "hostname capabilities require an explicit owner-authorized address scope".into(),
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(NetworkCovenantError::InvalidDestination(
+                    "address_scope is only valid for hostname destinations".into(),
+                ));
+            }
+            (_, None) => {}
+        }
         if matches!(self.protocol, NetworkProtocol::Icmp) && !self.ports.is_empty() {
             return Err(NetworkCovenantError::InvalidPortRange(
                 "ICMP capability may not declare ports".into(),
@@ -539,6 +736,7 @@ mod tests {
             destinations: DestinationSet::Hostnames {
                 values: vec!["backup.example".into()],
             },
+            address_scope: Some(AddressScopePolicy::PublicUnicastOnly),
             ports: vec![PortRange { from: 443, to: 443 }],
             justification: "encrypted owner-authorized backup transport".into(),
         };
@@ -546,6 +744,88 @@ mod tests {
         assert_eq!(policy.reasoning_authority, "none");
         assert_eq!(policy.host_ingress_default, "deny");
         assert_eq!(policy.digest_hex().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn hostname_capabilities_require_an_explicit_owner_address_scope() {
+        let w = workload();
+        let mut capability = NetworkCapability {
+            schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
+            capability_id: "backup-egress".into(),
+            workload_blake3: w.digest_hex().unwrap(),
+            direction: NetworkDirection::Egress,
+            protocol: NetworkProtocol::Tcp,
+            destinations: DestinationSet::Hostnames {
+                values: vec!["backup.example".into()],
+            },
+            address_scope: None,
+            ports: vec![PortRange { from: 443, to: 443 }],
+            justification: "owner-approved backup".into(),
+        };
+        assert!(matches!(
+            capability.validate(),
+            Err(NetworkCovenantError::InvalidDestination(_))
+        ));
+
+        capability.address_scope = Some(AddressScopePolicy::PublicUnicastOnly);
+        assert!(capability.validate().is_ok());
+
+        capability.destinations = DestinationSet::Cidrs {
+            values: vec!["192.168.0.0/16".into()],
+        };
+        assert!(matches!(
+            capability.validate(),
+            Err(NetworkCovenantError::InvalidDestination(_))
+        ));
+    }
+
+    #[test]
+    fn public_unicast_scope_rejects_special_ranges_and_mixed_answer_sets() {
+        let scope = AddressScopePolicy::PublicUnicastOnly;
+        assert!(scope.permits_address("93.184.216.34".parse().unwrap()));
+        assert!(scope.permits_address("2606:4700:4700::1111".parse().unwrap()));
+
+        for address in [
+            "0.1.2.3", "10.0.0.1", "100.64.0.1", "127.0.0.1",
+            "169.254.1.1", "169.254.169.254", "172.16.0.1",
+            "192.0.0.9", "192.0.2.1", "192.88.99.1", "192.168.1.1",
+            "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1",
+            "240.0.0.1", "255.255.255.255", "::", "::1", "::ffff:8.8.8.8",
+            "64:ff9b::808:808", "64:ff9b:1::1", "100::1", "2001::1",
+            "2001:2::1", "2001:db8::1", "2002::1", "3fff::1", "5f00::1",
+            "fc00::1", "fe80::1", "ff02::1"
+        ] {
+            let parsed = address.parse::<IpAddr>().unwrap();
+            assert!(!scope.permits_address(parsed), "unexpectedly allowed {address}");
+        }
+
+        assert!(!scope.permits_all(&[
+            "93.184.216.34".parse().unwrap(),
+            "10.0.0.1".parse().unwrap()
+        ]));
+    }
+
+    #[test]
+    fn explicit_cidr_scope_is_canonical_and_narrow() {
+        let scope = AddressScopePolicy::ExplicitCidrs {
+            values: vec!["192.168.0.0/16".into(), "fd12:3456::/32".into()],
+        };
+        assert!(scope.validate().is_ok());
+        assert!(scope.permits_address("192.168.1.10".parse().unwrap()));
+        assert!(scope.permits_address("fd12:3456::10".parse().unwrap()));
+        assert!(!scope.permits_address("10.0.0.1".parse().unwrap()));
+        assert!(!AddressScopePolicy::ExplicitCidrs {
+            values: vec!["169.254.0.0/16".into()]
+        }.permits_address("169.254.169.254".parse().unwrap()));
+
+        for values in [
+            vec![],
+            vec!["0.0.0.0/0".into()],
+            vec!["192.168.1.1/24".into()],
+            vec!["192.168.0.0/16".into(), "10.0.0.0/8".into()]
+        ] {
+            assert!(AddressScopePolicy::ExplicitCidrs { values }.validate().is_err());
+        }
     }
 
     #[test]

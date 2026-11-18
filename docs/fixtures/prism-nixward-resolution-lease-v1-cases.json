@@ -346,6 +346,46 @@
         "value": "missing application attempt id"
       },
       "oracle": "record as unmatched metadata; never fabricate application peer/TLS evidence"
+    },
+    {
+      "id": "LEASE-031",
+      "family": "address_scope",
+      "title": "private answer under public-unicast-only parent",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "10.0.0.8"
+        ]
+      },
+      "oracle": "parent-bound public-unicast scope rejects the lease; no kernel generation may include the private address"
+    },
+    {
+      "id": "LEASE-032",
+      "family": "address_scope",
+      "title": "address-scope digest substitution",
+      "operation": "deny",
+      "mutation": {
+        "path": "address_policy_blake3",
+        "value": "a digest not equal to the parent capability scope digest"
+      },
+      "oracle": "lease is rejected unless its scope digest exactly matches the owner-authorized parent NetworkCapability"
+    },
+    {
+      "id": "LEASE-033",
+      "family": "address_scope",
+      "title": "explicit LAN CIDR is narrower than private address space",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "10.0.0.1"
+        ],
+        "parent_address_scope": [
+          "192.168.0.0/16"
+        ]
+      },
+      "oracle": "private addresses are permitted only inside the exact owner-authorized CIDR set"
     }
   ]
 }

@@ -23,7 +23,7 @@ This proposal reuses existing Nixward work:
 
 | Existing component | Current role | Boundary that remains |
 |---|---|---|
-| `src/network_covenant.rs` | Typed `WorkloadIdentity`, `NetworkCapability`, `NetworkPolicyPlan`, expiring `NetworkCapabilityLease` | The current lease does not carry a DNS answer snapshot or resolved socket set |
+| `src/network_covenant.rs` | Typed `WorkloadIdentity`, schema-v2 `NetworkCapability` with owner-bound `AddressScopePolicy`, `NetworkPolicyPlan`, expiring `NetworkCapabilityLease` | Parent address scope is explicit; trusted resolver, lease issuer and runtime map writer remain unimplemented |
 | `src/network_enforcement.rs` | Compiles workload policy into a fail-closed cgroup-BPF enforcement plan; requires kernel feature probe and exact cgroup binding | `DestinationSet::Hostnames` is explicitly unresolved until an authenticated DNS/resolution covenant exists |
 | `src/network_runtime_lab.rs` | Validates an isolated runtime report with 14 required cases and emits a lab attestation | Lab attestation is not target-host activation evidence |
 | `tests/network-runtime-lab/` | Disposable NixOS VM; test-only cgroup-BPF object; real IPv4/IPv6 TCP/UDP allow/deny, lease expiry, generation swap, cgroup binding, stale replay and attach-failure cases | The current test BPF program is a small port/mode/generation/lease laboratory, not a production implementation of the typed CIDR/hostname policy compiler |
@@ -59,7 +59,7 @@ The bridge must not work around this by silently resolving a hostname in an untr
 7. Which kernel generation contains that exact allow-set?
 8. Did Prism actually connect to a peer in the same set and validate the original hostname's TLS identity?
 
-**Important:** the current `NetworkCapability` hostnames variant carries names, not an explicit address-classification policy. Before a production hostname lease is possible, the parent policy must gain an explicit address scope (for example, public-unicast-only or an explicit approved CIDR set) and a versioned resolver policy. Do not infer that `Hostnames` implicitly means globally reachable IP addresses.
+**Parent address scope is now represented in the Network Covenant schema v2.** A `NetworkCapability` with `DestinationSet::Hostnames` must carry an explicit `AddressScopePolicy`: `PublicUnicastOnly` or `ExplicitCidrs`. The scope participates in the parent capability and policy digests; hostname capabilities without a scope fail validation. `NetworkResolutionLeaseV1::validate_parent_binding` requires `address_policy_blake3` to match that exact parent scope and checks every resolved A/AAAA address against it. The pure model does not itself resolve DNS, authenticate a resolver, or implement the cgroup map writer.
 
 ## 4. Authority model and trust boundaries
 
@@ -368,3 +368,17 @@ References:
 Symthaea Browser's URL preflight and CDP executor are not Chromium network enforcement. A separate Symthaea draft, [PR #12789](https://github.com/Luminous-Dynamics/symthaea/pull/12789), now documents the browser-specific boundary and a 12-case test plan for redirects, subresources, service workers, WebSockets/WebTransport, UDP/WebRTC/QUIC, alternate DNS and explicit LAN navigation. Those cases are separate from Prism's HTTP-hop lease and remain unrun.
 
 The Nixward resolver lease proposed here is scoped first to Prism's HTTP(S) transport. Browser integration requires a resolver-proxy path that Chromium actually consumes, plus a distinct browser workload identity and protocol-specific cgroup policy. It would be incorrect to claim the Prism lease automatically protects Chromium.
+
+
+## Parent address-scope schema v2 update
+
+The parent Network Covenant schema is now version 2:
+- Hostname capabilities require an explicit owner-authorized address scope; omission is a validation error.
+- `PublicUnicastOnly` is a conservative deny policy covering private, loopback, link-local, shared, benchmarking, documentation, transition/translation, multicast, unspecified and known metadata-service destinations. Some more-specific globally reachable addresses inside special-purpose parent aggregates are deliberately blocked to avoid resolver-policy exceptions.
+- `ExplicitCidrs` is a canonical, sorted, unique, non-empty CIDR list. Prefix /0 and non-network-aligned CIDRs are rejected. Private/LAN ranges are usable only when explicitly included; loopback, link-local, multicast, unspecified, documentation and metadata endpoints remain denied.
+- The `address_scope` field is included in the owner capability digest. A resolution lease's `address_policy_blake3` must equal this exact scope digest, and every address in the complete answer set must be permitted.
+- This closes the parent-policy representation gap only. DNS resolution, resolver authentication, persistent nonce consumption, kernel map staging, production cgroup enforcement and Chromium resolver mediation remain unimplemented.
+
+The conservative address profile is informed by the IANA special-purpose registries (snapshot date 2025-10-09):
+- IPv4: https://www.iana.org/assignments/iana-ipv4-special-registry
+- IPv6: https://www.iana.org/assignments/iana-ipv6-special-registry

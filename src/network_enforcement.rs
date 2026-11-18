@@ -558,7 +558,7 @@ pub enum NetworkEnforcementError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network_covenant::{PortRange, WorkloadIdentity};
+    use crate::network_covenant::{AddressScopePolicy, PortRange, WorkloadIdentity};
 
     fn policy(destination: DestinationSet) -> NetworkPolicyPlan {
         let workload = WorkloadIdentity::new(
@@ -571,6 +571,11 @@ mod tests {
             },
         )
         .unwrap();
+        let address_scope = if matches!(&destination, DestinationSet::Hostnames { .. }) {
+            Some(AddressScopePolicy::PublicUnicastOnly)
+        } else {
+            None
+        };
         let capability = NetworkCapability {
             schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
             capability_id: "sync-egress".into(),
@@ -578,6 +583,7 @@ mod tests {
             direction: NetworkDirection::Egress,
             protocol: NetworkProtocol::Tcp,
             destinations: destination,
+            address_scope,
             ports: vec![PortRange { from: 443, to: 443 }],
             justification: "sync".into(),
         };

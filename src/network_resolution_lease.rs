@@ -8,8 +8,8 @@
 //! nonces, write BPF maps, or authorize production activation.
 
 use crate::network_covenant::{
-    DestinationSet, NetworkCapability, NetworkCapabilityLease, NetworkDirection, NetworkPolicyPlan,
-    NetworkProtocol,
+    AddressScopePolicy, DestinationSet, NetworkCapability, NetworkCapabilityLease,
+    NetworkDirection, NetworkPolicyPlan, NetworkProtocol,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -240,6 +240,19 @@ impl NetworkResolutionLeaseV1 {
             _ => return Err(NetworkResolutionLeaseError::ParentScopeMismatch),
         }
 
+        let address_scope = capability
+            .address_scope
+            .as_ref()
+            .ok_or(NetworkResolutionLeaseError::ParentAddressScopeMismatch)?;
+        let address_scope_digest = address_scope
+            .digest_hex()
+            .map_err(|error| NetworkResolutionLeaseError::ParentPolicy(error.to_string()))?;
+        if address_scope_digest != self.address_policy_blake3
+            || !address_scope.permits_all(&self.addresses)
+        {
+            return Err(NetworkResolutionLeaseError::ParentAddressScopeMismatch);
+        }
+
         if parent_lease.issued_at_unix > self.resolved_at_unix
             || parent_lease.expires_at_unix < self.expires_at_unix
         {
@@ -355,6 +368,8 @@ pub enum NetworkResolutionLeaseError {
     ParentBindingMismatch,
     #[error("parent capability does not grant this egress hostname, protocol and port")]
     ParentScopeMismatch,
+    #[error("resolved address set or address-policy digest is outside the owner-authorized parent scope")]
+    ParentAddressScopeMismatch,
     #[error("parent authority lease does not cover the resolution snapshot lifetime")]
     ParentLeaseTimeMismatch,
     #[error("parent authority lease is expired or not yet valid")]
@@ -371,11 +386,17 @@ pub enum NetworkResolutionLeaseError {
 mod tests {
     use super::*;
     use crate::network_covenant::{
-        NetworkCapability, NetworkCapabilityLease, NetworkDirection, NetworkPolicyPlan,
-        NetworkProtocol, PortRange, WorkloadIdentity, WorkloadSource,
+        AddressScopePolicy, NetworkCapability, NetworkCapabilityLease, NetworkDirection,
+        NetworkPolicyPlan, NetworkProtocol, PortRange, WorkloadIdentity, WorkloadSource,
     };
 
     fn parent() -> (NetworkPolicyPlan, NetworkCapability, NetworkCapabilityLease) {
+        parent_with_scope(AddressScopePolicy::PublicUnicastOnly)
+    }
+
+    fn parent_with_scope(
+        address_scope: AddressScopePolicy,
+    ) -> (NetworkPolicyPlan, NetworkCapability, NetworkCapabilityLease) {
         let workload = WorkloadIdentity::new(
             "holon-prism",
             "prism-proxy",
@@ -388,7 +409,7 @@ mod tests {
         )
         .unwrap();
         let capability = NetworkCapability {
-            schema_version: 1,
+            schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
             capability_id: "prism-public-api".into(),
             workload_blake3: workload.digest_hex().unwrap(),
             direction: NetworkDirection::Egress,
@@ -396,6 +417,7 @@ mod tests {
             destinations: DestinationSet::Hostnames {
                 values: vec!["api.example.org".into()],
             },
+            address_scope: Some(address_scope),
             ports: vec![PortRange { from: 443, to: 443 }],
             justification: "owner-approved Prism public HTTPS egress".into(),
         };
@@ -406,7 +428,7 @@ mod tests {
         )
         .unwrap();
         let parent_lease = NetworkCapabilityLease {
-            schema_version: 1,
+            schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
             holon_id: "holon-prism".into(),
             policy_blake3: policy.digest_hex().unwrap(),
             capability_blake3: capability.digest_hex().unwrap(),
@@ -432,7 +454,7 @@ mod tests {
             network_policy_blake3: parent_lease.policy_blake3.clone(),
             parent_capability_blake3: parent_lease.capability_blake3.clone(),
             parent_authority_lease_blake3: parent_lease.digest_hex().unwrap(),
-            address_policy_blake3: "33".repeat(32),
+            address_policy_blake3: capability.address_scope.as_ref().unwrap().digest_hex().unwrap(),
             hostname: "api.example.org".into(),
             transport: NetworkProtocol::Tcp,
             port: 443,
@@ -495,6 +517,43 @@ mod tests {
         assert_eq!(
             wrong_workload.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentBindingMismatch)
+        );
+    }
+
+    #[test]
+    fn lease_rejects_private_answers_under_public_unicast_parent_scope() {
+        let (policy, capability, parent_lease) = parent();
+        let mut private_answer = lease(&capability, &parent_lease);
+        private_answer.addresses = vec!["10.0.0.8".parse().unwrap()];
+        assert_eq!(
+            private_answer.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
+            Err(NetworkResolutionLeaseError::ParentAddressScopeMismatch)
+        );
+
+        let mut substituted_policy = lease(&capability, &parent_lease);
+        substituted_policy.address_policy_blake3 = "66".repeat(32);
+        assert_eq!(
+            substituted_policy.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
+            Err(NetworkResolutionLeaseError::ParentAddressScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn explicit_cidr_parent_scope_allows_only_its_approved_lan_addresses() {
+        let scope = AddressScopePolicy::ExplicitCidrs {
+            values: vec!["192.168.0.0/16".into()],
+        };
+        let (policy, capability, parent_lease) = parent_with_scope(scope);
+        let mut authorized = lease(&capability, &parent_lease);
+        authorized.addresses = vec!["192.168.1.10".parse().unwrap()];
+        assert!(authorized
+            .validate_parent_binding(&policy, &capability, &parent_lease, 112, 7)
+            .is_ok());
+
+        authorized.addresses = vec!["10.0.0.1".parse().unwrap()];
+        assert_eq!(
+            authorized.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
+            Err(NetworkResolutionLeaseError::ParentAddressScopeMismatch)
         );
     }
 
