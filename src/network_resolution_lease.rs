@@ -525,6 +525,7 @@ mod tests {
         AddressScopePolicy, NetworkCapability, NetworkCapabilityLease, NetworkDirection,
         NetworkPolicyPlan, NetworkProtocol, PortRange, WorkloadIdentity, WorkloadSource,
     };
+    use std::collections::BTreeMap;
 
     fn parent() -> (NetworkPolicyPlan, NetworkCapability, NetworkCapabilityLease) {
         parent_with_scope(AddressScopePolicy::PublicUnicastOnly)
