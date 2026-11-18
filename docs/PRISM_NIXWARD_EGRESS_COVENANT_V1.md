@@ -381,7 +381,7 @@ The parent Network Covenant schema is now version 2:
 - `PublicUnicastOnly` is a conservative deny policy covering private, loopback, link-local, shared, benchmarking, documentation, transition/translation, multicast, unspecified and known metadata-service destinations. Some more-specific globally reachable addresses inside special-purpose parent aggregates are deliberately blocked to avoid resolver-policy exceptions.
 - `ExplicitCidrs` is a canonical, sorted, unique, non-empty CIDR list (maximum 128 entries, maximum 64 characters per entry). Prefix /0 and non-network-aligned CIDRs are rejected. Private/LAN ranges are usable only when explicitly included; loopback, link-local, multicast, unspecified, documentation, transition/translation and metadata endpoints remain denied.
 - The `address_scope` field is included in the owner capability digest. A resolution lease's `address_policy_blake3` must equal this exact scope digest, and every address in the complete answer set must be permitted.
-- This closes the parent-policy representation gap only. DNS resolution, resolver authentication, persistent nonce consumption, kernel map staging, production cgroup enforcement and Chromium resolver mediation remain unimplemented.
+- This closes the parent-policy representation gap only. DNS resolution, production resolver authentication/issuance, broker-side invocation of the persistent nonce ledger, kernel map staging, production cgroup enforcement and Chromium resolver mediation remain unimplemented. Pure signature verification and replay-ledger APIs are now present but are not yet wired into a production broker transaction.
 
 The conservative address profile is informed by the IANA special-purpose registries (snapshot date 2025-10-09):
 - IPv4: https://www.iana.org/assignments/iana-ipv4-special-registry
@@ -399,6 +399,8 @@ The shared authority primitive and pure lease model now have a concrete verifier
 - `src/action/authority_replay.rs` reuses the existing persistent SQLite `AuthorityReplayLedger`. The new `consume_authorized_resolution_lease` API atomically burns the stable lease replay key and records the challenge, evidence and exact lease subject. Duplicate consumption fails closed across process restart.
 
 The new conformance proposals are `LEASE-034` through `LEASE-036`: mismatched signed authority, challenge nonce not derived from the lease nonce, and second use of the same nonce via a re-signature or modified subject. They are specification/source-level test cases, not executed CI or runtime proof.
+- Resolver challenges are now time-bound by the signed evidence: `issued_at_ms` must not precede lease issue time, the signature expiry must not exceed the lease expiry, and challenge TTL is capped at the five-second lease maximum. This is checked by the pure authorization wrapper; the production broker must still recheck lease/parent expiry immediately before map staging.
+
 
 **Still not implemented:** a production trusted resolver, resolver signing service and key custody, authenticated broker IPC, a broker transaction that sequences parent/workload validation + replay consumption + inactive map staging, exact IP:port BPF maps, or Prism's live lease adapter. The replay ledger primitive exists, but no production resolution-lease broker is calling it. No cgroup runtime enforcement or production activation claim is made.
 
