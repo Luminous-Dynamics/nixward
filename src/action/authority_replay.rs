@@ -7,6 +7,7 @@
 //! execution. A crash after the burn is fail-safe: the operator must authorize
 //! a fresh challenge rather than reusing an ambiguous approval.
 
+use crate::authority_signature::VerifiedSignatureEvidence;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -61,6 +62,23 @@ impl AuthorityReplayLedger {
 
     fn hex_32(value: &[u8; 32]) -> String {
         value.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn decode_hex_32(value: &str) -> Result<[u8; 32], AuthorityReplayError> {
+        if !Self::valid_digest(value) {
+            return Err(AuthorityReplayError::InvalidEvidence("evidence digest"));
+        }
+        let mut bytes = [0u8; 32];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or(AuthorityReplayError::InvalidEvidence("evidence digest"))?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or(AuthorityReplayError::InvalidEvidence("evidence digest"))?;
+            bytes[index] = ((high << 4) | low) as u8;
+        }
+        Ok(bytes)
     }
 
     fn reject_symlink_components(path: &Path) -> Result<(), AuthorityReplayError> {
@@ -146,6 +164,27 @@ impl AuthorityReplayLedger {
         Ok(connection)
     }
 
+    /// Atomically consume a challenge returned by the cryptographic verifier.
+    ///
+    /// This typed entry point prevents callers from accidentally combining a
+    /// replay key, challenge digest, subject digest and evidence digest from
+    /// different signatures. The raw method remains for migration callers;
+    /// new privileged mutation paths should use this method.
+    pub fn consume_verified(
+        &self,
+        evidence: &VerifiedSignatureEvidence,
+        consumed_at_ms: u64,
+    ) -> Result<(), AuthorityReplayError> {
+        let evidence_digest = Self::decode_hex_32(evidence.evidence_blake3())?;
+        self.consume(
+            evidence.replay_key(),
+            evidence.challenge_blake3(),
+            evidence_digest,
+            evidence.subject_blake3(),
+            consumed_at_ms,
+        )
+    }
+
     /// Atomically burn one verified challenge replay key.
     pub fn consume(
         &self,
@@ -193,6 +232,74 @@ impl AuthorityReplayLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authority_signature::{
+        AuthorityAction, AuthorityChallenge, AuthorityTrustPolicy, AuthorityVerifier,
+        DetachedAuthoritySignature, TrustedAuthorityKey, AUTHORITY_POLICY_KIND,
+        AUTHORITY_SCHEMA_VERSION, AUTHORITY_SIGNATURE_KIND,
+    };
+    use ed25519_dalek::{Signer, SigningKey};
+    use std::collections::BTreeMap;
+
+    fn verified_network_resolution_evidence() -> VerifiedSignatureEvidence {
+        let signing = SigningKey::from_bytes(&[29u8; 32]);
+        let public_key_hex = signing
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let subject = "33".repeat(32);
+        let holon = "22".repeat(32);
+        let challenge = AuthorityChallenge::new(
+            AuthorityAction::NetworkResolve,
+            subject.clone(),
+            holon.clone(),
+            "nixward-network-resolution-lease-v1",
+            [7u8; 32],
+            1_000,
+            30_000,
+        )
+        .unwrap();
+        let signature = signing.sign(&challenge.signing_bytes().unwrap());
+        let signed = DetachedAuthoritySignature {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            key_id: "resolver-test-key".into(),
+            public_key_hex: public_key_hex.clone(),
+            signature_hex: signature
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            challenge,
+        };
+        let policy = AuthorityTrustPolicy {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_POLICY_KIND.into(),
+            policy_id: "network-resolution-replay-test".into(),
+            keys: vec![TrustedAuthorityKey {
+                key_id: "resolver-test-key".into(),
+                issuer: "test-resolver".into(),
+                public_key_hex,
+                allowed_actions: vec![AuthorityAction::NetworkResolve],
+                revoked: false,
+                claims: BTreeMap::new(),
+            }],
+            max_ttl_ms: 60_000,
+            allowed_audiences: vec!["nixward-network-resolution-lease-v1".into()],
+        };
+        AuthorityVerifier::new(&policy)
+            .unwrap()
+            .verify(
+                &signed,
+                AuthorityAction::NetworkResolve,
+                &subject,
+                &holon,
+                2_000,
+            )
+            .unwrap()
+    }
 
     #[test]
     fn replay_key_is_one_shot_and_persistent() {
@@ -217,4 +324,26 @@ mod tests {
             .consume(&"55".repeat(32), &challenge, [0x44; 32], &subject, 1003)
             .unwrap();
     }
+
+    #[test]
+    fn consume_verified_binds_and_persistently_burns_the_exact_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = AuthorityReplayLedger::new(tmp.path().join("nixward/verified-replay.sqlite3"));
+        let evidence = verified_network_resolution_evidence();
+        assert_eq!(
+            ledger.consume_verified(&evidence, 2_001),
+            Ok(())
+        );
+        assert!(matches!(
+            ledger.consume_verified(&evidence, 2_002),
+            Err(AuthorityReplayError::AlreadyConsumed)
+        ));
+
+        let reopened = AuthorityReplayLedger::new(ledger.path().to_path_buf());
+        assert!(matches!(
+            reopened.consume_verified(&evidence, 2_003),
+            Err(AuthorityReplayError::AlreadyConsumed)
+        ));
+    }
+
 }
