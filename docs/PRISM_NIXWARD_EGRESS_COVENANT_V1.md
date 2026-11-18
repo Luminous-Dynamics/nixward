@@ -375,7 +375,7 @@ The Nixward resolver lease proposed here is scoped first to Prism's HTTP(S) tran
 The parent Network Covenant schema is now version 2:
 - Hostname capabilities require an explicit owner-authorized address scope; omission is a validation error.
 - `PublicUnicastOnly` is a conservative deny policy covering private, loopback, link-local, shared, benchmarking, documentation, transition/translation, multicast, unspecified and known metadata-service destinations. Some more-specific globally reachable addresses inside special-purpose parent aggregates are deliberately blocked to avoid resolver-policy exceptions.
-- `ExplicitCidrs` is a canonical, sorted, unique, non-empty CIDR list. Prefix /0 and non-network-aligned CIDRs are rejected. Private/LAN ranges are usable only when explicitly included; loopback, link-local, multicast, unspecified, documentation and metadata endpoints remain denied.
+- `ExplicitCidrs` is a canonical, sorted, unique, non-empty CIDR list (maximum 128 entries, maximum 64 characters per entry). Prefix /0 and non-network-aligned CIDRs are rejected. Private/LAN ranges are usable only when explicitly included; loopback, link-local, multicast, unspecified, documentation, transition/translation and metadata endpoints remain denied.
 - The `address_scope` field is included in the owner capability digest. A resolution lease's `address_policy_blake3` must equal this exact scope digest, and every address in the complete answer set must be permitted.
 - This closes the parent-policy representation gap only. DNS resolution, resolver authentication, persistent nonce consumption, kernel map staging, production cgroup enforcement and Chromium resolver mediation remain unimplemented.
 

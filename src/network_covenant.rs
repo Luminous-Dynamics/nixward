@@ -121,13 +121,14 @@ pub enum AddressScopePolicy {
 impl AddressScopePolicy {
     pub fn validate(&self) -> Result<(), NetworkCovenantError> {
         if let Self::ExplicitCidrs { values } = self {
-            if values.is_empty() {
+            if values.is_empty() || values.len() > 128 {
                 return Err(NetworkCovenantError::InvalidDestination(
                     "explicit address scope requires at least one CIDR".into(),
                 ));
             }
             let mut previous: Option<&str> = None;
             for value in values {
+                validate_token("address-scope CIDR", value, 64)?;
                 if parse_canonical_cidr(value).is_none() {
                     return Err(NetworkCovenantError::InvalidDestination(format!(
                         "address-scope CIDR is invalid, non-canonical, unaligned, or too broad: {value}"
@@ -247,6 +248,13 @@ fn is_hard_denied_address(address: IpAddr) -> bool {
                 || ipv6_in_prefix(ip, "64:ff9b:1::".parse().expect("constant IPv6 prefix"), 48)
                 || ipv6_in_prefix(ip, "100::".parse().expect("constant IPv6 prefix"), 64)
                 || ipv6_in_prefix(ip, "100:0:0:1::".parse().expect("constant IPv6 prefix"), 64)
+                || ipv6_in_prefix(ip, "2001::".parse().expect("constant IPv6 prefix"), 23)
+                || ipv6_in_prefix(ip, "2001:2::".parse().expect("constant IPv6 prefix"), 48)
+                || ipv6_in_prefix(ip, "2001:20::".parse().expect("constant IPv6 prefix"), 28)
+                || ipv6_in_prefix(ip, "2001:db8::".parse().expect("constant IPv6 prefix"), 32)
+                || ipv6_in_prefix(ip, "2002::".parse().expect("constant IPv6 prefix"), 16)
+                || ipv6_in_prefix(ip, "3fff::".parse().expect("constant IPv6 prefix"), 20)
+                || ipv6_in_prefix(ip, "5f00::".parse().expect("constant IPv6 prefix"), 16)
                 || ipv6_in_prefix(ip, "2001:db8::".parse().expect("constant IPv6 prefix"), 32)
                 || ipv6_in_prefix(ip, "3fff::".parse().expect("constant IPv6 prefix"), 20)
         }
@@ -822,10 +830,26 @@ mod tests {
             vec![],
             vec!["0.0.0.0/0".into()],
             vec!["192.168.1.1/24".into()],
-            vec!["192.168.0.0/16".into(), "10.0.0.0/8".into()]
+            vec!["192.168.0.0/16".into(), "10.0.0.0/8".into()],
+            vec!["2001:db8::/32".into()]
         ] {
             assert!(AddressScopePolicy::ExplicitCidrs { values }.validate().is_err());
         }
+
+        let too_many = (1..=129)
+            .map(|n| format!("10.{}.0.0/16", n))
+            .collect::<Vec<_>>();
+        assert!(AddressScopePolicy::ExplicitCidrs { values: too_many }.validate().is_err());
+
+        let documentation = AddressScopePolicy::ExplicitCidrs {
+            values: vec!["2001:db8::/32".into()],
+        };
+        assert!(!documentation.permits_address("2001:db8::1".parse().unwrap()));
+
+        let transition = AddressScopePolicy::ExplicitCidrs {
+            values: vec!["2002::/16".into()],
+        };
+        assert!(!transition.permits_address("2002::1".parse().unwrap()));
     }
 
     #[test]
