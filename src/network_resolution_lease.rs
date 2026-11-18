@@ -24,7 +24,7 @@ pub const NETWORK_RESOLUTION_LEASE_MAX_LIFETIME_SECS: u64 = 5;
 pub const NETWORK_RESOLUTION_LEASE_MAX_ADDRESSES: usize = 32;
 pub const NETWORK_RESOLUTION_LEASE_MAX_REDIRECT_HOPS: u8 = 5;
 pub const NETWORK_RESOLUTION_LEASE_AUDIENCE: &str = "nixward-network-resolution-lease-v1";
-const RESOLUTION_HOLON_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-holon:v1\\0";
+const RESOLUTION_HOLON_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-holon:v1\0";
 
 /// Stable challenge identity for a named Holon. This is distinct from the
 /// lease subject digest, which binds the complete serialized lease.
@@ -48,10 +48,7 @@ pub fn network_resolution_authority_holon_blake3(holon_id: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct AuthorizedNetworkResolutionLease {
     lease: NetworkResolutionLeaseV1,
-    evidence_blake3: String,
-    signer_key_id: String,
-    replay_key: String,
-    challenge_blake3: String,
+    verified_evidence: VerifiedSignatureEvidence,
 }
 
 impl AuthorizedNetworkResolutionLease {
@@ -81,7 +78,11 @@ impl AuthorizedNetworkResolutionLease {
         if evidence.claims().get("challenge_holon_blake3") != Some(&expected_holon) {
             return Err(NetworkResolutionLeaseError::AuthorityHolonMismatch);
         }
-        if evidence.claims().get("challenge_nonce_blake3").is_none()
+        if evidence
+            .claims()
+            .get("challenge_nonce_blake3")
+            .map(|nonce| !is_digest(nonce))
+            .unwrap_or(true)
             || evidence.claims().get("replay_key").map(String::as_str)
                 != Some(evidence.replay_key())
             || !is_digest(evidence.evidence_blake3())
@@ -93,10 +94,7 @@ impl AuthorizedNetworkResolutionLease {
 
         Ok(Self {
             lease,
-            evidence_blake3: evidence.evidence_blake3().to_owned(),
-            signer_key_id: evidence.signer_key_id().to_owned(),
-            replay_key: evidence.replay_key().to_owned(),
-            challenge_blake3: evidence.challenge_blake3().to_owned(),
+            verified_evidence: evidence.clone(),
         })
     }
 
@@ -105,21 +103,26 @@ impl AuthorizedNetworkResolutionLease {
     }
 
     pub fn evidence_blake3(&self) -> &str {
-        &self.evidence_blake3
+        self.verified_evidence.evidence_blake3()
     }
 
     pub fn signer_key_id(&self) -> &str {
-        &self.signer_key_id
+        self.verified_evidence.signer_key_id()
     }
 
-    /// Must be consumed atomically by the privileged broker immediately
-    /// before staging the kernel address-set generation.
+    /// Read-only sealed evidence for the privileged broker's typed
+    /// AuthorityReplayLedger::consume_verified call immediately before map
+    /// staging. The caller cannot replace or mutate its signed fields.
+    pub fn verified_evidence(&self) -> &VerifiedSignatureEvidence {
+        &self.verified_evidence
+    }
+
     pub fn replay_key(&self) -> &str {
-        &self.replay_key
+        self.verified_evidence.replay_key()
     }
 
     pub fn challenge_blake3(&self) -> &str {
-        &self.challenge_blake3
+        self.verified_evidence.challenge_blake3()
     }
 
     pub fn validate_parent_binding(
