@@ -361,3 +361,10 @@ References:
 - Cilium Layer 7 DNS proxy / FQDN policy: https://docs.cilium.io/en/stable/security/policy/layer7/
 - Cilium FQDN cache / conntrack expiry behavior: https://docs.cilium.io/en/latest/contributing/development/debugging/
 - OWASP SSRF guidance: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+
+
+### Browser workload boundary follow-on
+
+Symthaea Browser's URL preflight and CDP executor are not Chromium network enforcement. A separate Symthaea draft, [PR #12789](https://github.com/Luminous-Dynamics/symthaea/pull/12789), now documents the browser-specific boundary and a 12-case test plan for redirects, subresources, service workers, WebSockets/WebTransport, UDP/WebRTC/QUIC, alternate DNS and explicit LAN navigation. Those cases are separate from Prism's HTTP-hop lease and remain unrun.
+
+The Nixward resolver lease proposed here is scoped first to Prism's HTTP(S) transport. Browser integration requires a resolver-proxy path that Chromium actually consumes, plus a distinct browser workload identity and protocol-specific cgroup policy. It would be incorrect to claim the Prism lease automatically protects Chromium.
