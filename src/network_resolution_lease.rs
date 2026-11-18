@@ -7,6 +7,7 @@
 //! resolver signature, classify public-unicast addresses, consume replay
 //! nonces, write BPF maps, or authorize production activation.
 
+use crate::authority_signature::VerifiedSignatureEvidence;
 use crate::network_covenant::{
     AddressScopePolicy, DestinationSet, NetworkCapability, NetworkCapabilityLease,
     NetworkDirection, NetworkPolicyPlan, NetworkProtocol,
@@ -22,6 +23,129 @@ pub const NETWORK_RESOLUTION_LEASE_SCHEMA_VERSION: u32 = 1;
 pub const NETWORK_RESOLUTION_LEASE_MAX_LIFETIME_SECS: u64 = 5;
 pub const NETWORK_RESOLUTION_LEASE_MAX_ADDRESSES: usize = 32;
 pub const NETWORK_RESOLUTION_LEASE_MAX_REDIRECT_HOPS: u8 = 5;
+pub const NETWORK_RESOLUTION_LEASE_AUDIENCE: &str = "nixward-network-resolution-lease-v1";
+const RESOLUTION_HOLON_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-holon:v1\\0";
+
+/// Stable challenge identity for a named Holon. This is distinct from the
+/// lease subject digest, which binds the complete serialized lease.
+pub fn network_resolution_authority_holon_blake3(holon_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RESOLUTION_HOLON_DOMAIN);
+    hasher.update(&(holon_id.len() as u64).to_le_bytes());
+    hasher.update(holon_id.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// A cryptographically verified resolution lease. This wrapper cannot be
+/// deserialized or constructed from caller-supplied fields: it requires the
+/// sealed output of AuthorityVerifier and binds that evidence to the exact
+/// lease digest, resolver key, action, audience and Holon.
+///
+/// This is still not a kernel permission by itself. Before staging rules, the
+/// privileged broker must verify parent/cgroup state and atomically consume
+/// replay_key in persistent replay state.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct AuthorizedNetworkResolutionLease {
+    lease: NetworkResolutionLeaseV1,
+    evidence_blake3: String,
+    signer_key_id: String,
+    replay_key: String,
+    challenge_blake3: String,
+}
+
+impl AuthorizedNetworkResolutionLease {
+    pub fn authorize(
+        lease: NetworkResolutionLeaseV1,
+        evidence: &VerifiedSignatureEvidence,
+    ) -> Result<Self, NetworkResolutionLeaseError> {
+        lease.validate_structure()?;
+        let subject = lease.digest_hex()?;
+        if evidence.subject_blake3() != subject {
+            return Err(NetworkResolutionLeaseError::AuthoritySubjectMismatch);
+        }
+        if evidence.signer_key_id() != lease.issuer_key_id {
+            return Err(NetworkResolutionLeaseError::AuthoritySignerMismatch);
+        }
+        if evidence.claims().get("authority_action").map(String::as_str)
+            != Some("network-resolve")
+        {
+            return Err(NetworkResolutionLeaseError::AuthorityActionMismatch);
+        }
+        if evidence.claims().get("authority_audience").map(String::as_str)
+            != Some(NETWORK_RESOLUTION_LEASE_AUDIENCE)
+        {
+            return Err(NetworkResolutionLeaseError::AuthorityAudienceMismatch);
+        }
+        let expected_holon = network_resolution_authority_holon_blake3(&lease.holon_id);
+        if evidence.claims().get("challenge_holon_blake3") != Some(&expected_holon) {
+            return Err(NetworkResolutionLeaseError::AuthorityHolonMismatch);
+        }
+        if evidence.claims().get("challenge_nonce_blake3").is_none()
+            || evidence.claims().get("replay_key").map(String::as_str)
+                != Some(evidence.replay_key())
+            || !is_digest(evidence.evidence_blake3())
+            || !is_digest(evidence.challenge_blake3())
+            || !is_digest(evidence.replay_key())
+        {
+            return Err(NetworkResolutionLeaseError::InvalidAuthorityEvidence);
+        }
+
+        Ok(Self {
+            lease,
+            evidence_blake3: evidence.evidence_blake3().to_owned(),
+            signer_key_id: evidence.signer_key_id().to_owned(),
+            replay_key: evidence.replay_key().to_owned(),
+            challenge_blake3: evidence.challenge_blake3().to_owned(),
+        })
+    }
+
+    pub fn lease(&self) -> &NetworkResolutionLeaseV1 {
+        &self.lease
+    }
+
+    pub fn evidence_blake3(&self) -> &str {
+        &self.evidence_blake3
+    }
+
+    pub fn signer_key_id(&self) -> &str {
+        &self.signer_key_id
+    }
+
+    /// Must be consumed atomically by the privileged broker immediately
+    /// before staging the kernel address-set generation.
+    pub fn replay_key(&self) -> &str {
+        &self.replay_key
+    }
+
+    pub fn challenge_blake3(&self) -> &str {
+        &self.challenge_blake3
+    }
+
+    pub fn validate_parent_binding(
+        &self,
+        policy: &NetworkPolicyPlan,
+        capability: &NetworkCapability,
+        parent_lease: &NetworkCapabilityLease,
+        now_unix: u64,
+        active_policy_generation: u64,
+    ) -> Result<(), NetworkResolutionLeaseError> {
+        self.lease.validate_parent_binding(
+            policy,
+            capability,
+            parent_lease,
+            now_unix,
+            active_policy_generation,
+        )
+    }
+}
+
+fn is_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -378,6 +502,18 @@ pub enum NetworkResolutionLeaseError {
     PolicyGenerationMismatch,
     #[error("resolution lease is expired or not yet valid")]
     Expired,
+    #[error("detached authority subject does not bind the exact resolution lease")]
+    AuthoritySubjectMismatch,
+    #[error("detached authority signer does not match the lease issuer")]
+    AuthoritySignerMismatch,
+    #[error("detached authority action is not network-resolve")]
+    AuthorityActionMismatch,
+    #[error("detached authority audience is not the resolution-lease audience")]
+    AuthorityAudienceMismatch,
+    #[error("detached authority is not bound to this Holon")]
+    AuthorityHolonMismatch,
+    #[error("verified authority evidence is incomplete or internally inconsistent")]
+    InvalidAuthorityEvidence,
     #[error("network resolution lease serialization failed")]
     Serialization,
 }
@@ -473,6 +609,179 @@ mod tests {
             nonce: "55".repeat(32),
             dnssec_status: DnssecStatus::NotValidated,
         }
+    }
+
+    fn signed_evidence(
+        lease: &NetworkResolutionLeaseV1,
+        action: crate::authority_signature::AuthorityAction,
+        audience: &str,
+        key_id: &str,
+        challenge_holon: Option<&str>,
+    ) -> VerifiedSignatureEvidence {
+        use crate::authority_signature::{
+            AuthorityChallenge, AuthorityTrustPolicy, AuthorityVerifier,
+            DetachedAuthoritySignature, TrustedAuthorityKey, AUTHORITY_POLICY_KIND,
+            AUTHORITY_SCHEMA_VERSION, AUTHORITY_SIGNATURE_KIND,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let signing = SigningKey::from_bytes(&[23u8; 32]);
+        let subject = lease.digest_hex().unwrap();
+        let expected_holon = challenge_holon
+            .map(str::to_owned)
+            .unwrap_or_else(|| network_resolution_authority_holon_blake3(&lease.holon_id));
+        let challenge = AuthorityChallenge::new(
+            action,
+            subject.clone(),
+            expected_holon.clone(),
+            audience,
+            [31u8; 32],
+            1_000_000,
+            30_000,
+        )
+        .unwrap();
+        let signature = signing.sign(&challenge.signing_bytes().unwrap());
+        let public_key_hex = signing
+            .verifying_key()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let signed = DetachedAuthoritySignature {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_SIGNATURE_KIND.into(),
+            algorithm: "ed25519".into(),
+            key_id: key_id.into(),
+            public_key_hex: public_key_hex.clone(),
+            signature_hex: signature
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            challenge,
+        };
+        let policy = AuthorityTrustPolicy {
+            schema_version: AUTHORITY_SCHEMA_VERSION,
+            kind: AUTHORITY_POLICY_KIND.into(),
+            policy_id: "resolution-lease-test-policy".into(),
+            keys: vec![TrustedAuthorityKey {
+                key_id: key_id.into(),
+                issuer: "nixward-test-resolver".into(),
+                public_key_hex,
+                allowed_actions: vec![
+                    crate::authority_signature::AuthorityAction::NetworkResolve,
+                    crate::authority_signature::AuthorityAction::NetworkActivate,
+                ],
+                revoked: false,
+                claims: BTreeMap::from([("holon_id".into(), expected_holon.clone())]),
+            }],
+            max_ttl_ms: 60_000,
+            // The lease wrapper independently enforces its exact audience.
+            allowed_audiences: Vec::new(),
+        };
+        AuthorityVerifier::new(&policy)
+            .unwrap()
+            .verify(&signed, action, &subject, &expected_holon, 1_010_000)
+            .unwrap()
+    }
+
+    #[test]
+    fn signed_resolution_lease_is_bound_to_exact_lease_signer_action_audience_and_holon() {
+        use crate::authority_signature::AuthorityAction;
+
+        let (_, capability, parent_lease) = parent();
+        let lease = lease(&capability, &parent_lease);
+        let evidence = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+        );
+        let authorized =
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &evidence).unwrap();
+        assert_eq!(authorized.lease(), &lease);
+        assert_eq!(authorized.signer_key_id(), lease.issuer_key_id);
+        assert_eq!(authorized.replay_key().len(), 64);
+        assert_eq!(authorized.evidence_blake3().len(), 64);
+
+        let wrong_action = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkActivate,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+        );
+        assert_eq!(
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &wrong_action).unwrap_err(),
+            NetworkResolutionLeaseError::AuthorityActionMismatch
+        );
+
+        let wrong_audience = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            "nixward-other-audience",
+            &lease.issuer_key_id,
+            None,
+        );
+        assert_eq!(
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &wrong_audience).unwrap_err(),
+            NetworkResolutionLeaseError::AuthorityAudienceMismatch
+        );
+
+        let wrong_signer = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            "untrusted-other-resolver-key",
+            None,
+        );
+        assert_eq!(
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &wrong_signer).unwrap_err(),
+            NetworkResolutionLeaseError::AuthoritySignerMismatch
+        );
+
+        let wrong_holon = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            Some(&"99".repeat(32)),
+        );
+        assert_eq!(
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &wrong_holon).unwrap_err(),
+            NetworkResolutionLeaseError::AuthorityHolonMismatch
+        );
+
+        let mut altered = lease;
+        altered.port = 8443;
+        assert_eq!(
+            AuthorizedNetworkResolutionLease::authorize(altered, &evidence).unwrap_err(),
+            NetworkResolutionLeaseError::AuthoritySubjectMismatch
+        );
+    }
+
+    #[test]
+    fn authorized_resolution_lease_keeps_parent_scope_validation_fail_closed() {
+        use crate::authority_signature::AuthorityAction;
+
+        let (policy, capability, parent_lease) = parent();
+        let lease = lease(&capability, &parent_lease);
+        let evidence = signed_evidence(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+        );
+        let authorized = AuthorizedNetworkResolutionLease::authorize(lease, &evidence).unwrap();
+        assert!(authorized
+            .validate_parent_binding(&policy, &capability, &parent_lease, 112, 7)
+            .is_ok());
+        assert_eq!(
+            authorized.validate_parent_binding(&policy, &capability, &parent_lease, 115, 7),
+            Err(NetworkResolutionLeaseError::Expired)
+        );
     }
 
     #[test]
