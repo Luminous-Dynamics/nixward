@@ -327,6 +327,8 @@ pub struct VerifiedSignatureEvidence {
     subject_blake3: String,
     challenge_blake3: String,
     replay_key: String,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
     claims: BTreeMap<String, String>,
     _verified: VerifiedSignatureSeal,
 }
@@ -341,6 +343,8 @@ impl VerifiedSignatureEvidence {
     pub fn subject_blake3(&self) -> &str { &self.subject_blake3 }
     pub fn challenge_blake3(&self) -> &str { &self.challenge_blake3 }
     pub fn replay_key(&self) -> &str { &self.replay_key }
+    pub const fn issued_at_ms(&self) -> u64 { self.issued_at_ms }
+    pub const fn expires_at_ms(&self) -> u64 { self.expires_at_ms }
     pub fn claims(&self) -> &BTreeMap<String, String> { &self.claims }
 }
 
@@ -447,6 +451,8 @@ impl<'a> AuthorityVerifier<'a> {
             subject_blake3: challenge.subject_blake3.clone(),
             challenge_blake3,
             replay_key,
+            issued_at_ms: challenge.issued_at_ms,
+            expires_at_ms: challenge.expires_at_ms,
             claims,
             _verified: VerifiedSignatureSeal,
         })
