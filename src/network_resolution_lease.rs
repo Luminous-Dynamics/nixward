@@ -179,6 +179,7 @@ impl NetworkResolutionLeaseV1 {
         capability: &NetworkCapability,
         parent_lease: &NetworkCapabilityLease,
         now_unix: u64,
+        active_policy_generation: u64,
     ) -> Result<(), NetworkResolutionLeaseError> {
         self.validate_structure()?;
         policy
@@ -243,6 +244,9 @@ impl NetworkResolutionLeaseV1 {
             || parent_lease.expires_at_unix < self.expires_at_unix
         {
             return Err(NetworkResolutionLeaseError::ParentLeaseTimeMismatch);
+        }
+        if self.policy_generation != active_policy_generation {
+            return Err(NetworkResolutionLeaseError::PolicyGenerationMismatch);
         }
         if now_unix < self.issued_at_unix || now_unix >= self.expires_at_unix {
             return Err(NetworkResolutionLeaseError::Expired);
@@ -355,6 +359,8 @@ pub enum NetworkResolutionLeaseError {
     ParentLeaseTimeMismatch,
     #[error("parent authority lease is expired or not yet valid")]
     ParentLeaseExpired,
+    #[error("resolution lease policy generation is not the active generation")]
+    PolicyGenerationMismatch,
     #[error("resolution lease is expired or not yet valid")]
     Expired,
     #[error("network resolution lease serialization failed")]
@@ -461,7 +467,7 @@ mod tests {
         let lease = lease(&capability, &parent_lease);
         assert!(
             lease
-                .validate_parent_binding(&policy, &capability, &parent_lease, 112)
+                .validate_parent_binding(&policy, &capability, &parent_lease, 112, 7)
                 .is_ok()
         );
     }
@@ -473,21 +479,21 @@ mod tests {
         let mut wrong_host = lease(&capability, &parent_lease);
         wrong_host.hostname = "attacker.example.org".into();
         assert_eq!(
-            wrong_host.validate_parent_binding(&policy, &capability, &parent_lease, 112),
+            wrong_host.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentScopeMismatch)
         );
 
         let mut wrong_port = lease(&capability, &parent_lease);
         wrong_port.port = 8443;
         assert_eq!(
-            wrong_port.validate_parent_binding(&policy, &capability, &parent_lease, 112),
+            wrong_port.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentScopeMismatch)
         );
 
         let mut wrong_workload = lease(&capability, &parent_lease);
         wrong_workload.workload_blake3 = "66".repeat(32);
         assert_eq!(
-            wrong_workload.validate_parent_binding(&policy, &capability, &parent_lease, 112),
+            wrong_workload.validate_parent_binding(&policy, &capability, &parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentBindingMismatch)
         );
     }
@@ -507,7 +513,7 @@ mod tests {
         short_parent_lease.expires_at_unix = 114;
         let beyond_parent = lease(&capability, &short_parent_lease);
         assert_eq!(
-            beyond_parent.validate_parent_binding(&policy, &capability, &short_parent_lease, 112),
+            beyond_parent.validate_parent_binding(&policy, &capability, &short_parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentLeaseTimeMismatch)
         );
     }
@@ -568,15 +574,25 @@ mod tests {
     }
 
     #[test]
+    fn lease_rejects_stale_policy_generation() {
+        let (policy, capability, parent_lease) = parent();
+        let lease = lease(&capability, &parent_lease);
+        assert_eq!(
+            lease.validate_parent_binding(&policy, &capability, &parent_lease, 112, 6),
+            Err(NetworkResolutionLeaseError::PolicyGenerationMismatch)
+        );
+    }
+
+    #[test]
     fn lease_fails_closed_at_and_after_expiry() {
         let (policy, capability, parent_lease) = parent();
         let lease = lease(&capability, &parent_lease);
         assert_eq!(
-            lease.validate_parent_binding(&policy, &capability, &parent_lease, 115),
+            lease.validate_parent_binding(&policy, &capability, &parent_lease, 115, 7),
             Err(NetworkResolutionLeaseError::Expired)
         );
         assert_eq!(
-            lease.validate_parent_binding(&policy, &capability, &parent_lease, 116),
+            lease.validate_parent_binding(&policy, &capability, &parent_lease, 116, 7),
             Err(NetworkResolutionLeaseError::Expired)
         );
     }
