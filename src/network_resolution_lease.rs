@@ -7,7 +7,7 @@
 //! resolver signature, classify public-unicast addresses, consume replay
 //! nonces, write BPF maps, or authorize production activation.
 
-use crate::authority_signature::VerifiedSignatureEvidence;
+use crate::authority_signature::{AuthorityAction, AuthorityChallenge, VerifiedSignatureEvidence};
 use crate::network_covenant::{
     AddressScopePolicy, DestinationSet, NetworkCapability, NetworkCapabilityLease,
     NetworkDirection, NetworkPolicyPlan, NetworkProtocol,
@@ -25,6 +25,7 @@ pub const NETWORK_RESOLUTION_LEASE_MAX_ADDRESSES: usize = 32;
 pub const NETWORK_RESOLUTION_LEASE_MAX_REDIRECT_HOPS: u8 = 5;
 pub const NETWORK_RESOLUTION_LEASE_AUDIENCE: &str = "nixward-network-resolution-lease-v1";
 const RESOLUTION_HOLON_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-holon:v1\0";
+const RESOLUTION_REPLAY_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-replay:v1\0";
 
 /// Stable challenge identity for a named Holon. This is distinct from the
 /// lease subject digest, which binds the complete serialized lease.
@@ -34,6 +35,63 @@ pub fn network_resolution_authority_holon_blake3(holon_id: &str) -> String {
     hasher.update(&(holon_id.len() as u64).to_le_bytes());
     hasher.update(holon_id.as_bytes());
     hasher.finalize().to_hex().to_string()
+}
+
+/// Build the only supported signing challenge for a resolution lease. The
+/// challenge nonce is derived from the lease's own 32-byte one-shot nonce, so
+/// re-signing the same lease with a different timestamp cannot create a new
+/// lease replay identity.
+pub fn build_network_resolution_lease_challenge(
+    lease: &NetworkResolutionLeaseV1,
+    issued_at_ms: u64,
+    ttl_ms: u64,
+) -> Result<AuthorityChallenge, NetworkResolutionLeaseError> {
+    lease.validate_structure()?;
+    let nonce_entropy = decode_nonce_entropy(&lease.nonce)?;
+    AuthorityChallenge::new(
+        AuthorityAction::NetworkResolve,
+        lease.digest_hex()?,
+        network_resolution_authority_holon_blake3(&lease.holon_id),
+        NETWORK_RESOLUTION_LEASE_AUDIENCE,
+        nonce_entropy,
+        issued_at_ms,
+        ttl_ms,
+    )
+    .map_err(|_| NetworkResolutionLeaseError::InvalidAuthorityEvidence)
+}
+
+fn decode_nonce_entropy(value: &str) -> Result<[u8; 32], NetworkResolutionLeaseError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(NetworkResolutionLeaseError::InvalidAuthorityEvidence);
+    }
+    let mut bytes = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(NetworkResolutionLeaseError::InvalidAuthorityEvidence)?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(NetworkResolutionLeaseError::InvalidAuthorityEvidence)?;
+        bytes[index] = ((high << 4) | low) as u8;
+    }
+    Ok(bytes)
+}
+
+fn resolution_lease_replay_key(
+    lease: &NetworkResolutionLeaseV1,
+) -> Result<String, NetworkResolutionLeaseError> {
+    let subject = lease.digest_hex()?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RESOLUTION_REPLAY_DOMAIN);
+    hasher.update(&(lease.nonce.len() as u64).to_le_bytes());
+    hasher.update(lease.nonce.as_bytes());
+    hasher.update(&(subject.len() as u64).to_le_bytes());
+    hasher.update(subject.as_bytes());
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// A cryptographically verified resolution lease. This wrapper cannot be
@@ -49,6 +107,9 @@ pub fn network_resolution_authority_holon_blake3(holon_id: &str) -> String {
 pub struct AuthorizedNetworkResolutionLease {
     lease: NetworkResolutionLeaseV1,
     verified_evidence: VerifiedSignatureEvidence,
+    /// Stable across re-signatures of the same lease; bound to its own random
+    /// nonce and the exact lease digest.
+    replay_key: String,
 }
 
 impl AuthorizedNetworkResolutionLease {
@@ -78,11 +139,16 @@ impl AuthorizedNetworkResolutionLease {
         if evidence.claims().get("challenge_holon_blake3") != Some(&expected_holon) {
             return Err(NetworkResolutionLeaseError::AuthorityHolonMismatch);
         }
-        if evidence
-            .claims()
-            .get("challenge_nonce_blake3")
-            .map(|nonce| !is_digest(nonce))
-            .unwrap_or(true)
+        let nonce_entropy = decode_nonce_entropy(&lease.nonce)?;
+        let expected_challenge_nonce = AuthorityChallenge::nonce_blake3(
+            AuthorityAction::NetworkResolve,
+            &subject,
+            &expected_holon,
+            nonce_entropy,
+        )
+        .map_err(|_| NetworkResolutionLeaseError::InvalidAuthorityEvidence)?;
+        if evidence.claims().get("challenge_nonce_blake3")
+            != Some(&expected_challenge_nonce)
             || evidence.claims().get("replay_key").map(String::as_str)
                 != Some(evidence.replay_key())
             || !is_digest(evidence.evidence_blake3())
@@ -92,9 +158,11 @@ impl AuthorizedNetworkResolutionLease {
             return Err(NetworkResolutionLeaseError::InvalidAuthorityEvidence);
         }
 
+        let replay_key = resolution_lease_replay_key(&lease)?;
         Ok(Self {
             lease,
             verified_evidence: evidence.clone(),
+            replay_key,
         })
     }
 
@@ -117,8 +185,10 @@ impl AuthorizedNetworkResolutionLease {
         &self.verified_evidence
     }
 
+    /// One-shot lease replay key, distinct from the challenge replay key.
+    /// Re-signing the identical lease cannot create a second usable lease.
     pub fn replay_key(&self) -> &str {
-        self.verified_evidence.replay_key()
+        &self.replay_key
     }
 
     pub fn challenge_blake3(&self) -> &str {
