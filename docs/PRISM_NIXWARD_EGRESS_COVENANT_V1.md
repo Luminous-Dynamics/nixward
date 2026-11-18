@@ -161,13 +161,17 @@ An authenticated local resolution lease proves that the Nixward broker issued a 
 Prism requests hostname + parent capability + logical hop identity
   → Nixward authenticates caller and exact workload/cgroup
   → validates parent owner/delegation authority and policy generation
-  → resolves A/AAAA and obtains CNAME/TTL/validity metadata
+  → trusted resolver obtains the complete A/AAAA/CNAME/TTL snapshot
   → validates complete address set against explicit scope
-  → constructs canonical lease and consumes nonce
-  → stages per-workload IP:port rules in an inactive map generation
-  → verifies map contents/digest and binding
-  → atomically switches active generation
-  → returns verified lease to Prism
+  → constructs canonical lease with a fresh 256-bit one-shot nonce
+  → resolver signs the exact lease digest with network-resolve action/audience/Holon
+  → AuthorityVerifier checks trust policy, signature, signer, freshness and subject
+  → AuthorizedNetworkResolutionLease checks parent-facing identity bindings
+  → persistent replay ledger consumes the lease-nonce-derived replay key
+  → broker stages per-workload IP:port rules in an inactive map generation
+  → verifies map contents/digest and exact workload/cgroup binding
+  → atomically switches active generation; unknown outcome requires reconciliation
+  → returns the verified lease to Prism
   → Prism pins HTTP transport to the exact addresses and original hostname
   → kernel cgroup hooks admit only the leased IP:port set until monotonic expiry
   → Prism verifies actual remote_addr membership and TLS hostname
@@ -382,3 +386,20 @@ The parent Network Covenant schema is now version 2:
 The conservative address profile is informed by the IANA special-purpose registries (snapshot date 2025-10-09):
 - IPv4: https://www.iana.org/assignments/iana-ipv4-special-registry
 - IPv6: https://www.iana.org/assignments/iana-ipv6-special-registry
+
+
+## 14. Signed resolution-lease verification and one-shot replay (source added)
+
+The shared authority primitive and pure lease model now have a concrete verifier path:
+
+- `src/authority_signature.rs` adds the `network-resolve` action. `VerifiedSignatureEvidence` is now sealed: its fields are private, it cannot be deserialized or built with an external struct literal, and only `AuthorityVerifier::verify` can construct it. Read-only accessors expose the verified evidence to downstream capability wrappers.
+- `AuthorityChallenge::nonce_blake3` centralizes deterministic challenge-nonce derivation. `build_network_resolution_lease_challenge` binds the challenge to the exact lease digest, derived Holon identity, dedicated resolution audience, `network-resolve` action and the lease's own random nonce.
+- `AuthorizedNetworkResolutionLease` accepts only sealed verifier output. It checks exact lease subject digest, resolver key ID, authority action, dedicated audience, Holon binding, and the challenge-nonce derivation. It is not deserializable or a kernel permission.
+- The lease replay key is domain-separated and derived from the 256-bit lease nonce. It is stable across re-signatures and does not change if someone reuses the nonce with altered lease contents.
+- `src/action/authority_replay.rs` reuses the existing persistent SQLite `AuthorityReplayLedger`. The new `consume_authorized_resolution_lease` API atomically burns the stable lease replay key and records the challenge, evidence and exact lease subject. Duplicate consumption fails closed across process restart.
+
+The new conformance proposals are `LEASE-034` through `LEASE-036`: mismatched signed authority, challenge nonce not derived from the lease nonce, and second use of the same nonce via a re-signature or modified subject. They are specification/source-level test cases, not executed CI or runtime proof.
+
+**Still not implemented:** a production trusted resolver, resolver signing service and key custody, authenticated broker IPC, a broker transaction that sequences parent/workload validation + replay consumption + inactive map staging, exact IP:port BPF maps, or Prism's live lease adapter. The replay ledger primitive exists, but no production resolution-lease broker is calling it. No cgroup runtime enforcement or production activation claim is made.
+
+The required mutation order is now explicit: verify signed lease → validate exact parent/workload/policy/cgroup state → consume the stable lease nonce → stage the inactive map generation → verify staged contents → atomically switch active generation → reconcile any unknown outcome before retry. A consumed nonce is never restored after an uncertain mutation; the owner must issue a fresh lease.
