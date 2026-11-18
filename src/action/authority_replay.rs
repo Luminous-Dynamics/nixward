@@ -330,10 +330,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ledger = AuthorityReplayLedger::new(tmp.path().join("nixward/verified-replay.sqlite3"));
         let evidence = verified_network_resolution_evidence();
-        assert_eq!(
-            ledger.consume_verified(&evidence, 2_001),
-            Ok(())
-        );
+        ledger.consume_verified(&evidence, 2_001).unwrap();
         assert!(matches!(
             ledger.consume_verified(&evidence, 2_002),
             Err(AuthorityReplayError::AlreadyConsumed)
