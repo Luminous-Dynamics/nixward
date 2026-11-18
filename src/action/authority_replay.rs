@@ -8,6 +8,7 @@
 //! a fresh challenge rather than reusing an ambiguous approval.
 
 use crate::authority_signature::VerifiedSignatureEvidence;
+use crate::network_resolution_lease::AuthorizedNetworkResolutionLease;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -162,6 +163,29 @@ impl AuthorityReplayLedger {
              );",
         )?;
         Ok(connection)
+    }
+
+    /// Atomically consume the one-shot nonce of an authorized network
+    /// resolution lease. The replay key is derived from the lease nonce and
+    /// exact lease digest, so another valid signature over the same lease
+    /// cannot mint a second admission.
+    pub fn consume_authorized_resolution_lease(
+        &self,
+        authorized: &AuthorizedNetworkResolutionLease,
+        consumed_at_ms: u64,
+    ) -> Result<(), AuthorityReplayError> {
+        let lease = authorized.lease();
+        let subject = lease
+            .digest_hex()
+            .map_err(|_| AuthorityReplayError::InvalidEvidence("resolution lease digest"))?;
+        let evidence_digest = Self::decode_hex_32(authorized.evidence_blake3())?;
+        self.consume(
+            authorized.replay_key(),
+            authorized.challenge_blake3(),
+            evidence_digest,
+            &subject,
+            consumed_at_ms,
+        )
     }
 
     /// Atomically consume a challenge returned by the cryptographic verifier.
