@@ -3,7 +3,7 @@
   "kind": "prism-nixward-resolution-lease-v1-conformance-proposal",
   "status": "specification-only-not-executed",
   "execution_status": "not-run",
-  "note": "Mutations are proposed independent conformance cases. They are not evidence that a resolver, broker, cgroup map writer or BPF enforcement path exists or has passed.",
+  "note": "Mutations are proposed independent conformance cases. They are not evidence that a resolver, broker, cgroup map writer or BPF enforcement path exists or has passed. The newly added signature/replay cases describe source-level verifier and ledger APIs; they remain unexecuted until the Nixward test workflow and runtime broker integration are qualified.",
   "base_fixture": "docs/fixtures/prism-nixward-resolution-lease-v1.json",
   "required_negative_control": true,
   "cases": [
@@ -386,6 +386,39 @@
         ]
       },
       "oracle": "private addresses are permitted only inside the exact owner-authorized CIDR set"
+    },
+    {
+      "id": "LEASE-034",
+      "family": "signature_binding",
+      "title": "verified authority does not bind exact lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "signature",
+        "value": "valid Ed25519 signature over a different lease subject, signer, action, audience, or Holon"
+      },
+      "oracle": "AuthorizedNetworkResolutionLease rejects the proof unless sealed verifier evidence binds the exact lease digest, issuer key ID, network-resolve action, dedicated audience and derived Holon identity"
+    },
+    {
+      "id": "LEASE-035",
+      "family": "signature_binding",
+      "title": "challenge nonce is not derived from the lease nonce",
+      "operation": "deny",
+      "mutation": {
+        "path": "challenge.nonce_blake3",
+        "value": "validly signed but derived from unrelated entropy"
+      },
+      "oracle": "the verifier evidence is rejected because challenge_nonce_blake3 does not equal the deterministic derivation from the lease's one-shot nonce, subject, Holon and action"
+    },
+    {
+      "id": "LEASE-036",
+      "family": "replay",
+      "title": "same lease nonce re-signed or reused for modified subject",
+      "operation": "deny",
+      "mutation": {
+        "path": "replay",
+        "value": "second valid challenge with later timestamps or a modified lease digest but the same 256-bit lease nonce"
+      },
+      "oracle": "lease replay key remains stable for that nonce and the persistent AuthorityReplayLedger rejects every second consumption, including after process restart"
     }
   ]
 }
