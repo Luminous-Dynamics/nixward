@@ -47,6 +47,25 @@ pub fn build_network_resolution_lease_challenge(
     ttl_ms: u64,
 ) -> Result<AuthorityChallenge, NetworkResolutionLeaseError> {
     lease.validate_structure()?;
+    let lease_issued_at_ms = lease
+        .issued_at_unix
+        .checked_mul(1_000)
+        .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+    let lease_expires_at_ms = lease
+        .expires_at_unix
+        .checked_mul(1_000)
+        .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+    let challenge_expires_at_ms = issued_at_ms
+        .checked_add(ttl_ms)
+        .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+    if ttl_ms == 0
+        || ttl_ms > NETWORK_RESOLUTION_LEASE_MAX_LIFETIME_SECS * 1_000
+        || issued_at_ms < lease_issued_at_ms
+        || issued_at_ms >= lease_expires_at_ms
+        || challenge_expires_at_ms > lease_expires_at_ms
+    {
+        return Err(NetworkResolutionLeaseError::InvalidTimeWindow);
+    }
     let nonce_entropy = decode_nonce_entropy(&lease.nonce)?;
     AuthorityChallenge::new(
         AuthorityAction::NetworkResolve,
@@ -138,6 +157,26 @@ impl AuthorizedNetworkResolutionLease {
         let expected_holon = network_resolution_authority_holon_blake3(&lease.holon_id);
         if evidence.claims().get("challenge_holon_blake3") != Some(&expected_holon) {
             return Err(NetworkResolutionLeaseError::AuthorityHolonMismatch);
+        }
+        let lease_issued_at_ms = lease
+            .issued_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+        let lease_expires_at_ms = lease
+            .expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+        let challenge_ttl_ms = evidence
+            .expires_at_ms()
+            .checked_sub(evidence.issued_at_ms())
+            .ok_or(NetworkResolutionLeaseError::InvalidTimeWindow)?;
+        if evidence.issued_at_ms() < lease_issued_at_ms
+            || evidence.issued_at_ms() >= lease_expires_at_ms
+            || evidence.expires_at_ms() > lease_expires_at_ms
+            || challenge_ttl_ms == 0
+            || challenge_ttl_ms > NETWORK_RESOLUTION_LEASE_MAX_LIFETIME_SECS * 1_000
+        {
+            return Err(NetworkResolutionLeaseError::InvalidTimeWindow);
         }
         let nonce_entropy = decode_nonce_entropy(&lease.nonce)?;
         let expected_challenge_nonce = AuthorityChallenge::nonce_blake3(
@@ -698,7 +737,7 @@ mod tests {
             audience,
             key_id,
             challenge_holon,
-            1_000_000,
+            lease.issued_at_unix * 1_000,
         )
     }
 
@@ -869,7 +908,7 @@ mod tests {
 
         let (_, capability, parent_lease) = parent();
         let lease = lease(&capability, &parent_lease);
-        let challenge = build_network_resolution_lease_challenge(&lease, 1_000_000, 30_000)
+        let challenge = build_network_resolution_lease_challenge(&lease, 111_000, 3_000)
             .unwrap();
         assert_eq!(challenge.action, AuthorityAction::NetworkResolve);
         assert_eq!(challenge.subject_blake3, lease.digest_hex().unwrap());
@@ -885,7 +924,7 @@ mod tests {
             NETWORK_RESOLUTION_LEASE_AUDIENCE,
             &lease.issuer_key_id,
             None,
-            1_000_000,
+            111_000,
         );
         let second_evidence = signed_evidence_at(
             &lease,
@@ -893,7 +932,7 @@ mod tests {
             NETWORK_RESOLUTION_LEASE_AUDIENCE,
             &lease.issuer_key_id,
             None,
-            1_001_000,
+            112_000,
         );
         assert_ne!(
             first_evidence.challenge_blake3(),
@@ -916,7 +955,7 @@ mod tests {
             NETWORK_RESOLUTION_LEASE_AUDIENCE,
             &lease.issuer_key_id,
             None,
-            1_002_000,
+            113_000,
         );
         let third = AuthorizedNetworkResolutionLease::authorize(
             same_nonce_different_subject,
@@ -938,19 +977,19 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let ledger = AuthorityReplayLedger::new(temp.path().join("nixward/resolution-replay.sqlite3"));
         ledger
-            .consume_authorized_resolution_lease(&first, 1_002_000)
+            .consume_authorized_resolution_lease(&first, 112_000)
             .unwrap();
         assert!(matches!(
-            ledger.consume_authorized_resolution_lease(&second, 1_003_000),
+            ledger.consume_authorized_resolution_lease(&second, 113_000),
             Err(AuthorityReplayError::AlreadyConsumed)
         ));
         assert!(matches!(
-            ledger.consume_authorized_resolution_lease(&third, 1_003_500),
+            ledger.consume_authorized_resolution_lease(&third, 113_500),
             Err(AuthorityReplayError::AlreadyConsumed)
         ));
         let reopened = AuthorityReplayLedger::new(ledger.path().to_path_buf());
         assert!(matches!(
-            reopened.consume_authorized_resolution_lease(&third, 1_004_000),
+            reopened.consume_authorized_resolution_lease(&third, 114_000),
             Err(AuthorityReplayError::AlreadyConsumed)
         ));
     }
