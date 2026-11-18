@@ -692,6 +692,24 @@ mod tests {
         key_id: &str,
         challenge_holon: Option<&str>,
     ) -> VerifiedSignatureEvidence {
+        signed_evidence_at(
+            lease,
+            action,
+            audience,
+            key_id,
+            challenge_holon,
+            1_000_000,
+        )
+    }
+
+    fn signed_evidence_at(
+        lease: &NetworkResolutionLeaseV1,
+        action: crate::authority_signature::AuthorityAction,
+        audience: &str,
+        key_id: &str,
+        challenge_holon: Option<&str>,
+        issued_at_ms: u64,
+    ) -> VerifiedSignatureEvidence {
         use crate::authority_signature::{
             AuthorityChallenge, AuthorityTrustPolicy, AuthorityVerifier,
             DetachedAuthoritySignature, TrustedAuthorityKey, AUTHORITY_POLICY_KIND,
@@ -704,13 +722,16 @@ mod tests {
         let expected_holon = challenge_holon
             .map(str::to_owned)
             .unwrap_or_else(|| network_resolution_authority_holon_blake3(&lease.holon_id));
+        // The lease's own nonce, not fresh unrelated entropy, is bound into
+        // every signature challenge for this exact lease.
+        let nonce_entropy = decode_nonce_entropy(&lease.nonce).unwrap();
         let challenge = AuthorityChallenge::new(
             action,
             subject.clone(),
             expected_holon.clone(),
             audience,
-            [31u8; 32],
-            1_000_000,
+            nonce_entropy,
+            issued_at_ms,
             30_000,
         )
         .unwrap();
@@ -755,7 +776,13 @@ mod tests {
         };
         AuthorityVerifier::new(&policy)
             .unwrap()
-            .verify(&signed, action, &subject, &expected_holon, 1_010_000)
+            .verify(
+                &signed,
+                action,
+                &subject,
+                &expected_holon,
+                issued_at_ms + 1_000,
+            )
             .unwrap()
     }
 
@@ -833,6 +860,71 @@ mod tests {
             AuthorizedNetworkResolutionLease::authorize(altered, &evidence).unwrap_err(),
             NetworkResolutionLeaseError::AuthoritySubjectMismatch
         );
+    }
+
+    #[test]
+    fn resolution_lease_nonce_is_one_shot_even_when_the_same_lease_is_resigned() {
+        use crate::action::authority_replay::{AuthorityReplayError, AuthorityReplayLedger};
+        use crate::authority_signature::AuthorityAction;
+
+        let (_, capability, parent_lease) = parent();
+        let lease = lease(&capability, &parent_lease);
+        let challenge = build_network_resolution_lease_challenge(&lease, 1_000_000, 30_000)
+            .unwrap();
+        assert_eq!(challenge.action, AuthorityAction::NetworkResolve);
+        assert_eq!(challenge.subject_blake3, lease.digest_hex().unwrap());
+        assert_eq!(
+            challenge.holon_id,
+            network_resolution_authority_holon_blake3(&lease.holon_id)
+        );
+        assert_eq!(challenge.audience, NETWORK_RESOLUTION_LEASE_AUDIENCE);
+
+        let first_evidence = signed_evidence_at(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+            1_000_000,
+        );
+        let second_evidence = signed_evidence_at(
+            &lease,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+            1_001_000,
+        );
+        assert_ne!(
+            first_evidence.challenge_blake3(),
+            second_evidence.challenge_blake3(),
+            "the detached challenges should be distinct because their time windows differ"
+        );
+
+        let first =
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &first_evidence).unwrap();
+        let second =
+            AuthorizedNetworkResolutionLease::authorize(lease, &second_evidence).unwrap();
+        assert_eq!(
+            first.replay_key(),
+            second.replay_key(),
+            "the lease nonce and exact lease digest define the one-shot identity"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let ledger = AuthorityReplayLedger::new(temp.path().join("nixward/resolution-replay.sqlite3"));
+        ledger
+            .consume_authorized_resolution_lease(&first, 1_002_000)
+            .unwrap();
+        assert!(matches!(
+            ledger.consume_authorized_resolution_lease(&second, 1_003_000),
+            Err(AuthorityReplayError::AlreadyConsumed)
+        ));
+        let reopened = AuthorityReplayLedger::new(ledger.path().to_path_buf());
+        assert!(matches!(
+            reopened.consume_authorized_resolution_lease(&second, 1_004_000),
+            Err(AuthorityReplayError::AlreadyConsumed)
+        ));
     }
 
     #[test]
