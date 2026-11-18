@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://luminousdynamics.io/schemas/prism-nixward-resolution-lease-v1.schema.json",
+  "title": "Prism to Nixward Resolution Lease v1",
+  "description": "Proposed short-lived, workload-bound resolved-address lease. Schema validity alone grants no authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "lease_id",
+    "logical_request_id",
+    "redirect_hop",
+    "holon_id",
+    "workload_blake3",
+    "network_policy_blake3",
+    "parent_capability_blake3",
+    "parent_authority_lease_blake3",
+    "address_policy_blake3",
+    "hostname",
+    "transport",
+    "port",
+    "address_scope",
+    "addresses",
+    "resolver_profile_id",
+    "resolver_snapshot_blake3",
+    "resolved_at_unix",
+    "resolver_valid_until_unix",
+    "issued_at_unix",
+    "expires_at_unix",
+    "policy_generation",
+    "issuer_key_id",
+    "nonce",
+    "dnssec_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "lease_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "logical_request_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "redirect_hop": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5
+    },
+    "holon_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "workload_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "network_policy_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "parent_capability_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "parent_authority_lease_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "address_policy_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "hostname": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$"
+    },
+    "transport": {
+      "const": "tcp"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "address_scope": {
+      "enum": [
+        "public-unicast-only",
+        "explicit-approved-cidrs"
+      ]
+    },
+    "addresses": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 45,
+        "anyOf": [
+          {
+            "format": "ipv4"
+          },
+          {
+            "format": "ipv6"
+          }
+        ]
+      }
+    },
+    "resolver_profile_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "resolver_snapshot_blake3": {
+      "$ref": "#/$defs/blake3"
+    },
+    "resolved_at_unix": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resolver_valid_until_unix": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "issued_at_unix": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expires_at_unix": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "policy_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "issuer_key_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dnssec_status": {
+      "enum": [
+        "validated",
+        "not-validated",
+        "unsupported",
+        "indeterminate"
+      ]
+    }
+  },
+  "$defs": {
+    "blake3": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
