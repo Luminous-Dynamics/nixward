@@ -84,13 +84,13 @@ fn decode_nonce_entropy(value: &str) -> Result<[u8; 32], NetworkResolutionLeaseE
 fn resolution_lease_replay_key(
     lease: &NetworkResolutionLeaseV1,
 ) -> Result<String, NetworkResolutionLeaseError> {
-    let subject = lease.digest_hex()?;
+    // The nonce is a globally unique, 256-bit, one-use token. Do not include
+    // the subject digest: reusing the same nonce for a modified lease must
+    // still collide with the original consumed nonce.
+    let nonce_entropy = decode_nonce_entropy(&lease.nonce)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(RESOLUTION_REPLAY_DOMAIN);
-    hasher.update(&(lease.nonce.len() as u64).to_le_bytes());
-    hasher.update(lease.nonce.as_bytes());
-    hasher.update(&(subject.len() as u64).to_le_bytes());
-    hasher.update(subject.as_bytes());
+    hasher.update(&nonce_entropy);
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -904,11 +904,35 @@ mod tests {
         let first =
             AuthorizedNetworkResolutionLease::authorize(lease.clone(), &first_evidence).unwrap();
         let second =
-            AuthorizedNetworkResolutionLease::authorize(lease, &second_evidence).unwrap();
+            AuthorizedNetworkResolutionLease::authorize(lease.clone(), &second_evidence).unwrap();
+
+        // Even a second, validly signed lease object cannot reuse the same
+        // nonce to alter any other field and acquire a distinct replay slot.
+        let mut same_nonce_different_subject = lease.clone();
+        same_nonce_different_subject.resolver_snapshot_blake3 = "66".repeat(32);
+        let third_evidence = signed_evidence_at(
+            &same_nonce_different_subject,
+            AuthorityAction::NetworkResolve,
+            NETWORK_RESOLUTION_LEASE_AUDIENCE,
+            &lease.issuer_key_id,
+            None,
+            1_002_000,
+        );
+        let third = AuthorizedNetworkResolutionLease::authorize(
+            same_nonce_different_subject,
+            &third_evidence,
+        )
+        .unwrap();
+
         assert_eq!(
             first.replay_key(),
             second.replay_key(),
-            "the lease nonce and exact lease digest define the one-shot identity"
+            "the lease nonce defines the one-shot identity across re-signatures"
+        );
+        assert_eq!(
+            first.replay_key(),
+            third.replay_key(),
+            "reusing one nonce with a different subject must not create a second replay slot"
         );
 
         let temp = tempfile::tempdir().unwrap();
@@ -920,9 +944,13 @@ mod tests {
             ledger.consume_authorized_resolution_lease(&second, 1_003_000),
             Err(AuthorityReplayError::AlreadyConsumed)
         ));
+        assert!(matches!(
+            ledger.consume_authorized_resolution_lease(&third, 1_003_500),
+            Err(AuthorityReplayError::AlreadyConsumed)
+        ));
         let reopened = AuthorityReplayLedger::new(ledger.path().to_path_buf());
         assert!(matches!(
-            reopened.consume_authorized_resolution_lease(&second, 1_004_000),
+            reopened.consume_authorized_resolution_lease(&third, 1_004_000),
             Err(AuthorityReplayError::AlreadyConsumed)
         ));
     }
