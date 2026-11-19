@@ -519,3 +519,5 @@ The next backend should be separately versioned V41: retain V40 socket-admission
 ### V40 protocol support is explicit, not wildcard
 
 V40 now accepts only explicit TCP and UDP rules. ICMP is left unresolved because the reviewed V40 backend has no qualified ICMP hook. Protocol `Any` is also left unresolved: the existing connect/sendmsg feature set must not be interpreted as enforcement of arbitrary transports. Callers must issue separate explicit TCP and UDP capabilities; unsupported transport types remain in the unresolved list and block activation eligibility. The compiler has negative controls for both cases. LEASE-069 and LEASE-070 record this boundary.
+
+The V40 plan validator now independently rejects unsupported `Icmp` and `Any` protocols in deserialized `KernelNetworkRule` entries, not just in the capability compiler. This closes the alternate path where a caller could submit a manually assembled plan and bypass the compiler's unresolved-rule behavior. LEASE-071 covers mutation of an otherwise valid TCP plan to either unsupported protocol; the validator rejects before activation eligibility.
