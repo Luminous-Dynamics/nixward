@@ -545,6 +545,17 @@
         "setup": "Kernel reports neither exact prior nor exact target generation/payload pair"
       },
       "oracle": "quarantine as Conflict and require operator/runtime recovery; never issue a new grant"
+    },
+    {
+      "id": "LEASE-050",
+      "family": "replay",
+      "title": "replay-ledger record digest is bound to the exact signed lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "replay_record_blake3",
+        "value": "record for another lease, resolver key, or signature evidence"
+      },
+      "oracle": "the transaction reducer rejects a replay-record digest not derived from the exact lease digest, stable one-shot replay key, resolver key ID and verified authority-evidence digest; it enters Conflict and cannot execute"
     }
   ]
 }
