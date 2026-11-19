@@ -515,3 +515,7 @@ Therefore V40 must not claim that it constrains every packet on already-establis
 The V40 coverage boundary is now exposed as `NetworkEnforcementCoverageV40`, derived only after `NetworkEnforcementPlan::validate` succeeds. It reports required IPv4/IPv6 TCP connect hooks and conditional IPv4/IPv6 UDP sendmsg hooks, while explicitly setting packet-level egress filtering, established-flow revocation, passed-socket recipient binding and production-enforcement claims to false. This profile does not alter the signed plan or claim runtime attachment. LEASE-068 and two Rust tests protect these non-claims from accidental overstatement.
 
 The next backend should be separately versioned V41: retain V40 socket-admission hooks, add a qualified cgroup packet-egress plane, and prove descriptor-passing/cgroup-migration behavior in the disposable VM before any production activation path can select it.
+
+### V40 protocol support is explicit, not wildcard
+
+V40 now accepts only explicit TCP and UDP rules. ICMP is left unresolved because the reviewed V40 backend has no qualified ICMP hook. Protocol `Any` is also left unresolved: the existing connect/sendmsg feature set must not be interpreted as enforcement of arbitrary transports. Callers must issue separate explicit TCP and UDP capabilities; unsupported transport types remain in the unresolved list and block activation eligibility. The compiler has negative controls for both cases. LEASE-069 and LEASE-070 record this boundary.
