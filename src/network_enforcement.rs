@@ -250,6 +250,14 @@ impl NetworkEnforcementPlan {
         for rule in &self.rules {
             validate_digest(&rule.capability_blake3)?;
             validate_digest(&rule.workload_blake3)?;
+            if !matches!(rule.protocol, NetworkProtocol::Tcp | NetworkProtocol::Udp) {
+                return Err(NetworkEnforcementError::UnsafeContract(
+                    format!(
+                        "V40 deserialized rule uses unsupported protocol {:?}; only explicit TCP/UDP rules are enforceable",
+                        rule.protocol
+                    ),
+                ));
+            }
             if !self.workload_subjects.contains_key(&rule.workload_blake3) {
                 return Err(NetworkEnforcementError::UnknownWorkload(
                     rule.workload_blake3.clone(),
@@ -802,6 +810,26 @@ mod tests {
                 &[]
             ),
             Err(NetworkEnforcementError::UnresolvedRules(1))
+        ));
+    }
+
+    #[test]
+    fn deserialized_plan_cannot_inject_icmp_or_any_rules() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let mut icmp_plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        icmp_plan.rules[0].protocol = NetworkProtocol::Icmp;
+        assert!(matches!(
+            icmp_plan.validate(),
+            Err(NetworkEnforcementError::UnsafeContract(_))
+        ));
+
+        let mut any_plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        any_plan.rules[0].protocol = NetworkProtocol::Any;
+        assert!(matches!(
+            any_plan.validate(),
+            Err(NetworkEnforcementError::UnsafeContract(_))
         ));
     }
 
