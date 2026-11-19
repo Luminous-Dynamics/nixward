@@ -1,0 +1,525 @@
+# Prism ↔ Nixward Egress Covenant v1
+
+Status: cross-repository integration proposal and wire-contract draft. No production broker, DNS resolver, kernel loader, or runtime integration is implemented by this document.
+
+## 1. Executive decision
+
+Prism and Nixward solve different halves of the same problem. They should compose, not converge into one oversized networking crate.
+
+- **Prism is the application authority plane.** It authorizes an exact HTTP(S) operation: origin, URL, method, allowed headers/body, DNS snapshot, expiry, byte/time budgets, redirect/retry decisions, TLS hostname identity, response consumption and application receipt.
+- **Nixward is the workload enforcement plane.** It binds an approved network policy to an exact workload identity and cgroup, compiles workload-level network rules, enforces socket admission in the kernel, records metadata-only observations, and separates lab evidence from owner-authorized production activation.
+- **The kernel is the outer boundary.** A process that bypasses Prism must still be unable to open arbitrary sockets from the protected workload cgroup.
+- **The owner policy is the root of authority.** Prism, Symthaea reasoning, DNS observations, and telemetry cannot broaden an owner-approved workload capability.
+
+The intended composition is:
+
+`owner policy → workload capability → authenticated resolution lease → kernel address/port admission → Prism pinned HTTP request → peer/TLS verification → correlated evidence`
+
+The core principle is **one DNS decision, two independently enforced planes**: the same exact approved address set must constrain the HTTP transport and the workload's kernel socket boundary.
+
+## 2. Existing implementation inventory
+
+This proposal reuses existing Nixward work:
+
+| Existing component | Current role | Boundary that remains |
+|---|---|---|
+| `src/network_covenant.rs` | Typed `WorkloadIdentity`, schema-v2 `NetworkCapability` with owner-bound `AddressScopePolicy`, `NetworkPolicyPlan`, expiring `NetworkCapabilityLease` | Parent address scope is explicit; production trusted resolver, resolver signing service and runtime map writer remain unimplemented |
+| `src/authority_signature.rs` | Ed25519 `AuthorityVerifier`, explicit signer/action/audience trust policy, `NetworkResolve` action and sealed, read-only `VerifiedSignatureEvidence` | Verification primitive exists; resolver key provisioning, custody, distribution, rotation/revocation operations and service IPC are not deployed |
+| `src/network_runtime_lab.rs` | Validates an isolated runtime report with 14 required cases and emits a lab attestation | Lab attestation is not target-host activation evidence |
+| `tests/network-runtime-lab/` | Disposable NixOS VM; test-only cgroup-BPF object; real IPv4/IPv6 TCP/UDP allow/deny, lease expiry, generation swap, cgroup binding, stale replay and attach-failure cases | The current test BPF program is a small port/mode/generation/lease laboratory, not a production implementation of the typed CIDR/hostname policy compiler |
+| `src/network_activation.rs` | Exact owner-authorized activation intent and post-activation receipt contract | The existence of the receipt type does not itself prove that a production target has attached the reviewed program |
+| `src/network_telemetry.rs` | Bounded, metadata-only BLAKE3 hash-chained network telemetry; no payload capture or enforcement authority | Hash chaining provides integrity linkage, not collector authenticity or independent proof of successful remote connection |
+
+Prism's current implementation in Mycelix PR #6299 already has a one-use application capability, complete bounded DNS address-set validation, `resolve_to_addrs` pinning, original-host Host/SNI/certificate checks, a required `remote_addr()` membership check, manual per-hop redirect authorization, disabled ambient proxies/retries, bounded response bodies, and retained-body memory leases. Its receipts are currently application receipts, not signed or kernel-attested claims.
+
+References:
+- Nixward network architecture / task corpus: https://github.com/Luminous-Dynamics/nixward/pull/67
+- Nixward deterministic fault-scenario harness: https://github.com/Luminous-Dynamics/nixward/pull/71
+- Nixward offline rtnetlink observation verifier: https://github.com/Luminous-Dynamics/nixward/pull/72
+- Prism egress implementation: https://github.com/Luminous-Dynamics/mycelix/pull/6299
+- Symthaea browser preflight policy: https://github.com/Luminous-Dynamics/symthaea/blob/main/crates/domains/symthaea-browser/src/safety.rs
+- Iroh patch uses DNS-pinned Reqwest for relay probes: https://github.com/Luminous-Dynamics/symthaea/blob/main/patches/iroh/iroh/src/net_report/reportgen.rs
+
+## 3. Critical gap discovered
+
+Nixward's current `NetworkEnforcementPlan::compile_capability` rejects hostname destinations with the reason:
+
+> hostname capabilities require an authenticated DNS/resolution covenant before kernel pinning
+
+This is the correct fail-closed behavior. A hostname string is not an IP policy, and a DNS response is not automatically trusted merely because it was observed.
+
+The bridge must not work around this by silently resolving a hostname in an untrusted caller and passing its IPs into a privileged map writer. It must establish:
+
+1. Which owner-authorized parent capability allowed the hostname, protocol and port?
+2. Which exact workload and cgroup made the request?
+3. Which resolver/namespace/profile produced the A/AAAA/CNAME answer set?
+4. What was the complete answer set and its validity interval?
+5. Which policy filtered every address, and why?
+6. Which one-shot request/hop is the temporary lease for?
+7. Which kernel generation contains that exact allow-set?
+8. Did Prism actually connect to a peer in the same set and validate the original hostname's TLS identity?
+
+**Parent address scope is now represented in the Network Covenant schema v2.** A `NetworkCapability` with `DestinationSet::Hostnames` must carry an explicit `AddressScopePolicy`: `PublicUnicastOnly` or `ExplicitCidrs`. The scope participates in the parent capability and policy digests; hostname capabilities without a scope fail validation. `NetworkResolutionLeaseV1::validate_parent_binding` requires `address_policy_blake3` to match that exact parent scope and checks every resolved A/AAAA address against it. The pure model does not itself resolve DNS, authenticate a resolver, or implement the cgroup map writer.
+
+## 4. Authority model and trust boundaries
+
+### 4.1 Parent authority
+
+A resolution lease is a strict *narrowing* of an existing owner-authorized `NetworkCapability`. It never creates a new hostname, port, protocol, workload, or address scope.
+
+The parent capability should bind:
+- exact workload identity digest and Holon;
+- egress direction;
+- transport protocol;
+- exact hostname or explicit hostname pattern semantics;
+- permitted port(s);
+- explicit resolved-address scope/classification policy;
+- policy version and owner/delegation authority.
+
+A lease for `api.example.org:443/tcp` is invalid unless the parent policy grants that destination and the exact workload. Wildcard/subdomain matching must be explicit in the parent policy; v1 should prefer exact canonical hostnames.
+
+### 4.2 Resolver authority
+
+**Preferred v1 model:** Nixward's trusted resolver service obtains the complete A and AAAA set once, validates it against the parent policy, and returns a short-lived signed/digest-bound snapshot. Prism consumes those exact addresses for its socket pinning. It must not independently resolve again.
+
+The resolver adapter must identify its trust profile and the network namespace in which it resolved. It must return complete answer-set semantics, including:
+- A and AAAA answers (including a valid NODATA result for one family);
+- CNAME chain identity and loop/chain bounds;
+- duplicate elimination and answer-count ceiling;
+- TTL/valid-until for all accepted records;
+- DNS failure, timeout, malformed response and truncated UDP/TCP fallback outcomes;
+- a digest of the normalized resolver transcript.
+
+If an adapter cannot establish a usable validity bound, the broker must refuse a dynamic lease under the strict profile. A guessed/default TTL is not DNS evidence.
+
+The production resolver adapter is an explicit implementation milestone. The current OS `ToSocketAddrs` path in Prism does not expose authoritative TTL/CNAME/DNSSEC metadata; the test-only Hickory fixture does not make Hickory the production resolver. Split-DNS, systemd-resolved, hosts-file and VPN behavior require platform-specific tests before declaring compatibility.
+
+### 4.3 Address-set policy
+
+The resolver service evaluates the entire set, not only the first address. If one answer violates the parent address scope, reject the whole set. Do not silently drop a private/metadata answer and keep the public one.
+
+For Prism public-web traffic, the parent scope should be public-unicast-only and reject loopback, private, link-local, metadata, multicast, unspecified, special-use and transition ranges according to the reviewed policy corpus. LAN/browser navigation is a different workload and authority profile; it must not inherit public-web exceptions or vice versa.
+
+Every approved address is bound to the exact transport port. A lease cannot authorize arbitrary ports on an approved IP.
+
+### 4.4 Local broker identity
+
+The privileged Nixward broker—not the Prism request handler—owns kernel map updates. It must authenticate the requesting service over a local IPC channel and bind that caller to:
+- exact systemd unit / guest runtime identity;
+- stable cgroup-v2 identity (and inode/path observation);
+- exact NixOS system closure / workload artifact identity;
+- current parent policy digest and generation.
+
+Do not rely on a caller-supplied PID or cgroup path as proof. Resolve process identity using a race-resistant OS mechanism, then verify the cgroup binding at the mutation boundary. A stale PID, moved process, changed cgroup, or unknown workload blocks the lease.
+
+The Prism service gets no BPF map file descriptor, bpffs write permission, or general firewall mutation API.
+
+### 4.5 Separate policy from reasoning
+
+Symthaea, HDC similarity, Phi, anomaly detection and natural-language approval can recommend or explain. They never mint or widen a network capability. Existing Nixward `reasoning_authority = "none"` and telemetry `network_enforcement_authority = false` invariants remain mandatory.
+
+## 5. Proposed versioned wire contract
+
+The JSON Schema is `docs/schema/prism-nixward-resolution-lease-v1.schema.json`; a valid illustrative instance is `docs/fixtures/prism-nixward-resolution-lease-v1.json`.
+
+The lease binds:
+- schema/version and unique lease ID;
+- Holon, workload digest, network policy digest and parent capability digest;
+- exact canonical A-label hostname;
+- TCP protocol and exact destination port;
+- sorted, unique, complete IPv4/IPv6 address list;
+- resolver profile and resolver snapshot digest;
+- issue time and expiry;
+- parent policy generation and one-shot nonce;
+- opaque logical request ID and redirect-hop index.
+
+The lease intentionally excludes URL path, query, credentials, request/response bodies, cookies, Authorization headers, and other payload content. A public IP and hostname may still be sensitive operational metadata; storage/telemetry should use a digest or short-lived encrypted record where possible.
+
+The wire object is **not authority by itself**. The pure `AuthorizedNetworkResolutionLease` wrapper accepts it only with `VerifiedSignatureEvidence` produced by `AuthorityVerifier`, binding the canonical lease digest to the trusted resolver key ID, `network-resolve` action, dedicated audience, derived Holon identity and lease nonce. The eventual broker must additionally authenticate IPC caller identity, verify owner/delegation authorization for the exact parent capability, and validate the exact cgroup/workload binding. A BLAKE3 digest alone does not prove who issued a lease.
+
+### 5.1 Lease lifetime
+
+The effective expiry is the minimum of:
+- resolver snapshot `valid_until`;
+- parent capability / delegation expiry;
+- Prism's own short capability expiry;
+- the Nixward policy's configured maximum resolution-lease duration.
+
+A starting design target is a **maximum 5-second lease**, but the actual value must never exceed the resolver-derived validity. This is a proposal, not an existing guarantee.
+
+At broker activation, convert the remaining wall-clock validity into a kernel monotonic deadline using the broker's own clock. Never trust a caller-supplied monotonic timestamp. When the DNS validity is unknown or expired, require a new resolution snapshot.
+
+A lease covers one logical HTTP hop and its bounded authorized connection attempts to the same address set. A redirect, application retry, authority change, or policy-generation change requires a new lease. Prism currently disables implicit transport retries; keep that invariant.
+
+### 5.2 Canonical IP:port set identity shared with Prism
+
+Prism and Nixward use the same v1 binary address-set encoding for cross-plane correlation. The BLAKE3 derive-key context is `org.luminousdynamics.prism.address-set.v1`. The bytes are the unique-record count as u64 big-endian, followed by sorted records: IPv4 tag `0x04` + 4 address bytes + u16 big-endian port; IPv6 tag `0x06` + 16 address bytes + u16 big-endian port + u32 big-endian scope ID. IPv4 sorts before IPv6; addresses are then sorted lexicographically, followed by numeric port and IPv6 scope ID. Nixward's v1 lease stores bare `IpAddr` values and one port, so its IPv6 scope ID is zero. IPv6 flowinfo is excluded. Duplicate records are removed before encoding.
+
+The shared golden vector is `93.184.216.34:443` plus `[2606:4700:4700::1111]:443`; both repositories assert the identical 38-byte encoding. The Prism digest field is a correlation value only. It is distinct from the signed resolution-lease digest, resolver snapshot digest, signature evidence and kernel observation; equality does not authenticate either side. Preserve these distinctions in all receipts and benchmark reports.
+
+### 5.3 DNSSEC is not implied
+
+An authenticated local resolution lease proves that the Nixward broker issued a bounded decision under its configured resolver/trust policy. It does not automatically mean DNSSEC was validated. The resolver profile must separately report DNSSEC state (validated / not validated / unsupported / indeterminate); the policy decides whether it is required. Do not label a lease DNSSEC-authenticated unless the resolver actually validates the chain and the evidence binds that validation.
+
+## 6. State machine
+
+```text
+Prism requests hostname + parent capability + logical hop identity
+  → Nixward authenticates caller and exact workload/cgroup
+  → validates parent owner/delegation authority and policy generation
+  → trusted resolver obtains the complete A/AAAA/CNAME/TTL snapshot
+  → validates complete address set against explicit scope
+  → constructs canonical lease with a fresh 256-bit one-shot nonce
+  → resolver signs the exact lease digest with network-resolve action/audience/Holon
+  → AuthorityVerifier checks trust policy, signature, signer, freshness and subject
+  → AuthorizedNetworkResolutionLease checks parent-facing identity bindings
+  → persistent replay ledger consumes the lease-nonce-derived replay key
+  → broker stages per-workload IP:port rules in an inactive map generation
+  → verifies map contents/digest and exact workload/cgroup binding
+  → atomically switches active generation; unknown outcome requires reconciliation
+  → returns the verified lease to Prism
+  → Prism pins HTTP transport to the exact addresses and original hostname
+  → kernel cgroup hooks admit only the leased IP:port set until monotonic expiry
+  → Prism verifies actual remote_addr membership and TLS hostname
+  → both planes emit redacted, correlated evidence
+  → lease expires or is explicitly revoked; stale map entries are inert
+```
+
+### Atomicity and failure behavior
+
+- A partially staged map generation must never become active.
+- If map population, digest verification, cgroup binding, program attachment, generation switch or receipt persistence has an unknown outcome, the broker reconciles actual map/attachment state before retrying.
+- Unknown outcome means no new grant. Preserve the previous known-good static NixOS/nftables baseline; do not silently replace it with a broader allow rule.
+- The cgroup program must deny destinations not in the active set, including IPv4 and IPv6 paths and the relevant TCP socket hooks.
+- UDP/QUIC/HTTP/3 must remain denied unless explicitly modeled, tested and parent-authorized. Prism's current v1 transport profile is TCP HTTP(S).
+- A lease expiry must be enforced by kernel monotonic time, not by a userspace timer alone.
+- A resolver change, cgroup move, workload restart, policy-generation change or owner revocation invalidates outstanding dynamic leases.
+- Preserve deliberate LAN access only under a distinct workload and explicit user-navigation capability. Do not globally allow RFC1918 to make browser navigation work.
+
+## 7. Evidence model
+
+Prism and Nixward should emit separate records with a shared opaque `logical_request_id` and per-hop identifier.
+
+**Prism application receipt**
+- exact authority/policy version and sanitized origin;
+- address-set digest, peer address and `remote_addr` check;
+- TLS hostname/certificate result, protocol, status;
+- redirect hop, retry decision, bytes, duration and body-lease lifecycle;
+- binary/source revision and egress-capability ID.
+
+**Nixward kernel lease/activation evidence**
+- parent capability/policy digests and generation;
+- workload digest, cgroup identity and kernel/BPF program identity;
+- resolver profile/snapshot digest and validity interval;
+- staged/active map generation and exact address/port rule digest;
+- metadata-only connect/sendmsg admission observation and lease expiry/revocation outcome.
+
+A cgroup `connect4/connect6` hook is an admission/connection-attempt observation point; it does not on its own prove that a TCP handshake completed or identify the authenticated TLS peer. Prism's transport-level peer observation remains necessary. The kernel observation is independent corroboration that the protected workload could not bypass the approved address/port set.
+
+Network telemetry remains payload-free. Avoid storing URL paths, query strings, cookies, headers, bodies or raw user identifiers in the shared ledger. The existing five-minute telemetry time bucket is appropriate for general monitoring, but a bounded short-lived incident correlation record may need a separate, access-controlled retention policy; do not weaken the default telemetry policy globally.
+
+Hash chains and digests establish integrity/linkage, not issuer authenticity. A shared Ed25519 verifier and sealed evidence type now exist, and the pure resolution-lease wrapper accepts only verifier-produced evidence for the exact lease subject, resolver key, network-resolve action, audience, Holon and nonce. This does not deploy a resolver signing service or solve signer key custody, provisioning, rotation/revocation operations, authenticated broker IPC, or offline trust-policy distribution. Production activation still requires the existing exact owner-authorized Nixward activation flow.
+
+## 8. Security and conformance corpus
+
+The new fixture file defines positive and negative cases for the bridge. The executable implementation should extend the current 14-case runtime lab with, at minimum:
+
+1. exact authorized FQDN + IPv4/IPv6 set + port admitted;
+2. public + private mixed answer set rejected as a whole;
+3. metadata/loopback/link-local/special-use answer rejected under public-only scope;
+4. A/AAAA NODATA handling and incomplete answer-set rejection;
+5. CNAME chain, loop, excessive chain and malformed DNS response;
+6. UDP TC=1 followed by TCP retry to the same resolver;
+7. TTL expiry while a request is waiting to connect;
+8. DNS rebinding after lease issuance; no new address can connect;
+9. redirect to a second approved public hostname obtains a new lease;
+10. redirect to private/metadata/localhost obtains no second lease;
+11. lease bound to a different workload, cgroup, parent capability or policy generation is rejected;
+12. expired/revoked/replayed nonce rejected, including after broker restart;
+13. partially staged map update and failed generation swap preserve fail-closed state;
+14. IPv4/IPv6/TCP socket attempts from a second process in the same cgroup are denied outside the set;
+15. moving a process to an unbound cgroup does not inherit another workload's authority;
+16. broker restart, stale maps, cgroup rebind and attachment loss fail closed;
+17. Prism's observed peer must belong to the exact lease set and original hostname TLS checks remain active;
+18. no raw payload or URL secrets appear in telemetry/evidence.
+
+The existing lab's port-only BPF map is useful for testing cgroup hook semantics, lease clocks and generation swaps. It must be extended to exact IPv4/IPv6 address sets and port matching before it can qualify this integration. Do not describe the current lab as already enforcing this entire protocol.
+
+## 9. Benchmark plan: PEAB × Nixward runtime lab
+
+Compare four distinct configurations on the same machine, same fixtures and same policy corpus:
+
+| Profile | Application controls | Kernel/workload controls |
+|---|---|---|
+| A | Hardened Reqwest reference | None (baseline only) |
+| B | Prism egress capability + DNS pinning | None |
+| C | No Prism application policy | Nixward workload/cgroup egress policy |
+| D | Prism + Nixward resolution lease + cgroup BPF | Both |
+
+Profile A without hardening is a performance floor only. Profile C is not a valid HTTP-authority control; it should fail application-layer SSRF scenarios that require URL/method/redirect interpretation. Profile D is the target layered architecture.
+
+Measure:
+- unauthorized socket attempts and successful connections outside the lease set (hard gate: zero);
+- policy/authority mismatch, stale lease, DNS rebinding and redirect escape outcomes;
+- resolver p50/p95/p99 and DNS query count;
+- lease issuance/map staging/atomic generation switch p50/p95/p99;
+- added connect latency and total HTTP-hop p50/p95/p99;
+- throughput, CPU, BPF map occupancy/update rate, task/FD count and cgroup memory;
+- recovery latency after broker restart, map failure, cgroup rebind and policy revocation;
+- resolver-outage behavior, availability and false-positive rate for the allowed corpus.
+
+Use cold/warm DNS and cold/warm connections as separate strata. Use at least five independent runs per configuration, retain raw samples and failed runs, randomize configuration order, and publish 95% confidence intervals. Start with 10,000 seeded adversarial sequences per scenario family; grow to one million for the long-running campaign. No weighted aggregate score can compensate for a security-gate failure.
+
+Industry comparisons should include:
+- Envoy Dynamic Forward Proxy with `resolved_address_filter` and its documented DNS cache/stale-refresh behavior;
+- Cilium FQDN policy with its DNS-proxy/trusted-resolver assumptions;
+- Prism alone and Nixward cgroup enforcement alone;
+- the composed Prism+Nixward design.
+
+This is a stronger comparison than feature counts: it distinguishes application authority, kernel containment, operational cost and what each plane cannot prove.
+
+## 10. Work sequence and acceptance gates
+
+### M0 — Contract (this PR)
+- Freeze the JSON schema and examples.
+- Review parent policy address-scope semantics and resolver trust profile.
+- Agree on nonce, exact workload identity, map-generation and privacy fields.
+
+### M1 — Pure Nixward model (no kernel writes)
+- Add a typed `NetworkResolutionLeaseV1` model and canonical digest.
+- Validate exact policy/workload/parent-capability binding, hostname, TCP port, addresses, expiry, nonce, generation, and full-set policy.
+- Verify signed/delegated authority separately from schema validity.
+- Add property/mutation tests for all lease fields and policy mismatches.
+
+### M2 — Resolver broker
+- Add an explicit resolver adapter with complete A/AAAA/CNAME/TTL semantics.
+- Add deterministic DNS wire tests for mixed answers, malformed/slow replies, rebinding, TTL, UDP truncation/TCP fallback and resolver-profile changes.
+- Do not issue a kernel lease without a trusted resolver snapshot and valid expiry.
+
+### M3 — Kernel address-set runtime lab
+- Extend the test-only cgroup-BPF map from one port/mode to bounded IPv4/IPv6 address+port sets and exact workload bindings.
+- Add atomic multi-entry generation transitions and monotonic lease expiry.
+- Exercise the second-process bypass and failure/recovery cases in disposable NixOS VMs.
+
+### M4 — Prism adapter
+- Obtain one Nixward lease before a logical HTTP hop.
+- Pass the exact lease address set directly into `resolve_to_addrs`; never perform an independent second DNS lookup.
+- Preserve the original hostname for Host/SNI/certificate verification; require peer membership.
+- Renew for every redirect/retry/authority transition.
+- Correlate receipts with the kernel lease while keeping payloads/URL secrets out of telemetry.
+
+### M5 — Owner-authorized pilot
+- Require exact target system closure, reviewed BPF object digest, target-host feature/binding proof, allow/deny smoke tests, preservation of baseline firewall, and detached owner authority for `network-activate`.
+- Begin with one disposable NixOS VM and one noncritical Prism workload.
+- No fleet-wide activation or default policy broadening.
+
+**Release blockers:** no production use until the resolver source and DNS TTL are authenticated under the selected trust model; parent policy has an explicit address scope; cgroup enforcement is tested against exact IP sets; stale/replay/failure modes are independently observed; and the owner-authorized target-host activation receipt is verified.
+
+## 11. Explicit non-claims
+
+This proposal does not claim:
+- that Nixward currently enforces Prism hostname/IP leases in production;
+- that the existing 14-case runtime lab checks exact DNS-derived IP sets;
+- that Prism receipts are currently signed or independently kernel-attested;
+- that DNSSEC is validated by the current resolver;
+- that cgroup socket hooks prove completed TCP connections or TLS identity;
+- that an owner-approved hostname is automatically a safe public destination;
+- that a passing lab is production activation authority;
+- that the combined system is faster or more secure than Envoy/Cilium before matched PEAB runs.
+
+## 12. References
+
+- Nixward network OS architecture and existing task/evidence corpus: https://github.com/Luminous-Dynamics/nixward/pull/67
+- Nixward deterministic fault harness: https://github.com/Luminous-Dynamics/nixward/pull/71
+- Nixward offline Netlink evidence verifier: https://github.com/Luminous-Dynamics/nixward/pull/72
+- Nixward current network covenant, enforcement, runtime lab, telemetry and activation modules: `src/network_covenant.rs`, `src/network_enforcement.rs`, `src/network_runtime_lab.rs`, `src/network_telemetry.rs`, `src/network_activation.rs`
+- Prism implementation and PEAB protocol: https://github.com/Luminous-Dynamics/mycelix/pull/6299
+- Symthaea browser URL preflight: https://github.com/Luminous-Dynamics/symthaea/blob/main/crates/domains/symthaea-browser/src/safety.rs
+- OWASP SSRF Prevention Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+- Envoy Dynamic Forward Proxy DNS cache: https://www.envoyproxy.io/docs/envoy/v1.40.0/api-v3/extensions/common/dynamic_forward_proxy/v3/dns_cache.proto
+- Cilium DNS-based policy: https://docs.cilium.io/en/stable/security/dns/
+
+
+## 13. Industry semantics reviewed on 2026-11-18
+
+The comparison is not that Envoy or Cilium lacks DNS security. Both have mature mechanisms and important trade-offs PEAB must model.
+
+### Envoy Dynamic Forward Proxy
+
+Envoy resolves asynchronously, can use the DNS record TTL with a configured minimum refresh interval (documented default 5 seconds), supports a resolver timeout, host-cache bounds and pending-request circuit breakers, and can filter resolved addresses. Its TLS integration can set SNI and verify the upstream SAN against the resolved hostname.
+
+A critical semantic: if a refresh returns only addresses excluded by `resolved_address_filter`, Envoy treats resolution as failed and retains the previously resolved host entry. This is documented behavior, not automatically a vulnerability. It makes the stale-answer transition a mandatory PEAB test: determine whether an older cached address remains usable, whether active connections survive, and how expiry/host removal interacts with a request.
+
+### Cilium FQDN policy
+
+Cilium obtains IPs by observing DNS proxy responses, caches them with DNS TTL semantics and turns matching names into L3 CIDR-like policy entries, which can be combined with L4 port restrictions. The threat model explicitly trusts the intercepted DNS responses from configured cluster DNS servers. Documentation also notes that IP observations from multiple pods managed by the Cilium instance can be used for the matching domain. This is a workload-policy learning model, not a per-HTTP-request signed resolution lease.
+
+Cilium's conntrack lifecycle is another important distinction: expired DNS entries may remain deferred while connection tracking determines whether an existing flow still uses them. Existing connections can remain allowed; a new connection after expiry requires refreshed DNS state. PEAB should measure both existing-flow and new-flow behavior around TTL expiry and DNS-proxy/agent restart.
+
+### What the proposed composition should test differently
+
+- Scope each lease to an exact workload identity, parent capability, hostname, port, policy generation and one logical HTTP hop.
+- Carry the same complete A/AAAA snapshot into both Prism's `resolve_to_addrs` pin and Nixward's exact IP:port cgroup rule.
+- Expire on the earliest of resolver validity, parent-authority expiry, Prism capability expiry and the local policy maximum. Envoy's minimum DNS refresh interval is not a substitute for a per-request lease expiry.
+- Require a fresh lease on each redirect or retry; do not inherit the first hop's IP set or trust context.
+- Keep both existing-flow and new-flow semantics explicit: a kernel cgroup lease is intended to bound new socket admission; it does not terminate an already established socket by itself. If the policy requires revocation of existing sessions, that needs a separate, tested connection teardown mechanism.
+
+References:
+- Envoy v1.40.0 DNS cache: https://www.envoyproxy.io/docs/envoy/v1.40.0/api-v3/extensions/common/dynamic_forward_proxy/v3/dns_cache.proto
+- Envoy HTTP dynamic forward proxy architecture: https://www.envoyproxy.io/docs/envoy/v1.40.0/intro/arch_overview/http/http_proxy
+- Cilium DNS policy and trusted DNS assumption: https://docs.cilium.io/en/stable/security/dns/
+- Cilium Layer 7 DNS proxy / FQDN policy: https://docs.cilium.io/en/stable/security/policy/layer7/
+- Cilium FQDN cache / conntrack expiry behavior: https://docs.cilium.io/en/latest/contributing/development/debugging/
+- OWASP SSRF guidance: https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html
+
+
+### Browser workload boundary follow-on
+
+Symthaea Browser's URL preflight and CDP executor are not Chromium network enforcement. A separate Symthaea draft, [PR #12789](https://github.com/Luminous-Dynamics/symthaea/pull/12789), now documents the browser-specific boundary and a 12-case test plan for redirects, subresources, service workers, WebSockets/WebTransport, UDP/WebRTC/QUIC, alternate DNS and explicit LAN navigation. Those cases are separate from Prism's HTTP-hop lease and remain unrun.
+
+The Nixward resolver lease proposed here is scoped first to Prism's HTTP(S) transport. Browser integration requires a resolver-proxy path that Chromium actually consumes, plus a distinct browser workload identity and protocol-specific cgroup policy. It would be incorrect to claim the Prism lease automatically protects Chromium.
+
+
+## Parent address-scope schema v2 update
+
+The parent Network Covenant schema is now version 2:
+- Hostname capabilities require an explicit owner-authorized address scope; omission is a validation error.
+- `PublicUnicastOnly` is a conservative deny policy covering private, loopback, link-local, shared, benchmarking, documentation, transition/translation, multicast, unspecified and known metadata-service destinations. Some more-specific globally reachable addresses inside special-purpose parent aggregates are deliberately blocked to avoid resolver-policy exceptions.
+- `ExplicitCidrs` is a canonical, sorted, unique, non-empty CIDR list (maximum 128 entries, maximum 64 characters per entry). Prefix /0 and non-network-aligned CIDRs are rejected. Private/LAN ranges are usable only when explicitly included; loopback, link-local, multicast, unspecified, documentation, transition/translation and metadata endpoints remain denied.
+- The `address_scope` field is included in the owner capability digest. A resolution lease's `address_policy_blake3` must equal this exact scope digest, and every address in the complete answer set must be permitted.
+- This closes the parent-policy representation gap only. DNS resolution, production resolver authentication/issuance, broker-side invocation of the persistent nonce ledger, kernel map staging, production cgroup enforcement and Chromium resolver mediation remain unimplemented. Pure signature verification and replay-ledger APIs are now present but are not yet wired into a production broker transaction.
+
+The conservative address profile is informed by the IANA special-purpose registries (snapshot date 2025-10-09):
+- IPv4: https://www.iana.org/assignments/iana-ipv4-special-registry
+- IPv6: https://www.iana.org/assignments/iana-ipv6-special-registry
+
+
+## 14. Signed resolution-lease verification and one-shot replay (source added)
+
+The shared authority primitive and pure lease model now have a concrete verifier path:
+
+- `src/authority_signature.rs` adds the `network-resolve` action. `VerifiedSignatureEvidence` is now sealed: its fields are private, it cannot be deserialized or built with an external struct literal, and only `AuthorityVerifier::verify` can construct it. Read-only accessors expose the verified evidence to downstream capability wrappers.
+- `AuthorityChallenge::nonce_blake3` centralizes deterministic challenge-nonce derivation. `build_network_resolution_lease_challenge` binds the challenge to the exact lease digest, derived Holon identity, dedicated resolution audience, `network-resolve` action and the lease's own random nonce.
+- `AuthorizedNetworkResolutionLease` accepts only sealed verifier output. It checks exact lease subject digest, resolver key ID, authority action, dedicated audience, Holon binding, and the challenge-nonce derivation. It is not deserializable or a kernel permission.
+- The lease replay key is domain-separated and derived from the 256-bit lease nonce. It is stable across re-signatures and does not change if someone reuses the nonce with altered lease contents.
+- `src/action/authority_replay.rs` reuses the existing persistent SQLite `AuthorityReplayLedger`. The new `consume_authorized_resolution_lease` API atomically burns the stable lease replay key and records the challenge, evidence and exact lease subject. Duplicate consumption fails closed across process restart.
+
+The new conformance proposals are `LEASE-034` through `LEASE-036`: mismatched signed authority, challenge nonce not derived from the lease nonce, and second use of the same nonce via a re-signature or modified subject. They are specification/source-level test cases, not executed CI or runtime proof.
+- Resolver challenges are now time-bound by the signed evidence: `issued_at_ms` must not precede lease issue time, the signature expiry must not exceed the lease expiry, and challenge TTL is capped at the five-second lease maximum. This is checked by the pure authorization wrapper; the production broker must still recheck lease/parent expiry immediately before map staging.
+
+
+**Still not implemented:** a production trusted resolver, resolver signing service and key custody, authenticated broker IPC, a broker transaction that sequences parent/workload validation + replay consumption + inactive map staging, exact IP:port BPF maps, or Prism's live lease adapter. The replay ledger primitive exists, but no production resolution-lease broker is calling it. No cgroup runtime enforcement or production activation claim is made.
+
+The required mutation order is now explicit: verify signed lease → validate exact parent/workload/policy/cgroup state → consume the stable lease nonce → stage the inactive map generation → verify staged contents → atomically switch active generation → reconcile any unknown outcome before retry. A consumed nonce is never restored after an uncertain mutation; the owner must issue a fresh lease.
+
+
+### Prism adapter representation helpers
+
+\`NetworkResolutionLeaseV1::socket_addresses()\` materializes every canonical \`IpAddr\` together with the lease's single TCP port as a \`SocketAddr\`. \`effective_valid_until_unix()\` returns the earlier of the lease expiry and resolver-validity deadline. These helpers only convert signed lease fields into transport inputs; they do not validate signatures, parent/workload authority, resolver trust or replay state. The trusted adapter must run the full lease validation chain first, then convert the effective Unix deadline to a local monotonic deadline without extending the lease lifetime.
+
+
+## 9.1 Pure transaction reducer and map-payload identity
+
+The new `src/network_resolution_transaction.rs` module adds a pure, typed reducer for one resolution-lease activation. It is a state model and conformance surface only; it does not call the persistent replay ledger, write kernel maps, load BPF, or activate a workload.
+
+The reducer binds the exact lease digest, Prism-compatible address-set digest, opaque logical request ID, redirect-hop index, prior active map generation and prior known-good map-payload digest. Its `NetworkResolutionMapPayloadV1` binds the broker-observed cgroup identity digest, exact BPF program digest, workload and network-policy digests, lease digest, complete IP list, transport/port, policy generation, expiry and target map generation. The map payload digest uses the separate BLAKE3 derive-key context `symthaea:nixward:network-resolution-map-payload:v1`. A payload cannot be staged for a different port, IP set, workload, lease, cgroup, BPF object or generation without changing/rejecting its digest.
+
+The append-only event reducer treats uncertain mutations explicitly:
+- Replay-ledger consume with an unknown result enters `NonceReconciliationRequired`; only a matching durable replay-record read-back advances to `NonceConsumed`. A confirmed absence returns to `Prepared` for the same lease/nonce; a different record conflicts.
+- An inactive-map write with an unknown result enters `MapStageReconciliationRequired`; exact target generation plus exact payload read-back advances to `MapStaged`; proven absence permits restaging the same payload; a partial or mismatched map conflicts.
+- A generation-switch attempt—whether reported committed, not committed or unknown—enters `ReconciliationRequired`. Only exact target generation + exact target payload digest yields `Active`. Exact prior generation + exact prior payload digest yields `NotCommitted`. Contradictory outcomes, unexpected generations or payload mismatches yield terminal `Conflict`.
+- `may_execute()` is true only in `Active` after exact target map read-back. A transaction snapshot has no Deserialize path; reconstruct state by replaying validated events through the reducer. Events are serializable/deserializable for an eventual authenticated journal, but event JSON alone does not authenticate its producer.
+
+The prior-generation digest is required so a same-numbered but modified prior map cannot be mistaken for the known-good baseline. A failed or unknown mutation never grants permission by itself. The broker still needs authenticated IPC, owner/parent/workload validation, persistent nonce consumption, actual map read-back, cgroup identity verification, observer completeness and the existing owner-authorized activation path before production use.
+
+New conformance cases `LEASE-039`–`LEASE-049` cover replay-ledger uncertainty, inactive-map uncertainty, exact payload binding, active-generation reconciliation and conflicting read-backs. They are proposed cases; no CI or kernel runtime pass is claimed.
+
+
+### Parent-bound transaction proof and replay-record identity
+
+The transaction reducer no longer accepts a raw `NetworkResolutionLeaseV1` in production entry points. `ParentBoundNetworkResolutionLease::bind` consumes the non-deserializable `AuthorizedNetworkResolutionLease` produced by `AuthorityVerifier`, then runs exact policy/capability/parent-lease/address-scope/generation/expiry binding. The resulting proof object has private fields and no Deserialize path. Transaction and map-payload construction recheck expiry and active policy generation; the test-only constructor is compiled only under `cfg(test)` and is unavailable to production callers.
+
+The transaction also computes an expected replay-record correlation digest using a separate BLAKE3 domain. Its preimage binds the exact lease digest, stable nonce-derived replay key, resolver signer key ID, and verified authority-evidence digest. Both `NonceConsumed` and `NonceConsumptionUnknown` must carry that exact digest; an event describing another lease or signer cannot advance the state machine. The durable broker still must read its actual replay ledger and verify the row contents. This expected digest is a cross-layer correlation contract, not a replacement for SQLite's atomic consume-once transaction or an independent authenticity proof. LEASE-050 covers the mismatched-record negative control.
+
+
+The map-payload object now explicitly carries the parent capability digest, parent authority-lease digest, owner-authorized address-scope digest and resolver-snapshot digest in addition to the enclosing lease digest. Validation compares each field against the non-deserializable parent-bound proof before computing the map digest. This makes the intended policy lineage inspectable and prevents a valid-shaped digest from another parent/snapshot from being silently substituted. The IP set, TCP port, BPF program digest, cgroup identity, policy generation and expiry remain bound as before. LEASE-051 is the corresponding valid-shaped substitution negative control. It remains unexecuted.
+
+
+## 9.2 Hash-chained transaction journal
+
+The reducer now exposes `NetworkResolutionJournalRecordV1`. Each record binds the stable transaction identity, zero-based contiguous sequence, previous record digest and typed event. The first record chains from a deterministic genesis derived from the lease, logical request/hop, exact map payload and known prior generation/digest. `apply_journal_record` rejects a schema mismatch, cross-transaction record, sequence gap/duplicate, broken previous-head link, or altered event digest; any such failure puts the reducer into terminal `Conflict`.
+
+A journal can now be serialized, persisted, loaded into a fresh transaction reconstructed from the same non-deserializable parent-bound lease proof, and replayed to the same reducer state and journal head. The transaction snapshot itself remains non-deserializable; the durable source of truth is the validated event sequence, not a caller-supplied `Active` snapshot.
+
+**Security boundary:** BLAKE3 chaining detects accidental corruption and ordering damage. It does not authenticate the event producer, prevent a privileged attacker from rewriting and re-hashing the entire log, or prove that a reported kernel read-back occurred. The privileged broker must authenticate IPC/event provenance and sign or externally anchor the journal head, ideally with a monotonic durable sequence and protected key. The journal is crash-replay infrastructure, not cryptographic attestation.
+
+`reports_exact_active_target()` deliberately replaces the permission-sounding `may_execute()` predicate. It states only that the reducer has received events consistent with exact target-generation/payload read-back. It is not a transport grant. The broker must authenticate the read-back, check cgroup identity and expiry again, and enforce the active map before permitting a connect.
+
+New cases `LEASE-052`–`LEASE-054` verify deterministic replay, event-digest tampering, and duplicate/reordered sequence rejection. These source tests are still unexecuted until exact-head validation.
+
+
+## 9.3 Owner-authorized BPF identity is now part of the request map contract
+
+A source review found that the owner-activation wrapper had public fields and accepted a signed activation intent without checking that the challenge Holon and audience matched the intent. That could let a valid signature over the correct intent digest be paired with a challenge for a different Holon. The wrapper is now sealed with private fields and no deserialization path. Its constructor requires sealed `VerifiedSignatureEvidence` for the exact intent digest, action `network-activate`, fixed audience `nixward-network-activation-v1`, and a domain-separated Holon identity derived from `intent.holon_id`. The intent has a helper that builds exactly this challenge. The previous negative-control test now rejects changed action, audience and Holon.
+
+`NetworkResolutionMapPayloadV1::for_lease` now requires both the parent-bound resolution lease and `AuthorizedNetworkActivation`. The BPF object digest is copied from the signed activation intent rather than supplied as an independent string. The map payload additionally carries the activation-intent digest, authority-evidence digest, signer key ID and activation replay key. Its validation and transaction `begin` recheck that Holon, parent policy and active policy generation match the resolution lease, and that every activation provenance field matches the sealed proof. A map payload cannot select another BPF object or swap to another activation proof while preserving its digest.
+
+This is still a contract layer, not a live kernel loader: the privileged broker must consume the owner-activation replay key, read the actual loaded BPF object/program tag and active generation from the kernel, observe the exact workload cgroup identity, and bind the read-back to authenticated IPC. The strings in a pure payload do not prove that the kernel loaded those bytes.
+
+New conformance cases `LEASE-055`–`LEASE-057` cover challenge Holon/audience/action, BPF-object substitution, and activation provenance substitution. The relevant Rust tests are source changes only and remain unexecuted.
+
+
+## 9.4 Signed authority is revalidated at the mutation boundary
+
+Both proof layers now carry the detached evidence's signed issue/expiry timestamps:
+- The parent-bound resolver proof records the verified resolver evidence window. Its `validate_at_ms` checks that the resolver signature is still valid, then checks the resolution lease, parent lease and exact active policy generation using the same Unix-millisecond sample.
+- The owner activation proof records challenge digest, issue time and expiry time. Its `validate_at_ms` rejects not-yet-valid or expired approvals. The map-payload builder and transaction `begin` invoke this check; the broker must call it again immediately before the actual privileged write/switch.
+
+The transaction APIs now take `now_unix_ms`, not seconds. Lease and parent deadlines are represented as seconds in the signed lease schema, converted with checked multiplication, and compared at millisecond precision. This avoids accepting an owner/resolver proof for the remainder of a rounded-down second after its signed expiry.
+
+The transaction journal genesis was also tightened to include the exact expected resolver replay-record digest. Two otherwise identical lease/map transactions that differ only in their verified resolver evidence/replay identity therefore have different journal transaction IDs. The map digest already binds the activation challenge, expiry, signer, evidence and replay identity.
+
+`LEASE-058`–`LEASE-060` exercise resolver evidence expiry, owner activation expiry and the exact millisecond boundary. All remain source-level test contracts until exact-head CI/runtime evidence exists.
+
+## 9.5 Journal-bound mutation time and live execution eligibility
+
+Every journal record now binds the broker-observed Unix-millisecond sample and the independently observed active policy generation into its record digest. The record time is not merely a log timestamp: it is part of the deterministic input used to qualify whether a mutation was authorized. A broker must obtain the time and generation from its trusted runtime context; the journal hash itself is not a signature or proof of that context.
+
+Mutating records (resolver nonce consumption, map staging, map verification and generation switch) are accepted only while the resolver evidence, owner activation evidence, parent lease, request lease and active policy generation are all valid. Read-only reconciliation remains available after expiry so a lost response can still be resolved. If an exact target generation/payload is found active after the request or parent lease has expired, the reducer records `ExpiredActive`, not `Active`; `requires_revocation()` is true, and the transaction can never authorize a new flow.
+
+The authority windows have intentionally different meanings:
+- Resolver and owner challenge expiry govern **new privileged mutations**. Once a map was switched within the valid approval window, expiration of the issuance/activation challenge does not silently shorten the request lease.
+- The parent/request lease validity and current policy generation govern **new-flow eligibility**. Existing flows are a separate lifecycle policy.
+- Every flow-admission decision must include a fresh runtime read-back of active map generation, payload digest, cgroup identity and loaded BPF object digest. The pure reducer only compares these supplied observations; it does not read the kernel or authenticate their producer.
+
+`execution_eligible_at_ms` is therefore a fail-closed comparison gate, not an authorization token. A production broker must source cgroup/BPF/map observations from authenticated kernel read-back and retain the deny-by-default baseline. If any read-back is missing, stale or ambiguous, do not admit the flow.
+
+`LEASE-061`–`LEASE-063` cover timestamp/policy binding, delayed reconciliation after expiry, and cgroup/BPF/map identity at flow admission. All remain unexecuted source-level cases pending exact-head validation.
+
+The journal conformance corpus also adds `LEASE-064` and `LEASE-065`: modifying the timestamp or observed active policy generation after record creation must fail the hash check and quarantine the reducer. The record digest now covers the full event, transaction identity, sequence, previous head, observation time and policy generation. These are integrity checks only; a trusted broker must still authenticate the origin of those samples and externally anchor/sign journal heads.
+
+## 9.6 Enforcement-plan feature requirements are derived, not caller-asserted
+
+The V40 plan validator previously checked fail-closed mode, backend identity and workload bindings but did not recompute its required kernel feature list from the actual compiled rules. A mutated/deserialized plan could therefore omit a mandatory hook from the list that the activation probe checked. The validator now reconstructs the exact required set:
+- cgroup v2, IPv4 connect, IPv6 connect and BPF link for the reviewed baseline;
+- both IPv4 and IPv6 UDP sendmsg hooks whenever any compiled rule is UDP or Any.
+
+The plan is rejected if the serialized feature list omits, duplicates or adds a feature inconsistent with its actual rules. This does not establish that the kernel has attached the hooks; it ensures the plan cannot weaken its own probe requirements. LEASE-066 and LEASE-067 are negative controls for connect-hook removal and UDP sendmsg probe removal.
+
+### V40 coverage boundary: socket admission is not packet-level enforcement
+
+The reviewed V40 backend uses cgroup socket-address hooks for IPv4/IPv6 connect and conditionally UDP sendmsg. Linux documents separate attach points for TCP connect (BPF_CGROUP_INET4_CONNECT / INET6_CONNECT) and UDP sendmsg (BPF_CGROUP_UDP4_SENDMSG / UDP6_SENDMSG). A separate cgroup skb program (BPF_CGROUP_INET_EGRESS) is called for outgoing packets and can drop/pass packets at packet time.
+
+Therefore V40 must not claim that it constrains every packet on already-established sockets, sockets inherited or passed with SCM_RIGHTS, or every descriptor-transfer edge. A future V41 profile should add a packet-level egress plane and qualify socket/cgroup attribution under descriptor passing, fork, cgroup movement and reconnect. Until then, the V40 coverage report must explicitly mark per-packet filtering and delegated-socket recipient binding as not qualified. References: https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_CGROUP_SOCK_ADDR/ and https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_CGROUP_SKB/
+
+The V40 coverage boundary is now exposed as `NetworkEnforcementCoverageV40`, derived only after `NetworkEnforcementPlan::validate` succeeds. It reports required IPv4/IPv6 TCP connect hooks and conditional IPv4/IPv6 UDP sendmsg hooks, while explicitly setting packet-level egress filtering, established-flow revocation, passed-socket recipient binding and production-enforcement claims to false. This profile does not alter the signed plan or claim runtime attachment. LEASE-068 and two Rust tests protect these non-claims from accidental overstatement.
+
+The next backend should be separately versioned V41: retain V40 socket-admission hooks, add a qualified cgroup packet-egress plane, and prove descriptor-passing/cgroup-migration behavior in the disposable VM before any production activation path can select it.
+
+### V40 protocol support is explicit, not wildcard
+
+V40 now accepts only explicit TCP and UDP rules. ICMP is left unresolved because the reviewed V40 backend has no qualified ICMP hook. Protocol `Any` is also left unresolved: the existing connect/sendmsg feature set must not be interpreted as enforcement of arbitrary transports. Callers must issue separate explicit TCP and UDP capabilities; unsupported transport types remain in the unresolved list and block activation eligibility. The compiler has negative controls for both cases. LEASE-069 and LEASE-070 record this boundary.
+
+The V40 plan validator now independently rejects unsupported `Icmp` and `Any` protocols in deserialized `KernelNetworkRule` entries, not just in the capability compiler. This closes the alternate path where a caller could submit a manually assembled plan and bypass the compiler's unresolved-rule behavior. LEASE-071 covers mutation of an otherwise valid TCP plan to either unsupported protocol; the validator rejects before activation eligibility.
+
+Journal time is now required to be non-decreasing across the transaction's sequence. Both record construction and replay compare the supplied Unix-millisecond sample against the last accepted sample. A regressing timestamp is rejected even if the caller recomputes a correct record hash, and replay puts the reducer into terminal Conflict. This is a chronology invariant in addition to hash-chain integrity; the broker still has to authenticate its clock source and journal writer. LEASE-072 records this adversarial case.

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "lease_id": "00112233445566778899aabbccddeeff",
+  "logical_request_id": "102132435465768798a9bacbdcedfe0f",
+  "redirect_hop": 0,
+  "holon_id": "holon-prism-public-fetch",
+  "workload_blake3": "1111111111111111111111111111111111111111111111111111111111111111",
+  "network_policy_blake3": "2222222222222222222222222222222222222222222222222222222222222222",
+  "parent_capability_blake3": "3333333333333333333333333333333333333333333333333333333333333333",
+  "parent_authority_lease_blake3": "4444444444444444444444444444444444444444444444444444444444444444",
+  "address_policy_blake3": "5555555555555555555555555555555555555555555555555555555555555555",
+  "hostname": "api.example.org",
+  "transport": "tcp",
+  "port": 443,
+  "address_scope": "public-unicast-only",
+  "addresses": [
+    "93.184.216.34",
+    "2606:4700:4700::1111"
+  ],
+  "resolver_profile_id": "example-trusted-resolver-profile-v1",
+  "resolver_snapshot_blake3": "6666666666666666666666666666666666666666666666666666666666666666",
+  "resolved_at_unix": 1794960000,
+  "resolver_valid_until_unix": 1794960030,
+  "issued_at_unix": 1794960001,
+  "expires_at_unix": 1794960005,
+  "policy_generation": 12,
+  "issuer_key_id": "nixward-local-egress-broker-v1",
+  "nonce": "7777777777777777777777777777777777777777777777777777777777777777",
+  "dnssec_status": "not-validated"
+}

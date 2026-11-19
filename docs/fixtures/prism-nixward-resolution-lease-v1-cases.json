@@ -1,0 +1,802 @@
+{
+  "schema_version": 1,
+  "kind": "prism-nixward-resolution-lease-v1-conformance-proposal",
+  "status": "specification-only-not-executed",
+  "execution_status": "not-run",
+  "note": "Mutations are proposed independent conformance cases. They are not evidence that a resolver, broker, cgroup map writer or BPF enforcement path exists or has passed. The newly added signature/replay cases describe source-level verifier and ledger APIs; they remain unexecuted until the Nixward test workflow and runtime broker integration are qualified.",
+  "base_fixture": "docs/fixtures/prism-nixward-resolution-lease-v1.json",
+  "required_negative_control": true,
+  "cases": [
+    {
+      "id": "LEASE-001",
+      "family": "well_formedness",
+      "title": "valid dual-stack lease",
+      "operation": "accept",
+      "mutation": null,
+      "oracle": "schema and semantic validation accept only when parent policy, workload, generation, resolver snapshot and authority evidence also match"
+    },
+    {
+      "id": "LEASE-002",
+      "family": "address_scope",
+      "title": "mixed public and private answers",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "93.184.216.34",
+          "10.0.0.8"
+        ]
+      },
+      "oracle": "reject the complete set; do not drop the private member and retain the public member"
+    },
+    {
+      "id": "LEASE-003",
+      "family": "address_scope",
+      "title": "metadata address in public-only scope",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "169.254.169.254"
+        ]
+      },
+      "oracle": "no lease is minted and no kernel rule is staged"
+    },
+    {
+      "id": "LEASE-004",
+      "family": "address_scope",
+      "title": "loopback address in public-only scope",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "127.0.0.1"
+        ]
+      },
+      "oracle": "the entire answer set is rejected"
+    },
+    {
+      "id": "LEASE-005",
+      "family": "address_scope",
+      "title": "link-local IPv6 answer",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "fe80::1"
+        ]
+      },
+      "oracle": "the entire answer set is rejected"
+    },
+    {
+      "id": "LEASE-006",
+      "family": "answer_set",
+      "title": "duplicate address entries",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "93.184.216.34",
+          "93.184.216.34"
+        ]
+      },
+      "oracle": "canonical set must be unique and sorted before digesting"
+    },
+    {
+      "id": "LEASE-007",
+      "family": "answer_set",
+      "title": "answer count above hard ceiling",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": "33 unique permitted addresses"
+      },
+      "oracle": "reject before map staging; never truncate the set"
+    },
+    {
+      "id": "LEASE-008",
+      "family": "answer_set",
+      "title": "no A or AAAA addresses",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": []
+      },
+      "oracle": "no capability or empty allow-set may be produced"
+    },
+    {
+      "id": "LEASE-009",
+      "family": "parent_binding",
+      "title": "parent capability digest mismatch",
+      "operation": "deny",
+      "mutation": {
+        "path": "parent_capability_blake3",
+        "value": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      "oracle": "lease cannot widen or detach from the exact parent capability"
+    },
+    {
+      "id": "LEASE-010",
+      "family": "parent_binding",
+      "title": "hostname not permitted by parent",
+      "operation": "deny",
+      "mutation": {
+        "path": "hostname",
+        "value": "attacker.example.org"
+      },
+      "oracle": "exact host policy mismatch denies"
+    },
+    {
+      "id": "LEASE-011",
+      "family": "parent_binding",
+      "title": "unapproved subdomain",
+      "operation": "deny",
+      "mutation": {
+        "path": "hostname",
+        "value": "evil.api.example.org"
+      },
+      "oracle": "no implicit suffix or wildcard grant"
+    },
+    {
+      "id": "LEASE-012",
+      "family": "parent_binding",
+      "title": "port outside parent capability",
+      "operation": "deny",
+      "mutation": {
+        "path": "port",
+        "value": 8443
+      },
+      "oracle": "lease cannot widen port range"
+    },
+    {
+      "id": "LEASE-013",
+      "family": "parent_binding",
+      "title": "UDP transport not enabled",
+      "operation": "deny",
+      "mutation": {
+        "path": "transport",
+        "value": "udp"
+      },
+      "oracle": "v1 TCP profile rejects UDP/QUIC unless a distinct parent capability and protocol profile are approved"
+    },
+    {
+      "id": "LEASE-014",
+      "family": "workload_binding",
+      "title": "workload identity mismatch",
+      "operation": "deny",
+      "mutation": {
+        "path": "workload_blake3",
+        "value": "9999999999999999999999999999999999999999999999999999999999999999"
+      },
+      "oracle": "broker caller/cgroup and policy workload digest must agree"
+    },
+    {
+      "id": "LEASE-015",
+      "family": "policy_binding",
+      "title": "policy digest mismatch",
+      "operation": "deny",
+      "mutation": {
+        "path": "network_policy_blake3",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "oracle": "no rule may be staged against another policy version"
+    },
+    {
+      "id": "LEASE-016",
+      "family": "policy_binding",
+      "title": "stale policy generation",
+      "operation": "deny",
+      "mutation": {
+        "path": "policy_generation",
+        "value": 11
+      },
+      "oracle": "active generation mismatch denies; stale map body remains inert"
+    },
+    {
+      "id": "LEASE-017",
+      "family": "expiry",
+      "title": "lease expired before activation",
+      "operation": "deny",
+      "mutation": {
+        "path": "expires_at_unix",
+        "value": 1794960000
+      },
+      "oracle": "broker denies before populating maps"
+    },
+    {
+      "id": "LEASE-018",
+      "family": "expiry",
+      "title": "lease expires before resolver snapshot",
+      "operation": "deny",
+      "mutation": {
+        "path": "expires_at_unix",
+        "value": 1794960031
+      },
+      "oracle": "expiry may not exceed resolver_valid_until"
+    },
+    {
+      "id": "LEASE-019",
+      "family": "expiry",
+      "title": "lease lifetime exceeds policy cap",
+      "operation": "deny",
+      "mutation": {
+        "path": "expires_at_unix",
+        "value": 1794960030
+      },
+      "oracle": "the five-second example ceiling is not exceeded even when DNS TTL is longer"
+    },
+    {
+      "id": "LEASE-020",
+      "family": "resolver",
+      "title": "resolver validity missing or unknown",
+      "operation": "deny",
+      "mutation": {
+        "path": "resolver_valid_until_unix",
+        "value": null
+      },
+      "oracle": "strict profile refuses dynamic lease without a defensible validity bound"
+    },
+    {
+      "id": "LEASE-021",
+      "family": "resolver",
+      "title": "resolver snapshot digest mismatch",
+      "operation": "deny",
+      "mutation": {
+        "path": "resolver_snapshot_blake3",
+        "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "oracle": "verifier rejects snapshot substitution"
+    },
+    {
+      "id": "LEASE-022",
+      "family": "resolver",
+      "title": "resolver trust profile not configured",
+      "operation": "deny",
+      "mutation": {
+        "path": "resolver_profile_id",
+        "value": "unknown"
+      },
+      "oracle": "unconfigured resolver profile cannot issue leases"
+    },
+    {
+      "id": "LEASE-023",
+      "family": "dnssec",
+      "title": "DNSSEC status overclaimed",
+      "operation": "deny",
+      "mutation": {
+        "path": "dnssec_status",
+        "value": "validated"
+      },
+      "oracle": "verified status requires independent resolver evidence, not a caller-selected enum"
+    },
+    {
+      "id": "LEASE-024",
+      "family": "replay",
+      "title": "nonce replay",
+      "operation": "deny",
+      "mutation": {
+        "path": "nonce",
+        "value": "reuse previously consumed nonce"
+      },
+      "oracle": "persistent consume-once store rejects replay after process and broker restart"
+    },
+    {
+      "id": "LEASE-025",
+      "family": "privacy",
+      "title": "secret URL material added",
+      "operation": "deny",
+      "mutation": {
+        "path": "url_path_or_query",
+        "value": "must-not-be-present"
+      },
+      "oracle": "unknown fields and URL path/query, credentials and payload bytes are excluded"
+    },
+    {
+      "id": "LEASE-026",
+      "family": "atomicity",
+      "title": "partial map staging",
+      "operation": "deny",
+      "mutation": {
+        "path": "map_stage",
+        "value": "fail-after-first-address"
+      },
+      "oracle": "inactive incomplete generation cannot become active"
+    },
+    {
+      "id": "LEASE-027",
+      "family": "atomicity",
+      "title": "unknown generation-switch outcome",
+      "operation": "reconcile",
+      "mutation": {
+        "path": "generation_switch",
+        "value": "timeout-after-kernel-update"
+      },
+      "oracle": "reconcile actual active map generation before retry; no new grant under unknown outcome"
+    },
+    {
+      "id": "LEASE-028",
+      "family": "cgroup_binding",
+      "title": "cgroup moved or re-bound",
+      "operation": "deny",
+      "mutation": {
+        "path": "cgroup_identity",
+        "value": "different inode/workload"
+      },
+      "oracle": "lease invalidated when exact workload/cgroup binding changes"
+    },
+    {
+      "id": "LEASE-029",
+      "family": "redirect",
+      "title": "redirect to private destination",
+      "operation": "deny",
+      "mutation": {
+        "path": "redirect_hop",
+        "value": 1,
+        "redirect_hostname": "internal.example"
+      },
+      "oracle": "each redirect requires a new parent-authorized resolution lease; target not fetched"
+    },
+    {
+      "id": "LEASE-030",
+      "family": "observability",
+      "title": "kernel connect event without matching Prism receipt",
+      "operation": "quarantine",
+      "mutation": {
+        "path": "correlation",
+        "value": "missing application attempt id"
+      },
+      "oracle": "record as unmatched metadata; never fabricate application peer/TLS evidence"
+    },
+    {
+      "id": "LEASE-031",
+      "family": "address_scope",
+      "title": "private answer under public-unicast-only parent",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "10.0.0.8"
+        ]
+      },
+      "oracle": "parent-bound public-unicast scope rejects the lease; no kernel generation may include the private address"
+    },
+    {
+      "id": "LEASE-032",
+      "family": "address_scope",
+      "title": "address-scope digest substitution",
+      "operation": "deny",
+      "mutation": {
+        "path": "address_policy_blake3",
+        "value": "a digest not equal to the parent capability scope digest"
+      },
+      "oracle": "lease is rejected unless its scope digest exactly matches the owner-authorized parent NetworkCapability"
+    },
+    {
+      "id": "LEASE-033",
+      "family": "address_scope",
+      "title": "explicit LAN CIDR is narrower than private address space",
+      "operation": "deny",
+      "mutation": {
+        "path": "addresses",
+        "value": [
+          "10.0.0.1"
+        ],
+        "parent_address_scope": [
+          "192.168.0.0/16"
+        ]
+      },
+      "oracle": "private addresses are permitted only inside the exact owner-authorized CIDR set"
+    },
+    {
+      "id": "LEASE-034",
+      "family": "signature_binding",
+      "title": "verified authority does not bind exact lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "signature",
+        "value": "valid Ed25519 signature over a different lease subject, signer, action, audience, or Holon"
+      },
+      "oracle": "AuthorizedNetworkResolutionLease rejects the proof unless sealed verifier evidence binds the exact lease digest, issuer key ID, network-resolve action, dedicated audience and derived Holon identity"
+    },
+    {
+      "id": "LEASE-035",
+      "family": "signature_binding",
+      "title": "challenge nonce is not derived from the lease nonce",
+      "operation": "deny",
+      "mutation": {
+        "path": "challenge.nonce_blake3",
+        "value": "validly signed but derived from unrelated entropy"
+      },
+      "oracle": "the verifier evidence is rejected because challenge_nonce_blake3 does not equal the deterministic derivation from the lease's one-shot nonce, subject, Holon and action"
+    },
+    {
+      "id": "LEASE-036",
+      "family": "replay",
+      "title": "same lease nonce re-signed or reused for modified subject",
+      "operation": "deny",
+      "mutation": {
+        "path": "replay",
+        "value": "second valid challenge with later timestamps or a modified lease digest but the same 256-bit lease nonce"
+      },
+      "oracle": "lease replay key remains stable for that nonce and the persistent AuthorityReplayLedger rejects every second consumption, including after process restart"
+    },
+    {
+      "id": "LEASE-037",
+      "family": "address_set_digest",
+      "title": "Prism and Nixward canonical IP:port address-set encoding",
+      "operation": "accept",
+      "mutation": null,
+      "oracle": "both implementations produce the identical 38-byte golden encoding for 93.184.216.34:443 plus [2606:4700:4700::1111]:443; digest is a correlation value only and remains distinct from the signed lease/resolver transcript digests"
+    },
+    {
+      "id": "LEASE-038",
+      "family": "prism_adapter_representation",
+      "title": "lease socket conversion and effective validity ceiling",
+      "operation": "accept",
+      "mutation": null,
+      "oracle": "socket_addresses emits the full unique IP:port set in canonical order; effective_valid_until_unix equals min(expires_at_unix, resolver_valid_until_unix); conversion helpers do not imply authority validation"
+    },
+    {
+      "id": "LEASE-039",
+      "family": "replay",
+      "title": "nonce-consumption write returns unknown but exact replay row exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "A persistent replay-ledger consume call loses its response after commit"
+      },
+      "oracle": "reconcile to consumed only when the read-back record digest exactly matches the pending nonce-bound record"
+    },
+    {
+      "id": "LEASE-040",
+      "family": "replay",
+      "title": "nonce-consumption write returns unknown and no replay row exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "A persistent replay-ledger consume call loses its response before commit"
+      },
+      "oracle": "an authoritative ledger read-back proving absence returns to Prepared; retry uses the same lease/nonce and cannot mint a broader lease"
+    },
+    {
+      "id": "LEASE-041",
+      "family": "replay",
+      "title": "nonce-ledger read-back belongs to another subject",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Replay reconciliation returns a record digest different from the expected pending record"
+      },
+      "oracle": "quarantine as Conflict; never infer consumed or unconsumed from a different record"
+    },
+    {
+      "id": "LEASE-042",
+      "family": "atomicity",
+      "title": "inactive map stage returns unknown but exact map payload exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Map write response is lost after the complete expected inactive generation was staged"
+      },
+      "oracle": "reconcile only to MapStaged when generation and exact map payload digest match; still require separate read-back verification"
+    },
+    {
+      "id": "LEASE-043",
+      "family": "atomicity",
+      "title": "inactive map stage returns unknown and target generation is absent",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Map write response is lost before any target generation is created"
+      },
+      "oracle": "only an authoritative read-back proving target generation absence permits restaging the same exact payload"
+    },
+    {
+      "id": "LEASE-044",
+      "family": "atomicity",
+      "title": "partial or mismatched inactive map generation",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Read-back finds target generation with a different or incomplete map payload digest"
+      },
+      "oracle": "quarantine as Conflict; do not switch generation or overwrite the ambiguous map in place"
+    },
+    {
+      "id": "LEASE-045",
+      "family": "map_payload_binding",
+      "title": "map payload binds exact lease cgroup and BPF program",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Mutate cgroup identity, BPF object digest, lease digest, policy generation, port, IP set or expiry in the proposed payload"
+      },
+      "oracle": "payload validation rejects any value that does not match the broker-observed cgroup, exact signed lease and reviewed BPF program; map digest is domain-separated"
+    },
+    {
+      "id": "LEASE-046",
+      "family": "atomicity",
+      "title": "unknown generation switch reads back exact target map",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch call returns unknown and active-map read-back reports target generation plus exact payload digest"
+      },
+      "oracle": "transaction becomes Active only after exact target-generation and payload-digest read-back"
+    },
+    {
+      "id": "LEASE-047",
+      "family": "atomicity",
+      "title": "unknown generation switch reads back exact previous map",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch call returns unknown and active-map read-back reports prior generation plus prior known-good payload digest"
+      },
+      "oracle": "transaction becomes NotCommitted and remains non-executable; a new lease is required for a new transaction"
+    },
+    {
+      "id": "LEASE-048",
+      "family": "atomicity",
+      "title": "switch says committed but prior map remains active",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch API reports committed but authoritative read-back still reports prior generation"
+      },
+      "oracle": "quarantine as Conflict; do not trust the API return code over actual kernel state"
+    },
+    {
+      "id": "LEASE-049",
+      "family": "atomicity",
+      "title": "switch read-back observes wrong generation or target digest",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Kernel reports neither exact prior nor exact target generation/payload pair"
+      },
+      "oracle": "quarantine as Conflict and require operator/runtime recovery; never issue a new grant"
+    },
+    {
+      "id": "LEASE-050",
+      "family": "replay",
+      "title": "replay-ledger record digest is bound to the exact signed lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "replay_record_blake3",
+        "value": "record for another lease, resolver key, or signature evidence"
+      },
+      "oracle": "the transaction reducer rejects a replay-record digest not derived from the exact lease digest, stable one-shot replay key, resolver key ID and verified authority-evidence digest; it enters Conflict and cannot execute"
+    },
+    {
+      "id": "LEASE-051",
+      "family": "map_payload_binding",
+      "title": "map payload explicitly binds parent capability and resolver provenance",
+      "operation": "deny",
+      "mutation": {
+        "paths": [
+          "parent_capability_blake3",
+          "parent_authority_lease_blake3",
+          "address_policy_blake3",
+          "resolver_snapshot_blake3"
+        ],
+        "value": "valid-shaped digest for another lease"
+      },
+      "oracle": "the map-payload validator rejects substitutions even when every value remains a syntactically valid digest; payload identity must match the exact parent-bound lease"
+    },
+    {
+      "id": "LEASE-052",
+      "family": "journal_replay",
+      "title": "transaction journal replays exact reducer state after restart",
+      "operation": "replay",
+      "mutation": {
+        "path": "journal",
+        "value": "serialize and deserialize the ordered records into a fresh transaction created from the same bound lease and map payload"
+      },
+      "oracle": "the replayed transaction reaches the same state, sequence, journal head and transaction digest as the original; the journal hash chain is not treated as an authenticated event source"
+    },
+    {
+      "id": "LEASE-053",
+      "family": "journal_integrity",
+      "title": "journal detects modified event content",
+      "operation": "deny",
+      "mutation": {
+        "path": "record.event",
+        "value": "change the event after record digest creation without recomputing the digest"
+      },
+      "oracle": "the journal reducer rejects the record with JournalDigestMismatch and enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-054",
+      "family": "journal_integrity",
+      "title": "journal rejects reordered and duplicate records",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.sequence",
+        "value": "replay a later record before sequence zero, then replay the first record twice"
+      },
+      "oracle": "the reducer rejects sequence gaps and duplicate sequences with JournalSequenceMismatch; no active state is reachable"
+    },
+    {
+      "id": "LEASE-055",
+      "family": "owner_activation_binding",
+      "title": "network activation proof binds signed intent audience and Holon",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "path": "authority_challenge",
+        "value": "change action, activation audience, or domain-separated Holon identity while retaining a signature over the altered challenge"
+      },
+      "oracle": "AuthorizedNetworkActivation is constructible only from sealed VerifiedSignatureEvidence and rejects action, audience, Holon or exact-subject mismatch"
+    },
+    {
+      "id": "LEASE-056",
+      "family": "owner_activation_binding",
+      "title": "kernel map BPF object digest comes from owner-authorized activation intent",
+      "operation": "deny",
+      "mutation": {
+        "path": "map_payload.bpf_program_blake3",
+        "value": "substitute a valid-shaped BPF object digest different from the authorized activation intent"
+      },
+      "oracle": "map payload builder copies the exact BPF digest from AuthorizedNetworkActivation; transaction begin rejects a substituted BPF digest or a different activation intent"
+    },
+    {
+      "id": "LEASE-057",
+      "family": "owner_activation_binding",
+      "title": "map payload binds activation signer evidence and replay identity",
+      "operation": "deny",
+      "mutation": {
+        "path": "map_payload.activation_provenance",
+        "value": "substitute activation intent digest, signer key ID, evidence digest or replay key"
+      },
+      "oracle": "payload validation requires exact owner-authorized intent/evidence/signer/replay fields and binds them into its domain-separated digest"
+    },
+    {
+      "id": "LEASE-058",
+      "family": "authority_freshness",
+      "title": "expired resolver signature cannot authorize a still-live resolution lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "resolver_authority.expires_at_ms",
+        "value": "earlier-than-resolution-lease.expires_at_unix while lease itself remains live"
+      },
+      "oracle": "ParentBoundNetworkResolutionLease and map builder recheck the verified resolver signature's issued/expiry interval; structural lease validity cannot extend the signer authority"
+    },
+    {
+      "id": "LEASE-059",
+      "family": "authority_freshness",
+      "title": "expired owner activation signature cannot authorize a new map mutation",
+      "operation": "deny",
+      "mutation": {
+        "path": "activation_authority.expires_at_ms",
+        "value": "expiry occurs before map staging"
+      },
+      "oracle": "AuthorizedNetworkActivation::validate_at_ms is called by map payload construction and transaction begin; expired or not-yet-valid approval is rejected"
+    },
+    {
+      "id": "LEASE-060",
+      "family": "authority_freshness",
+      "title": "signed authority expiry is enforced without second-level rounding",
+      "operation": "deny-at-exact-expiry",
+      "mutation": {
+        "path": "now_unix_ms",
+        "value": "call at expiry_ms - 1 then exactly expiry_ms"
+      },
+      "oracle": "the operation is accepted one millisecond before expiry and rejected at the exact expiry boundary; lease seconds are converted to checked milliseconds and never used to round authority expiry down"
+    },
+    {
+      "id": "LEASE-061",
+      "family": "journal_authority_window",
+      "title": "journal mutation records bind wall-clock sample and active policy generation",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Attempt nonce/map/switch mutation exactly at lease expiry or with a stale active policy generation; mutate timestamp after record digest creation"
+      },
+      "oracle": "mutating events are rejected outside the parent/lease/resolver/owner time window or under a different policy generation; timestamps and policy generation are included in the journal record digest"
+    },
+    {
+      "id": "LEASE-062",
+      "family": "delayed_reconciliation",
+      "title": "unknown switch is reconciled after lease expiry without granting execution",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Switch outcome is unknown before expiry; exact target generation/map digest is read back at or after lease expiry"
+      },
+      "oracle": "record ExpiredActive, never Active; execution eligibility remains false and broker is required to revoke the stale target map"
+    },
+    {
+      "id": "LEASE-063",
+      "family": "runtime_identity",
+      "title": "flow admission requires exact live cgroup BPF map generation and lease",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Keep the transaction Active but vary current cgroup identity, loaded BPF object digest, active map generation, map digest and lease time"
+      },
+      "oracle": "execution gate accepts only when current policy, cgroup, BPF object, target generation, payload digest and lease lifetime all match"
+    },
+    {
+      "id": "LEASE-064",
+      "family": "journal_integrity",
+      "title": "journal observation timestamp cannot be rewritten",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.observed_at_unix_ms",
+        "value": "change the broker sample after record digest creation"
+      },
+      "oracle": "record digest mismatch is detected and the reducer enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-065",
+      "family": "journal_integrity",
+      "title": "journal policy generation cannot be rewritten",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.active_policy_generation",
+        "value": "replace the observed policy generation after record digest creation"
+      },
+      "oracle": "record digest mismatch is detected and the reducer enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-066",
+      "family": "kernel_feature_contract",
+      "title": "serialized enforcement plan cannot omit mandatory connect hook",
+      "operation": "deny",
+      "mutation": {
+        "path": "required_kernel_features",
+        "value": "remove cgroup-inet6-connect from an otherwise valid V40 plan"
+      },
+      "oracle": "NetworkEnforcementPlan::validate recomputes exact required hook set from rules and rejects any removed, duplicated or unexpected feature"
+    },
+    {
+      "id": "LEASE-067",
+      "family": "kernel_feature_contract",
+      "title": "UDP capability requires both IPv4 and IPv6 sendmsg feature probes",
+      "operation": "deny",
+      "mutation": {
+        "path": "required_kernel_features",
+        "value": "remove cgroup-udp4-sendmsg or cgroup-udp6-sendmsg from a UDP plan"
+      },
+      "oracle": "the compiled plan includes both UDP sendmsg hooks and refuses activation if the target probe lacks either"
+    },
+    {
+      "id": "LEASE-068",
+      "family": "kernel_coverage_boundary",
+      "title": "V40 machine-readable coverage does not claim packet or descriptor-transfer controls",
+      "operation": "accept-profile-with-explicit-nonclaims",
+      "mutation": null,
+      "oracle": "coverage profile reports connect and conditional UDP sendmsg hooks while packet-level egress filtering, established-flow revocation and passed-socket recipient binding remain explicitly unqualified; no production enforcement claim is emitted"
+    },
+    {
+      "id": "LEASE-069",
+      "family": "kernel_protocol_coverage",
+      "title": "V40 compiler rejects ICMP because no ICMP enforcement hook is qualified",
+      "operation": "reject-as-unresolved",
+      "mutation": {
+        "path": "capability.protocol",
+        "value": "icmp"
+      },
+      "oracle": "ICMP never becomes a resolved KernelNetworkRule or activation-eligible policy under V40"
+    },
+    {
+      "id": "LEASE-070",
+      "family": "kernel_protocol_coverage",
+      "title": "V40 compiler rejects protocol Any rather than claiming wildcard transport enforcement",
+      "operation": "reject-as-unresolved",
+      "mutation": {
+        "path": "capability.protocol",
+        "value": "any"
+      },
+      "oracle": "caller must split wildcard authority into explicit supported TCP/UDP capabilities; V40 does not imply ICMP or other protocols"
+    },
+    {
+      "id": "LEASE-071",
+      "family": "kernel_protocol_coverage",
+      "title": "deserialized V40 plan cannot inject ICMP or Any rules",
+      "operation": "deny",
+      "mutation": {
+        "path": "rules[].protocol",
+        "value": "mutate a valid serialized TCP rule to ICMP or Any"
+      },
+      "oracle": "NetworkEnforcementPlan::validate rejects unsupported protocol values even when the plan bypasses the capability compiler"
+    },
+    {
+      "id": "LEASE-072",
+      "family": "journal_integrity",
+      "title": "journal rejects regressing observation time even when record hash is recomputed",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.observed_at_unix_ms",
+        "value": "create a later sequence record with a lower observed time and recompute its valid record hash"
+      },
+      "oracle": "the reducer tracks last_observed_at_unix_ms and requires non-decreasing timestamps at record creation and replay; regressed records enter terminal Conflict"
+    }
+  ]
+}

@@ -37,6 +37,23 @@ pub enum KernelNetworkFeature {
     BpfMapPinning,
 }
 
+/// Machine-readable coverage boundary for the reviewed V40 socket-address backend.
+///
+/// False fields are deliberate non-claims, not missing metadata. V40 is
+/// admission-hook coverage; packet-level filtering and descriptor-transfer
+/// recipient binding require a separately reviewed backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkEnforcementCoverageV40 {
+    pub ipv4_tcp_connect_hook_required: bool,
+    pub ipv6_tcp_connect_hook_required: bool,
+    pub ipv4_udp_sendmsg_hook_required: bool,
+    pub ipv6_udp_sendmsg_hook_required: bool,
+    pub packet_level_egress_filter_qualified: bool,
+    pub established_flow_revocation_qualified: bool,
+    pub passed_socket_recipient_binding_qualified: bool,
+    pub production_enforcement_claimed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelFeatureProbe {
     pub schema_version: u32,
@@ -207,12 +224,40 @@ impl NetworkEnforcementPlan {
                 "V40 activation must remain proof-gated".into(),
             ));
         }
+
+        // Never trust a serialized caller-provided feature list. Recompute the
+        // exact hook set from the actual compiled rules so deleting a required
+        // connect/sendmsg hook cannot silently weaken activation eligibility.
+        let mut expected_features = BTreeSet::from([
+            KernelNetworkFeature::CgroupV2,
+            KernelNetworkFeature::CgroupInet4Connect,
+            KernelNetworkFeature::CgroupInet6Connect,
+            KernelNetworkFeature::BpfLink,
+        ]);
+        for rule in &self.rules {
+            if matches!(rule.protocol, NetworkProtocol::Udp | NetworkProtocol::Any) {
+                expected_features.insert(KernelNetworkFeature::CgroupUdp4Sendmsg);
+                expected_features.insert(KernelNetworkFeature::CgroupUdp6Sendmsg);
+            }
+        }
+        if self.required_kernel_features != expected_features.into_iter().collect::<Vec<_>>() {
+            return Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch);
+        }
+
         for digest in self.workload_subjects.keys() {
             validate_digest(digest)?;
         }
         for rule in &self.rules {
             validate_digest(&rule.capability_blake3)?;
             validate_digest(&rule.workload_blake3)?;
+            if !matches!(rule.protocol, NetworkProtocol::Tcp | NetworkProtocol::Udp) {
+                return Err(NetworkEnforcementError::UnsafeContract(
+                    format!(
+                        "V40 deserialized rule uses unsupported protocol {:?}; only explicit TCP/UDP rules are enforceable",
+                        rule.protocol
+                    ),
+                ));
+            }
             if !self.workload_subjects.contains_key(&rule.workload_blake3) {
                 return Err(NetworkEnforcementError::UnknownWorkload(
                     rule.workload_blake3.clone(),
@@ -225,6 +270,33 @@ impl NetworkEnforcementPlan {
     pub fn digest_hex(&self) -> Result<String, NetworkEnforcementError> {
         self.validate()?;
         hash_json(PLAN_DOMAIN, self)
+    }
+
+    /// Return the explicit, versioned coverage profile for this V40 plan.
+    /// The profile describes contract capabilities only; it does not assert
+    /// that a target kernel has attached or is enforcing any program.
+    pub fn coverage_profile_v40(
+        &self,
+    ) -> Result<NetworkEnforcementCoverageV40, NetworkEnforcementError> {
+        self.validate()?;
+        Ok(NetworkEnforcementCoverageV40 {
+            ipv4_tcp_connect_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupInet4Connect),
+            ipv6_tcp_connect_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupInet6Connect),
+            ipv4_udp_sendmsg_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupUdp4Sendmsg),
+            ipv6_udp_sendmsg_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupUdp6Sendmsg),
+            packet_level_egress_filter_qualified: false,
+            established_flow_revocation_qualified: false,
+            passed_socket_recipient_binding_qualified: false,
+            production_enforcement_claimed: false,
+        })
     }
 
     pub fn activation_eligibility(
@@ -476,6 +548,15 @@ fn compile_capability(capability: &NetworkCapability) -> Result<KernelNetworkRul
     ) {
         return Err("host/listen ingress remains in the nftables baseline in V40".into());
     }
+    match capability.protocol {
+        NetworkProtocol::Tcp | NetworkProtocol::Udp => {}
+        NetworkProtocol::Icmp => {
+            return Err("ICMP is not implemented by the V40 connect/sendmsg hook contract".into());
+        }
+        NetworkProtocol::Any => {
+            return Err("protocol Any includes transports not enforced by the V40 hook contract; split into explicit TCP/UDP capabilities".into());
+        }
+    }
     match &capability.destinations {
         DestinationSet::Hostnames { .. } => {
             return Err("hostname capabilities require an authenticated DNS/resolution covenant before kernel pinning".into());
@@ -543,6 +624,8 @@ pub enum NetworkEnforcementError {
     UnresolvedRules(usize),
     #[error("target kernel does not prove all required cgroup/BPF features")]
     MissingKernelFeatures,
+    #[error("compiled plan kernel-feature requirements do not match its actual rules")]
+    KernelFeatureRequirementsMismatch,
     #[error("duplicate workload cgroup binding")]
     DuplicateCgroupBinding,
     #[error("one or more workload cgroup bindings are missing")]
@@ -558,9 +641,16 @@ pub enum NetworkEnforcementError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network_covenant::{PortRange, WorkloadIdentity};
+    use crate::network_covenant::{AddressScopePolicy, PortRange, WorkloadIdentity};
 
     fn policy(destination: DestinationSet) -> NetworkPolicyPlan {
+        policy_with_protocol(destination, NetworkProtocol::Tcp)
+    }
+
+    fn policy_with_protocol(
+        destination: DestinationSet,
+        protocol: NetworkProtocol,
+    ) -> NetworkPolicyPlan {
         let workload = WorkloadIdentity::new(
             "holon-a",
             "sync",
@@ -571,14 +661,24 @@ mod tests {
             },
         )
         .unwrap();
+        let address_scope = if matches!(&destination, DestinationSet::Hostnames { .. }) {
+            Some(AddressScopePolicy::PublicUnicastOnly)
+        } else {
+            None
+        };
         let capability = NetworkCapability {
             schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
             capability_id: "sync-egress".into(),
             workload_blake3: workload.digest_hex().unwrap(),
             direction: NetworkDirection::Egress,
-            protocol: NetworkProtocol::Tcp,
+            protocol,
             destinations: destination,
-            ports: vec![PortRange { from: 443, to: 443 }],
+            address_scope,
+            ports: if protocol == NetworkProtocol::Icmp {
+                Vec::new()
+            } else {
+                vec![PortRange { from: 443, to: 443 }]
+            },
             justification: "sync".into(),
         };
         NetworkPolicyPlan::new("holon-a", vec![workload], vec![capability]).unwrap()
@@ -594,6 +694,160 @@ mod tests {
         assert_eq!(plan.rules.len(), 1);
         assert_eq!(plan.activation, "disabled-until-runtime-proof-v40");
         assert!(!plan.fail_open);
+    }
+
+    #[test]
+    fn v40_coverage_profile_does_not_overclaim_packet_or_passed_socket_controls() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        let coverage = plan.coverage_profile_v40().unwrap();
+
+        assert!(coverage.ipv4_tcp_connect_hook_required);
+        assert!(coverage.ipv6_tcp_connect_hook_required);
+        assert!(!coverage.ipv4_udp_sendmsg_hook_required);
+        assert!(!coverage.ipv6_udp_sendmsg_hook_required);
+        assert!(!coverage.packet_level_egress_filter_qualified);
+        assert!(!coverage.established_flow_revocation_qualified);
+        assert!(!coverage.passed_socket_recipient_binding_qualified);
+        assert!(!coverage.production_enforcement_claimed);
+    }
+
+    #[test]
+    fn udp_v40_coverage_profile_names_both_sendmsg_hooks_as_required() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Udp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        let coverage = plan.coverage_profile_v40().unwrap();
+        assert!(coverage.ipv4_udp_sendmsg_hook_required);
+        assert!(coverage.ipv6_udp_sendmsg_hook_required);
+        assert!(!coverage.packet_level_egress_filter_qualified);
+    }
+
+    #[test]
+    fn deserialized_plan_cannot_drop_a_required_connect_hook() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let mut plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        plan.required_kernel_features
+            .retain(|feature| *feature != KernelNetworkFeature::CgroupInet6Connect);
+
+        assert!(matches!(
+            plan.validate(),
+            Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch)
+        ));
+    }
+
+    #[test]
+    fn udp_rules_require_both_ipv4_and_ipv6_sendmsg_hooks() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Udp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.required_kernel_features.contains(&KernelNetworkFeature::CgroupUdp4Sendmsg));
+        assert!(plan.required_kernel_features.contains(&KernelNetworkFeature::CgroupUdp6Sendmsg));
+
+        let probe = KernelFeatureProbe {
+            schema_version: 1,
+            kernel_release: "test".into(),
+            cgroup_mode: "v2-unified".into(),
+            observed_features: plan
+                .required_kernel_features
+                .iter()
+                .copied()
+                .filter(|feature| *feature != KernelNetworkFeature::CgroupUdp6Sendmsg)
+                .collect(),
+            probe_method: "negative-control".into(),
+        };
+        assert!(matches!(
+            plan.activation_eligibility(&probe, &[]),
+            Err(NetworkEnforcementError::MissingKernelFeatures)
+        ));
+
+        let mut weakened_plan = plan;
+        weakened_plan
+            .required_kernel_features
+            .retain(|feature| *feature != KernelNetworkFeature::CgroupUdp4Sendmsg);
+        assert!(matches!(
+            weakened_plan.validate(),
+            Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch)
+        ));
+    }
+
+    #[test]
+    fn v40_refuses_icmp_because_no_icmp_hook_is_qualified() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Icmp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.unresolved.len(), 1);
+        assert!(
+            plan.unresolved[0].reason.contains("ICMP is not implemented"),
+            "ICMP must not become an apparently enforceable kernel rule"
+        );
+        assert!(matches!(
+            plan.activation_eligibility(
+                &KernelFeatureProbe {
+                    schema_version: 1,
+                    kernel_release: "test".into(),
+                    cgroup_mode: "v2-unified".into(),
+                    observed_features: plan.required_kernel_features.clone(),
+                    probe_method: "fixture".into(),
+                },
+                &[]
+            ),
+            Err(NetworkEnforcementError::UnresolvedRules(1))
+        ));
+    }
+
+    #[test]
+    fn deserialized_plan_cannot_inject_icmp_or_any_rules() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let mut icmp_plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        icmp_plan.rules[0].protocol = NetworkProtocol::Icmp;
+        assert!(matches!(
+            icmp_plan.validate(),
+            Err(NetworkEnforcementError::UnsafeContract(_))
+        ));
+
+        let mut any_plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        any_plan.rules[0].protocol = NetworkProtocol::Any;
+        assert!(matches!(
+            any_plan.validate(),
+            Err(NetworkEnforcementError::UnsafeContract(_))
+        ));
+    }
+
+    #[test]
+    fn v40_refuses_protocol_any_instead_of_overclaiming_all_protocol_coverage() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Any,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.unresolved.len(), 1);
+        assert!(
+            plan.unresolved[0].reason.contains("protocol Any"),
+            "wildcard transport authority must be split into supported explicit transports"
+        );
     }
 
     #[test]

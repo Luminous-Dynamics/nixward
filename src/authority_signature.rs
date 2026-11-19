@@ -104,6 +104,7 @@ pub enum AuthorityAction {
     Change,
     GuestRealize,
     NetworkActivate,
+    NetworkResolve,
     SecurityEnrollment,
 }
 
@@ -116,6 +117,7 @@ impl AuthorityAction {
             Self::Change => "change",
             Self::GuestRealize => "guest-realize",
             Self::NetworkActivate => "network-activate",
+            Self::NetworkResolve => "network-resolve",
             Self::SecurityEnrollment => "security-enrollment",
         }
     }
@@ -214,12 +216,12 @@ impl AuthorityChallenge {
         let expires_at_ms = issued_at_ms
             .checked_add(ttl_ms)
             .ok_or(AuthorityError::InvalidFreshness)?;
-        let mut nonce = blake3::Hasher::new();
-        nonce.update(CHALLENGE_DOMAIN);
-        nonce.update(&nonce_entropy);
-        nonce.update(subject_blake3.as_bytes());
-        nonce.update(holon_id.as_bytes());
-        nonce.update(action.as_str().as_bytes());
+        let nonce_blake3 = Self::nonce_blake3(
+            action,
+            &subject_blake3,
+            &holon_id,
+            nonce_entropy,
+        )?;
         Ok(Self {
             schema_version: AUTHORITY_SCHEMA_VERSION,
             kind: AUTHORITY_CHALLENGE_KIND.into(),
@@ -227,10 +229,31 @@ impl AuthorityChallenge {
             subject_blake3,
             holon_id,
             audience: audience.into(),
-            nonce_blake3: nonce.finalize().to_hex().to_string(),
+            nonce_blake3,
             issued_at_ms,
             expires_at_ms,
         })
+    }
+
+    /// Derive the deterministic nonce digest for one exact action, subject,
+    /// Holon and entropy value. Lease protocols can use this to bind their
+    /// owner-generated one-shot nonce into the detached signature challenge.
+    pub fn nonce_blake3(
+        action: AuthorityAction,
+        subject_blake3: &str,
+        holon_id: &str,
+        nonce_entropy: [u8; 32],
+    ) -> Result<String, AuthorityError> {
+        if !valid_blake3_hex(subject_blake3) || !valid_blake3_hex(holon_id) {
+            return Err(AuthorityError::InvalidDigest);
+        }
+        let mut nonce = blake3::Hasher::new();
+        nonce.update(CHALLENGE_DOMAIN);
+        nonce.update(&nonce_entropy);
+        nonce.update(subject_blake3.as_bytes());
+        nonce.update(holon_id.as_bytes());
+        nonce.update(action.as_str().as_bytes());
+        Ok(nonce.finalize().to_hex().to_string())
     }
 
     /// Canonical signing payload. This intentionally does not use serde JSON so
@@ -290,15 +313,39 @@ pub struct DetachedAuthoritySignature {
 /// Result returned only by successful cryptographic verification. It is not
 /// deserializable and therefore cannot be materialized from an untrusted JSON
 /// payload as an authority capability.
+/// Result returned only by successful cryptographic verification.
+///
+/// Fields are private so downstream code cannot construct or mutate verified
+/// authority claims. The private seal also prevents struct-literal construction
+/// outside this module. Callers receive read-only accessors and must still
+/// atomically consume the replay key at the privileged mutation boundary.
 #[derive(Debug, Clone)]
 pub struct VerifiedSignatureEvidence {
-    pub issuer: String,
-    pub signer_key_id: String,
-    pub evidence_blake3: String,
-    pub subject_blake3: String,
-    pub challenge_blake3: String,
-    pub replay_key: String,
-    pub claims: BTreeMap<String, String>,
+    issuer: String,
+    signer_key_id: String,
+    evidence_blake3: String,
+    subject_blake3: String,
+    challenge_blake3: String,
+    replay_key: String,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    claims: BTreeMap<String, String>,
+    _verified: VerifiedSignatureSeal,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedSignatureSeal;
+
+impl VerifiedSignatureEvidence {
+    pub fn issuer(&self) -> &str { &self.issuer }
+    pub fn signer_key_id(&self) -> &str { &self.signer_key_id }
+    pub fn evidence_blake3(&self) -> &str { &self.evidence_blake3 }
+    pub fn subject_blake3(&self) -> &str { &self.subject_blake3 }
+    pub fn challenge_blake3(&self) -> &str { &self.challenge_blake3 }
+    pub fn replay_key(&self) -> &str { &self.replay_key }
+    pub const fn issued_at_ms(&self) -> u64 { self.issued_at_ms }
+    pub const fn expires_at_ms(&self) -> u64 { self.expires_at_ms }
+    pub fn claims(&self) -> &BTreeMap<String, String> { &self.claims }
 }
 
 pub struct AuthorityVerifier<'a> {
@@ -393,6 +440,8 @@ impl<'a> AuthorityVerifier<'a> {
         claims.insert("authority_action".into(), expected_action.as_str().into());
         claims.insert("authority_audience".into(), challenge.audience.clone());
         claims.insert("challenge_blake3".into(), challenge_blake3.clone());
+        claims.insert("challenge_holon_blake3".into(), challenge.holon_id.clone());
+        claims.insert("challenge_nonce_blake3".into(), challenge.nonce_blake3.clone());
         claims.insert("replay_key".into(), replay_key.clone());
         claims.insert("signature_algorithm".into(), "ed25519".into());
         Ok(VerifiedSignatureEvidence {
@@ -402,7 +451,10 @@ impl<'a> AuthorityVerifier<'a> {
             subject_blake3: challenge.subject_blake3.clone(),
             challenge_blake3,
             replay_key,
+            issued_at_ms: challenge.issued_at_ms,
+            expires_at_ms: challenge.expires_at_ms,
             claims,
+            _verified: VerifiedSignatureSeal,
         })
     }
 }
