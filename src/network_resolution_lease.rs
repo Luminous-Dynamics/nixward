@@ -1196,18 +1196,28 @@ mod tests {
     fn canonical_address_set_encoding_matches_prism_golden_vector() {
         let ipv4: IpAddr = "93.184.216.34".parse().unwrap();
         let ipv6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+        let expected = vec![
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+            0x04, 0x5d, 0xb8, 0xd8, 0x22, 0x01, 0xbb,
+            0x06, 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x11, 0x11, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x00,
+        ];
+
         assert_eq!(
             canonical_address_set_encoding(&[ipv6, ipv4], 443),
-            vec![
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
-                0x04, 0x5d, 0xb8, 0xd8, 0x22, 0x01, 0xbb,
-                0x06, 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x11, 0x11, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x00,
-            ]
+            expected
         );
         assert_eq!(
             canonical_address_set_encoding(&[ipv4, ipv6], 443),
             canonical_address_set_encoding(&[ipv6, ipv4, ipv4], 443)
+        );
+
+        let (_, capability, parent_lease) = parent();
+        let lease_value = lease(&capability, &parent_lease);
+        assert_eq!(lease_value.canonical_address_set_encoding(), expected);
+        assert_eq!(
+            lease_value.address_set_digest_hex(),
+            canonical_address_set_digest(&[ipv4, ipv6], 443)
         );
     }
 
