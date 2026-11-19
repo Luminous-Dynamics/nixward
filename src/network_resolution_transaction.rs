@@ -10,8 +10,12 @@
 //! after a separately authenticated broker has applied the events and read
 //! back the exact active map generation and digest.
 
-use crate::network_covenant::NetworkProtocol;
-use crate::network_resolution_lease::NetworkResolutionLeaseV1;
+use crate::network_covenant::{
+    NetworkCapability, NetworkCapabilityLease, NetworkPolicyPlan, NetworkProtocol,
+};
+use crate::network_resolution_lease::{
+    AuthorizedNetworkResolutionLease, NetworkResolutionLeaseV1,
+};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use thiserror::Error;
@@ -44,6 +48,146 @@ fn hash_serialized<T: Serialize>(value: &T) -> Result<String, NetworkResolutionT
     hash_serialized_domain(TRANSACTION_DOMAIN, value)
 }
 
+/// Non-deserializable proof that a resolution lease passed detached-signature
+/// verification and exact owner-authorized parent-policy binding.
+///
+/// It is deliberately distinct from a structurally valid lease. Production
+/// transaction APIs accept this type rather than raw lease JSON or a caller-
+/// assembled struct. It remains a source-level proof object: the privileged
+/// broker must still authenticate its IPC caller/cgroup and recheck current
+/// policy generation and expiry immediately before each mutation.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct ParentBoundNetworkResolutionLease {
+    lease: NetworkResolutionLeaseV1,
+    parent_policy_blake3: String,
+    parent_capability_blake3: String,
+    parent_authority_lease_blake3: String,
+    parent_expires_at_unix: u64,
+    active_policy_generation: u64,
+    authority_evidence_blake3: String,
+    resolver_key_id: String,
+    replay_key: String,
+}
+
+impl ParentBoundNetworkResolutionLease {
+    /// Verify the signature-sealed lease against the exact parent policy,
+    /// capability and owner-issued parent lease before it can enter the
+    /// transaction reducer.
+    pub fn bind(
+        authorized: AuthorizedNetworkResolutionLease,
+        policy: &NetworkPolicyPlan,
+        capability: &NetworkCapability,
+        parent_lease: &NetworkCapabilityLease,
+        now_unix: u64,
+        active_policy_generation: u64,
+    ) -> Result<Self, NetworkResolutionTransactionError> {
+        authorized
+            .validate_parent_binding(
+                policy,
+                capability,
+                parent_lease,
+                now_unix,
+                active_policy_generation,
+            )
+            .map_err(|error| {
+                NetworkResolutionTransactionError::ParentBinding(error.to_string())
+            })?;
+
+        let parent_policy_blake3 = policy
+            .digest_hex()
+            .map_err(|error| NetworkResolutionTransactionError::ParentBinding(error.to_string()))?;
+        let parent_capability_blake3 = capability.digest_hex().map_err(|error| {
+            NetworkResolutionTransactionError::ParentBinding(error.to_string())
+        })?;
+        let parent_authority_lease_blake3 = parent_lease.digest_hex().map_err(|error| {
+            NetworkResolutionTransactionError::ParentBinding(error.to_string())
+        })?;
+
+        Ok(Self {
+            lease: authorized.lease().clone(),
+            parent_policy_blake3,
+            parent_capability_blake3,
+            parent_authority_lease_blake3,
+            parent_expires_at_unix: parent_lease.expires_at_unix,
+            active_policy_generation,
+            authority_evidence_blake3: authorized.evidence_blake3().to_owned(),
+            resolver_key_id: authorized.signer_key_id().to_owned(),
+            replay_key: authorized.replay_key().to_owned(),
+        })
+    }
+
+    /// Test-only fixture constructor. It is not compiled into production and
+    /// must never be used by the broker or adapter.
+    #[cfg(test)]
+    fn test_only(
+        lease: NetworkResolutionLeaseV1,
+        parent_expires_at_unix: u64,
+    ) -> Self {
+        Self {
+            parent_policy_blake3: lease.network_policy_blake3.clone(),
+            parent_capability_blake3: lease.parent_capability_blake3.clone(),
+            parent_authority_lease_blake3: lease.parent_authority_lease_blake3.clone(),
+            active_policy_generation: lease.policy_generation,
+            authority_evidence_blake3: "aa".repeat(32),
+            resolver_key_id: lease.issuer_key_id.clone(),
+            replay_key: "bb".repeat(32),
+            lease,
+            parent_expires_at_unix,
+        }
+    }
+
+    pub fn lease(&self) -> &NetworkResolutionLeaseV1 {
+        &self.lease
+    }
+
+    pub fn parent_policy_blake3(&self) -> &str {
+        &self.parent_policy_blake3
+    }
+
+    pub fn parent_capability_blake3(&self) -> &str {
+        &self.parent_capability_blake3
+    }
+
+    pub fn parent_authority_lease_blake3(&self) -> &str {
+        &self.parent_authority_lease_blake3
+    }
+
+    pub fn authority_evidence_blake3(&self) -> &str {
+        &self.authority_evidence_blake3
+    }
+
+    pub fn resolver_key_id(&self) -> &str {
+        &self.resolver_key_id
+    }
+
+    pub fn replay_key(&self) -> &str {
+        &self.replay_key
+    }
+
+    fn validate_at(
+        &self,
+        now_unix: u64,
+        active_policy_generation: u64,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        if active_policy_generation != self.active_policy_generation
+            || active_policy_generation != self.lease.policy_generation
+        {
+            return Err(NetworkResolutionTransactionError::PolicyGenerationMismatch);
+        }
+        if self.lease.expires_at_unix > self.parent_expires_at_unix {
+            return Err(NetworkResolutionTransactionError::ParentLeaseTimeMismatch);
+        }
+        if now_unix < self.lease.issued_at_unix
+            || now_unix >= self.lease.expires_at_unix
+            || now_unix >= self.parent_expires_at_unix
+        {
+            return Err(NetworkResolutionTransactionError::ParentLeaseExpired);
+        }
+        Ok(())
+    }
+}
+
 /// Exact v1 contents expected in the inactive workload address-map generation.
 ///
 /// This binds the cgroup identity, workload, parent-derived policy, request
@@ -73,11 +217,15 @@ impl NetworkResolutionMapPayloadV1 {
     /// cgroup identity. The broker must obtain the cgroup digest itself; it
     /// must never trust a caller-supplied PID or cgroup path as proof.
     pub fn for_lease(
-        lease: &NetworkResolutionLeaseV1,
+        bound_lease: &ParentBoundNetworkResolutionLease,
         cgroup_identity_blake3: impl Into<String>,
         bpf_program_blake3: impl Into<String>,
         target_active_generation: u64,
+        now_unix: u64,
+        active_policy_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
+        bound_lease.validate_at(now_unix, active_policy_generation)?;
+        let lease = bound_lease.lease();
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
@@ -86,7 +234,7 @@ impl NetworkResolutionMapPayloadV1 {
             cgroup_identity_blake3: cgroup_identity_blake3.into(),
             bpf_program_blake3: bpf_program_blake3.into(),
             workload_blake3: lease.workload_blake3.clone(),
-            network_policy_blake3: lease.network_policy_blake3.clone(),
+            network_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
             lease_blake3: lease
                 .digest_hex()
                 .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
@@ -138,15 +286,16 @@ impl NetworkResolutionMapPayloadV1 {
 
     fn validate_for_lease(
         &self,
-        lease: &NetworkResolutionLeaseV1,
+        bound_lease: &ParentBoundNetworkResolutionLease,
         expected_generation: u64,
     ) -> Result<(), NetworkResolutionTransactionError> {
         self.validate()?;
+        let lease = bound_lease.lease();
         let lease_digest = lease
             .digest_hex()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
         if self.workload_blake3 != lease.workload_blake3
-            || self.network_policy_blake3 != lease.network_policy_blake3
+            || self.network_policy_blake3 != bound_lease.parent_policy_blake3()
             || self.lease_blake3 != lease_digest
             || self.address_set_blake3 != lease.address_set_digest_hex()
             || self.transport != lease.transport
@@ -241,6 +390,12 @@ pub struct NetworkResolutionTransaction {
     redirect_hop: u8,
     lease_blake3: String,
     address_set_blake3: String,
+    parent_policy_blake3: String,
+    parent_capability_blake3: String,
+    parent_authority_lease_blake3: String,
+    authority_evidence_blake3: String,
+    resolver_key_id: String,
+    replay_key: String,
     expected_map_payload_blake3: String,
     prior_active_generation: u64,
     prior_active_map_payload_blake3: String,
@@ -259,11 +414,15 @@ impl NetworkResolutionTransaction {
     /// Begin one transaction from an already structurally validated lease
     /// and its exact cgroup-bound kernel-map payload.
     pub fn begin(
-        lease: &NetworkResolutionLeaseV1,
+        bound_lease: &ParentBoundNetworkResolutionLease,
         map_payload: NetworkResolutionMapPayloadV1,
+        now_unix: u64,
+        active_policy_generation: u64,
         prior_active_generation: u64,
         prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
+        bound_lease.validate_at(now_unix, active_policy_generation)?;
+        let lease = bound_lease.lease();
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
@@ -274,7 +433,7 @@ impl NetworkResolutionTransaction {
         let target_active_generation = prior_active_generation
             .checked_add(1)
             .ok_or(NetworkResolutionTransactionError::GenerationOverflow)?;
-        map_payload.validate_for_lease(lease, target_active_generation)?;
+        map_payload.validate_for_lease(bound_lease, target_active_generation)?;
         let expected_map_payload_blake3 = map_payload.digest_hex()?;
 
         Ok(Self {
@@ -285,6 +444,12 @@ impl NetworkResolutionTransaction {
                 .digest_hex()
                 .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
             address_set_blake3: lease.address_set_digest_hex(),
+            parent_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
+            parent_capability_blake3: bound_lease.parent_capability_blake3().to_owned(),
+            parent_authority_lease_blake3: bound_lease.parent_authority_lease_blake3().to_owned(),
+            authority_evidence_blake3: bound_lease.authority_evidence_blake3().to_owned(),
+            resolver_key_id: bound_lease.resolver_key_id().to_owned(),
+            replay_key: bound_lease.replay_key().to_owned(),
             expected_map_payload_blake3,
             prior_active_generation,
             prior_active_map_payload_blake3,
@@ -550,6 +715,14 @@ impl NetworkResolutionTransaction {
 pub enum NetworkResolutionTransactionError {
     #[error("resolution lease is structurally invalid")]
     InvalidLease,
+    #[error("signature-verified lease failed exact parent binding: {0}")]
+    ParentBinding(String),
+    #[error("parent capability or resolution lease is expired")]
+    ParentLeaseExpired,
+    #[error("parent authority lease expires before the resolution lease")]
+    ParentLeaseTimeMismatch,
+    #[error("active policy generation differs from the parent-bound lease")]
+    PolicyGenerationMismatch,
     #[error("transaction digest is invalid")]
     InvalidDigest,
     #[error("kernel map payload is structurally invalid")]
@@ -617,14 +790,18 @@ mod tests {
 
     fn started() -> NetworkResolutionTransaction {
         let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only(lease, 109);
         let payload = NetworkResolutionMapPayloadV1::for_lease(
-            &lease,
+            &bound,
             "88".repeat(32),
             "99".repeat(32),
             41,
+            102,
+            7,
         )
         .unwrap();
-        NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)).unwrap()
+        NetworkResolutionTransaction::begin(&bound, payload, 102, 7, 40, "cc".repeat(32))
+            .unwrap()
     }
 
     fn stage_and_verify(transaction: &mut NetworkResolutionTransaction) {
@@ -651,24 +828,36 @@ mod tests {
     #[test]
     fn map_payload_rejects_substitution_of_workload_port_policy_or_address_set() {
         let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only(lease, 109);
         let mut payload = NetworkResolutionMapPayloadV1::for_lease(
-            &lease,
+            &bound,
             "88".repeat(32),
             "99".repeat(32),
             41,
+            102,
+            7,
         )
         .unwrap();
         payload.port = 8443;
         assert_eq!(
-            NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)),
+            NetworkResolutionTransaction::begin(
+                &bound,
+                payload,
+                102,
+                7,
+                40,
+                "cc".repeat(32)
+            ),
             Err(NetworkResolutionTransactionError::MapPayloadMismatch)
         );
 
         let mut wrong_cgroup = NetworkResolutionMapPayloadV1::for_lease(
-            &lease,
+            &bound,
             "99".repeat(32),
             "99".repeat(32),
             41,
+            102,
+            7,
         )
         .unwrap();
         wrong_cgroup.cgroup_identity_blake3 = "not-a-digest".into();
@@ -676,6 +865,43 @@ mod tests {
             wrong_cgroup.validate(),
             Err(NetworkResolutionTransactionError::InvalidMapPayload)
         );
+    }
+
+    #[test]
+    fn transaction_refuses_expired_parent_lease_or_stale_policy_generation() {
+        let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only(lease, 104);
+        let payload = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            "88".repeat(32),
+            "99".repeat(32),
+            41,
+            102,
+            7,
+        )
+        .unwrap();
+        assert!(matches!(
+            NetworkResolutionTransaction::begin(
+                &bound,
+                payload.clone(),
+                105,
+                7,
+                40,
+                "cc".repeat(32)
+            ),
+            Err(NetworkResolutionTransactionError::ParentLeaseExpired)
+        ));
+        assert!(matches!(
+            NetworkResolutionTransaction::begin(
+                &bound,
+                payload,
+                102,
+                8,
+                40,
+                "cc".repeat(32)
+            ),
+            Err(NetworkResolutionTransactionError::PolicyGenerationMismatch)
+        ));
     }
 
     #[test]
