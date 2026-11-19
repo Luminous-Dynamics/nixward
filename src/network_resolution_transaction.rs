@@ -533,6 +533,7 @@ struct JournalGenesisBinding<'a> {
     logical_request_id: &'a str,
     redirect_hop: u8,
     lease_blake3: &'a str,
+    expected_replay_record_blake3: &'a str,
     expected_map_payload_blake3: &'a str,
     prior_active_generation: u64,
     prior_active_map_payload_blake3: &'a str,
@@ -641,6 +642,7 @@ impl NetworkResolutionTransaction {
                 logical_request_id: &lease.logical_request_id,
                 redirect_hop: lease.redirect_hop,
                 lease_blake3: &lease_blake3,
+                expected_replay_record_blake3: &expected_replay_record_blake3,
                 expected_map_payload_blake3: &expected_map_payload_blake3,
                 prior_active_generation,
                 prior_active_map_payload_blake3: &prior_active_map_payload_blake3,
@@ -1412,6 +1414,91 @@ mod tests {
             ),
             Err(NetworkResolutionTransactionError::ResolverAuthorityExpired)
         ));
+    }
+
+    #[test]
+    fn map_payload_builder_rejects_expired_owner_activation_signature() {
+        let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only(lease, 109);
+        let mut activation_intent = activation(bound.lease()).intent().clone();
+        let expired_activation = AuthorizedNetworkActivation::test_only_with_expiry(
+            activation_intent.clone(),
+            100_000,
+            101_000,
+        );
+        assert!(matches!(
+            NetworkResolutionMapPayloadV1::for_lease(
+                &bound,
+                &expired_activation,
+                "88".repeat(32),
+                41,
+                102_000,
+                7,
+            ),
+            Err(NetworkResolutionTransactionError::ActivationBinding(_))
+        ));
+        activation_intent.bpf_object_blake3 = "77".repeat(32);
+        assert_ne!(
+            activation_intent.digest_hex().unwrap(),
+            expired_activation.intent().digest_hex().unwrap()
+        );
+    }
+
+    #[test]
+    fn journal_identity_binds_the_exact_signed_resolver_replay_proof() {
+        let lease = lease();
+        let bound_a = ParentBoundNetworkResolutionLease::test_only(lease.clone(), 109);
+        let bound_b = ParentBoundNetworkResolutionLease::test_only(lease, 109);
+        let mut bound_b = bound_b;
+        bound_b.replay_key = "dd".repeat(32);
+        let activation_a = activation(bound_a.lease());
+        let activation_b = activation(bound_b.lease());
+        let payload_a = NetworkResolutionMapPayloadV1::for_lease(
+            &bound_a,
+            &activation_a,
+            "88".repeat(32),
+            41,
+            102_000,
+            7,
+        )
+        .unwrap();
+        let payload_b = NetworkResolutionMapPayloadV1::for_lease(
+            &bound_b,
+            &activation_b,
+            "88".repeat(32),
+            41,
+            102_000,
+            7,
+        )
+        .unwrap();
+        let tx_a = NetworkResolutionTransaction::begin(
+            &bound_a,
+            &activation_a,
+            payload_a,
+            102_000,
+            7,
+            40,
+            "cc".repeat(32),
+        )
+        .unwrap();
+        let tx_b = NetworkResolutionTransaction::begin(
+            &bound_b,
+            &activation_b,
+            payload_b,
+            102_000,
+            7,
+            40,
+            "cc".repeat(32),
+        )
+        .unwrap();
+        assert_ne!(
+            tx_a.journal_transaction_blake3(),
+            tx_b.journal_transaction_blake3()
+        );
+        assert_ne!(
+            tx_a.expected_replay_record_blake3(),
+            tx_b.expected_replay_record_blake3()
+        );
     }
 
     #[test]
