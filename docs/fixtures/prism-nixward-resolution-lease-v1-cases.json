@@ -671,6 +671,36 @@
         "value": "call at expiry_ms - 1 then exactly expiry_ms"
       },
       "oracle": "the operation is accepted one millisecond before expiry and rejected at the exact expiry boundary; lease seconds are converted to checked milliseconds and never used to round authority expiry down"
+    },
+    {
+      "id": "LEASE-061",
+      "family": "journal_authority_window",
+      "title": "journal mutation records bind wall-clock sample and active policy generation",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Attempt nonce/map/switch mutation exactly at lease expiry or with a stale active policy generation; mutate timestamp after record digest creation"
+      },
+      "oracle": "mutating events are rejected outside the parent/lease/resolver/owner time window or under a different policy generation; timestamps and policy generation are included in the journal record digest"
+    },
+    {
+      "id": "LEASE-062",
+      "family": "delayed_reconciliation",
+      "title": "unknown switch is reconciled after lease expiry without granting execution",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Switch outcome is unknown before expiry; exact target generation/map digest is read back at or after lease expiry"
+      },
+      "oracle": "record ExpiredActive, never Active; execution eligibility remains false and broker is required to revoke the stale target map"
+    },
+    {
+      "id": "LEASE-063",
+      "family": "runtime_identity",
+      "title": "flow admission requires exact live cgroup BPF map generation and lease",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "setup": "Keep the transaction Active but vary current cgroup identity, loaded BPF object digest, active map generation, map digest and lease time"
+      },
+      "oracle": "execution gate accepts only when current policy, cgroup, BPF object, target generation, payload digest and lease lifetime all match"
     }
   ]
 }
