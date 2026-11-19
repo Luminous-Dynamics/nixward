@@ -753,6 +753,28 @@
       "operation": "accept-profile-with-explicit-nonclaims",
       "mutation": null,
       "oracle": "coverage profile reports connect and conditional UDP sendmsg hooks while packet-level egress filtering, established-flow revocation and passed-socket recipient binding remain explicitly unqualified; no production enforcement claim is emitted"
+    },
+    {
+      "id": "LEASE-069",
+      "family": "kernel_protocol_coverage",
+      "title": "V40 compiler rejects ICMP because no ICMP enforcement hook is qualified",
+      "operation": "reject-as-unresolved",
+      "mutation": {
+        "path": "capability.protocol",
+        "value": "icmp"
+      },
+      "oracle": "ICMP never becomes a resolved KernelNetworkRule or activation-eligible policy under V40"
+    },
+    {
+      "id": "LEASE-070",
+      "family": "kernel_protocol_coverage",
+      "title": "V40 compiler rejects protocol Any rather than claiming wildcard transport enforcement",
+      "operation": "reject-as-unresolved",
+      "mutation": {
+        "path": "capability.protocol",
+        "value": "any"
+      },
+      "oracle": "caller must split wildcard authority into explicit supported TCP/UDP capabilities; V40 does not imply ICMP or other protocols"
     }
   ]
 }
