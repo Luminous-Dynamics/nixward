@@ -467,3 +467,16 @@ A source review found that the owner-activation wrapper had public fields and ac
 This is still a contract layer, not a live kernel loader: the privileged broker must consume the owner-activation replay key, read the actual loaded BPF object/program tag and active generation from the kernel, observe the exact workload cgroup identity, and bind the read-back to authenticated IPC. The strings in a pure payload do not prove that the kernel loaded those bytes.
 
 New conformance cases `LEASE-055`–`LEASE-057` cover challenge Holon/audience/action, BPF-object substitution, and activation provenance substitution. The relevant Rust tests are source changes only and remain unexecuted.
+
+
+## 9.4 Signed authority is revalidated at the mutation boundary
+
+Both proof layers now carry the detached evidence's signed issue/expiry timestamps:
+- The parent-bound resolver proof records the verified resolver evidence window. Its `validate_at_ms` checks that the resolver signature is still valid, then checks the resolution lease, parent lease and exact active policy generation using the same Unix-millisecond sample.
+- The owner activation proof records challenge digest, issue time and expiry time. Its `validate_at_ms` rejects not-yet-valid or expired approvals. The map-payload builder and transaction `begin` invoke this check; the broker must call it again immediately before the actual privileged write/switch.
+
+The transaction APIs now take `now_unix_ms`, not seconds. Lease and parent deadlines are represented as seconds in the signed lease schema, converted with checked multiplication, and compared at millisecond precision. This avoids accepting an owner/resolver proof for the remainder of a rounded-down second after its signed expiry.
+
+The transaction journal genesis was also tightened to include the exact expected resolver replay-record digest. Two otherwise identical lease/map transactions that differ only in their verified resolver evidence/replay identity therefore have different journal transaction IDs. The map digest already binds the activation challenge, expiry, signer, evidence and replay identity.
+
+`LEASE-058`–`LEASE-060` exercise resolver evidence expiry, owner activation expiry and the exact millisecond boundary. All remain source-level test contracts until exact-head CI/runtime evidence exists.
