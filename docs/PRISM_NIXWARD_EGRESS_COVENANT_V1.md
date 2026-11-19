@@ -417,3 +417,19 @@ The required mutation order is now explicit: verify signed lease → validate ex
 
 \`NetworkResolutionLeaseV1::socket_addresses()\` materializes every canonical \`IpAddr\` together with the lease's single TCP port as a \`SocketAddr\`. \`effective_valid_until_unix()\` returns the earlier of the lease expiry and resolver-validity deadline. These helpers only convert signed lease fields into transport inputs; they do not validate signatures, parent/workload authority, resolver trust or replay state. The trusted adapter must run the full lease validation chain first, then convert the effective Unix deadline to a local monotonic deadline without extending the lease lifetime.
 
+
+## 9.1 Pure transaction reducer and map-payload identity
+
+The new `src/network_resolution_transaction.rs` module adds a pure, typed reducer for one resolution-lease activation. It is a state model and conformance surface only; it does not call the persistent replay ledger, write kernel maps, load BPF, or activate a workload.
+
+The reducer binds the exact lease digest, Prism-compatible address-set digest, opaque logical request ID, redirect-hop index, prior active map generation and prior known-good map-payload digest. Its `NetworkResolutionMapPayloadV1` binds the broker-observed cgroup identity digest, exact BPF program digest, workload and network-policy digests, lease digest, complete IP list, transport/port, policy generation, expiry and target map generation. The map payload digest uses the separate BLAKE3 derive-key context `symthaea:nixward:network-resolution-map-payload:v1`. A payload cannot be staged for a different port, IP set, workload, lease, cgroup, BPF object or generation without changing/rejecting its digest.
+
+The append-only event reducer treats uncertain mutations explicitly:
+- Replay-ledger consume with an unknown result enters `NonceReconciliationRequired`; only a matching durable replay-record read-back advances to `NonceConsumed`. A confirmed absence returns to `Prepared` for the same lease/nonce; a different record conflicts.
+- An inactive-map write with an unknown result enters `MapStageReconciliationRequired`; exact target generation plus exact payload read-back advances to `MapStaged`; proven absence permits restaging the same payload; a partial or mismatched map conflicts.
+- A generation-switch attempt—whether reported committed, not committed or unknown—enters `ReconciliationRequired`. Only exact target generation + exact target payload digest yields `Active`. Exact prior generation + exact prior payload digest yields `NotCommitted`. Contradictory outcomes, unexpected generations or payload mismatches yield terminal `Conflict`.
+- `may_execute()` is true only in `Active` after exact target map read-back. A transaction snapshot has no Deserialize path; reconstruct state by replaying validated events through the reducer. Events are serializable/deserializable for an eventual authenticated journal, but event JSON alone does not authenticate its producer.
+
+The prior-generation digest is required so a same-numbered but modified prior map cannot be mistaken for the known-good baseline. A failed or unknown mutation never grants permission by itself. The broker still needs authenticated IPC, owner/parent/workload validation, persistent nonce consumption, actual map read-back, cgroup identity verification, observer completeness and the existing owner-authorized activation path before production use.
+
+New conformance cases `LEASE-039`–`LEASE-049` cover replay-ledger uncertainty, inactive-map uncertainty, exact payload binding, active-generation reconciliation and conflicting read-backs. They are proposed cases; no CI or kernel runtime pass is claimed.
