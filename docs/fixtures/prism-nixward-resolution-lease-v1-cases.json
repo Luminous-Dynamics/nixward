@@ -427,6 +427,14 @@
       "operation": "accept",
       "mutation": null,
       "oracle": "both implementations produce the identical 38-byte golden encoding for 93.184.216.34:443 plus [2606:4700:4700::1111]:443; digest is a correlation value only and remains distinct from the signed lease/resolver transcript digests"
+    },
+    {
+      "id": "LEASE-038",
+      "family": "prism_adapter_representation",
+      "title": "lease socket conversion and effective validity ceiling",
+      "operation": "accept",
+      "mutation": null,
+      "oracle": "socket_addresses emits the full unique IP:port set in canonical order; effective_valid_until_unix equals min(expires_at_unix, resolver_valid_until_unix); conversion helpers do not imply authority validation"
     }
   ]
 }
