@@ -701,6 +701,28 @@
         "setup": "Keep the transaction Active but vary current cgroup identity, loaded BPF object digest, active map generation, map digest and lease time"
       },
       "oracle": "execution gate accepts only when current policy, cgroup, BPF object, target generation, payload digest and lease lifetime all match"
+    },
+    {
+      "id": "LEASE-064",
+      "family": "journal_integrity",
+      "title": "journal observation timestamp cannot be rewritten",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.observed_at_unix_ms",
+        "value": "change the broker sample after record digest creation"
+      },
+      "oracle": "record digest mismatch is detected and the reducer enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-065",
+      "family": "journal_integrity",
+      "title": "journal policy generation cannot be rewritten",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.active_policy_generation",
+        "value": "replace the observed policy generation after record digest creation"
+      },
+      "oracle": "record digest mismatch is detected and the reducer enters terminal Conflict"
     }
   ]
 }
