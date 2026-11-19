@@ -203,6 +203,9 @@ impl NetworkActivationIntent {
 pub struct AuthorizedNetworkActivation {
     intent: NetworkActivationIntent,
     authority_evidence_blake3: String,
+    authority_challenge_blake3: String,
+    authority_issued_at_ms: u64,
+    authority_expires_at_ms: u64,
     signer_key_id: String,
     replay_key: String,
 }
@@ -239,9 +242,15 @@ impl AuthorizedNetworkActivation {
         validate_digest(evidence.evidence_blake3())?;
         validate_digest(evidence.challenge_blake3())?;
         validate_digest(evidence.replay_key())?;
+        if evidence.expires_at_ms() <= evidence.issued_at_ms() {
+            return Err(NetworkActivationError::InvalidAuthorityEvidence);
+        }
         Ok(Self {
             intent,
             authority_evidence_blake3: evidence.evidence_blake3().to_owned(),
+            authority_challenge_blake3: evidence.challenge_blake3().to_owned(),
+            authority_issued_at_ms: evidence.issued_at_ms(),
+            authority_expires_at_ms: evidence.expires_at_ms(),
             signer_key_id: evidence.signer_key_id().to_owned(),
             replay_key: evidence.replay_key().to_owned(),
         })
@@ -253,6 +262,9 @@ impl AuthorizedNetworkActivation {
         Self {
             intent,
             authority_evidence_blake3: "aa".repeat(32),
+            authority_challenge_blake3: "cc".repeat(32),
+            authority_issued_at_ms: 0,
+            authority_expires_at_ms: u64::MAX,
             signer_key_id: "test-owner".into(),
             replay_key: "bb".repeat(32),
         }
@@ -264,6 +276,31 @@ impl AuthorizedNetworkActivation {
 
     pub fn authority_evidence_blake3(&self) -> &str {
         &self.authority_evidence_blake3
+    }
+
+    pub fn authority_challenge_blake3(&self) -> &str {
+        &self.authority_challenge_blake3
+    }
+
+    pub fn authority_issued_at_ms(&self) -> u64 {
+        self.authority_issued_at_ms
+    }
+
+    pub fn authority_expires_at_ms(&self) -> u64 {
+        self.authority_expires_at_ms
+    }
+
+    /// Recheck the signed approval's absolute validity immediately before any
+    /// privileged activation or map mutation. Seconds-to-milliseconds
+    /// conversion belongs to the caller and must be checked for overflow.
+    pub fn validate_at_ms(&self, now_ms: u64) -> Result<(), NetworkActivationError> {
+        if self.authority_expires_at_ms <= self.authority_issued_at_ms
+            || now_ms < self.authority_issued_at_ms
+            || now_ms >= self.authority_expires_at_ms
+        {
+            return Err(NetworkActivationError::AuthorityEvidenceExpired);
+        }
+        Ok(())
     }
 
     pub fn signer_key_id(&self) -> &str {
@@ -464,6 +501,8 @@ pub enum NetworkActivationError {
     AuthorityHolonMismatch,
     #[error("detached authority evidence is malformed")]
     InvalidAuthorityEvidence,
+    #[error("detached authority approval is expired or not yet valid")]
+    AuthorityEvidenceExpired,
     #[error("reasoning plane may not become activation authority")]
     AuthorityEscalation,
     #[error("network activation evidence serialization failed")]
@@ -548,6 +587,43 @@ mod tests {
         assert_eq!(policy["source_claim"], "not-activated-by-generated-source");
         assert_eq!(policy["automatic_activation"], false);
         assert_eq!(policy["reasoning_authority"], "none");
+    }
+
+    #[test]
+    fn authorized_activation_rejects_expired_or_not_yet_valid_evidence() {
+        let intent = NetworkActivationIntent {
+            schema_version: 1,
+            holon_id: "holon-a".into(),
+            operation: NetworkActivationOperation::Activate,
+            backend: NETWORK_RUNTIME_LAB_BACKEND.into(),
+            enforcement_plan_blake3: "11".repeat(32),
+            production_readiness_blake3: "22".repeat(32),
+            network_policy_blake3: "33".repeat(32),
+            target_system_toplevel: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".into(),
+            bpf_object_blake3: "44".repeat(32),
+            target_policy_generation: 1,
+            prior_activation_receipt_blake3: None,
+            rollback_invariant: "preserve-nixos-nftables-baseline-v46".into(),
+            reasoning_authority: "none".into(),
+        };
+        let subject = intent.digest_hex().unwrap();
+        let expected_holon = network_activation_authority_holon_blake3(&intent.holon_id);
+        let evidence = evidence(
+            subject,
+            AuthorityAction::NetworkActivate,
+            expected_holon,
+            NETWORK_ACTIVATION_AUDIENCE,
+        );
+        let authorized = AuthorizedNetworkActivation::authorize(intent, &evidence).unwrap();
+        assert!(authorized.validate_at_ms(1_010_000).is_ok());
+        assert!(matches!(
+            authorized.validate_at_ms(1_030_000),
+            Err(NetworkActivationError::AuthorityEvidenceExpired)
+        ));
+        assert!(matches!(
+            authorized.validate_at_ms(999_999),
+            Err(NetworkActivationError::AuthorityEvidenceExpired)
+        ));
     }
 
     #[test]
