@@ -37,6 +37,23 @@ pub enum KernelNetworkFeature {
     BpfMapPinning,
 }
 
+/// Machine-readable coverage boundary for the reviewed V40 socket-address backend.
+///
+/// False fields are deliberate non-claims, not missing metadata. V40 is
+/// admission-hook coverage; packet-level filtering and descriptor-transfer
+/// recipient binding require a separately reviewed backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkEnforcementCoverageV40 {
+    pub ipv4_tcp_connect_hook_required: bool,
+    pub ipv6_tcp_connect_hook_required: bool,
+    pub ipv4_udp_sendmsg_hook_required: bool,
+    pub ipv6_udp_sendmsg_hook_required: bool,
+    pub packet_level_egress_filter_qualified: bool,
+    pub established_flow_revocation_qualified: bool,
+    pub passed_socket_recipient_binding_qualified: bool,
+    pub production_enforcement_claimed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelFeatureProbe {
     pub schema_version: u32,
@@ -245,6 +262,33 @@ impl NetworkEnforcementPlan {
     pub fn digest_hex(&self) -> Result<String, NetworkEnforcementError> {
         self.validate()?;
         hash_json(PLAN_DOMAIN, self)
+    }
+
+    /// Return the explicit, versioned coverage profile for this V40 plan.
+    /// The profile describes contract capabilities only; it does not assert
+    /// that a target kernel has attached or is enforcing any program.
+    pub fn coverage_profile_v40(
+        &self,
+    ) -> Result<NetworkEnforcementCoverageV40, NetworkEnforcementError> {
+        self.validate()?;
+        Ok(NetworkEnforcementCoverageV40 {
+            ipv4_tcp_connect_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupInet4Connect),
+            ipv6_tcp_connect_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupInet6Connect),
+            ipv4_udp_sendmsg_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupUdp4Sendmsg),
+            ipv6_udp_sendmsg_hook_required: self
+                .required_kernel_features
+                .contains(&KernelNetworkFeature::CgroupUdp6Sendmsg),
+            packet_level_egress_filter_qualified: false,
+            established_flow_revocation_qualified: false,
+            passed_socket_recipient_binding_qualified: false,
+            production_enforcement_claimed: false,
+        })
     }
 
     pub fn activation_eligibility(
@@ -629,6 +673,39 @@ mod tests {
         assert_eq!(plan.rules.len(), 1);
         assert_eq!(plan.activation, "disabled-until-runtime-proof-v40");
         assert!(!plan.fail_open);
+    }
+
+    #[test]
+    fn v40_coverage_profile_does_not_overclaim_packet_or_passed_socket_controls() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        let coverage = plan.coverage_profile_v40().unwrap();
+
+        assert!(coverage.ipv4_tcp_connect_hook_required);
+        assert!(coverage.ipv6_tcp_connect_hook_required);
+        assert!(!coverage.ipv4_udp_sendmsg_hook_required);
+        assert!(!coverage.ipv6_udp_sendmsg_hook_required);
+        assert!(!coverage.packet_level_egress_filter_qualified);
+        assert!(!coverage.established_flow_revocation_qualified);
+        assert!(!coverage.passed_socket_recipient_binding_qualified);
+        assert!(!coverage.production_enforcement_claimed);
+    }
+
+    #[test]
+    fn udp_v40_coverage_profile_names_both_sendmsg_hooks_as_required() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Udp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        let coverage = plan.coverage_profile_v40().unwrap();
+        assert!(coverage.ipv4_udp_sendmsg_hook_required);
+        assert!(coverage.ipv6_udp_sendmsg_hook_required);
+        assert!(!coverage.packet_level_egress_filter_qualified);
     }
 
     #[test]
