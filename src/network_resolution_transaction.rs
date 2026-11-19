@@ -209,6 +209,9 @@ pub struct NetworkResolutionMapPayloadV1 {
     pub bpf_program_blake3: String,
     pub network_activation_intent_blake3: String,
     pub activation_authority_evidence_blake3: String,
+    pub activation_challenge_blake3: String,
+    pub activation_issued_at_ms: u64,
+    pub activation_expires_at_ms: u64,
     pub activation_signer_key_id: String,
     pub activation_replay_key: String,
     pub workload_blake3: String,
@@ -240,6 +243,12 @@ impl NetworkResolutionMapPayloadV1 {
         active_policy_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         bound_lease.validate_at(now_unix, active_policy_generation)?;
+        let now_ms = now_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        activation
+            .validate_at_ms(now_ms)
+            .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
         let lease = bound_lease.lease();
         lease
             .validate_structure()
@@ -267,6 +276,9 @@ impl NetworkResolutionMapPayloadV1 {
             bpf_program_blake3: activation_intent.bpf_object_blake3.clone(),
             network_activation_intent_blake3,
             activation_authority_evidence_blake3: activation.authority_evidence_blake3().to_owned(),
+            activation_challenge_blake3: activation.authority_challenge_blake3().to_owned(),
+            activation_issued_at_ms: activation.authority_issued_at_ms(),
+            activation_expires_at_ms: activation.authority_expires_at_ms(),
             activation_signer_key_id: activation.signer_key_id().to_owned(),
             activation_replay_key: activation.replay_key().to_owned(),
             workload_blake3: lease.workload_blake3.clone(),
@@ -294,6 +306,8 @@ impl NetworkResolutionMapPayloadV1 {
             || !is_digest(&self.bpf_program_blake3)
             || !is_digest(&self.network_activation_intent_blake3)
             || !is_digest(&self.activation_authority_evidence_blake3)
+            || !is_digest(&self.activation_challenge_blake3)
+            || self.activation_expires_at_ms <= self.activation_issued_at_ms
             || !is_digest(&self.activation_replay_key)
             || self.activation_signer_key_id.trim().is_empty()
             || self.activation_signer_key_id.contains('\0')
@@ -351,6 +365,9 @@ impl NetworkResolutionMapPayloadV1 {
             || activation_intent.target_policy_generation != lease.policy_generation
             || self.network_activation_intent_blake3 != activation_digest
             || self.activation_authority_evidence_blake3 != activation.authority_evidence_blake3()
+            || self.activation_challenge_blake3 != activation.authority_challenge_blake3()
+            || self.activation_issued_at_ms != activation.authority_issued_at_ms()
+            || self.activation_expires_at_ms != activation.authority_expires_at_ms()
             || self.activation_signer_key_id != activation.signer_key_id()
             || self.activation_replay_key != activation.replay_key()
             || self.bpf_program_blake3 != activation_intent.bpf_object_blake3
@@ -509,6 +526,9 @@ pub struct NetworkResolutionTransaction {
     address_set_blake3: String,
     network_activation_intent_blake3: String,
     activation_authority_evidence_blake3: String,
+    activation_challenge_blake3: String,
+    activation_issued_at_ms: u64,
+    activation_expires_at_ms: u64,
     activation_signer_key_id: String,
     activation_replay_key: String,
     parent_policy_blake3: String,
@@ -548,6 +568,12 @@ impl NetworkResolutionTransaction {
         prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         bound_lease.validate_at(now_unix, active_policy_generation)?;
+        let now_ms = now_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        activation
+            .validate_at_ms(now_ms)
+            .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
         let lease = bound_lease.lease();
         lease
             .validate_structure()
@@ -599,6 +625,9 @@ impl NetworkResolutionTransaction {
                 NetworkResolutionTransactionError::ActivationBinding(error.to_string())
             })?,
             activation_authority_evidence_blake3: activation.authority_evidence_blake3().to_owned(),
+            activation_challenge_blake3: activation.authority_challenge_blake3().to_owned(),
+            activation_issued_at_ms: activation.authority_issued_at_ms(),
+            activation_expires_at_ms: activation.authority_expires_at_ms(),
             activation_signer_key_id: activation.signer_key_id().to_owned(),
             activation_replay_key: activation.replay_key().to_owned(),
             parent_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
@@ -931,6 +960,18 @@ impl NetworkResolutionTransaction {
         &self.activation_authority_evidence_blake3
     }
 
+    pub fn activation_challenge_blake3(&self) -> &str {
+        &self.activation_challenge_blake3
+    }
+
+    pub fn activation_issued_at_ms(&self) -> u64 {
+        self.activation_issued_at_ms
+    }
+
+    pub fn activation_expires_at_ms(&self) -> u64 {
+        self.activation_expires_at_ms
+    }
+
     pub fn activation_signer_key_id(&self) -> &str {
         &self.activation_signer_key_id
     }
@@ -1038,6 +1079,8 @@ pub enum NetworkResolutionTransactionError {
     PolicyGenerationMismatch,
     #[error("transaction digest is invalid")]
     InvalidDigest,
+    #[error("Unix seconds could not be safely converted to milliseconds")]
+    InvalidTimeWindow,
     #[error("kernel map payload is structurally invalid")]
     InvalidMapPayload,
     #[error("kernel map payload does not exactly narrow the supplied resolution lease")]
