@@ -723,6 +723,28 @@
         "value": "replace the observed policy generation after record digest creation"
       },
       "oracle": "record digest mismatch is detected and the reducer enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-066",
+      "family": "kernel_feature_contract",
+      "title": "serialized enforcement plan cannot omit mandatory connect hook",
+      "operation": "deny",
+      "mutation": {
+        "path": "required_kernel_features",
+        "value": "remove cgroup-inet6-connect from an otherwise valid V40 plan"
+      },
+      "oracle": "NetworkEnforcementPlan::validate recomputes exact required hook set from rules and rejects any removed, duplicated or unexpected feature"
+    },
+    {
+      "id": "LEASE-067",
+      "family": "kernel_feature_contract",
+      "title": "UDP capability requires both IPv4 and IPv6 sendmsg feature probes",
+      "operation": "deny",
+      "mutation": {
+        "path": "required_kernel_features",
+        "value": "remove cgroup-udp4-sendmsg or cgroup-udp6-sendmsg from a UDP plan"
+      },
+      "oracle": "the compiled plan includes both UDP sendmsg hooks and refuses activation if the target probe lacks either"
     }
   ]
 }
