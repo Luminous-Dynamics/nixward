@@ -259,12 +259,21 @@ impl AuthorizedNetworkActivation {
     /// The test-only constructor cannot be called by production builds.
     #[cfg(test)]
     pub(crate) fn test_only(intent: NetworkActivationIntent) -> Self {
+        Self::test_only_with_expiry(intent, 0, u64::MAX)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_only_with_expiry(
+        intent: NetworkActivationIntent,
+        authority_issued_at_ms: u64,
+        authority_expires_at_ms: u64,
+    ) -> Self {
         Self {
             intent,
             authority_evidence_blake3: "aa".repeat(32),
             authority_challenge_blake3: "cc".repeat(32),
-            authority_issued_at_ms: 0,
-            authority_expires_at_ms: u64::MAX,
+            authority_issued_at_ms,
+            authority_expires_at_ms,
             signer_key_id: "test-owner".into(),
             replay_key: "bb".repeat(32),
         }
