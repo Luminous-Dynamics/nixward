@@ -8,7 +8,7 @@
 //! target system closure, BPF object, policy generation, prior activation state,
 //! and an owner signature whose action is specifically `network-activate`.
 
-use crate::authority_signature::VerifiedSignatureEvidence;
+use crate::authority_signature::{AuthorityAction, AuthorityChallenge, VerifiedSignatureEvidence};
 use crate::network_enforcement::{NetworkEnforcementPlan, NetworkProductionReadiness};
 use crate::network_runtime_lab::NETWORK_RUNTIME_LAB_BACKEND;
 use serde::{Deserialize, Serialize};
@@ -16,8 +16,19 @@ use thiserror::Error;
 
 const INTENT_DOMAIN: &[u8] = b"symthaea:nixward:network-activation-intent:v1\0";
 const RECEIPT_DOMAIN: &[u8] = b"symthaea:nixward:network-activation-receipt:v1\0";
+const ACTIVATION_HOLON_DOMAIN: &[u8] = b"symthaea:nixward:network-activation-holon:v1\0";
 
 pub const NETWORK_ACTIVATION_SCHEMA_VERSION: u32 = 1;
+pub const NETWORK_ACTIVATION_AUDIENCE: &str = "nixward-network-activation-v1";
+
+/// Stable domain-separated identity used in network-activation authority challenges.
+pub fn network_activation_authority_holon_blake3(holon_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ACTIVATION_HOLON_DOMAIN);
+    hasher.update(&(holon_id.len() as u64).to_le_bytes());
+    hasher.update(holon_id.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
 pub const NETWORK_ACTIVATION_STATUS: &str = "owner-authorized-production-activation-v46";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +57,28 @@ pub struct NetworkActivationIntent {
 }
 
 impl NetworkActivationIntent {
+    /// Build the exact owner-approval challenge for this intent. The caller
+    /// supplies fresh 32-byte entropy; the verifier later enforces freshness,
+    /// signer trust, action, subject and domain-separated Holon identity.
+    pub fn authority_challenge(
+        &self,
+        nonce_entropy: [u8; 32],
+        issued_at_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<AuthorityChallenge, NetworkActivationError> {
+        self.validate()?;
+        AuthorityChallenge::new(
+            AuthorityAction::NetworkActivate,
+            self.digest_hex()?,
+            network_activation_authority_holon_blake3(&self.holon_id),
+            NETWORK_ACTIVATION_AUDIENCE,
+            nonce_entropy,
+            issued_at_ms,
+            ttl_ms,
+        )
+        .map_err(|_| NetworkActivationError::InvalidAuthorityEvidence)
+    }
+
     pub fn new(
         holon_id: impl Into<String>,
         operation: NetworkActivationOperation,
@@ -148,14 +181,30 @@ impl NetworkActivationIntent {
     }
 }
 
-/// Non-deserializable capability proving that the owner authorized one exact
-/// production network activation intent.
+/// Non-deserializable, non-forgeable capability proving that the owner
+/// authorized one exact production network activation intent.
+///
+/// External construction is intentionally rejected:
+///
+/// ```compile_fail
+/// use nixward::network_activation::AuthorizedNetworkActivation;
+///
+/// fn forge() {
+///     let _ = AuthorizedNetworkActivation {
+///         intent: todo!(),
+///         authority_evidence_blake3: String::new(),
+///         signer_key_id: String::new(),
+///         replay_key: String::new(),
+///     };
+/// }
+/// ```
+#[must_use]
 #[derive(Debug, Clone)]
 pub struct AuthorizedNetworkActivation {
-    pub intent: NetworkActivationIntent,
-    pub authority_evidence_blake3: String,
-    pub signer_key_id: String,
-    pub replay_key: String,
+    intent: NetworkActivationIntent,
+    authority_evidence_blake3: String,
+    signer_key_id: String,
+    replay_key: String,
 }
 
 impl AuthorizedNetworkActivation {
@@ -168,10 +217,27 @@ impl AuthorizedNetworkActivation {
         if evidence.subject_blake3() != digest {
             return Err(NetworkActivationError::AuthoritySubjectMismatch);
         }
-        if evidence.claims().get("authority_action").map(String::as_str) != Some("network-activate") {
+        if evidence.claims().get("authority_action").map(String::as_str)
+            != Some(AuthorityAction::NetworkActivate.as_str())
+        {
             return Err(NetworkActivationError::AuthorityActionMismatch);
         }
+        if evidence.claims().get("authority_audience").map(String::as_str)
+            != Some(NETWORK_ACTIVATION_AUDIENCE)
+        {
+            return Err(NetworkActivationError::AuthorityAudienceMismatch);
+        }
+        let expected_holon = network_activation_authority_holon_blake3(&intent.holon_id);
+        if evidence.claims().get("challenge_holon_blake3") != Some(&expected_holon) {
+            return Err(NetworkActivationError::AuthorityHolonMismatch);
+        }
+        if evidence.claims().get("replay_key").map(String::as_str)
+            != Some(evidence.replay_key())
+        {
+            return Err(NetworkActivationError::InvalidAuthorityEvidence);
+        }
         validate_digest(evidence.evidence_blake3())?;
+        validate_digest(evidence.challenge_blake3())?;
         validate_digest(evidence.replay_key())?;
         Ok(Self {
             intent,
@@ -179,6 +245,33 @@ impl AuthorizedNetworkActivation {
             signer_key_id: evidence.signer_key_id().to_owned(),
             replay_key: evidence.replay_key().to_owned(),
         })
+    }
+
+    /// The test-only constructor cannot be called by production builds.
+    #[cfg(test)]
+    pub(crate) fn test_only(intent: NetworkActivationIntent) -> Self {
+        Self {
+            intent,
+            authority_evidence_blake3: "aa".repeat(32),
+            signer_key_id: "test-owner".into(),
+            replay_key: "bb".repeat(32),
+        }
+    }
+
+    pub fn intent(&self) -> &NetworkActivationIntent {
+        &self.intent
+    }
+
+    pub fn authority_evidence_blake3(&self) -> &str {
+        &self.authority_evidence_blake3
+    }
+
+    pub fn signer_key_id(&self) -> &str {
+        &self.signer_key_id
+    }
+
+    pub fn replay_key(&self) -> &str {
+        &self.replay_key
     }
 }
 
@@ -365,6 +458,12 @@ pub enum NetworkActivationError {
     AuthoritySubjectMismatch,
     #[error("detached authority is not permitted for network activation")]
     AuthorityActionMismatch,
+    #[error("detached authority audience is not the network-activation audience")]
+    AuthorityAudienceMismatch,
+    #[error("detached authority challenge is not bound to this Holon")]
+    AuthorityHolonMismatch,
+    #[error("detached authority evidence is malformed")]
+    InvalidAuthorityEvidence,
     #[error("reasoning plane may not become activation authority")]
     AuthorityEscalation,
     #[error("network activation evidence serialization failed")]
@@ -384,15 +483,19 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::collections::BTreeMap;
 
-    fn evidence(subject: String, action: AuthorityAction) -> VerifiedSignatureEvidence {
+    fn evidence(
+        subject: String,
+        action: AuthorityAction,
+        challenge_holon: String,
+        audience: &str,
+    ) -> VerifiedSignatureEvidence {
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let key_id = "owner-root";
-        let holon_id = "22".repeat(32);
         let challenge = AuthorityChallenge::new(
             action,
             subject.clone(),
-            holon_id.clone(),
-            "nixward-test",
+            challenge_holon.clone(),
+            audience,
             [3u8; 32],
             1_000_000,
             30_000,
@@ -434,7 +537,7 @@ mod tests {
         };
         AuthorityVerifier::new(&policy)
             .unwrap()
-            .verify(&signed, action, &subject, &holon_id, 1_010_000)
+            .verify(&signed, action, &subject, &challenge_holon, 1_010_000)
             .unwrap()
     }
 
@@ -465,13 +568,47 @@ mod tests {
             reasoning_authority: "none".into(),
         };
         let subject = intent.digest_hex().unwrap();
-        let valid = evidence(subject.clone(), AuthorityAction::NetworkActivate);
-        assert!(AuthorizedNetworkActivation::authorize(intent.clone(), &valid).is_ok());
+        let expected_holon = network_activation_authority_holon_blake3(&intent.holon_id);
+        let valid = evidence(
+            subject.clone(),
+            AuthorityAction::NetworkActivate,
+            expected_holon.clone(),
+            NETWORK_ACTIVATION_AUDIENCE,
+        );
+        let authorized = AuthorizedNetworkActivation::authorize(intent.clone(), &valid).unwrap();
+        assert_eq!(authorized.intent().digest_hex().unwrap(), subject);
 
-        let wrong = evidence(subject, AuthorityAction::Change);
+        let wrong_action = evidence(
+            subject.clone(),
+            AuthorityAction::Change,
+            expected_holon.clone(),
+            NETWORK_ACTIVATION_AUDIENCE,
+        );
         assert!(matches!(
-            AuthorizedNetworkActivation::authorize(intent, &wrong),
+            AuthorizedNetworkActivation::authorize(intent.clone(), &wrong_action),
             Err(NetworkActivationError::AuthorityActionMismatch)
+        ));
+
+        let wrong_audience = evidence(
+            subject.clone(),
+            AuthorityAction::NetworkActivate,
+            expected_holon.clone(),
+            "nixward-test",
+        );
+        assert!(matches!(
+            AuthorizedNetworkActivation::authorize(intent.clone(), &wrong_audience),
+            Err(NetworkActivationError::AuthorityAudienceMismatch)
+        ));
+
+        let wrong_holon = evidence(
+            subject,
+            AuthorityAction::NetworkActivate,
+            "ff".repeat(32),
+            NETWORK_ACTIVATION_AUDIENCE,
+        );
+        assert!(matches!(
+            AuthorizedNetworkActivation::authorize(intent, &wrong_holon),
+            Err(NetworkActivationError::AuthorityHolonMismatch)
         ));
     }
 }
