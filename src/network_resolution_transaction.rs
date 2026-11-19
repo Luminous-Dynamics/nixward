@@ -87,7 +87,7 @@ impl ParentBoundNetworkResolutionLease {
         policy: &NetworkPolicyPlan,
         capability: &NetworkCapability,
         parent_lease: &NetworkCapabilityLease,
-        now_unix: u64,
+        now_unix_ms: u64,
         active_policy_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         authorized
@@ -193,14 +193,11 @@ impl ParentBoundNetworkResolutionLease {
         &self.replay_key
     }
 
-    fn validate_at(
+    fn validate_at_ms(
         &self,
-        now_unix: u64,
+        now_ms: u64,
         active_policy_generation: u64,
     ) -> Result<(), NetworkResolutionTransactionError> {
-        let now_ms = now_unix
-            .checked_mul(1_000)
-            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
         if self.resolver_authority_expires_at_ms <= self.resolver_authority_issued_at_ms
             || now_ms < self.resolver_authority_issued_at_ms
             || now_ms >= self.resolver_authority_expires_at_ms
@@ -212,12 +209,21 @@ impl ParentBoundNetworkResolutionLease {
         {
             return Err(NetworkResolutionTransactionError::PolicyGenerationMismatch);
         }
+        let lease_issued_at_ms = self.lease.issued_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let lease_expires_at_ms = self.lease.expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let parent_expires_at_ms = self.parent_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
         if self.lease.expires_at_unix > self.parent_expires_at_unix {
             return Err(NetworkResolutionTransactionError::ParentLeaseTimeMismatch);
         }
-        if now_unix < self.lease.issued_at_unix
-            || now_unix >= self.lease.expires_at_unix
-            || now_unix >= self.parent_expires_at_unix
+        if now_ms < lease_issued_at_ms
+            || now_ms >= lease_expires_at_ms
+            || now_ms >= parent_expires_at_ms
         {
             return Err(NetworkResolutionTransactionError::ParentLeaseExpired);
         }
@@ -262,22 +268,20 @@ pub struct NetworkResolutionMapPayloadV1 {
 
 impl NetworkResolutionMapPayloadV1 {
     /// Build a payload bound to one validated lease and one broker-observed
-    /// cgroup identity. The broker must obtain the cgroup digest itself; it
-    /// must never trust a caller-supplied PID or cgroup path as proof.
+    /// cgroup identity. `now_unix_ms` is sampled at the mutation boundary;
+    /// do not round millisecond authority expiry down to whole seconds. The
+    /// broker must obtain cgroup identity itself, not trust a caller PID/path.
     pub fn for_lease(
         bound_lease: &ParentBoundNetworkResolutionLease,
         activation: &AuthorizedNetworkActivation,
         cgroup_identity_blake3: impl Into<String>,
         target_active_generation: u64,
-        now_unix: u64,
+        now_unix_ms: u64,
         active_policy_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
-        bound_lease.validate_at(now_unix, active_policy_generation)?;
-        let now_ms = now_unix
-            .checked_mul(1_000)
-            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        bound_lease.validate_at_ms(now_unix_ms, active_policy_generation)?;
         activation
-            .validate_at_ms(now_ms)
+            .validate_at_ms(now_unix_ms)
             .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
         let lease = bound_lease.lease();
         lease
@@ -586,8 +590,9 @@ pub struct NetworkResolutionTransaction {
 }
 
 impl NetworkResolutionTransaction {
-    /// Begin one transaction from an already structurally validated lease
-    /// and its exact cgroup-bound kernel-map payload.
+    /// Begin one transaction from a parent-bound lease, owner-authorized
+    /// activation proof and exact cgroup-bound map payload. `now_unix_ms`
+    /// must be sampled immediately before this transaction is begun.
     pub fn begin(
         bound_lease: &ParentBoundNetworkResolutionLease,
         activation: &AuthorizedNetworkActivation,
@@ -598,11 +603,8 @@ impl NetworkResolutionTransaction {
         prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         bound_lease.validate_at(now_unix, active_policy_generation)?;
-        let now_ms = now_unix
-            .checked_mul(1_000)
-            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
         activation
-            .validate_at_ms(now_ms)
+            .validate_at_ms(now_unix_ms)
             .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
         let lease = bound_lease.lease();
         lease
@@ -1219,7 +1221,7 @@ mod tests {
             &activation,
             "88".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
@@ -1277,7 +1279,7 @@ mod tests {
                 &bound,
                 &activation,
                 payload,
-                102,
+                102_000,
                 7,
                 40,
                 "cc".repeat(32)
@@ -1428,7 +1430,7 @@ mod tests {
                 &bound,
                 &activation,
                 payload.clone(),
-                105,
+                105_000,
                 7,
                 40,
                 "cc".repeat(32)
@@ -1440,7 +1442,7 @@ mod tests {
                 &bound,
                 &activation,
                 payload,
-                102,
+                102_000,
                 8,
                 40,
                 "cc".repeat(32)
