@@ -23,7 +23,7 @@ use thiserror::Error;
 pub const NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const TRANSACTION_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-transaction:v1\0";
 const MAP_PAYLOAD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-map-payload:v1\0";
-const REPLAY_RECORD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-replay-record:v1\\0";
+const REPLAY_RECORD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-replay-record:v1\0";
 
 fn is_digest(value: &str) -> bool {
     value.len() == 64
@@ -1003,8 +1003,9 @@ mod tests {
     #[test]
     fn nonce_ledger_mismatch_quarantines_transaction() {
         let mut tx = started();
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumptionUnknown {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         assert_eq!(
@@ -1019,8 +1020,9 @@ mod tests {
     #[test]
     fn staged_map_unknown_requires_exact_readback_before_retry_or_switch() {
         let mut tx = started();
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         let map_digest = tx.expected_map_payload_blake3().to_owned();
