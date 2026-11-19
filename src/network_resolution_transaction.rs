@@ -761,6 +761,9 @@ impl NetworkResolutionTransaction {
         observed_at_unix_ms: u64,
         active_policy_generation: u64,
     ) -> Result<NetworkResolutionJournalRecordV1, NetworkResolutionTransactionError> {
+        if observed_at_unix_ms == 0 || active_policy_generation == 0 {
+            return Err(NetworkResolutionTransactionError::InvalidTimeWindow);
+        }
         if event.requires_live_authority() {
             self.validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)?;
         }
@@ -810,6 +813,9 @@ impl NetworkResolutionTransaction {
     ) -> Result<(), NetworkResolutionTransactionError> {
         if record.schema_version != NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION {
             return Err(NetworkResolutionTransactionError::UnsupportedJournalSchema);
+        }
+        if record.observed_at_unix_ms == 0 || record.active_policy_generation == 0 {
+            return Err(NetworkResolutionTransactionError::InvalidTimeWindow);
         }
         if record.transaction_blake3 != self.journal_transaction_blake3 {
             return Err(NetworkResolutionTransactionError::JournalTransactionMismatch);
@@ -1251,6 +1257,25 @@ impl NetworkResolutionTransaction {
             && self.reconciled_active_generation == Some(self.target_active_generation)
             && self.verified_map_payload_blake3.as_deref()
                 == Some(self.expected_map_payload_blake3.as_str())
+    }
+
+    /// Re-check authority and exact active-map read-back before admitting a new
+    /// flow. The caller must source time, active policy generation, active map
+    /// generation and payload digest from its trusted runtime context. This
+    /// reducer does not query the kernel or authenticate those observations.
+    pub fn execution_eligible_at_ms(
+        &self,
+        now_unix_ms: u64,
+        active_policy_generation: u64,
+        active_map_generation: u64,
+        active_map_payload_blake3: &str,
+    ) -> bool {
+        self.reports_exact_active_target()
+            && self
+                .validate_mutation_window_at_ms(now_unix_ms, active_policy_generation)
+                .is_ok()
+            && active_map_generation == self.target_active_generation
+            && active_map_payload_blake3 == self.expected_map_payload_blake3
     }
 
     pub fn digest_hex(&self) -> Result<String, NetworkResolutionTransactionError> {
@@ -1994,7 +2019,7 @@ mod tests {
         transaction: &mut NetworkResolutionTransaction,
         event: NetworkResolutionTransactionEvent,
     ) -> NetworkResolutionJournalRecordV1 {
-        let record = transaction.next_journal_record(event).unwrap();
+        let record = transaction.next_journal_record(event, 102_000, 7).unwrap();
         transaction.apply_journal_record(record.clone()).unwrap();
         record
     }
@@ -2060,9 +2085,13 @@ mod tests {
     fn journal_detects_event_tampering_without_recomputed_record_digest() {
         let mut transaction = started();
         let mut record = transaction
-            .next_journal_record(NetworkResolutionTransactionEvent::NonceConsumed {
-                replay_record_blake3: transaction.expected_replay_record_blake3().to_owned(),
-            })
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3: transaction.expected_replay_record_blake3().to_owned(),
+                },
+                102_000,
+                7,
+            )
             .unwrap();
         record.event = NetworkResolutionTransactionEvent::NonceConsumed {
             replay_record_blake3: "ff".repeat(32),
