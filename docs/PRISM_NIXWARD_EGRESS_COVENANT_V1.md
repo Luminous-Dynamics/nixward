@@ -411,3 +411,9 @@ The new conformance proposals are `LEASE-034` through `LEASE-036`: mismatched si
 **Still not implemented:** a production trusted resolver, resolver signing service and key custody, authenticated broker IPC, a broker transaction that sequences parent/workload validation + replay consumption + inactive map staging, exact IP:port BPF maps, or Prism's live lease adapter. The replay ledger primitive exists, but no production resolution-lease broker is calling it. No cgroup runtime enforcement or production activation claim is made.
 
 The required mutation order is now explicit: verify signed lease → validate exact parent/workload/policy/cgroup state → consume the stable lease nonce → stage the inactive map generation → verify staged contents → atomically switch active generation → reconcile any unknown outcome before retry. A consumed nonce is never restored after an uncertain mutation; the owner must issue a fresh lease.
+
+
+### Prism adapter representation helpers
+
+\`NetworkResolutionLeaseV1::socket_addresses()\` materializes every canonical \`IpAddr\` together with the lease's single TCP port as a \`SocketAddr\`. \`effective_valid_until_unix()\` returns the earlier of the lease expiry and resolver-validity deadline. These helpers only convert signed lease fields into transport inputs; they do not validate signatures, parent/workload authority, resolver trust or replay state. The trusted adapter must run the full lease validation chain first, then convert the effective Unix deadline to a local monotonic deadline without extending the lease lifetime.
+
