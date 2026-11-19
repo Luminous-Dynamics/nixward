@@ -480,3 +480,18 @@ The transaction APIs now take `now_unix_ms`, not seconds. Lease and parent deadl
 The transaction journal genesis was also tightened to include the exact expected resolver replay-record digest. Two otherwise identical lease/map transactions that differ only in their verified resolver evidence/replay identity therefore have different journal transaction IDs. The map digest already binds the activation challenge, expiry, signer, evidence and replay identity.
 
 `LEASE-058`–`LEASE-060` exercise resolver evidence expiry, owner activation expiry and the exact millisecond boundary. All remain source-level test contracts until exact-head CI/runtime evidence exists.
+
+## 9.5 Journal-bound mutation time and live execution eligibility
+
+Every journal record now binds the broker-observed Unix-millisecond sample and the independently observed active policy generation into its record digest. The record time is not merely a log timestamp: it is part of the deterministic input used to qualify whether a mutation was authorized. A broker must obtain the time and generation from its trusted runtime context; the journal hash itself is not a signature or proof of that context.
+
+Mutating records (resolver nonce consumption, map staging, map verification and generation switch) are accepted only while the resolver evidence, owner activation evidence, parent lease, request lease and active policy generation are all valid. Read-only reconciliation remains available after expiry so a lost response can still be resolved. If an exact target generation/payload is found active after the request or parent lease has expired, the reducer records `ExpiredActive`, not `Active`; `requires_revocation()` is true, and the transaction can never authorize a new flow.
+
+The authority windows have intentionally different meanings:
+- Resolver and owner challenge expiry govern **new privileged mutations**. Once a map was switched within the valid approval window, expiration of the issuance/activation challenge does not silently shorten the request lease.
+- The parent/request lease validity and current policy generation govern **new-flow eligibility**. Existing flows are a separate lifecycle policy.
+- Every flow-admission decision must include a fresh runtime read-back of active map generation, payload digest, cgroup identity and loaded BPF object digest. The pure reducer only compares these supplied observations; it does not read the kernel or authenticate their producer.
+
+`execution_eligible_at_ms` is therefore a fail-closed comparison gate, not an authorization token. A production broker must source cgroup/BPF/map observations from authenticated kernel read-back and retain the deny-by-default baseline. If any read-back is missing, stale or ambiguous, do not admit the flow.
+
+`LEASE-061`–`LEASE-063` cover timestamp/policy binding, delayed reconciliation after expiry, and cgroup/BPF/map identity at flow admission. All remain unexecuted source-level cases pending exact-head validation.
