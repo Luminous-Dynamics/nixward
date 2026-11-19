@@ -1394,6 +1394,42 @@ mod tests {
         );
     }
     #[test]
+    fn resolver_authority_expiry_is_checked_at_millisecond_precision() {
+        let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only_with_resolver_expiry(
+            lease,
+            109,
+            100_000,
+            104_000,
+        );
+        let activation = activation(bound.lease());
+        assert!(bound.validate_at_ms(103_999, 7).is_ok());
+        assert_eq!(
+            bound.validate_at_ms(104_000, 7),
+            Err(NetworkResolutionTransactionError::ResolverAuthorityExpired)
+        );
+        let payload = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            &activation,
+            "88".repeat(32),
+            41,
+            103_999,
+            7,
+        )
+        .unwrap();
+        assert!(NetworkResolutionTransaction::begin(
+            &bound,
+            &activation,
+            payload,
+            103_999,
+            7,
+            40,
+            "cc".repeat(32),
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn transaction_refuses_expired_resolver_signature_even_when_lease_is_live() {
         let lease = lease();
         let bound = ParentBoundNetworkResolutionLease::test_only_with_resolver_expiry(
