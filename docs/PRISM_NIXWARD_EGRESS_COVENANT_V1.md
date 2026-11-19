@@ -151,7 +151,13 @@ At broker activation, convert the remaining wall-clock validity into a kernel mo
 
 A lease covers one logical HTTP hop and its bounded authorized connection attempts to the same address set. A redirect, application retry, authority change, or policy-generation change requires a new lease. Prism currently disables implicit transport retries; keep that invariant.
 
-### 5.2 DNSSEC is not implied
+### 5.2 Canonical IP:port set identity shared with Prism
+
+Prism and Nixward use the same v1 binary address-set encoding for cross-plane correlation. The BLAKE3 derive-key context is `org.luminousdynamics.prism.address-set.v1`. The bytes are the unique-record count as u64 big-endian, followed by sorted records: IPv4 tag `0x04` + 4 address bytes + u16 big-endian port; IPv6 tag `0x06` + 16 address bytes + u16 big-endian port + u32 big-endian scope ID. IPv4 sorts before IPv6; addresses are then sorted lexicographically, followed by numeric port and IPv6 scope ID. Nixward's v1 lease stores bare `IpAddr` values and one port, so its IPv6 scope ID is zero. IPv6 flowinfo is excluded. Duplicate records are removed before encoding.
+
+The shared golden vector is `93.184.216.34:443` plus `[2606:4700:4700::1111]:443`; both repositories assert the identical 38-byte encoding. The Prism digest field is a correlation value only. It is distinct from the signed resolution-lease digest, resolver snapshot digest, signature evidence and kernel observation; equality does not authenticate either side. Preserve these distinctions in all receipts and benchmark reports.
+
+### 5.3 DNSSEC is not implied
 
 An authenticated local resolution lease proves that the Nixward broker issued a bounded decision under its configured resolver/trust policy. It does not automatically mean DNSSEC was validated. The resolver profile must separately report DNSSEC state (validated / not validated / unsupported / indeterminate); the policy decides whether it is required. Do not label a lease DNSSEC-authenticated unless the resolver actually validates the chain and the evidence binds that validation.
 
