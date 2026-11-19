@@ -775,6 +775,17 @@
         "value": "any"
       },
       "oracle": "caller must split wildcard authority into explicit supported TCP/UDP capabilities; V40 does not imply ICMP or other protocols"
+    },
+    {
+      "id": "LEASE-071",
+      "family": "kernel_protocol_coverage",
+      "title": "deserialized V40 plan cannot inject ICMP or Any rules",
+      "operation": "deny",
+      "mutation": {
+        "path": "rules[].protocol",
+        "value": "mutate a valid serialized TCP rule to ICMP or Any"
+      },
+      "oracle": "NetworkEnforcementPlan::validate rejects unsupported protocol values even when the plan bypasses the capability compiler"
     }
   ]
 }
