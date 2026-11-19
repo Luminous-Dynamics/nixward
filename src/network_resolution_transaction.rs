@@ -90,6 +90,7 @@ impl ParentBoundNetworkResolutionLease {
         now_unix_ms: u64,
         active_policy_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
+        let now_unix = now_unix_ms / 1_000;
         authorized
             .validate_parent_binding(
                 policy,
@@ -112,7 +113,7 @@ impl ParentBoundNetworkResolutionLease {
             NetworkResolutionTransactionError::ParentBinding(error.to_string())
         })?;
 
-        Ok(Self {
+        let proof = Self {
             lease: authorized.lease().clone(),
             parent_policy_blake3,
             parent_capability_blake3,
@@ -124,7 +125,9 @@ impl ParentBoundNetworkResolutionLease {
             authority_evidence_blake3: authorized.evidence_blake3().to_owned(),
             resolver_key_id: authorized.signer_key_id().to_owned(),
             replay_key: authorized.replay_key().to_owned(),
-        })
+        };
+        proof.validate_at_ms(now_unix_ms, active_policy_generation)?;
+        Ok(proof)
     }
 
     /// Test-only constructor for deterministic state-machine tests. It bypasses
@@ -597,12 +600,12 @@ impl NetworkResolutionTransaction {
         bound_lease: &ParentBoundNetworkResolutionLease,
         activation: &AuthorizedNetworkActivation,
         map_payload: NetworkResolutionMapPayloadV1,
-        now_unix: u64,
+        now_unix_ms: u64,
         active_policy_generation: u64,
         prior_active_generation: u64,
         prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
-        bound_lease.validate_at(now_unix, active_policy_generation)?;
+        bound_lease.validate_at_ms(now_unix_ms, active_policy_generation)?;
         activation
             .validate_at_ms(now_unix_ms)
             .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
@@ -1229,7 +1232,7 @@ mod tests {
             &bound,
             &activation,
             payload,
-            102,
+            102_000,
             7,
             40,
             "cc".repeat(32),
@@ -1269,7 +1272,7 @@ mod tests {
             &activation,
             "88".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
@@ -1292,7 +1295,7 @@ mod tests {
             &activation,
             "99".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
@@ -1307,7 +1310,7 @@ mod tests {
             &activation,
             "88".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
@@ -1316,7 +1319,7 @@ mod tests {
             &activation,
             "77".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
@@ -1335,7 +1338,7 @@ mod tests {
                 &bound,
                 &activation,
                 changed_program,
-                102,
+                102_000,
                 7,
                 40,
                 "cc".repeat(32)
@@ -1363,7 +1366,7 @@ mod tests {
                     &bound,
                     &activation,
                     substituted,
-                    102,
+                    102_000,
                     7,
                     40,
                     "cc".repeat(32)
@@ -1380,7 +1383,7 @@ mod tests {
                 &bound,
                 &other_activation,
                 canonical_payload,
-                102,
+                102_000,
                 7,
                 40,
                 "cc".repeat(32)
@@ -1404,7 +1407,7 @@ mod tests {
                 &activation,
                 "88".repeat(32),
                 41,
-                102,
+                102_000,
                 7,
             ),
             Err(NetworkResolutionTransactionError::ResolverAuthorityExpired)
@@ -1421,7 +1424,7 @@ mod tests {
             &activation,
             "88".repeat(32),
             41,
-            102,
+            102_000,
             7,
         )
         .unwrap();
