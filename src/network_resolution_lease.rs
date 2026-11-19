@@ -377,6 +377,25 @@ pub fn canonical_address_set_digest(addresses: &[IpAddr], port: u16) -> String {
 }
 
 impl NetworkResolutionLeaseV1 {
+    /// Materialize the complete canonical IP:port socket set for an adapter.
+    ///
+    /// Callers must validate the lease structure, signature, parent authority,
+    /// workload identity and replay state before treating these endpoints as
+    /// authorized. This helper only performs the representation conversion.
+    pub fn socket_addresses(&self) -> Vec<std::net::SocketAddr> {
+        self.addresses
+            .iter()
+            .copied()
+            .map(|address| std::net::SocketAddr::new(address, self.port))
+            .collect()
+    }
+
+    /// Effective Unix validity ceiling shared by the signed lease and resolver.
+    /// This is the earlier of the lease expiry and the DNS-validity deadline.
+    pub fn effective_valid_until_unix(&self) -> u64 {
+        self.expires_at_unix.min(self.resolver_valid_until_unix)
+    }
+
     /// Return the canonical IP:port encoding for the lease's complete address set.
     pub fn canonical_address_set_encoding(&self) -> Vec<u8> {
         canonical_address_set_encoding(&self.addresses, self.port)
@@ -1214,6 +1233,19 @@ mod tests {
 
         let (_, capability, parent_lease) = parent();
         let lease_value = lease(&capability, &parent_lease);
+        assert_eq!(
+            lease_value.socket_addresses(),
+            vec![
+                "93.184.216.34:443".parse::<std::net::SocketAddr>().unwrap(),
+                "[2606:4700:4700::1111]:443"
+                    .parse::<std::net::SocketAddr>()
+                    .unwrap(),
+            ]
+        );
+        assert_eq!(
+            lease_value.effective_valid_until_unix(),
+            lease_value.expires_at_unix
+        );
         assert_eq!(lease_value.canonical_address_set_encoding(), expected);
         assert_eq!(
             lease_value.address_set_digest_hex(),
