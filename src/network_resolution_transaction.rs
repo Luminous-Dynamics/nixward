@@ -157,7 +157,7 @@ impl NetworkResolutionMapPayloadV1 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkResolutionSwitchOutcome {
     Committed,
@@ -185,7 +185,7 @@ pub enum NetworkResolutionTransactionState {
 /// The event stream may be persisted by a future broker, but event data alone
 /// does not authenticate the producer. The broker must bind replay-ledger and
 /// kernel read-back records to its own authenticated IPC/runtime observations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum NetworkResolutionTransactionEvent {
     NonceConsumptionUnknown {
@@ -564,8 +564,6 @@ pub enum NetworkResolutionTransactionError {
     MapDigestMismatch,
     #[error("replay-ledger read-back does not match the pending consume-once record")]
     ReplayRecordConflict,
-    #[error("replay-ledger read-back does not match the pending consume-once record")]
-    ReplayRecordConflict,
     #[error("switch outcome is missing during reconciliation")]
     MissingSwitchOutcome,
     #[error("kernel read-back contradicts the reported switch outcome or map digest")]
@@ -739,12 +737,24 @@ mod tests {
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::NonceConsumed);
 
-        tx.apply(NetworkResolutionTransactionEvent::MapStaged {
+        tx.apply(NetworkResolutionTransactionEvent::MapStageOutcomeUnknown {
+            generation: 41,
+            map_payload_blake3: map_digest.clone(),
+        })
+        .unwrap();
+        tx.apply(NetworkResolutionTransactionEvent::StagedMapReconciled {
+            generation: 41,
+            map_payload_blake3: Some(map_digest.clone()),
+        })
+        .unwrap();
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::MapStaged);
+
+        tx.apply(NetworkResolutionTransactionEvent::MapVerified {
             generation: 41,
             map_payload_blake3: map_digest,
         })
         .unwrap();
-        assert_eq!(tx.state(), NetworkResolutionTransactionState::MapStaged);
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::MapVerified);
     }
 
     #[test]
@@ -760,9 +770,10 @@ mod tests {
         assert!(tx.requires_reconciliation());
         assert!(!tx.may_execute());
 
+        let map_digest = tx.expected_map_payload_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::Reconciled {
             active_generation: 41,
-            active_map_payload_blake3: Some("aa".repeat(32)),
+            active_map_payload_blake3: Some(map_digest),
         })
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Active);
@@ -779,9 +790,10 @@ mod tests {
         .unwrap();
         assert!(tx.requires_reconciliation());
 
+        let map_digest = tx.expected_map_payload_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::Reconciled {
             active_generation: 41,
-            active_map_payload_blake3: Some("aa".repeat(32)),
+            active_map_payload_blake3: Some(map_digest),
         })
         .unwrap();
         assert!(tx.may_execute());
@@ -833,10 +845,11 @@ mod tests {
                 outcome: NetworkResolutionSwitchOutcome::Unknown,
             })
             .unwrap();
+        let map_digest = unexpected.expected_map_payload_blake3().to_owned();
         assert_eq!(
             unexpected.apply(NetworkResolutionTransactionEvent::Reconciled {
                 active_generation: 99,
-                active_map_payload_blake3: Some("aa".repeat(32)),
+                active_map_payload_blake3: Some(map_digest),
             }),
             Err(NetworkResolutionTransactionError::UnexpectedGeneration)
         );
@@ -850,10 +863,11 @@ mod tests {
             replay_record_blake3: "bb".repeat(32),
         })
         .unwrap();
+        let map_digest = tx.expected_map_payload_blake3().to_owned();
         assert_eq!(
             tx.apply(NetworkResolutionTransactionEvent::MapStaged {
                 generation: 42,
-                map_payload_blake3: "aa".repeat(32),
+                map_payload_blake3: map_digest,
             }),
             Err(NetworkResolutionTransactionError::GenerationMismatch)
         );
