@@ -46,7 +46,9 @@ pub enum NetworkResolutionSwitchOutcome {
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkResolutionTransactionState {
     Prepared,
+    NonceReconciliationRequired,
     NonceConsumed,
+    MapStageReconciliationRequired,
     MapStaged,
     MapVerified,
     ReconciliationRequired,
@@ -63,8 +65,22 @@ pub enum NetworkResolutionTransactionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum NetworkResolutionTransactionEvent {
+    NonceConsumptionUnknown {
+        replay_record_blake3: String,
+    },
+    ReplayLedgerReconciled {
+        replay_record_blake3: Option<String>,
+    },
     NonceConsumed {
         replay_record_blake3: String,
+    },
+    MapStageOutcomeUnknown {
+        generation: u64,
+        map_payload_blake3: String,
+    },
+    StagedMapReconciled {
+        generation: u64,
+        map_payload_blake3: Option<String>,
     },
     MapStaged {
         generation: u64,
@@ -99,9 +115,12 @@ pub struct NetworkResolutionTransaction {
     address_set_blake3: String,
     expected_map_payload_blake3: String,
     prior_active_generation: u64,
+    prior_active_map_payload_blake3: String,
     target_active_generation: u64,
     state: NetworkResolutionTransactionState,
+    pending_replay_record_blake3: Option<String>,
     replay_record_blake3: Option<String>,
+    pending_staged_map_payload_blake3: Option<String>,
     staged_map_payload_blake3: Option<String>,
     verified_map_payload_blake3: Option<String>,
     switch_outcome: Option<NetworkResolutionSwitchOutcome>,
@@ -118,12 +137,16 @@ impl NetworkResolutionTransaction {
         lease: &NetworkResolutionLeaseV1,
         expected_map_payload_blake3: impl Into<String>,
         prior_active_generation: u64,
+        prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
         let expected_map_payload_blake3 = expected_map_payload_blake3.into();
-        if !is_digest(&expected_map_payload_blake3) {
+        let prior_active_map_payload_blake3 = prior_active_map_payload_blake3.into();
+        if !is_digest(&expected_map_payload_blake3)
+            || !is_digest(&prior_active_map_payload_blake3)
+        {
             return Err(NetworkResolutionTransactionError::InvalidDigest);
         }
         let target_active_generation = prior_active_generation
@@ -140,9 +163,12 @@ impl NetworkResolutionTransaction {
             address_set_blake3: lease.address_set_digest_hex(),
             expected_map_payload_blake3,
             prior_active_generation,
+            prior_active_map_payload_blake3,
             target_active_generation,
             state: NetworkResolutionTransactionState::Prepared,
+            pending_replay_record_blake3: None,
             replay_record_blake3: None,
+            pending_staged_map_payload_blake3: None,
             staged_map_payload_blake3: None,
             verified_map_payload_blake3: None,
             switch_outcome: None,
@@ -169,6 +195,37 @@ impl NetworkResolutionTransaction {
         event: NetworkResolutionTransactionEvent,
     ) -> Result<(), NetworkResolutionTransactionError> {
         match event {
+            NetworkResolutionTransactionEvent::NonceConsumptionUnknown {
+                replay_record_blake3,
+            } => {
+                self.require_state(NetworkResolutionTransactionState::Prepared)?;
+                if !is_digest(&replay_record_blake3) {
+                    return Err(NetworkResolutionTransactionError::InvalidDigest);
+                }
+                self.pending_replay_record_blake3 = Some(replay_record_blake3);
+                self.state = NetworkResolutionTransactionState::NonceReconciliationRequired;
+            }
+            NetworkResolutionTransactionEvent::ReplayLedgerReconciled {
+                replay_record_blake3,
+            } => {
+                self.require_state(NetworkResolutionTransactionState::NonceReconciliationRequired)?;
+                match replay_record_blake3 {
+                    Some(observed) => {
+                        if self.pending_replay_record_blake3.as_deref() != Some(observed.as_str())
+                            || !is_digest(&observed)
+                        {
+                            return Err(NetworkResolutionTransactionError::ReplayRecordConflict);
+                        }
+                        self.replay_record_blake3 = Some(observed);
+                        self.pending_replay_record_blake3 = None;
+                        self.state = NetworkResolutionTransactionState::NonceConsumed;
+                    }
+                    None => {
+                        self.pending_replay_record_blake3 = None;
+                        self.state = NetworkResolutionTransactionState::Prepared;
+                    }
+                }
+            }
             NetworkResolutionTransactionEvent::NonceConsumed { replay_record_blake3 } => {
                 self.require_state(NetworkResolutionTransactionState::Prepared)?;
                 if !is_digest(&replay_record_blake3) {
@@ -176,6 +233,40 @@ impl NetworkResolutionTransaction {
                 }
                 self.replay_record_blake3 = Some(replay_record_blake3);
                 self.state = NetworkResolutionTransactionState::NonceConsumed;
+            }
+            NetworkResolutionTransactionEvent::MapStageOutcomeUnknown {
+                generation,
+                map_payload_blake3,
+            } => {
+                self.require_state(NetworkResolutionTransactionState::NonceConsumed)?;
+                self.require_target_generation(generation)?;
+                self.require_expected_map_digest(&map_payload_blake3)?;
+                self.pending_staged_map_payload_blake3 = Some(map_payload_blake3);
+                self.state = NetworkResolutionTransactionState::MapStageReconciliationRequired;
+            }
+            NetworkResolutionTransactionEvent::StagedMapReconciled {
+                generation,
+                map_payload_blake3,
+            } => {
+                self.require_state(NetworkResolutionTransactionState::MapStageReconciliationRequired)?;
+                self.require_target_generation(generation)?;
+                match map_payload_blake3 {
+                    Some(observed) => {
+                        self.require_expected_map_digest(&observed)?;
+                        if self.pending_staged_map_payload_blake3.as_deref()
+                            != Some(observed.as_str())
+                        {
+                            return Err(NetworkResolutionTransactionError::MapDigestMismatch);
+                        }
+                        self.staged_map_payload_blake3 = Some(observed);
+                        self.pending_staged_map_payload_blake3 = None;
+                        self.state = NetworkResolutionTransactionState::MapStaged;
+                    }
+                    None => {
+                        self.pending_staged_map_payload_blake3 = None;
+                        self.state = NetworkResolutionTransactionState::NonceConsumed;
+                    }
+                }
             }
             NetworkResolutionTransactionEvent::MapStaged {
                 generation,
@@ -226,7 +317,10 @@ impl NetworkResolutionTransaction {
                     self.reconciled_active_generation = Some(active_generation);
                     self.state = NetworkResolutionTransactionState::Active;
                 } else if active_generation == self.prior_active_generation {
-                    if outcome == NetworkResolutionSwitchOutcome::Committed {
+                    if outcome == NetworkResolutionSwitchOutcome::Committed
+                        || active_map_payload_blake3.as_deref()
+                            != Some(self.prior_active_map_payload_blake3.as_str())
+                    {
                         return Err(NetworkResolutionTransactionError::ReadbackConflict);
                     }
                     self.reconciled_active_generation = Some(active_generation);
@@ -337,6 +431,8 @@ pub enum NetworkResolutionTransactionError {
     GenerationMismatch,
     #[error("staged/read-back map payload digest does not match the authorized payload")]
     MapDigestMismatch,
+    #[error("replay-ledger read-back does not match the pending consume-once record")]
+    ReplayRecordConflict,
     #[error("switch outcome is missing during reconciliation")]
     MissingSwitchOutcome,
     #[error("kernel read-back contradicts the reported switch outcome or map digest")]
@@ -384,7 +480,7 @@ mod tests {
     }
 
     fn started() -> NetworkResolutionTransaction {
-        NetworkResolutionTransaction::begin(&lease(), "aa".repeat(32), 40).unwrap()
+        NetworkResolutionTransaction::begin(&lease(), "aa".repeat(32), 40, "cc".repeat(32)).unwrap()
     }
 
     fn stage_and_verify(transaction: &mut NetworkResolutionTransaction) {
@@ -416,6 +512,81 @@ mod tests {
         assert_eq!(tx.target_active_generation(), 41);
         assert_eq!(tx.prior_active_generation(), 40);
         assert!(!tx.may_execute());
+    }
+
+    #[test]
+    fn nonce_consumption_unknown_requires_replay_ledger_reconciliation() {
+        let mut tx = started();
+        tx.apply(NetworkResolutionTransactionEvent::NonceConsumptionUnknown {
+            replay_record_blake3: "bb".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(
+            tx.state(),
+            NetworkResolutionTransactionState::NonceReconciliationRequired
+        );
+        assert!(!tx.may_execute());
+
+        tx.apply(NetworkResolutionTransactionEvent::ReplayLedgerReconciled {
+            replay_record_blake3: None,
+        })
+        .unwrap();
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::Prepared);
+
+        tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
+            replay_record_blake3: "bb".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::NonceConsumed);
+    }
+
+    #[test]
+    fn nonce_ledger_mismatch_quarantines_transaction() {
+        let mut tx = started();
+        tx.apply(NetworkResolutionTransactionEvent::NonceConsumptionUnknown {
+            replay_record_blake3: "bb".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(
+            tx.apply(NetworkResolutionTransactionEvent::ReplayLedgerReconciled {
+                replay_record_blake3: Some("dd".repeat(32)),
+            }),
+            Err(NetworkResolutionTransactionError::ReplayRecordConflict)
+        );
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
+    }
+
+    #[test]
+    fn staged_map_unknown_requires_exact_readback_before_retry_or_switch() {
+        let mut tx = started();
+        tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
+            replay_record_blake3: "bb".repeat(32),
+        })
+        .unwrap();
+        tx.apply(NetworkResolutionTransactionEvent::MapStageOutcomeUnknown {
+            generation: 41,
+            map_payload_blake3: "aa".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(
+            tx.state(),
+            NetworkResolutionTransactionState::MapStageReconciliationRequired
+        );
+        assert!(!tx.may_execute());
+
+        tx.apply(NetworkResolutionTransactionEvent::StagedMapReconciled {
+            generation: 41,
+            map_payload_blake3: None,
+        })
+        .unwrap();
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::NonceConsumed);
+
+        tx.apply(NetworkResolutionTransactionEvent::MapStaged {
+            generation: 41,
+            map_payload_blake3: "aa".repeat(32),
+        })
+        .unwrap();
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::MapStaged);
     }
 
     #[test]
