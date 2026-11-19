@@ -443,3 +443,16 @@ The transaction also computes an expected replay-record correlation digest using
 
 
 The map-payload object now explicitly carries the parent capability digest, parent authority-lease digest, owner-authorized address-scope digest and resolver-snapshot digest in addition to the enclosing lease digest. Validation compares each field against the non-deserializable parent-bound proof before computing the map digest. This makes the intended policy lineage inspectable and prevents a valid-shaped digest from another parent/snapshot from being silently substituted. The IP set, TCP port, BPF program digest, cgroup identity, policy generation and expiry remain bound as before. LEASE-051 is the corresponding valid-shaped substitution negative control. It remains unexecuted.
+
+
+## 9.2 Hash-chained transaction journal
+
+The reducer now exposes `NetworkResolutionJournalRecordV1`. Each record binds the stable transaction identity, zero-based contiguous sequence, previous record digest and typed event. The first record chains from a deterministic genesis derived from the lease, logical request/hop, exact map payload and known prior generation/digest. `apply_journal_record` rejects a schema mismatch, cross-transaction record, sequence gap/duplicate, broken previous-head link, or altered event digest; any such failure puts the reducer into terminal `Conflict`.
+
+A journal can now be serialized, persisted, loaded into a fresh transaction reconstructed from the same non-deserializable parent-bound lease proof, and replayed to the same reducer state and journal head. The transaction snapshot itself remains non-deserializable; the durable source of truth is the validated event sequence, not a caller-supplied `Active` snapshot.
+
+**Security boundary:** BLAKE3 chaining detects accidental corruption and ordering damage. It does not authenticate the event producer, prevent a privileged attacker from rewriting and re-hashing the entire log, or prove that a reported kernel read-back occurred. The privileged broker must authenticate IPC/event provenance and sign or externally anchor the journal head, ideally with a monotonic durable sequence and protected key. The journal is crash-replay infrastructure, not cryptographic attestation.
+
+`reports_exact_active_target()` deliberately replaces the permission-sounding `may_execute()` predicate. It states only that the reducer has received events consistent with exact target-generation/payload read-back. It is not a transport grant. The broker must authenticate the read-back, check cgroup identity and expiry again, and enforce the active map before permitting a connect.
+
+New cases `LEASE-052`–`LEASE-054` verify deterministic replay, event-digest tampering, and duplicate/reordered sequence rejection. These source tests are still unexecuted until exact-head validation.
