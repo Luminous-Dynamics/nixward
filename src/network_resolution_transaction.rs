@@ -69,6 +69,7 @@ pub struct ParentBoundNetworkResolutionLease {
     parent_policy_blake3: String,
     parent_capability_blake3: String,
     parent_authority_lease_blake3: String,
+    parent_issued_at_unix: u64,
     parent_expires_at_unix: u64,
     active_policy_generation: u64,
     resolver_authority_issued_at_ms: u64,
@@ -118,6 +119,7 @@ impl ParentBoundNetworkResolutionLease {
             parent_policy_blake3,
             parent_capability_blake3,
             parent_authority_lease_blake3,
+            parent_issued_at_unix: parent_lease.issued_at_unix,
             parent_expires_at_unix: parent_lease.expires_at_unix,
             active_policy_generation,
             resolver_authority_issued_at_ms: authorized.verified_evidence().issued_at_ms(),
@@ -157,6 +159,7 @@ impl ParentBoundNetworkResolutionLease {
             parent_policy_blake3: lease.network_policy_blake3.clone(),
             parent_capability_blake3: lease.parent_capability_blake3.clone(),
             parent_authority_lease_blake3: lease.parent_authority_lease_blake3.clone(),
+            parent_issued_at_unix: lease.issued_at_unix.saturating_sub(1),
             active_policy_generation: lease.policy_generation,
             resolver_authority_issued_at_ms,
             resolver_authority_expires_at_ms,
@@ -218,6 +221,9 @@ impl ParentBoundNetworkResolutionLease {
         let lease_expires_at_ms = self.lease.expires_at_unix
             .checked_mul(1_000)
             .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let parent_issued_at_ms = self.parent_issued_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
         let parent_expires_at_ms = self.parent_expires_at_unix
             .checked_mul(1_000)
             .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
@@ -226,6 +232,7 @@ impl ParentBoundNetworkResolutionLease {
         }
         if now_ms < lease_issued_at_ms
             || now_ms >= lease_expires_at_ms
+            || now_ms < parent_issued_at_ms
             || now_ms >= parent_expires_at_ms
         {
             return Err(NetworkResolutionTransactionError::ParentLeaseExpired);
@@ -454,6 +461,7 @@ pub enum NetworkResolutionTransactionState {
     MapVerified,
     ReconciliationRequired,
     Active,
+    ExpiredActive,
     NotCommitted,
     Conflict,
 }
@@ -500,6 +508,23 @@ pub enum NetworkResolutionTransactionEvent {
     },
 }
 
+impl NetworkResolutionTransactionEvent {
+    /// Events that mutate replay state or kernel enforcement require current
+    /// signed authority and policy generation. Reconciliation is read-only and
+    /// remains possible after expiry so an unknown outcome can be resolved.
+    fn requires_live_authority(&self) -> bool {
+        matches!(
+            self,
+            Self::NonceConsumptionUnknown { .. }
+                | Self::NonceConsumed { .. }
+                | Self::MapStageOutcomeUnknown { .. }
+                | Self::MapStaged { .. }
+                | Self::MapVerified { .. }
+                | Self::SwitchAttempted { .. }
+        )
+    }
+}
+
 #[derive(Serialize)]
 struct ReplayRecordBinding<'a> {
     lease_blake3: &'a str,
@@ -521,6 +546,10 @@ struct ReplayRecordBinding<'a> {
 pub struct NetworkResolutionJournalRecordV1 {
     pub schema_version: u32,
     pub transaction_blake3: String,
+    /// Trusted broker wall-clock sample captured at mutation/read-back boundary.
+    pub observed_at_unix_ms: u64,
+    /// Policy generation independently read by the broker for this event.
+    pub active_policy_generation: u64,
     pub sequence: u64,
     pub previous_record_blake3: String,
     pub event: NetworkResolutionTransactionEvent,
@@ -543,6 +572,8 @@ struct JournalGenesisBinding<'a> {
 struct JournalRecordBinding<'a> {
     schema_version: u32,
     transaction_blake3: &'a str,
+    observed_at_unix_ms: u64,
+    active_policy_generation: u64,
     sequence: u64,
     previous_record_blake3: &'a str,
     event: &'a NetworkResolutionTransactionEvent,
@@ -562,6 +593,13 @@ pub struct NetworkResolutionTransaction {
     redirect_hop: u8,
     lease_blake3: String,
     address_set_blake3: String,
+    lease_issued_at_unix_ms: u64,
+    lease_expires_at_unix_ms: u64,
+    parent_issued_at_unix_ms: u64,
+    parent_expires_at_unix_ms: u64,
+    policy_generation: u64,
+    resolver_authority_issued_at_ms: u64,
+    resolver_authority_expires_at_ms: u64,
     network_activation_intent_blake3: String,
     activation_authority_evidence_blake3: String,
     activation_challenge_blake3: String,
@@ -623,6 +661,22 @@ impl NetworkResolutionTransaction {
             .ok_or(NetworkResolutionTransactionError::GenerationOverflow)?;
         map_payload.validate_for_lease(bound_lease, activation, target_active_generation)?;
         let expected_map_payload_blake3 = map_payload.digest_hex()?;
+        let lease_issued_at_unix_ms = lease
+            .issued_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let lease_expires_at_unix_ms = lease
+            .expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let parent_issued_at_unix_ms = bound_lease
+            .parent_issued_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        let parent_expires_at_unix_ms = bound_lease
+            .parent_expires_at_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
         let lease_blake3 = lease
             .digest_hex()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
@@ -658,6 +712,13 @@ impl NetworkResolutionTransaction {
                 .digest_hex()
                 .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
             address_set_blake3: lease.address_set_digest_hex(),
+            lease_issued_at_unix_ms,
+            lease_expires_at_unix_ms,
+            parent_issued_at_unix_ms,
+            parent_expires_at_unix_ms,
+            policy_generation: lease.policy_generation,
+            resolver_authority_issued_at_ms: bound_lease.resolver_authority_issued_at_ms,
+            resolver_authority_expires_at_ms: bound_lease.resolver_authority_expires_at_ms,
             network_activation_intent_blake3: activation.intent().digest_hex().map_err(|error| {
                 NetworkResolutionTransactionError::ActivationBinding(error.to_string())
             })?,
@@ -697,10 +758,17 @@ impl NetworkResolutionTransaction {
     pub fn next_journal_record(
         &self,
         event: NetworkResolutionTransactionEvent,
+        observed_at_unix_ms: u64,
+        active_policy_generation: u64,
     ) -> Result<NetworkResolutionJournalRecordV1, NetworkResolutionTransactionError> {
+        if event.requires_live_authority() {
+            self.validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)?;
+        }
         let binding = JournalRecordBinding {
             schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
             transaction_blake3: &self.journal_transaction_blake3,
+            observed_at_unix_ms,
+            active_policy_generation,
             sequence: self.next_journal_sequence,
             previous_record_blake3: &self.journal_head_blake3,
             event: &event,
@@ -710,6 +778,8 @@ impl NetworkResolutionTransaction {
         Ok(NetworkResolutionJournalRecordV1 {
             schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
             transaction_blake3: self.journal_transaction_blake3.clone(),
+            observed_at_unix_ms,
+            active_policy_generation,
             sequence: self.next_journal_sequence,
             previous_record_blake3: self.journal_head_blake3.clone(),
             event,
@@ -755,6 +825,8 @@ impl NetworkResolutionTransaction {
             &JournalRecordBinding {
                 schema_version: record.schema_version,
                 transaction_blake3: &record.transaction_blake3,
+                observed_at_unix_ms: record.observed_at_unix_ms,
+                active_policy_generation: record.active_policy_generation,
                 sequence: record.sequence,
                 previous_record_blake3: &record.previous_record_blake3,
                 event: &record.event,
@@ -767,7 +839,11 @@ impl NetworkResolutionTransaction {
             .next_journal_sequence
             .checked_add(1)
             .ok_or(NetworkResolutionTransactionError::JournalSequenceOverflow)?;
-        self.apply_checked(record.event)?;
+        self.apply_checked_at(
+            record.event,
+            record.observed_at_unix_ms,
+            record.active_policy_generation,
+        )?;
         self.next_journal_sequence = next_sequence;
         self.journal_head_blake3 = record.record_blake3;
         Ok(())
@@ -782,6 +858,86 @@ impl NetworkResolutionTransaction {
             self.state = NetworkResolutionTransactionState::Conflict;
         }
         result
+    }
+
+    fn validate_mutation_window_at_ms(
+        &self,
+        now_ms: u64,
+        active_policy_generation: u64,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        if active_policy_generation != self.policy_generation {
+            return Err(NetworkResolutionTransactionError::PolicyGenerationMismatch);
+        }
+        if now_ms < self.lease_issued_at_unix_ms
+            || now_ms >= self.lease_expires_at_unix_ms
+            || now_ms < self.parent_issued_at_unix_ms
+            || now_ms >= self.parent_expires_at_unix_ms
+        {
+            return Err(NetworkResolutionTransactionError::ParentLeaseExpired);
+        }
+        if now_ms < self.resolver_authority_issued_at_ms
+            || now_ms >= self.resolver_authority_expires_at_ms
+        {
+            return Err(NetworkResolutionTransactionError::ResolverAuthorityExpired);
+        }
+        if now_ms < self.activation_issued_at_ms || now_ms >= self.activation_expires_at_ms {
+            return Err(NetworkResolutionTransactionError::ActivationAuthorityExpired);
+        }
+        Ok(())
+    }
+
+    fn apply_checked_at(
+        &mut self,
+        event: NetworkResolutionTransactionEvent,
+        observed_at_unix_ms: u64,
+        active_policy_generation: u64,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        match event {
+            NetworkResolutionTransactionEvent::Reconciled {
+                active_generation,
+                active_map_payload_blake3,
+            } => {
+                self.require_state(NetworkResolutionTransactionState::ReconciliationRequired)?;
+                let outcome = self
+                    .switch_outcome
+                    .ok_or(NetworkResolutionTransactionError::MissingSwitchOutcome)?;
+                if active_generation == self.target_active_generation {
+                    if outcome == NetworkResolutionSwitchOutcome::NotCommitted
+                        || active_map_payload_blake3.as_deref()
+                            != Some(self.expected_map_payload_blake3.as_str())
+                    {
+                        return Err(NetworkResolutionTransactionError::ReadbackConflict);
+                    }
+                    self.reconciled_active_generation = Some(active_generation);
+                    if self
+                        .validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)
+                        .is_ok()
+                    {
+                        self.state = NetworkResolutionTransactionState::Active;
+                    } else {
+                        self.state = NetworkResolutionTransactionState::ExpiredActive;
+                    }
+                } else if active_generation == self.prior_active_generation {
+                    if outcome == NetworkResolutionSwitchOutcome::Committed
+                        || active_map_payload_blake3.as_deref()
+                            != Some(self.prior_active_map_payload_blake3.as_str())
+                    {
+                        return Err(NetworkResolutionTransactionError::ReadbackConflict);
+                    }
+                    self.reconciled_active_generation = Some(active_generation);
+                    self.state = NetworkResolutionTransactionState::NotCommitted;
+                } else {
+                    return Err(NetworkResolutionTransactionError::UnexpectedGeneration);
+                }
+            }
+            other => {
+                if other.requires_live_authority() {
+                    self.validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)?;
+                }
+                self.apply_checked(other)?;
+            }
+        }
+        Ok(())
     }
 
     fn apply_checked(
@@ -1061,6 +1217,10 @@ impl NetworkResolutionTransaction {
         self.target_active_generation
     }
 
+    pub fn requires_revocation(&self) -> bool {
+        self.state == NetworkResolutionTransactionState::ExpiredActive
+    }
+
     pub fn requires_reconciliation(&self) -> bool {
         matches!(
             self.state,
@@ -1112,6 +1272,8 @@ pub enum NetworkResolutionTransactionError {
     ParentLeaseExpired,
     #[error("signed resolver authority evidence is expired or not yet valid")]
     ResolverAuthorityExpired,
+    #[error("owner activation authority is expired or not yet valid")]
+    ActivationAuthorityExpired,
     #[error("parent authority lease expires before the resolution lease")]
     ParentLeaseTimeMismatch,
     #[error("active policy generation differs from the parent-bound lease")]
