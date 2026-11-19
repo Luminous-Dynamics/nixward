@@ -497,3 +497,17 @@ The authority windows have intentionally different meanings:
 `LEASE-061`–`LEASE-063` cover timestamp/policy binding, delayed reconciliation after expiry, and cgroup/BPF/map identity at flow admission. All remain unexecuted source-level cases pending exact-head validation.
 
 The journal conformance corpus also adds `LEASE-064` and `LEASE-065`: modifying the timestamp or observed active policy generation after record creation must fail the hash check and quarantine the reducer. The record digest now covers the full event, transaction identity, sequence, previous head, observation time and policy generation. These are integrity checks only; a trusted broker must still authenticate the origin of those samples and externally anchor/sign journal heads.
+
+## 9.6 Enforcement-plan feature requirements are derived, not caller-asserted
+
+The V40 plan validator previously checked fail-closed mode, backend identity and workload bindings but did not recompute its required kernel feature list from the actual compiled rules. A mutated/deserialized plan could therefore omit a mandatory hook from the list that the activation probe checked. The validator now reconstructs the exact required set:
+- cgroup v2, IPv4 connect, IPv6 connect and BPF link for the reviewed baseline;
+- both IPv4 and IPv6 UDP sendmsg hooks whenever any compiled rule is UDP or Any.
+
+The plan is rejected if the serialized feature list omits, duplicates or adds a feature inconsistent with its actual rules. This does not establish that the kernel has attached the hooks; it ensures the plan cannot weaken its own probe requirements. LEASE-066 and LEASE-067 are negative controls for connect-hook removal and UDP sendmsg probe removal.
+
+### V40 coverage boundary: socket admission is not packet-level enforcement
+
+The reviewed V40 backend uses cgroup socket-address hooks for IPv4/IPv6 connect and conditionally UDP sendmsg. Linux documents separate attach points for TCP connect (BPF_CGROUP_INET4_CONNECT / INET6_CONNECT) and UDP sendmsg (BPF_CGROUP_UDP4_SENDMSG / UDP6_SENDMSG). A separate cgroup skb program (BPF_CGROUP_INET_EGRESS) is called for outgoing packets and can drop/pass packets at packet time.
+
+Therefore V40 must not claim that it constrains every packet on already-established sockets, sockets inherited or passed with SCM_RIGHTS, or every descriptor-transfer edge. A future V41 profile should add a packet-level egress plane and qualify socket/cgroup attribution under descriptor passing, fork, cgroup movement and reconnect. Until then, the V40 coverage report must explicitly mark per-packet filtering and delegated-socket recipient binding as not qualified. References: https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_CGROUP_SOCK_ADDR/ and https://docs.ebpf.io/linux/program-type/BPF_PROG_TYPE_CGROUP_SKB/
