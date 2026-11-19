@@ -204,6 +204,10 @@ pub struct NetworkResolutionMapPayloadV1 {
     pub bpf_program_blake3: String,
     pub workload_blake3: String,
     pub network_policy_blake3: String,
+    pub parent_capability_blake3: String,
+    pub parent_authority_lease_blake3: String,
+    pub address_policy_blake3: String,
+    pub resolver_snapshot_blake3: String,
     pub lease_blake3: String,
     pub address_set_blake3: String,
     pub transport: NetworkProtocol,
@@ -237,6 +241,10 @@ impl NetworkResolutionMapPayloadV1 {
             bpf_program_blake3: bpf_program_blake3.into(),
             workload_blake3: lease.workload_blake3.clone(),
             network_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
+            parent_capability_blake3: bound_lease.parent_capability_blake3().to_owned(),
+            parent_authority_lease_blake3: bound_lease.parent_authority_lease_blake3().to_owned(),
+            address_policy_blake3: lease.address_policy_blake3.clone(),
+            resolver_snapshot_blake3: lease.resolver_snapshot_blake3.clone(),
             lease_blake3,
             address_set_blake3: lease.address_set_digest_hex(),
             transport: lease.transport,
@@ -256,6 +264,10 @@ impl NetworkResolutionMapPayloadV1 {
             || !is_digest(&self.bpf_program_blake3)
             || !is_digest(&self.workload_blake3)
             || !is_digest(&self.network_policy_blake3)
+            || !is_digest(&self.parent_capability_blake3)
+            || !is_digest(&self.parent_authority_lease_blake3)
+            || !is_digest(&self.address_policy_blake3)
+            || !is_digest(&self.resolver_snapshot_blake3)
             || !is_digest(&self.lease_blake3)
             || !is_digest(&self.address_set_blake3)
             || self.transport != NetworkProtocol::Tcp
@@ -296,6 +308,10 @@ impl NetworkResolutionMapPayloadV1 {
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
         if self.workload_blake3 != lease.workload_blake3
             || self.network_policy_blake3 != bound_lease.parent_policy_blake3()
+            || self.parent_capability_blake3 != bound_lease.parent_capability_blake3()
+            || self.parent_authority_lease_blake3 != bound_lease.parent_authority_lease_blake3()
+            || self.address_policy_blake3 != lease.address_policy_blake3
+            || self.resolver_snapshot_blake3 != lease.resolver_snapshot_blake3
             || self.lease_blake3 != lease_digest
             || self.address_set_blake3 != lease.address_set_digest_hex()
             || self.transport != lease.transport
@@ -921,6 +937,42 @@ mod tests {
         assert_eq!(
             wrong_cgroup.validate(),
             Err(NetworkResolutionTransactionError::InvalidMapPayload)
+        );
+
+        let canonical_payload = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            "88".repeat(32),
+            "99".repeat(32),
+            41,
+            102,
+            7,
+        )
+        .unwrap();
+        let changed_cgroup = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            "77".repeat(32),
+            "99".repeat(32),
+            41,
+            102,
+            7,
+        )
+        .unwrap();
+        let changed_program = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            "88".repeat(32),
+            "66".repeat(32),
+            41,
+            102,
+            7,
+        )
+        .unwrap();
+        assert_ne!(
+            canonical_payload.digest_hex().unwrap(),
+            changed_cgroup.digest_hex().unwrap()
+        );
+        assert_ne!(
+            canonical_payload.digest_hex().unwrap(),
+            changed_program.digest_hex().unwrap()
         );
     }
 
