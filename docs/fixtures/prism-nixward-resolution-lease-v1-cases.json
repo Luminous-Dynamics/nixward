@@ -572,6 +572,39 @@
         "value": "valid-shaped digest for another lease"
       },
       "oracle": "the map-payload validator rejects substitutions even when every value remains a syntactically valid digest; payload identity must match the exact parent-bound lease"
+    },
+    {
+      "id": "LEASE-052",
+      "family": "journal_replay",
+      "title": "transaction journal replays exact reducer state after restart",
+      "operation": "replay",
+      "mutation": {
+        "path": "journal",
+        "value": "serialize and deserialize the ordered records into a fresh transaction created from the same bound lease and map payload"
+      },
+      "oracle": "the replayed transaction reaches the same state, sequence, journal head and transaction digest as the original; the journal hash chain is not treated as an authenticated event source"
+    },
+    {
+      "id": "LEASE-053",
+      "family": "journal_integrity",
+      "title": "journal detects modified event content",
+      "operation": "deny",
+      "mutation": {
+        "path": "record.event",
+        "value": "change the event after record digest creation without recomputing the digest"
+      },
+      "oracle": "the journal reducer rejects the record with JournalDigestMismatch and enters terminal Conflict"
+    },
+    {
+      "id": "LEASE-054",
+      "family": "journal_integrity",
+      "title": "journal rejects reordered and duplicate records",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.sequence",
+        "value": "replay a later record before sequence zero, then replay the first record twice"
+      },
+      "oracle": "the reducer rejects sequence gaps and duplicate sequences with JournalSequenceMismatch; no active state is reachable"
     }
   ]
 }
