@@ -974,6 +974,34 @@ mod tests {
             canonical_payload.digest_hex().unwrap(),
             changed_program.digest_hex().unwrap()
         );
+
+        let mut wrong_parent_capability = canonical_payload.clone();
+        wrong_parent_capability.parent_capability_blake3 = "dd".repeat(32);
+        let mut wrong_parent_lease = canonical_payload.clone();
+        wrong_parent_lease.parent_authority_lease_blake3 = "ee".repeat(32);
+        let mut wrong_scope = canonical_payload.clone();
+        wrong_scope.address_policy_blake3 = "ff".repeat(32);
+        let mut wrong_resolver_snapshot = canonical_payload.clone();
+        wrong_resolver_snapshot.resolver_snapshot_blake3 = "ab".repeat(32);
+
+        for substituted in [
+            wrong_parent_capability,
+            wrong_parent_lease,
+            wrong_scope,
+            wrong_resolver_snapshot,
+        ] {
+            assert_eq!(
+                NetworkResolutionTransaction::begin(
+                    &bound,
+                    substituted,
+                    102,
+                    7,
+                    40,
+                    "cc".repeat(32)
+                ),
+                Err(NetworkResolutionTransactionError::MapPayloadMismatch)
+            );
+        }
     }
 
     #[test]
