@@ -117,26 +117,6 @@ impl ParentBoundNetworkResolutionLease {
         })
     }
 
-    /// Test-only fixture constructor. It is not compiled into production and
-    /// must never be used by the broker or adapter.
-    #[cfg(test)]
-    fn test_only(
-        lease: NetworkResolutionLeaseV1,
-        parent_expires_at_unix: u64,
-    ) -> Self {
-        Self {
-            parent_policy_blake3: lease.network_policy_blake3.clone(),
-            parent_capability_blake3: lease.parent_capability_blake3.clone(),
-            parent_authority_lease_blake3: lease.parent_authority_lease_blake3.clone(),
-            active_policy_generation: lease.policy_generation,
-            authority_evidence_blake3: "aa".repeat(32),
-            resolver_key_id: lease.issuer_key_id.clone(),
-            replay_key: "bb".repeat(32),
-            lease,
-            parent_expires_at_unix,
-        }
-    }
-
     /// Test-only constructor for deterministic state-machine tests. It bypasses
     /// cryptographic and parent-policy verification and is unavailable outside
     /// cfg(test) builds.
