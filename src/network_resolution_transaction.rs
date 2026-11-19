@@ -1166,8 +1166,9 @@ mod tests {
     #[test]
     fn map_digest_or_generation_mismatch_conflicts_before_execution() {
         let mut tx = started();
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         let map_digest = tx.expected_map_payload_blake3().to_owned();
