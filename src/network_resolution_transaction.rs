@@ -1560,17 +1560,19 @@ mod tests {
     #[test]
     fn journal_rejects_reordered_or_duplicate_records() {
         let mut source = started();
+        let replay_record_blake3 = source.expected_replay_record_blake3().to_owned();
         let first = append_record(
             &mut source,
             NetworkResolutionTransactionEvent::NonceConsumed {
-                replay_record_blake3: source.expected_replay_record_blake3().to_owned(),
+                replay_record_blake3,
             },
         );
+        let map_payload_blake3 = source.expected_map_payload_blake3().to_owned();
         let second = append_record(
             &mut source,
             NetworkResolutionTransactionEvent::MapStaged {
                 generation: 41,
-                map_payload_blake3: source.expected_map_payload_blake3().to_owned(),
+                map_payload_blake3,
             },
         );
 
