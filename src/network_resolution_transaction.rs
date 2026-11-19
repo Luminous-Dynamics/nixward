@@ -1203,8 +1203,9 @@ mod tests {
     fn transaction_snapshot_digest_is_stable_and_changes_with_state() {
         let mut tx = started();
         let prepared = tx.digest_hex().unwrap();
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         assert_ne!(prepared, tx.digest_hex().unwrap());
