@@ -419,6 +419,14 @@
         "value": "second valid challenge with later timestamps or a modified lease digest but the same 256-bit lease nonce"
       },
       "oracle": "lease replay key remains stable for that nonce and the persistent AuthorityReplayLedger rejects every second consumption, including after process restart"
+    },
+    {
+      "id": "LEASE-037",
+      "family": "address_set_digest",
+      "title": "Prism and Nixward canonical IP:port address-set encoding",
+      "operation": "accept",
+      "mutation": null,
+      "oracle": "both implementations produce the identical 38-byte golden encoding for 93.184.216.34:443 plus [2606:4700:4700::1111]:443; digest is a correlation value only and remains distinct from the signed lease/resolver transcript digests"
     }
   ]
 }
