@@ -433,3 +433,10 @@ The append-only event reducer treats uncertain mutations explicitly:
 The prior-generation digest is required so a same-numbered but modified prior map cannot be mistaken for the known-good baseline. A failed or unknown mutation never grants permission by itself. The broker still needs authenticated IPC, owner/parent/workload validation, persistent nonce consumption, actual map read-back, cgroup identity verification, observer completeness and the existing owner-authorized activation path before production use.
 
 New conformance cases `LEASE-039`–`LEASE-049` cover replay-ledger uncertainty, inactive-map uncertainty, exact payload binding, active-generation reconciliation and conflicting read-backs. They are proposed cases; no CI or kernel runtime pass is claimed.
+
+
+### Parent-bound transaction proof and replay-record identity
+
+The transaction reducer no longer accepts a raw `NetworkResolutionLeaseV1` in production entry points. `ParentBoundNetworkResolutionLease::bind` consumes the non-deserializable `AuthorizedNetworkResolutionLease` produced by `AuthorityVerifier`, then runs exact policy/capability/parent-lease/address-scope/generation/expiry binding. The resulting proof object has private fields and no Deserialize path. Transaction and map-payload construction recheck expiry and active policy generation; the test-only constructor is compiled only under `cfg(test)` and is unavailable to production callers.
+
+The transaction also computes an expected replay-record correlation digest using a separate BLAKE3 domain. Its preimage binds the exact lease digest, stable nonce-derived replay key, resolver signer key ID, and verified authority-evidence digest. Both `NonceConsumed` and `NonceConsumptionUnknown` must carry that exact digest; an event describing another lease or signer cannot advance the state machine. The durable broker still must read its actual replay ledger and verify the row contents. This expected digest is a cross-layer correlation contract, not a replacement for SQLite's atomic consume-once transaction or an independent authenticity proof. LEASE-050 covers the mismatched-record negative control.
