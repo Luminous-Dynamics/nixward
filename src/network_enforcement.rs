@@ -207,6 +207,26 @@ impl NetworkEnforcementPlan {
                 "V40 activation must remain proof-gated".into(),
             ));
         }
+
+        // Never trust a serialized caller-provided feature list. Recompute the
+        // exact hook set from the actual compiled rules so deleting a required
+        // connect/sendmsg hook cannot silently weaken activation eligibility.
+        let mut expected_features = BTreeSet::from([
+            KernelNetworkFeature::CgroupV2,
+            KernelNetworkFeature::CgroupInet4Connect,
+            KernelNetworkFeature::CgroupInet6Connect,
+            KernelNetworkFeature::BpfLink,
+        ]);
+        for rule in &self.rules {
+            if matches!(rule.protocol, NetworkProtocol::Udp | NetworkProtocol::Any) {
+                expected_features.insert(KernelNetworkFeature::CgroupUdp4Sendmsg);
+                expected_features.insert(KernelNetworkFeature::CgroupUdp6Sendmsg);
+            }
+        }
+        if self.required_kernel_features != expected_features.into_iter().collect::<Vec<_>>() {
+            return Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch);
+        }
+
         for digest in self.workload_subjects.keys() {
             validate_digest(digest)?;
         }
@@ -543,6 +563,8 @@ pub enum NetworkEnforcementError {
     UnresolvedRules(usize),
     #[error("target kernel does not prove all required cgroup/BPF features")]
     MissingKernelFeatures,
+    #[error("compiled plan kernel-feature requirements do not match its actual rules")]
+    KernelFeatureRequirementsMismatch,
     #[error("duplicate workload cgroup binding")]
     DuplicateCgroupBinding,
     #[error("one or more workload cgroup bindings are missing")]
@@ -561,6 +583,13 @@ mod tests {
     use crate::network_covenant::{AddressScopePolicy, PortRange, WorkloadIdentity};
 
     fn policy(destination: DestinationSet) -> NetworkPolicyPlan {
+        policy_with_protocol(destination, NetworkProtocol::Tcp)
+    }
+
+    fn policy_with_protocol(
+        destination: DestinationSet,
+        protocol: NetworkProtocol,
+    ) -> NetworkPolicyPlan {
         let workload = WorkloadIdentity::new(
             "holon-a",
             "sync",
@@ -581,7 +610,7 @@ mod tests {
             capability_id: "sync-egress".into(),
             workload_blake3: workload.digest_hex().unwrap(),
             direction: NetworkDirection::Egress,
-            protocol: NetworkProtocol::Tcp,
+            protocol,
             destinations: destination,
             address_scope,
             ports: vec![PortRange { from: 443, to: 443 }],
@@ -600,6 +629,60 @@ mod tests {
         assert_eq!(plan.rules.len(), 1);
         assert_eq!(plan.activation, "disabled-until-runtime-proof-v40");
         assert!(!plan.fail_open);
+    }
+
+    #[test]
+    fn deserialized_plan_cannot_drop_a_required_connect_hook() {
+        let policy = policy(DestinationSet::Cidrs {
+            values: vec!["203.0.113.0/24".into()],
+        });
+        let mut plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        plan.required_kernel_features
+            .retain(|feature| *feature != KernelNetworkFeature::CgroupInet6Connect);
+
+        assert!(matches!(
+            plan.validate(),
+            Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch)
+        ));
+    }
+
+    #[test]
+    fn udp_rules_require_both_ipv4_and_ipv6_sendmsg_hooks() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Udp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.required_kernel_features.contains(&KernelNetworkFeature::CgroupUdp4Sendmsg));
+        assert!(plan.required_kernel_features.contains(&KernelNetworkFeature::CgroupUdp6Sendmsg));
+
+        let probe = KernelFeatureProbe {
+            schema_version: 1,
+            kernel_release: "test".into(),
+            cgroup_mode: "v2-unified".into(),
+            observed_features: plan
+                .required_kernel_features
+                .iter()
+                .copied()
+                .filter(|feature| *feature != KernelNetworkFeature::CgroupUdp6Sendmsg)
+                .collect(),
+            probe_method: "negative-control".into(),
+        };
+        assert!(matches!(
+            plan.activation_eligibility(&probe, &[]),
+            Err(NetworkEnforcementError::MissingKernelFeatures)
+        ));
+
+        let mut weakened_plan = plan;
+        weakened_plan
+            .required_kernel_features
+            .retain(|feature| *feature != KernelNetworkFeature::CgroupUdp4Sendmsg);
+        assert!(matches!(
+            weakened_plan.validate(),
+            Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch)
+        ));
     }
 
     #[test]
