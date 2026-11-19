@@ -10,8 +10,10 @@
 //! after a separately authenticated broker has applied the events and read
 //! back the exact active map generation and digest.
 
+use crate::network_covenant::NetworkProtocol;
 use crate::network_resolution_lease::NetworkResolutionLeaseV1;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use thiserror::Error;
 
 pub const NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION: u32 = 1;
@@ -24,14 +26,135 @@ fn is_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn hash_serialized<T: Serialize>(value: &T) -> Result<String, NetworkResolutionTransactionError> {
+fn hash_serialized_domain<T: Serialize>(
+    domain: &[u8],
+    value: &T,
+) -> Result<String, NetworkResolutionTransactionError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|_| NetworkResolutionTransactionError::Serialization)?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(TRANSACTION_DOMAIN);
+    hasher.update(domain);
     hasher.update(&(bytes.len() as u64).to_le_bytes());
     hasher.update(&bytes);
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn hash_serialized<T: Serialize>(value: &T) -> Result<String, NetworkResolutionTransactionError> {
+    hash_serialized_domain(TRANSACTION_DOMAIN, value)
+}
+
+/// Exact v1 contents expected in the inactive workload address-map generation.
+///
+/// This binds the cgroup identity, workload, parent-derived policy, request
+/// lease, complete address set, TCP port, policy generation, expiry and target
+/// map generation. It is a deterministic payload description, not proof that
+/// a privileged broker actually wrote or activated the map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkResolutionMapPayloadV1 {
+    pub schema_version: u32,
+    pub cgroup_identity_blake3: String,
+    pub workload_blake3: String,
+    pub network_policy_blake3: String,
+    pub lease_blake3: String,
+    pub address_set_blake3: String,
+    pub transport: NetworkProtocol,
+    pub port: u16,
+    pub addresses: Vec<IpAddr>,
+    pub policy_generation: u64,
+    pub target_active_generation: u64,
+    pub lease_expires_at_unix: u64,
+}
+
+impl NetworkResolutionMapPayloadV1 {
+    /// Build a payload bound to one validated lease and one broker-observed
+    /// cgroup identity. The broker must obtain the cgroup digest itself; it
+    /// must never trust a caller-supplied PID or cgroup path as proof.
+    pub fn for_lease(
+        lease: &NetworkResolutionLeaseV1,
+        cgroup_identity_blake3: impl Into<String>,
+        target_active_generation: u64,
+    ) -> Result<Self, NetworkResolutionTransactionError> {
+        lease
+            .validate_structure()
+            .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
+        let payload = Self {
+            schema_version: 1,
+            cgroup_identity_blake3: cgroup_identity_blake3.into(),
+            workload_blake3: lease.workload_blake3.clone(),
+            network_policy_blake3: lease.network_policy_blake3.clone(),
+            lease_blake3: lease
+                .digest_hex()
+                .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
+            address_set_blake3: lease.address_set_digest_hex(),
+            transport: lease.transport,
+            port: lease.port,
+            addresses: lease.addresses.clone(),
+            policy_generation: lease.policy_generation,
+            target_active_generation,
+            lease_expires_at_unix: lease.expires_at_unix,
+        };
+        payload.validate()?;
+        Ok(payload)
+    }
+
+    pub fn validate(&self) -> Result<(), NetworkResolutionTransactionError> {
+        if self.schema_version != 1
+            || !is_digest(&self.cgroup_identity_blake3)
+            || !is_digest(&self.workload_blake3)
+            || !is_digest(&self.network_policy_blake3)
+            || !is_digest(&self.lease_blake3)
+            || !is_digest(&self.address_set_blake3)
+            || self.transport != NetworkProtocol::Tcp
+            || self.port == 0
+            || self.addresses.is_empty()
+            || self.addresses.len() > 32
+            || self.policy_generation == 0
+            || self.target_active_generation == 0
+            || self.lease_expires_at_unix == 0
+        {
+            return Err(NetworkResolutionTransactionError::InvalidMapPayload);
+        }
+        let mut canonical = self.addresses.clone();
+        canonical.sort_unstable();
+        canonical.dedup();
+        if canonical != self.addresses
+            || self.addresses.iter().any(|ip| ip.is_unspecified() || ip.is_multicast())
+        {
+            return Err(NetworkResolutionTransactionError::InvalidMapPayload);
+        }
+        Ok(())
+    }
+
+    pub fn digest_hex(&self) -> Result<String, NetworkResolutionTransactionError> {
+        self.validate()?;
+        hash_serialized_domain(MAP_PAYLOAD_DOMAIN, self)
+    }
+
+    fn validate_for_lease(
+        &self,
+        lease: &NetworkResolutionLeaseV1,
+        expected_generation: u64,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        self.validate()?;
+        let lease_digest = lease
+            .digest_hex()
+            .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
+        if self.workload_blake3 != lease.workload_blake3
+            || self.network_policy_blake3 != lease.network_policy_blake3
+            || self.lease_blake3 != lease_digest
+            || self.address_set_blake3 != lease.address_set_digest_hex()
+            || self.transport != lease.transport
+            || self.port != lease.port
+            || self.addresses != lease.addresses
+            || self.policy_generation != lease.policy_generation
+            || self.lease_expires_at_unix != lease.expires_at_unix
+            || self.target_active_generation != expected_generation
+        {
+            return Err(NetworkResolutionTransactionError::MapPayloadMismatch);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -128,30 +251,26 @@ pub struct NetworkResolutionTransaction {
 }
 
 impl NetworkResolutionTransaction {
-    /// Begin one transaction from an already structurally validated lease.
-    ///
-    /// `expected_map_payload_blake3` must be computed over the exact canonical
-    /// workload/cgroup/IP/port/policy/expiry map payload the broker intends to
-    /// stage. The transaction reducer does not compile that payload itself.
+    /// Begin one transaction from an already structurally validated lease
+    /// and its exact cgroup-bound kernel-map payload.
     pub fn begin(
         lease: &NetworkResolutionLeaseV1,
-        expected_map_payload_blake3: impl Into<String>,
+        map_payload: NetworkResolutionMapPayloadV1,
         prior_active_generation: u64,
         prior_active_map_payload_blake3: impl Into<String>,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
-        let expected_map_payload_blake3 = expected_map_payload_blake3.into();
         let prior_active_map_payload_blake3 = prior_active_map_payload_blake3.into();
-        if !is_digest(&expected_map_payload_blake3)
-            || !is_digest(&prior_active_map_payload_blake3)
-        {
+        if !is_digest(&prior_active_map_payload_blake3) {
             return Err(NetworkResolutionTransactionError::InvalidDigest);
         }
         let target_active_generation = prior_active_generation
             .checked_add(1)
             .ok_or(NetworkResolutionTransactionError::GenerationOverflow)?;
+        map_payload.validate_for_lease(lease, target_active_generation)?;
+        let expected_map_payload_blake3 = map_payload.digest_hex()?;
 
         Ok(Self {
             schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
@@ -393,6 +512,14 @@ impl NetworkResolutionTransaction {
         self.prior_active_generation
     }
 
+    pub fn prior_active_map_payload_blake3(&self) -> &str {
+        &self.prior_active_map_payload_blake3
+    }
+
+    pub fn expected_map_payload_blake3(&self) -> &str {
+        &self.expected_map_payload_blake3
+    }
+
     pub fn target_active_generation(&self) -> u64 {
         self.target_active_generation
     }
@@ -420,6 +547,10 @@ pub enum NetworkResolutionTransactionError {
     InvalidLease,
     #[error("transaction digest is invalid")]
     InvalidDigest,
+    #[error("kernel map payload is structurally invalid")]
+    InvalidMapPayload,
+    #[error("kernel map payload does not exactly narrow the supplied resolution lease")]
+    MapPayloadMismatch,
     #[error("kernel map generation overflow")]
     GenerationOverflow,
     #[error("event is invalid for transaction state {from:?}; expected {expected:?}")]
@@ -431,6 +562,8 @@ pub enum NetworkResolutionTransactionError {
     GenerationMismatch,
     #[error("staged/read-back map payload digest does not match the authorized payload")]
     MapDigestMismatch,
+    #[error("replay-ledger read-back does not match the pending consume-once record")]
+    ReplayRecordConflict,
     #[error("replay-ledger read-back does not match the pending consume-once record")]
     ReplayRecordConflict,
     #[error("switch outcome is missing during reconciliation")]
@@ -480,7 +613,10 @@ mod tests {
     }
 
     fn started() -> NetworkResolutionTransaction {
-        NetworkResolutionTransaction::begin(&lease(), "aa".repeat(32), 40, "cc".repeat(32)).unwrap()
+        let lease = lease();
+        let payload =
+            NetworkResolutionMapPayloadV1::for_lease(&lease, "88".repeat(32), 41).unwrap();
+        NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)).unwrap()
     }
 
     fn stage_and_verify(transaction: &mut NetworkResolutionTransaction) {
@@ -489,18 +625,39 @@ mod tests {
                 replay_record_blake3: "bb".repeat(32),
             })
             .unwrap();
+        let map_digest = transaction.expected_map_payload_blake3().to_owned();
         transaction
             .apply(NetworkResolutionTransactionEvent::MapStaged {
                 generation: 41,
-                map_payload_blake3: "aa".repeat(32),
+                map_payload_blake3: map_digest.clone(),
             })
             .unwrap();
         transaction
             .apply(NetworkResolutionTransactionEvent::MapVerified {
                 generation: 41,
-                map_payload_blake3: "aa".repeat(32),
+                map_payload_blake3: map_digest,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn map_payload_rejects_substitution_of_workload_port_policy_or_address_set() {
+        let lease = lease();
+        let mut payload =
+            NetworkResolutionMapPayloadV1::for_lease(&lease, "88".repeat(32), 41).unwrap();
+        payload.port = 8443;
+        assert_eq!(
+            NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)),
+            Err(NetworkResolutionTransactionError::MapPayloadMismatch)
+        );
+
+        let mut wrong_cgroup =
+            NetworkResolutionMapPayloadV1::for_lease(&lease, "99".repeat(32), 41).unwrap();
+        wrong_cgroup.cgroup_identity_blake3 = "not-a-digest".into();
+        assert_eq!(
+            wrong_cgroup.validate(),
+            Err(NetworkResolutionTransactionError::InvalidMapPayload)
+        );
     }
 
     #[test]
@@ -563,9 +720,10 @@ mod tests {
             replay_record_blake3: "bb".repeat(32),
         })
         .unwrap();
+        let map_digest = tx.expected_map_payload_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::MapStageOutcomeUnknown {
             generation: 41,
-            map_payload_blake3: "aa".repeat(32),
+            map_payload_blake3: map_digest.clone(),
         })
         .unwrap();
         assert_eq!(
@@ -583,7 +741,7 @@ mod tests {
 
         tx.apply(NetworkResolutionTransactionEvent::MapStaged {
             generation: 41,
-            map_payload_blake3: "aa".repeat(32),
+            map_payload_blake3: map_digest,
         })
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::MapStaged);
