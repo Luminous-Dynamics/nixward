@@ -456,3 +456,14 @@ A journal can now be serialized, persisted, loaded into a fresh transaction reco
 `reports_exact_active_target()` deliberately replaces the permission-sounding `may_execute()` predicate. It states only that the reducer has received events consistent with exact target-generation/payload read-back. It is not a transport grant. The broker must authenticate the read-back, check cgroup identity and expiry again, and enforce the active map before permitting a connect.
 
 New cases `LEASE-052`–`LEASE-054` verify deterministic replay, event-digest tampering, and duplicate/reordered sequence rejection. These source tests are still unexecuted until exact-head validation.
+
+
+## 9.3 Owner-authorized BPF identity is now part of the request map contract
+
+A source review found that the owner-activation wrapper had public fields and accepted a signed activation intent without checking that the challenge Holon and audience matched the intent. That could let a valid signature over the correct intent digest be paired with a challenge for a different Holon. The wrapper is now sealed with private fields and no deserialization path. Its constructor requires sealed `VerifiedSignatureEvidence` for the exact intent digest, action `network-activate`, fixed audience `nixward-network-activation-v1`, and a domain-separated Holon identity derived from `intent.holon_id`. The intent has a helper that builds exactly this challenge. The previous negative-control test now rejects changed action, audience and Holon.
+
+`NetworkResolutionMapPayloadV1::for_lease` now requires both the parent-bound resolution lease and `AuthorizedNetworkActivation`. The BPF object digest is copied from the signed activation intent rather than supplied as an independent string. The map payload additionally carries the activation-intent digest, authority-evidence digest, signer key ID and activation replay key. Its validation and transaction `begin` recheck that Holon, parent policy and active policy generation match the resolution lease, and that every activation provenance field matches the sealed proof. A map payload cannot select another BPF object or swap to another activation proof while preserving its digest.
+
+This is still a contract layer, not a live kernel loader: the privileged broker must consume the owner-activation replay key, read the actual loaded BPF object/program tag and active generation from the kernel, observe the exact workload cgroup identity, and bind the read-back to authenticated IPC. The strings in a pure payload do not prove that the kernel loaded those bytes.
+
+New conformance cases `LEASE-055`–`LEASE-057` cover challenge Holon/audience/action, BPF-object substitution, and activation provenance substitution. The relevant Rust tests are source changes only and remain unexecuted.
