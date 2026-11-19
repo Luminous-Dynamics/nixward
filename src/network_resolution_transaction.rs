@@ -24,6 +24,10 @@ pub const NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const TRANSACTION_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-transaction:v1\0";
 const MAP_PAYLOAD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-map-payload:v1\0";
 const REPLAY_RECORD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-replay-record:v1\0";
+const JOURNAL_GENESIS_DOMAIN: &[u8] =
+    b"symthaea:nixward:network-resolution-journal-genesis:v1\0";
+const JOURNAL_RECORD_DOMAIN: &[u8] =
+    b"symthaea:nixward:network-resolution-journal-record:v1\0";
 
 fn is_digest(value: &str) -> bool {
     value.len() == 64
@@ -403,6 +407,45 @@ struct ReplayRecordBinding<'a> {
     authority_evidence_blake3: &'a str,
 }
 
+/// Append-only, hash-chained record for one transaction reducer event.
+///
+/// The record digest detects accidental corruption, truncation/reordering and
+/// mismatched transaction streams. It is deliberately **not authenticated**:
+/// anyone able to rewrite the complete journal can recompute this hash chain.
+/// A privileged broker must separately authenticate event sources and sign or
+/// otherwise externally anchor the final journal head before treating it as
+/// evidence of kernel state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkResolutionJournalRecordV1 {
+    pub schema_version: u32,
+    pub transaction_blake3: String,
+    pub sequence: u64,
+    pub previous_record_blake3: String,
+    pub event: NetworkResolutionTransactionEvent,
+    pub record_blake3: String,
+}
+
+#[derive(Serialize)]
+struct JournalGenesisBinding<'a> {
+    schema_version: u32,
+    logical_request_id: &'a str,
+    redirect_hop: u8,
+    lease_blake3: &'a str,
+    expected_map_payload_blake3: &'a str,
+    prior_active_generation: u64,
+    prior_active_map_payload_blake3: &'a str,
+}
+
+#[derive(Serialize)]
+struct JournalRecordBinding<'a> {
+    schema_version: u32,
+    transaction_blake3: &'a str,
+    sequence: u64,
+    previous_record_blake3: &'a str,
+    event: &'a NetworkResolutionTransactionEvent,
+}
+
 /// A single lease's expected transition from prepared authority to an
 /// observed active kernel-map generation.
 ///
@@ -428,6 +471,9 @@ pub struct NetworkResolutionTransaction {
     prior_active_generation: u64,
     prior_active_map_payload_blake3: String,
     target_active_generation: u64,
+    journal_transaction_blake3: String,
+    next_journal_sequence: u64,
+    journal_head_blake3: String,
     state: NetworkResolutionTransactionState,
     pending_replay_record_blake3: Option<String>,
     replay_record_blake3: Option<String>,
@@ -475,6 +521,19 @@ impl NetworkResolutionTransaction {
                 authority_evidence_blake3: bound_lease.authority_evidence_blake3(),
             },
         )?;
+        let journal_transaction_blake3 = hash_serialized_domain(
+            JOURNAL_GENESIS_DOMAIN,
+            &JournalGenesisBinding {
+                schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
+                logical_request_id: &lease.logical_request_id,
+                redirect_hop: lease.redirect_hop,
+                lease_blake3: &lease_blake3,
+                expected_map_payload_blake3: &expected_map_payload_blake3,
+                prior_active_generation,
+                prior_active_map_payload_blake3: &prior_active_map_payload_blake3,
+            },
+        )?;
+        let journal_head_blake3 = journal_transaction_blake3.clone();
 
         Ok(Self {
             schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
@@ -495,6 +554,9 @@ impl NetworkResolutionTransaction {
             prior_active_generation,
             prior_active_map_payload_blake3,
             target_active_generation,
+            journal_transaction_blake3,
+            next_journal_sequence: 0,
+            journal_head_blake3,
             state: NetworkResolutionTransactionState::Prepared,
             pending_replay_record_blake3: None,
             replay_record_blake3: None,
@@ -506,10 +568,88 @@ impl NetworkResolutionTransaction {
         })
     }
 
-    /// Apply one event. Any out-of-order or contradictory event permanently
-    /// places this in Conflict; a caller must start with a fresh, authorized
-    /// lease rather than attempting to repair or replay a widened transaction.
-    pub fn apply(
+    /// Construct the next journal record without mutating transaction state.
+    /// The returned record must be durably committed before applying it.
+    pub fn next_journal_record(
+        &self,
+        event: NetworkResolutionTransactionEvent,
+    ) -> Result<NetworkResolutionJournalRecordV1, NetworkResolutionTransactionError> {
+        let binding = JournalRecordBinding {
+            schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
+            transaction_blake3: &self.journal_transaction_blake3,
+            sequence: self.next_journal_sequence,
+            previous_record_blake3: &self.journal_head_blake3,
+            event: &event,
+        };
+        let record_blake3 =
+            hash_serialized_domain(JOURNAL_RECORD_DOMAIN, &binding)?;
+        Ok(NetworkResolutionJournalRecordV1 {
+            schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
+            transaction_blake3: self.journal_transaction_blake3.clone(),
+            sequence: self.next_journal_sequence,
+            previous_record_blake3: self.journal_head_blake3.clone(),
+            event,
+            record_blake3,
+        })
+    }
+
+    /// Apply a journal record after verifying schema, transaction identity,
+    /// contiguous sequence, previous-head linkage and the event digest.
+    ///
+    /// On any malformed, duplicated, reordered or contradictory record the
+    /// reducer enters terminal Conflict. Event hashes are not signatures and
+    /// must not be treated as proof of who produced the record.
+    pub fn apply_journal_record(
+        &mut self,
+        record: NetworkResolutionJournalRecordV1,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        let result = self.apply_journal_record_checked(record);
+        if result.is_err() {
+            self.state = NetworkResolutionTransactionState::Conflict;
+        }
+        result
+    }
+
+    fn apply_journal_record_checked(
+        &mut self,
+        record: NetworkResolutionJournalRecordV1,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        if record.schema_version != NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION {
+            return Err(NetworkResolutionTransactionError::UnsupportedJournalSchema);
+        }
+        if record.transaction_blake3 != self.journal_transaction_blake3 {
+            return Err(NetworkResolutionTransactionError::JournalTransactionMismatch);
+        }
+        if record.sequence != self.next_journal_sequence {
+            return Err(NetworkResolutionTransactionError::JournalSequenceMismatch);
+        }
+        if record.previous_record_blake3 != self.journal_head_blake3 {
+            return Err(NetworkResolutionTransactionError::JournalChainMismatch);
+        }
+        let expected_digest = hash_serialized_domain(
+            JOURNAL_RECORD_DOMAIN,
+            &JournalRecordBinding {
+                schema_version: record.schema_version,
+                transaction_blake3: &record.transaction_blake3,
+                sequence: record.sequence,
+                previous_record_blake3: &record.previous_record_blake3,
+                event: &record.event,
+            },
+        )?;
+        if record.record_blake3 != expected_digest {
+            return Err(NetworkResolutionTransactionError::JournalDigestMismatch);
+        }
+        let next_sequence = self
+            .next_journal_sequence
+            .checked_add(1)
+            .ok_or(NetworkResolutionTransactionError::JournalSequenceOverflow)?;
+        self.apply_checked(record.event)?;
+        self.next_journal_sequence = next_sequence;
+        self.journal_head_blake3 = record.record_blake3;
+        Ok(())
+    }
+
+    fn apply(
         &mut self,
         event: NetworkResolutionTransactionEvent,
     ) -> Result<(), NetworkResolutionTransactionError> {
@@ -769,16 +909,36 @@ impl NetworkResolutionTransaction {
         self.target_active_generation
     }
 
-    /// New request execution may proceed only after exact-generation read-back.
-    pub fn may_execute(&self) -> bool {
+    pub fn requires_reconciliation(&self) -> bool {
+        matches!(
+            self.state,
+            NetworkResolutionTransactionState::NonceReconciliationRequired
+                | NetworkResolutionTransactionState::MapStageReconciliationRequired
+                | NetworkResolutionTransactionState::ReconciliationRequired
+        )
+    }
+
+    pub fn journal_transaction_blake3(&self) -> &str {
+        &self.journal_transaction_blake3
+    }
+
+    pub fn journal_head_blake3(&self) -> &str {
+        &self.journal_head_blake3
+    }
+
+    pub fn next_journal_sequence(&self) -> u64 {
+        self.next_journal_sequence
+    }
+
+    /// Reports that the reducer received an exact target-generation and
+    /// payload read-back after a switch attempt. This is not an authorization
+    /// token or proof that the observations were authentic; a privileged
+    /// broker must authenticate and independently collect those observations.
+    pub fn reports_exact_active_target(&self) -> bool {
         self.state == NetworkResolutionTransactionState::Active
             && self.reconciled_active_generation == Some(self.target_active_generation)
             && self.verified_map_payload_blake3.as_deref()
                 == Some(self.expected_map_payload_blake3.as_str())
-    }
-
-    pub fn requires_reconciliation(&self) -> bool {
-        self.state == NetworkResolutionTransactionState::ReconciliationRequired
     }
 
     pub fn digest_hex(&self) -> Result<String, NetworkResolutionTransactionError> {
@@ -825,6 +985,18 @@ pub enum NetworkResolutionTransactionError {
     UnexpectedGeneration,
     #[error("transaction serialization failed")]
     Serialization,
+    #[error("unsupported network-resolution journal schema")]
+    UnsupportedJournalSchema,
+    #[error("journal record belongs to another transaction")]
+    JournalTransactionMismatch,
+    #[error("journal sequence is duplicate, missing, or out of order")]
+    JournalSequenceMismatch,
+    #[error("journal previous-record digest does not match current head")]
+    JournalChainMismatch,
+    #[error("journal record digest does not match its contents")]
+    JournalDigestMismatch,
+    #[error("journal sequence counter overflow")]
+    JournalSequenceOverflow,
 }
 
 #[cfg(test)]
@@ -1052,7 +1224,7 @@ mod tests {
         assert_eq!(tx.redirect_hop(), 0);
         assert_eq!(tx.target_active_generation(), 41);
         assert_eq!(tx.prior_active_generation(), 40);
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1067,7 +1239,7 @@ mod tests {
             tx.state(),
             NetworkResolutionTransactionState::NonceReconciliationRequired
         );
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
 
         tx.apply(NetworkResolutionTransactionEvent::ReplayLedgerReconciled {
             replay_record_blake3: None,
@@ -1093,7 +1265,7 @@ mod tests {
             Err(NetworkResolutionTransactionError::ReplayRecordConflict)
         );
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1131,7 +1303,7 @@ mod tests {
             tx.state(),
             NetworkResolutionTransactionState::MapStageReconciliationRequired
         );
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
 
         tx.apply(NetworkResolutionTransactionEvent::StagedMapReconciled {
             generation: 41,
@@ -1164,14 +1336,14 @@ mod tests {
     fn only_verified_readback_after_switch_can_enable_execution() {
         let mut tx = started();
         stage_and_verify(&mut tx);
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
 
         tx.apply(NetworkResolutionTransactionEvent::SwitchAttempted {
             outcome: NetworkResolutionSwitchOutcome::Committed,
         })
         .unwrap();
         assert!(tx.requires_reconciliation());
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
 
         let map_digest = tx.expected_map_payload_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::Reconciled {
@@ -1180,7 +1352,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Active);
-        assert!(tx.may_execute());
+        assert!(tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1199,7 +1371,7 @@ mod tests {
             active_map_payload_blake3: Some(map_digest),
         })
         .unwrap();
-        assert!(tx.may_execute());
+        assert!(tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1216,7 +1388,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::NotCommitted);
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1239,7 +1411,7 @@ mod tests {
             committed_but_old.state(),
             NetworkResolutionTransactionState::Conflict
         );
-        assert!(!committed_but_old.may_execute());
+        assert!(!committed_but_old.reports_exact_active_target());
 
         let mut unexpected = started();
         stage_and_verify(&mut unexpected);
@@ -1276,7 +1448,7 @@ mod tests {
             Err(NetworkResolutionTransactionError::GenerationMismatch)
         );
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
     }
 
     #[test]
@@ -1293,7 +1465,7 @@ mod tests {
         assert!(tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
             replay_record_blake3,
         }).is_err());
-        assert!(!tx.may_execute());
+        assert!(!tx.reports_exact_active_target());
     }
 
     #[test]
