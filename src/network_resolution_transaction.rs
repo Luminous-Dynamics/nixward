@@ -866,7 +866,11 @@ impl NetworkResolutionTransaction {
         result
     }
 
-    fn validate_mutation_window_at_ms(
+    /// Runtime flow admission is governed by the active parent/lease window
+    /// and current policy generation. Resolver/owner signatures authorize
+    /// issuing and mutating the map; their challenge expiry does not silently
+    /// shorten a successfully activated request lease.
+    fn validate_execution_window_at_ms(
         &self,
         now_ms: u64,
         active_policy_generation: u64,
@@ -881,6 +885,17 @@ impl NetworkResolutionTransaction {
         {
             return Err(NetworkResolutionTransactionError::ParentLeaseExpired);
         }
+        Ok(())
+    }
+
+    /// Every new mutation must occur while the resolver and owner approvals
+    /// are valid in addition to the underlying lease and policy.
+    fn validate_mutation_window_at_ms(
+        &self,
+        now_ms: u64,
+        active_policy_generation: u64,
+    ) -> Result<(), NetworkResolutionTransactionError> {
+        self.validate_execution_window_at_ms(now_ms, active_policy_generation)?;
         if now_ms < self.resolver_authority_issued_at_ms
             || now_ms >= self.resolver_authority_expires_at_ms
         {
@@ -916,7 +931,7 @@ impl NetworkResolutionTransaction {
                     }
                     self.reconciled_active_generation = Some(active_generation);
                     if self
-                        .validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)
+                        .validate_execution_window_at_ms(observed_at_unix_ms, active_policy_generation)
                         .is_ok()
                     {
                         self.state = NetworkResolutionTransactionState::Active;
@@ -1272,7 +1287,7 @@ impl NetworkResolutionTransaction {
     ) -> bool {
         self.reports_exact_active_target()
             && self
-                .validate_mutation_window_at_ms(now_unix_ms, active_policy_generation)
+                .validate_execution_window_at_ms(now_unix_ms, active_policy_generation)
                 .is_ok()
             && active_map_generation == self.target_active_generation
             && active_map_payload_blake3 == self.expected_map_payload_blake3
@@ -2141,6 +2156,91 @@ mod tests {
             Err(NetworkResolutionTransactionError::JournalSequenceMismatch)
         );
         assert_eq!(duplicate.state(), NetworkResolutionTransactionState::Conflict);
+    }
+
+    #[test]
+    fn signature_challenge_expiry_after_commit_does_not_extend_or_shorten_lease() {
+        let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only_with_resolver_expiry(
+            lease,
+            109,
+            100_000,
+            103_000,
+        );
+        let activation_intent = activation(bound.lease()).intent().clone();
+        let activation = AuthorizedNetworkActivation::test_only_with_expiry(
+            activation_intent,
+            100_000,
+            103_000,
+        );
+        let payload = NetworkResolutionMapPayloadV1::for_lease(
+            &bound,
+            &activation,
+            "88".repeat(32),
+            41,
+            102_000,
+            7,
+        )
+        .unwrap();
+        let mut transaction = NetworkResolutionTransaction::begin(
+            &bound,
+            &activation,
+            payload,
+            102_000,
+            7,
+            40,
+            "cc".repeat(32),
+        )
+        .unwrap();
+
+        let replay_record_blake3 = transaction.expected_replay_record_blake3().to_owned();
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::NonceConsumed {
+                replay_record_blake3,
+            },
+        );
+        let map_digest = transaction.expected_map_payload_blake3().to_owned();
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::MapStaged {
+                generation: 41,
+                map_payload_blake3: map_digest.clone(),
+            },
+        );
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::MapVerified {
+                generation: 41,
+                map_payload_blake3: map_digest.clone(),
+            },
+        );
+        let switch = transaction
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::SwitchAttempted {
+                    outcome: NetworkResolutionSwitchOutcome::Unknown,
+                },
+                102_999,
+                7,
+            )
+            .unwrap();
+        transaction.apply_journal_record(switch).unwrap();
+
+        let reconciliation = transaction
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::Reconciled {
+                    active_generation: 41,
+                    active_map_payload_blake3: Some(map_digest.clone()),
+                },
+                103_000,
+                7,
+            )
+            .unwrap();
+        transaction.apply_journal_record(reconciliation).unwrap();
+
+        assert_eq!(transaction.state(), NetworkResolutionTransactionState::Active);
+        assert!(transaction.execution_eligible_at_ms(103_001, 7, 41, &map_digest));
+        assert!(!transaction.execution_eligible_at_ms(105_000, 7, 41, &map_digest));
     }
 
     #[test]
