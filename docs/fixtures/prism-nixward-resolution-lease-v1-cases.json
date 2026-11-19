@@ -638,6 +638,39 @@
         "value": "substitute activation intent digest, signer key ID, evidence digest or replay key"
       },
       "oracle": "payload validation requires exact owner-authorized intent/evidence/signer/replay fields and binds them into its domain-separated digest"
+    },
+    {
+      "id": "LEASE-058",
+      "family": "authority_freshness",
+      "title": "expired resolver signature cannot authorize a still-live resolution lease",
+      "operation": "deny",
+      "mutation": {
+        "path": "resolver_authority.expires_at_ms",
+        "value": "earlier-than-resolution-lease.expires_at_unix while lease itself remains live"
+      },
+      "oracle": "ParentBoundNetworkResolutionLease and map builder recheck the verified resolver signature's issued/expiry interval; structural lease validity cannot extend the signer authority"
+    },
+    {
+      "id": "LEASE-059",
+      "family": "authority_freshness",
+      "title": "expired owner activation signature cannot authorize a new map mutation",
+      "operation": "deny",
+      "mutation": {
+        "path": "activation_authority.expires_at_ms",
+        "value": "expiry occurs before map staging"
+      },
+      "oracle": "AuthorizedNetworkActivation::validate_at_ms is called by map payload construction and transaction begin; expired or not-yet-valid approval is rejected"
+    },
+    {
+      "id": "LEASE-060",
+      "family": "authority_freshness",
+      "title": "signed authority expiry is enforced without second-level rounding",
+      "operation": "deny-at-exact-expiry",
+      "mutation": {
+        "path": "now_unix_ms",
+        "value": "call at expiry_ms - 1 then exactly expiry_ms"
+      },
+      "oracle": "the operation is accepted one millisecond before expiry and rejected at the exact expiry boundary; lease seconds are converted to checked milliseconds and never used to round authority expiry down"
     }
   ]
 }
