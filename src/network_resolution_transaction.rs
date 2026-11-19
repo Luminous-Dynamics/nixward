@@ -1468,6 +1468,128 @@ mod tests {
         assert!(!tx.reports_exact_active_target());
     }
 
+    fn append_record(
+        transaction: &mut NetworkResolutionTransaction,
+        event: NetworkResolutionTransactionEvent,
+    ) -> NetworkResolutionJournalRecordV1 {
+        let record = transaction.next_journal_record(event).unwrap();
+        transaction.apply_journal_record(record.clone()).unwrap();
+        record
+    }
+
+    #[test]
+    fn journal_replays_exact_state_after_serialization_round_trip() {
+        let mut original = started();
+        let map_digest = original.expected_map_payload_blake3().to_owned();
+        let replay_record = original.expected_replay_record_blake3().to_owned();
+
+        let records = vec![
+            append_record(
+                &mut original,
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3: replay_record,
+                },
+            ),
+            append_record(
+                &mut original,
+                NetworkResolutionTransactionEvent::MapStaged {
+                    generation: 41,
+                    map_payload_blake3: map_digest.clone(),
+                },
+            ),
+            append_record(
+                &mut original,
+                NetworkResolutionTransactionEvent::MapVerified {
+                    generation: 41,
+                    map_payload_blake3: map_digest.clone(),
+                },
+            ),
+            append_record(
+                &mut original,
+                NetworkResolutionTransactionEvent::SwitchAttempted {
+                    outcome: NetworkResolutionSwitchOutcome::Unknown,
+                },
+            ),
+            append_record(
+                &mut original,
+                NetworkResolutionTransactionEvent::Reconciled {
+                    active_generation: 41,
+                    active_map_payload_blake3: Some(map_digest),
+                },
+            ),
+        ];
+
+        let mut replayed = started();
+        for record in records {
+            let encoded = serde_json::to_vec(&record).unwrap();
+            let decoded: NetworkResolutionJournalRecordV1 =
+                serde_json::from_slice(&encoded).unwrap();
+            replayed.apply_journal_record(decoded).unwrap();
+        }
+
+        assert_eq!(replayed.state(), NetworkResolutionTransactionState::Active);
+        assert!(replayed.reports_exact_active_target());
+        assert_eq!(replayed.next_journal_sequence(), 5);
+        assert_eq!(replayed.journal_head_blake3(), original.journal_head_blake3());
+        assert_eq!(replayed.digest_hex().unwrap(), original.digest_hex().unwrap());
+    }
+
+    #[test]
+    fn journal_detects_event_tampering_without_recomputed_record_digest() {
+        let mut transaction = started();
+        let mut record = transaction
+            .next_journal_record(NetworkResolutionTransactionEvent::NonceConsumed {
+                replay_record_blake3: transaction.expected_replay_record_blake3().to_owned(),
+            })
+            .unwrap();
+        record.event = NetworkResolutionTransactionEvent::NonceConsumed {
+            replay_record_blake3: "ff".repeat(32),
+        };
+
+        assert_eq!(
+            transaction.apply_journal_record(record),
+            Err(NetworkResolutionTransactionError::JournalDigestMismatch)
+        );
+        assert_eq!(
+            transaction.state(),
+            NetworkResolutionTransactionState::Conflict
+        );
+        assert!(!transaction.reports_exact_active_target());
+    }
+
+    #[test]
+    fn journal_rejects_reordered_or_duplicate_records() {
+        let mut source = started();
+        let first = append_record(
+            &mut source,
+            NetworkResolutionTransactionEvent::NonceConsumed {
+                replay_record_blake3: source.expected_replay_record_blake3().to_owned(),
+            },
+        );
+        let second = append_record(
+            &mut source,
+            NetworkResolutionTransactionEvent::MapStaged {
+                generation: 41,
+                map_payload_blake3: source.expected_map_payload_blake3().to_owned(),
+            },
+        );
+
+        let mut reordered = started();
+        assert_eq!(
+            reordered.apply_journal_record(second),
+            Err(NetworkResolutionTransactionError::JournalSequenceMismatch)
+        );
+        assert_eq!(reordered.state(), NetworkResolutionTransactionState::Conflict);
+
+        let mut duplicate = started();
+        duplicate.apply_journal_record(first.clone()).unwrap();
+        assert_eq!(
+            duplicate.apply_journal_record(first),
+            Err(NetworkResolutionTransactionError::JournalSequenceMismatch)
+        );
+        assert_eq!(duplicate.state(), NetworkResolutionTransactionState::Conflict);
+    }
+
     #[test]
     fn transaction_snapshot_digest_is_stable_and_changes_with_state() {
         let mut tx = started();
