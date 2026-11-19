@@ -605,6 +605,39 @@
         "value": "replay a later record before sequence zero, then replay the first record twice"
       },
       "oracle": "the reducer rejects sequence gaps and duplicate sequences with JournalSequenceMismatch; no active state is reachable"
+    },
+    {
+      "id": "LEASE-055",
+      "family": "owner_activation_binding",
+      "title": "network activation proof binds signed intent audience and Holon",
+      "operation": "deny-on-mismatch",
+      "mutation": {
+        "path": "authority_challenge",
+        "value": "change action, activation audience, or domain-separated Holon identity while retaining a signature over the altered challenge"
+      },
+      "oracle": "AuthorizedNetworkActivation is constructible only from sealed VerifiedSignatureEvidence and rejects action, audience, Holon or exact-subject mismatch"
+    },
+    {
+      "id": "LEASE-056",
+      "family": "owner_activation_binding",
+      "title": "kernel map BPF object digest comes from owner-authorized activation intent",
+      "operation": "deny",
+      "mutation": {
+        "path": "map_payload.bpf_program_blake3",
+        "value": "substitute a valid-shaped BPF object digest different from the authorized activation intent"
+      },
+      "oracle": "map payload builder copies the exact BPF digest from AuthorizedNetworkActivation; transaction begin rejects a substituted BPF digest or a different activation intent"
+    },
+    {
+      "id": "LEASE-057",
+      "family": "owner_activation_binding",
+      "title": "map payload binds activation signer evidence and replay identity",
+      "operation": "deny",
+      "mutation": {
+        "path": "map_payload.activation_provenance",
+        "value": "substitute activation intent digest, signer key ID, evidence digest or replay key"
+      },
+      "oracle": "payload validation requires exact owner-authorized intent/evidence/signer/replay fields and binds them into its domain-separated digest"
     }
   ]
 }
