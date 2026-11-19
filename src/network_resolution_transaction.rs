@@ -2144,6 +2144,127 @@ mod tests {
     }
 
     #[test]
+    fn journal_rejects_new_mutations_at_exact_lease_expiry() {
+        let mut transaction = started();
+        let replay_record_blake3 = transaction.expected_replay_record_blake3().to_owned();
+        assert_eq!(
+            transaction.next_journal_record(
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3,
+                },
+                105_000,
+                7,
+            ),
+            Err(NetworkResolutionTransactionError::ParentLeaseExpired)
+        );
+        assert_eq!(transaction.next_journal_sequence(), 0);
+    }
+
+    #[test]
+    fn delayed_switch_reconciliation_after_expiry_is_recorded_but_never_executable() {
+        let mut transaction = started();
+        let replay_record_blake3 = transaction.expected_replay_record_blake3().to_owned();
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::NonceConsumed {
+                replay_record_blake3,
+            },
+        );
+        let map_digest = transaction.expected_map_payload_blake3().to_owned();
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::MapStaged {
+                generation: 41,
+                map_payload_blake3: map_digest.clone(),
+            },
+        );
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::MapVerified {
+                generation: 41,
+                map_payload_blake3: map_digest.clone(),
+            },
+        );
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::SwitchAttempted {
+                outcome: NetworkResolutionSwitchOutcome::Unknown,
+            },
+        );
+
+        let reconciliation = transaction
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::Reconciled {
+                    active_generation: 41,
+                    active_map_payload_blake3: Some(map_digest.clone()),
+                },
+                105_000,
+                7,
+            )
+            .unwrap();
+        transaction.apply_journal_record(reconciliation).unwrap();
+
+        assert_eq!(
+            transaction.state(),
+            NetworkResolutionTransactionState::ExpiredActive
+        );
+        assert!(!transaction.reports_exact_active_target());
+        assert!(transaction.requires_revocation());
+        assert!(!transaction.execution_eligible_at_ms(
+            104_999,
+            7,
+            41,
+            &map_digest
+        ));
+    }
+
+    #[test]
+    fn journal_rejects_mutation_when_policy_generation_has_changed() {
+        let mut transaction = started();
+        let replay_record_blake3 = transaction.expected_replay_record_blake3().to_owned();
+        assert_eq!(
+            transaction.next_journal_record(
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3,
+                },
+                102_000,
+                8,
+            ),
+            Err(NetworkResolutionTransactionError::PolicyGenerationMismatch)
+        );
+    }
+
+    #[test]
+    fn execution_gate_requires_fresh_exact_active_map_and_live_authority() {
+        let mut transaction = started();
+        stage_and_verify(&mut transaction);
+        let map_digest = transaction.expected_map_payload_blake3().to_owned();
+        append_record(
+            &mut transaction,
+            NetworkResolutionTransactionEvent::SwitchAttempted {
+                outcome: NetworkResolutionSwitchOutcome::Committed,
+            },
+        );
+        let record = transaction
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::Reconciled {
+                    active_generation: 41,
+                    active_map_payload_blake3: Some(map_digest.clone()),
+                },
+                102_000,
+                7,
+            )
+            .unwrap();
+        transaction.apply_journal_record(record).unwrap();
+
+        assert!(transaction.execution_eligible_at_ms(102_001, 7, 41, &map_digest));
+        assert!(!transaction.execution_eligible_at_ms(102_001, 8, 41, &map_digest));
+        assert!(!transaction.execution_eligible_at_ms(102_001, 7, 40, &map_digest));
+        assert!(!transaction.execution_eligible_at_ms(102_001, 7, 41, &"ff".repeat(32)));
+        assert!(!transaction.execution_eligible_at_ms(105_000, 7, 41, &map_digest));
+    }
+
+    #[test]
     fn transaction_snapshot_digest_is_stable_and_changes_with_state() {
         let mut tx = started();
         let prepared = tx.digest_hex().unwrap();
