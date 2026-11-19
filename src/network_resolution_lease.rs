@@ -313,7 +313,81 @@ pub struct NetworkResolutionLeaseV1 {
     pub dnssec_status: DnssecStatus,
 }
 
+/// Canonical IP:port endpoint representation shared with Prism receipts.
+/// Nixward's lease v1 stores bare IP addresses and one port, so the IPv6 scope
+/// ID is encoded as zero. IPv6 flowinfo is not part of a destination authority.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum CanonicalLeaseSocketAddress {
+    V4 { ip: [u8; 4], port: u16 },
+    V6 {
+        ip: [u8; 16],
+        port: u16,
+        scope_id: u32,
+    },
+}
+
+/// Encode an address set using the Prism/Nixward v1 canonical byte contract.
+/// The encoding is family-tagged, sorted and deduplicated independently of
+/// caller order. The empty set has an encoding but is never a valid lease.
+pub fn canonical_address_set_encoding(addresses: &[IpAddr], port: u16) -> Vec<u8> {
+    let mut canonical: Vec<CanonicalLeaseSocketAddress> = addresses
+        .iter()
+        .map(|address| match address {
+            IpAddr::V4(address) => CanonicalLeaseSocketAddress::V4 {
+                ip: address.octets(),
+                port,
+            },
+            IpAddr::V6(address) => CanonicalLeaseSocketAddress::V6 {
+                ip: address.octets(),
+                port,
+                scope_id: 0,
+            },
+        })
+        .collect();
+    canonical.sort_unstable();
+    canonical.dedup();
+
+    let mut encoded = Vec::with_capacity(8 + canonical.len() * 23);
+    encoded.extend_from_slice(&(canonical.len() as u64).to_be_bytes());
+    for address in canonical {
+        match address {
+            CanonicalLeaseSocketAddress::V4 { ip, port } => {
+                encoded.push(4);
+                encoded.extend_from_slice(&ip);
+                encoded.extend_from_slice(&port.to_be_bytes());
+            }
+            CanonicalLeaseSocketAddress::V6 { ip, port, scope_id } => {
+                encoded.push(6);
+                encoded.extend_from_slice(&ip);
+                encoded.extend_from_slice(&port.to_be_bytes());
+                encoded.extend_from_slice(&scope_id.to_be_bytes());
+            }
+        }
+    }
+    encoded
+}
+
+/// Compute the same domain-separated address-set digest emitted by Prism.
+/// This is a correlation value, not a resolver signature or lease signature.
+pub fn canonical_address_set_digest(addresses: &[IpAddr], port: u16) -> String {
+    let encoded = canonical_address_set_encoding(addresses, port);
+    let mut hasher =
+        blake3::Hasher::new_derive_key("org.luminousdynamics.prism.address-set.v1");
+    hasher.update(&encoded);
+    hasher.finalize().to_hex().to_string()
+}
+
 impl NetworkResolutionLeaseV1 {
+    /// Return the canonical IP:port encoding for the lease's complete address set.
+    pub fn canonical_address_set_encoding(&self) -> Vec<u8> {
+        canonical_address_set_encoding(&self.addresses, self.port)
+    }
+
+    /// Return Prism-compatible address-set correlation digest.
+    pub fn address_set_digest_hex(&self) -> String {
+        canonical_address_set_digest(&self.addresses, self.port)
+    }
+
     /// Validate canonical encoding, bounded complete-set shape and expiry.
     ///
     /// This does not classify IP ranges as public/private and does not prove
@@ -1116,6 +1190,25 @@ mod tests {
         assert_eq!(
             beyond_parent.validate_parent_binding(&policy, &capability, &short_parent_lease, 112, 7),
             Err(NetworkResolutionLeaseError::ParentLeaseTimeMismatch)
+        );
+    }
+
+    #[test]
+    fn canonical_address_set_encoding_matches_prism_golden_vector() {
+        let ipv4: IpAddr = "93.184.216.34".parse().unwrap();
+        let ipv6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+        assert_eq!(
+            canonical_address_set_encoding(&[ipv6, ipv4], 443),
+            vec![
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+                0x04, 0x5d, 0xb8, 0xd8, 0x22, 0x01, 0xbb,
+                0x06, 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x11, 0x11, 0x01, 0xbb, 0x00, 0x00, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(
+            canonical_address_set_encoding(&[ipv4, ipv6], 443),
+            canonical_address_set_encoding(&[ipv6, ipv4, ipv4], 443)
         );
     }
 
