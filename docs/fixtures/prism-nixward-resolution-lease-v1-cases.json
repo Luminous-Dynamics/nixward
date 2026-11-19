@@ -556,6 +556,22 @@
         "value": "record for another lease, resolver key, or signature evidence"
       },
       "oracle": "the transaction reducer rejects a replay-record digest not derived from the exact lease digest, stable one-shot replay key, resolver key ID and verified authority-evidence digest; it enters Conflict and cannot execute"
+    },
+    {
+      "id": "LEASE-051",
+      "family": "map_payload_binding",
+      "title": "map payload explicitly binds parent capability and resolver provenance",
+      "operation": "deny",
+      "mutation": {
+        "paths": [
+          "parent_capability_blake3",
+          "parent_authority_lease_blake3",
+          "address_policy_blake3",
+          "resolver_snapshot_blake3"
+        ],
+        "value": "valid-shaped digest for another lease"
+      },
+      "oracle": "the map-payload validator rejects substitutions even when every value remains a syntactically valid digest; payload identity must match the exact parent-bound lease"
     }
   ]
 }
