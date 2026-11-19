@@ -745,6 +745,14 @@
         "value": "remove cgroup-udp4-sendmsg or cgroup-udp6-sendmsg from a UDP plan"
       },
       "oracle": "the compiled plan includes both UDP sendmsg hooks and refuses activation if the target probe lacks either"
+    },
+    {
+      "id": "LEASE-068",
+      "family": "kernel_coverage_boundary",
+      "title": "V40 machine-readable coverage does not claim packet or descriptor-transfer controls",
+      "operation": "accept-profile-with-explicit-nonclaims",
+      "mutation": null,
+      "oracle": "coverage profile reports connect and conditional UDP sendmsg hooks while packet-level egress filtering, established-flow revocation and passed-socket recipient binding remain explicitly unqualified; no production enforcement claim is emitted"
     }
   ]
 }
