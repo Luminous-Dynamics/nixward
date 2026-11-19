@@ -55,6 +55,7 @@ fn hash_serialized<T: Serialize>(value: &T) -> Result<String, NetworkResolutionT
 pub struct NetworkResolutionMapPayloadV1 {
     pub schema_version: u32,
     pub cgroup_identity_blake3: String,
+    pub bpf_program_blake3: String,
     pub workload_blake3: String,
     pub network_policy_blake3: String,
     pub lease_blake3: String,
@@ -74,6 +75,7 @@ impl NetworkResolutionMapPayloadV1 {
     pub fn for_lease(
         lease: &NetworkResolutionLeaseV1,
         cgroup_identity_blake3: impl Into<String>,
+        bpf_program_blake3: impl Into<String>,
         target_active_generation: u64,
     ) -> Result<Self, NetworkResolutionTransactionError> {
         lease
@@ -82,6 +84,7 @@ impl NetworkResolutionMapPayloadV1 {
         let payload = Self {
             schema_version: 1,
             cgroup_identity_blake3: cgroup_identity_blake3.into(),
+            bpf_program_blake3: bpf_program_blake3.into(),
             workload_blake3: lease.workload_blake3.clone(),
             network_policy_blake3: lease.network_policy_blake3.clone(),
             lease_blake3: lease
@@ -102,6 +105,7 @@ impl NetworkResolutionMapPayloadV1 {
     pub fn validate(&self) -> Result<(), NetworkResolutionTransactionError> {
         if self.schema_version != 1
             || !is_digest(&self.cgroup_identity_blake3)
+            || !is_digest(&self.bpf_program_blake3)
             || !is_digest(&self.workload_blake3)
             || !is_digest(&self.network_policy_blake3)
             || !is_digest(&self.lease_blake3)
@@ -613,8 +617,13 @@ mod tests {
 
     fn started() -> NetworkResolutionTransaction {
         let lease = lease();
-        let payload =
-            NetworkResolutionMapPayloadV1::for_lease(&lease, "88".repeat(32), 41).unwrap();
+        let payload = NetworkResolutionMapPayloadV1::for_lease(
+            &lease,
+            "88".repeat(32),
+            "99".repeat(32),
+            41,
+        )
+        .unwrap();
         NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)).unwrap()
     }
 
@@ -642,16 +651,26 @@ mod tests {
     #[test]
     fn map_payload_rejects_substitution_of_workload_port_policy_or_address_set() {
         let lease = lease();
-        let mut payload =
-            NetworkResolutionMapPayloadV1::for_lease(&lease, "88".repeat(32), 41).unwrap();
+        let mut payload = NetworkResolutionMapPayloadV1::for_lease(
+            &lease,
+            "88".repeat(32),
+            "99".repeat(32),
+            41,
+        )
+        .unwrap();
         payload.port = 8443;
         assert_eq!(
             NetworkResolutionTransaction::begin(&lease, payload, 40, "cc".repeat(32)),
             Err(NetworkResolutionTransactionError::MapPayloadMismatch)
         );
 
-        let mut wrong_cgroup =
-            NetworkResolutionMapPayloadV1::for_lease(&lease, "99".repeat(32), 41).unwrap();
+        let mut wrong_cgroup = NetworkResolutionMapPayloadV1::for_lease(
+            &lease,
+            "99".repeat(32),
+            "99".repeat(32),
+            41,
+        )
+        .unwrap();
         wrong_cgroup.cgroup_identity_blake3 = "not-a-digest".into();
         assert_eq!(
             wrong_cgroup.validate(),
