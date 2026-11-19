@@ -435,6 +435,116 @@
       "operation": "accept",
       "mutation": null,
       "oracle": "socket_addresses emits the full unique IP:port set in canonical order; effective_valid_until_unix equals min(expires_at_unix, resolver_valid_until_unix); conversion helpers do not imply authority validation"
+    },
+    {
+      "id": "LEASE-039",
+      "family": "replay",
+      "title": "nonce-consumption write returns unknown but exact replay row exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "A persistent replay-ledger consume call loses its response after commit"
+      },
+      "oracle": "reconcile to consumed only when the read-back record digest exactly matches the pending nonce-bound record"
+    },
+    {
+      "id": "LEASE-040",
+      "family": "replay",
+      "title": "nonce-consumption write returns unknown and no replay row exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "A persistent replay-ledger consume call loses its response before commit"
+      },
+      "oracle": "an authoritative ledger read-back proving absence returns to Prepared; retry uses the same lease/nonce and cannot mint a broader lease"
+    },
+    {
+      "id": "LEASE-041",
+      "family": "replay",
+      "title": "nonce-ledger read-back belongs to another subject",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Replay reconciliation returns a record digest different from the expected pending record"
+      },
+      "oracle": "quarantine as Conflict; never infer consumed or unconsumed from a different record"
+    },
+    {
+      "id": "LEASE-042",
+      "family": "atomicity",
+      "title": "inactive map stage returns unknown but exact map payload exists",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Map write response is lost after the complete expected inactive generation was staged"
+      },
+      "oracle": "reconcile only to MapStaged when generation and exact map payload digest match; still require separate read-back verification"
+    },
+    {
+      "id": "LEASE-043",
+      "family": "atomicity",
+      "title": "inactive map stage returns unknown and target generation is absent",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Map write response is lost before any target generation is created"
+      },
+      "oracle": "only an authoritative read-back proving target generation absence permits restaging the same exact payload"
+    },
+    {
+      "id": "LEASE-044",
+      "family": "atomicity",
+      "title": "partial or mismatched inactive map generation",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Read-back finds target generation with a different or incomplete map payload digest"
+      },
+      "oracle": "quarantine as Conflict; do not switch generation or overwrite the ambiguous map in place"
+    },
+    {
+      "id": "LEASE-045",
+      "family": "map_payload_binding",
+      "title": "map payload binds exact lease cgroup and BPF program",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Mutate cgroup identity, BPF object digest, lease digest, policy generation, port, IP set or expiry in the proposed payload"
+      },
+      "oracle": "payload validation rejects any value that does not match the broker-observed cgroup, exact signed lease and reviewed BPF program; map digest is domain-separated"
+    },
+    {
+      "id": "LEASE-046",
+      "family": "atomicity",
+      "title": "unknown generation switch reads back exact target map",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch call returns unknown and active-map read-back reports target generation plus exact payload digest"
+      },
+      "oracle": "transaction becomes Active only after exact target-generation and payload-digest read-back"
+    },
+    {
+      "id": "LEASE-047",
+      "family": "atomicity",
+      "title": "unknown generation switch reads back exact previous map",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch call returns unknown and active-map read-back reports prior generation plus prior known-good payload digest"
+      },
+      "oracle": "transaction becomes NotCommitted and remains non-executable; a new lease is required for a new transaction"
+    },
+    {
+      "id": "LEASE-048",
+      "family": "atomicity",
+      "title": "switch says committed but prior map remains active",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Switch API reports committed but authoritative read-back still reports prior generation"
+      },
+      "oracle": "quarantine as Conflict; do not trust the API return code over actual kernel state"
+    },
+    {
+      "id": "LEASE-049",
+      "family": "atomicity",
+      "title": "switch read-back observes wrong generation or target digest",
+      "operation": "reconcile-or-conflict",
+      "mutation": {
+        "setup": "Kernel reports neither exact prior nor exact target generation/payload pair"
+      },
+      "oracle": "quarantine as Conflict and require operator/runtime recovery; never issue a new grant"
     }
   ]
 }
