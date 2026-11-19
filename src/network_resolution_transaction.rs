@@ -10,6 +10,7 @@
 //! after a separately authenticated broker has applied the events and read
 //! back the exact active map generation and digest.
 
+use crate::network_activation::AuthorizedNetworkActivation;
 use crate::network_covenant::{
     NetworkCapability, NetworkCapabilityLease, NetworkPolicyPlan, NetworkProtocol,
 };
@@ -206,6 +207,10 @@ pub struct NetworkResolutionMapPayloadV1 {
     pub schema_version: u32,
     pub cgroup_identity_blake3: String,
     pub bpf_program_blake3: String,
+    pub network_activation_intent_blake3: String,
+    pub activation_authority_evidence_blake3: String,
+    pub activation_signer_key_id: String,
+    pub activation_replay_key: String,
     pub workload_blake3: String,
     pub network_policy_blake3: String,
     pub parent_capability_blake3: String,
@@ -228,8 +233,8 @@ impl NetworkResolutionMapPayloadV1 {
     /// must never trust a caller-supplied PID or cgroup path as proof.
     pub fn for_lease(
         bound_lease: &ParentBoundNetworkResolutionLease,
+        activation: &AuthorizedNetworkActivation,
         cgroup_identity_blake3: impl Into<String>,
-        bpf_program_blake3: impl Into<String>,
         target_active_generation: u64,
         now_unix: u64,
         active_policy_generation: u64,
@@ -239,13 +244,31 @@ impl NetworkResolutionMapPayloadV1 {
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
+        let activation_intent = activation.intent();
+        activation_intent.validate().map_err(|error| {
+            NetworkResolutionTransactionError::ActivationBinding(error.to_string())
+        })?;
+        if activation_intent.holon_id != lease.holon_id
+            || activation_intent.network_policy_blake3 != bound_lease.parent_policy_blake3()
+            || activation_intent.target_policy_generation != active_policy_generation
+            || activation_intent.target_policy_generation != lease.policy_generation
+        {
+            return Err(NetworkResolutionTransactionError::ActivationBindingMismatch);
+        }
+        let network_activation_intent_blake3 = activation_intent
+            .digest_hex()
+            .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
         let lease_blake3 = lease
             .digest_hex()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
         let payload = Self {
             schema_version: 1,
             cgroup_identity_blake3: cgroup_identity_blake3.into(),
-            bpf_program_blake3: bpf_program_blake3.into(),
+            bpf_program_blake3: activation_intent.bpf_object_blake3.clone(),
+            network_activation_intent_blake3,
+            activation_authority_evidence_blake3: activation.authority_evidence_blake3().to_owned(),
+            activation_signer_key_id: activation.signer_key_id().to_owned(),
+            activation_replay_key: activation.replay_key().to_owned(),
             workload_blake3: lease.workload_blake3.clone(),
             network_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
             parent_capability_blake3: bound_lease.parent_capability_blake3().to_owned(),
@@ -269,6 +292,11 @@ impl NetworkResolutionMapPayloadV1 {
         if self.schema_version != 1
             || !is_digest(&self.cgroup_identity_blake3)
             || !is_digest(&self.bpf_program_blake3)
+            || !is_digest(&self.network_activation_intent_blake3)
+            || !is_digest(&self.activation_authority_evidence_blake3)
+            || !is_digest(&self.activation_replay_key)
+            || self.activation_signer_key_id.trim().is_empty()
+            || self.activation_signer_key_id.contains('\0')
             || !is_digest(&self.workload_blake3)
             || !is_digest(&self.network_policy_blake3)
             || !is_digest(&self.parent_capability_blake3)
@@ -306,10 +334,29 @@ impl NetworkResolutionMapPayloadV1 {
     fn validate_for_lease(
         &self,
         bound_lease: &ParentBoundNetworkResolutionLease,
+        activation: &AuthorizedNetworkActivation,
         expected_generation: u64,
     ) -> Result<(), NetworkResolutionTransactionError> {
         self.validate()?;
         let lease = bound_lease.lease();
+        let activation_intent = activation.intent();
+        activation_intent.validate().map_err(|error| {
+            NetworkResolutionTransactionError::ActivationBinding(error.to_string())
+        })?;
+        let activation_digest = activation_intent
+            .digest_hex()
+            .map_err(|error| NetworkResolutionTransactionError::ActivationBinding(error.to_string()))?;
+        if activation_intent.holon_id != lease.holon_id
+            || activation_intent.network_policy_blake3 != bound_lease.parent_policy_blake3()
+            || activation_intent.target_policy_generation != lease.policy_generation
+            || self.network_activation_intent_blake3 != activation_digest
+            || self.activation_authority_evidence_blake3 != activation.authority_evidence_blake3()
+            || self.activation_signer_key_id != activation.signer_key_id()
+            || self.activation_replay_key != activation.replay_key()
+            || self.bpf_program_blake3 != activation_intent.bpf_object_blake3
+        {
+            return Err(NetworkResolutionTransactionError::ActivationBindingMismatch);
+        }
         let lease_digest = lease
             .digest_hex()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
@@ -460,6 +507,10 @@ pub struct NetworkResolutionTransaction {
     redirect_hop: u8,
     lease_blake3: String,
     address_set_blake3: String,
+    network_activation_intent_blake3: String,
+    activation_authority_evidence_blake3: String,
+    activation_signer_key_id: String,
+    activation_replay_key: String,
     parent_policy_blake3: String,
     parent_capability_blake3: String,
     parent_authority_lease_blake3: String,
@@ -489,6 +540,7 @@ impl NetworkResolutionTransaction {
     /// and its exact cgroup-bound kernel-map payload.
     pub fn begin(
         bound_lease: &ParentBoundNetworkResolutionLease,
+        activation: &AuthorizedNetworkActivation,
         map_payload: NetworkResolutionMapPayloadV1,
         now_unix: u64,
         active_policy_generation: u64,
@@ -507,7 +559,7 @@ impl NetworkResolutionTransaction {
         let target_active_generation = prior_active_generation
             .checked_add(1)
             .ok_or(NetworkResolutionTransactionError::GenerationOverflow)?;
-        map_payload.validate_for_lease(bound_lease, target_active_generation)?;
+        map_payload.validate_for_lease(bound_lease, activation, target_active_generation)?;
         let expected_map_payload_blake3 = map_payload.digest_hex()?;
         let lease_blake3 = lease
             .digest_hex()
@@ -543,6 +595,12 @@ impl NetworkResolutionTransaction {
                 .digest_hex()
                 .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
             address_set_blake3: lease.address_set_digest_hex(),
+            network_activation_intent_blake3: activation.intent().digest_hex().map_err(|error| {
+                NetworkResolutionTransactionError::ActivationBinding(error.to_string())
+            })?,
+            activation_authority_evidence_blake3: activation.authority_evidence_blake3().to_owned(),
+            activation_signer_key_id: activation.signer_key_id().to_owned(),
+            activation_replay_key: activation.replay_key().to_owned(),
             parent_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
             parent_capability_blake3: bound_lease.parent_capability_blake3().to_owned(),
             parent_authority_lease_blake3: bound_lease.parent_authority_lease_blake3().to_owned(),
@@ -865,6 +923,22 @@ impl NetworkResolutionTransaction {
         &self.address_set_blake3
     }
 
+    pub fn network_activation_intent_blake3(&self) -> &str {
+        &self.network_activation_intent_blake3
+    }
+
+    pub fn activation_authority_evidence_blake3(&self) -> &str {
+        &self.activation_authority_evidence_blake3
+    }
+
+    pub fn activation_signer_key_id(&self) -> &str {
+        &self.activation_signer_key_id
+    }
+
+    pub fn activation_replay_key(&self) -> &str {
+        &self.activation_replay_key
+    }
+
     pub fn parent_policy_blake3(&self) -> &str {
         &self.parent_policy_blake3
     }
@@ -952,6 +1026,10 @@ pub enum NetworkResolutionTransactionError {
     InvalidLease,
     #[error("signature-verified lease failed exact parent binding: {0}")]
     ParentBinding(String),
+    #[error("owner-signed network activation intent is invalid: {0}")]
+    ActivationBinding(String),
+    #[error("owner-signed activation does not bind this Holon, parent policy and generation")]
+    ActivationBindingMismatch,
     #[error("parent capability or resolution lease is expired")]
     ParentLeaseExpired,
     #[error("parent authority lease expires before the resolution lease")]
