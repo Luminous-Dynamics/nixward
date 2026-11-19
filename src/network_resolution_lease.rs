@@ -371,8 +371,7 @@ pub fn canonical_address_set_encoding(addresses: &[IpAddr], port: u16) -> Vec<u8
 /// This is a correlation value, not a resolver signature or lease signature.
 pub fn canonical_address_set_digest(addresses: &[IpAddr], port: u16) -> String {
     let encoded = canonical_address_set_encoding(addresses, port);
-    let mut hasher =
-        blake3::Hasher::new_derive_key("org.luminousdynamics.prism.address-set.v1");
+    let mut hasher = blake3::Hasher::new_derive_key("org.luminousdynamics.prism.address-set.v1");
     hasher.update(&encoded);
     hasher.finalize().to_hex().to_string()
 }
