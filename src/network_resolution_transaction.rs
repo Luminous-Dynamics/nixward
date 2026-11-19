@@ -623,6 +623,7 @@ pub struct NetworkResolutionTransaction {
     journal_transaction_blake3: String,
     next_journal_sequence: u64,
     journal_head_blake3: String,
+    last_observed_at_unix_ms: u64,
     state: NetworkResolutionTransactionState,
     pending_replay_record_blake3: Option<String>,
     replay_record_blake3: Option<String>,
@@ -746,6 +747,7 @@ impl NetworkResolutionTransaction {
             journal_transaction_blake3,
             next_journal_sequence: 0,
             journal_head_blake3,
+            last_observed_at_unix_ms: 0,
             state: NetworkResolutionTransactionState::Prepared,
             pending_replay_record_blake3: None,
             replay_record_blake3: None,
@@ -767,6 +769,9 @@ impl NetworkResolutionTransaction {
     ) -> Result<NetworkResolutionJournalRecordV1, NetworkResolutionTransactionError> {
         if observed_at_unix_ms == 0 || active_policy_generation == 0 {
             return Err(NetworkResolutionTransactionError::InvalidTimeWindow);
+        }
+        if observed_at_unix_ms < self.last_observed_at_unix_ms {
+            return Err(NetworkResolutionTransactionError::JournalTimestampRegressed);
         }
         if event.requires_live_authority() {
             self.validate_mutation_window_at_ms(observed_at_unix_ms, active_policy_generation)?;
@@ -821,6 +826,9 @@ impl NetworkResolutionTransaction {
         if record.observed_at_unix_ms == 0 || record.active_policy_generation == 0 {
             return Err(NetworkResolutionTransactionError::InvalidTimeWindow);
         }
+        if record.observed_at_unix_ms < self.last_observed_at_unix_ms {
+            return Err(NetworkResolutionTransactionError::JournalTimestampRegressed);
+        }
         if record.transaction_blake3 != self.journal_transaction_blake3 {
             return Err(NetworkResolutionTransactionError::JournalTransactionMismatch);
         }
@@ -856,6 +864,7 @@ impl NetworkResolutionTransaction {
         )?;
         self.next_journal_sequence = next_sequence;
         self.journal_head_blake3 = record.record_blake3;
+        self.last_observed_at_unix_ms = record.observed_at_unix_ms;
         Ok(())
     }
 
@@ -1367,6 +1376,8 @@ pub enum NetworkResolutionTransactionError {
     JournalDigestMismatch,
     #[error("journal sequence counter overflow")]
     JournalSequenceOverflow,
+    #[error("journal observation timestamp regressed relative to the prior record")]
+    JournalTimestampRegressed,
 }
 
 #[cfg(test)]
@@ -2129,6 +2140,80 @@ mod tests {
             NetworkResolutionTransactionState::Conflict
         );
         assert!(!transaction.reports_exact_active_target());
+    }
+
+    #[test]
+    fn journal_rejects_observation_timestamp_regression() {
+        let mut transaction = started();
+        let first = transaction
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3: transaction.expected_replay_record_blake3().to_owned(),
+                },
+                102_000,
+                7,
+            )
+            .unwrap();
+        transaction.apply_journal_record(first).unwrap();
+
+        assert_eq!(
+            transaction.next_journal_record(
+                NetworkResolutionTransactionEvent::MapStaged {
+                    generation: 41,
+                    map_payload_blake3: transaction.expected_map_payload_blake3().to_owned(),
+                },
+                101_999,
+                7,
+            ),
+            Err(NetworkResolutionTransactionError::JournalTimestampRegressed)
+        );
+    }
+
+    #[test]
+    fn journal_replay_rejects_timestamp_regression_even_with_a_valid_record_hash() {
+        let mut source = started();
+        let first = source
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::NonceConsumed {
+                    replay_record_blake3: source.expected_replay_record_blake3().to_owned(),
+                },
+                102_000,
+                7,
+            )
+            .unwrap();
+        source.apply_journal_record(first.clone()).unwrap();
+        let second = source
+            .next_journal_record(
+                NetworkResolutionTransactionEvent::MapStaged {
+                    generation: 41,
+                    map_payload_blake3: source.expected_map_payload_blake3().to_owned(),
+                },
+                102_000,
+                7,
+            )
+            .unwrap();
+
+        let mut replay = started();
+        replay.apply_journal_record(first).unwrap();
+        let mut regressed = second;
+        regressed.observed_at_unix_ms = 101_999;
+        let binding = JournalRecordBinding {
+            schema_version: regressed.schema_version,
+            transaction_blake3: &regressed.transaction_blake3,
+            observed_at_unix_ms: regressed.observed_at_unix_ms,
+            active_policy_generation: regressed.active_policy_generation,
+            sequence: regressed.sequence,
+            previous_record_blake3: &regressed.previous_record_blake3,
+            event: &regressed.event,
+        };
+        regressed.record_blake3 =
+            hash_serialized_domain(JOURNAL_RECORD_DOMAIN, &binding).unwrap();
+
+        assert_eq!(
+            replay.apply_journal_record(regressed),
+            Err(NetworkResolutionTransactionError::JournalTimestampRegressed)
+        );
+        assert_eq!(replay.state(), NetworkResolutionTransactionState::Conflict);
     }
 
     #[test]
