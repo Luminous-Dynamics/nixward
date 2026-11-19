@@ -235,6 +235,9 @@ impl NetworkResolutionMapPayloadV1 {
         lease
             .validate_structure()
             .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
+        let lease_blake3 = lease
+            .digest_hex()
+            .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
         let payload = Self {
             schema_version: 1,
             cgroup_identity_blake3: cgroup_identity_blake3.into(),
@@ -1286,8 +1289,9 @@ mod tests {
             Err(NetworkResolutionTransactionError::InvalidTransition { .. })
         ));
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         assert!(tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: tx.expected_replay_record_blake3().to_owned(),
+            replay_record_blake3,
         }).is_err());
         assert!(!tx.may_execute());
     }
