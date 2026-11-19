@@ -614,6 +614,8 @@ pub struct NetworkResolutionTransaction {
     resolver_key_id: String,
     replay_key: String,
     expected_replay_record_blake3: String,
+    cgroup_identity_blake3: String,
+    bpf_program_blake3: String,
     expected_map_payload_blake3: String,
     prior_active_generation: u64,
     prior_active_map_payload_blake3: String,
@@ -735,6 +737,8 @@ impl NetworkResolutionTransaction {
             resolver_key_id: bound_lease.resolver_key_id().to_owned(),
             replay_key: bound_lease.replay_key().to_owned(),
             expected_replay_record_blake3,
+            cgroup_identity_blake3: map_payload.cgroup_identity_blake3.clone(),
+            bpf_program_blake3: map_payload.bpf_program_blake3.clone(),
             expected_map_payload_blake3,
             prior_active_generation,
             prior_active_map_payload_blake3,
@@ -1284,6 +1288,8 @@ impl NetworkResolutionTransaction {
         active_policy_generation: u64,
         active_map_generation: u64,
         active_map_payload_blake3: &str,
+        observed_cgroup_identity_blake3: &str,
+        observed_bpf_program_blake3: &str,
     ) -> bool {
         self.reports_exact_active_target()
             && self
@@ -1291,6 +1297,8 @@ impl NetworkResolutionTransaction {
                 .is_ok()
             && active_map_generation == self.target_active_generation
             && active_map_payload_blake3 == self.expected_map_payload_blake3
+            && observed_cgroup_identity_blake3 == self.cgroup_identity_blake3
+            && observed_bpf_program_blake3 == self.bpf_program_blake3
     }
 
     pub fn digest_hex(&self) -> Result<String, NetworkResolutionTransactionError> {
@@ -2239,8 +2247,22 @@ mod tests {
         transaction.apply_journal_record(reconciliation).unwrap();
 
         assert_eq!(transaction.state(), NetworkResolutionTransactionState::Active);
-        assert!(transaction.execution_eligible_at_ms(103_001, 7, 41, &map_digest));
-        assert!(!transaction.execution_eligible_at_ms(105_000, 7, 41, &map_digest));
+        assert!(transaction.execution_eligible_at_ms(
+            103_001,
+            7,
+            41,
+            &map_digest,
+            &"88".repeat(32),
+            &"99".repeat(32),
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            105_000,
+            7,
+            41,
+            &map_digest,
+            &"88".repeat(32),
+            &"99".repeat(32),
+        ));
     }
 
     #[test]
@@ -2357,11 +2379,27 @@ mod tests {
             .unwrap();
         transaction.apply_journal_record(record).unwrap();
 
-        assert!(transaction.execution_eligible_at_ms(102_001, 7, 41, &map_digest));
-        assert!(!transaction.execution_eligible_at_ms(102_001, 8, 41, &map_digest));
-        assert!(!transaction.execution_eligible_at_ms(102_001, 7, 40, &map_digest));
-        assert!(!transaction.execution_eligible_at_ms(102_001, 7, 41, &"ff".repeat(32)));
-        assert!(!transaction.execution_eligible_at_ms(105_000, 7, 41, &map_digest));
+        assert!(transaction.execution_eligible_at_ms(
+            102_001, 7, 41, &map_digest, &"88".repeat(32), &"99".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            102_001, 8, 41, &map_digest, &"88".repeat(32), &"99".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            102_001, 7, 40, &map_digest, &"88".repeat(32), &"99".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            102_001, 7, 41, &"ff".repeat(32), &"88".repeat(32), &"99".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            102_001, 7, 41, &map_digest, &"77".repeat(32), &"99".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            102_001, 7, 41, &map_digest, &"88".repeat(32), &"77".repeat(32)
+        ));
+        assert!(!transaction.execution_eligible_at_ms(
+            105_000, 7, 41, &map_digest, &"88".repeat(32), &"99".repeat(32)
+        ));
     }
 
     #[test]
