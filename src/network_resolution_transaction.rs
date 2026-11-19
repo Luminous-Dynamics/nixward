@@ -23,6 +23,7 @@ use thiserror::Error;
 pub const NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const TRANSACTION_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-transaction:v1\0";
 const MAP_PAYLOAD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-map-payload:v1\0";
+const REPLAY_RECORD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-replay-record:v1\\0";
 
 fn is_digest(value: &str) -> bool {
     value.len() == 64
@@ -236,9 +237,7 @@ impl NetworkResolutionMapPayloadV1 {
             bpf_program_blake3: bpf_program_blake3.into(),
             workload_blake3: lease.workload_blake3.clone(),
             network_policy_blake3: bound_lease.parent_policy_blake3().to_owned(),
-            lease_blake3: lease
-                .digest_hex()
-                .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?,
+            lease_blake3,
             address_set_blake3: lease.address_set_digest_hex(),
             transport: lease.transport,
             port: lease.port,
@@ -377,6 +376,14 @@ pub enum NetworkResolutionTransactionEvent {
     },
 }
 
+#[derive(Serialize)]
+struct ReplayRecordBinding<'a> {
+    lease_blake3: &'a str,
+    replay_key: &'a str,
+    resolver_key_id: &'a str,
+    authority_evidence_blake3: &'a str,
+}
+
 /// A single lease's expected transition from prepared authority to an
 /// observed active kernel-map generation.
 ///
@@ -397,6 +404,7 @@ pub struct NetworkResolutionTransaction {
     authority_evidence_blake3: String,
     resolver_key_id: String,
     replay_key: String,
+    expected_replay_record_blake3: String,
     expected_map_payload_blake3: String,
     prior_active_generation: u64,
     prior_active_map_payload_blake3: String,
@@ -436,6 +444,18 @@ impl NetworkResolutionTransaction {
             .ok_or(NetworkResolutionTransactionError::GenerationOverflow)?;
         map_payload.validate_for_lease(bound_lease, target_active_generation)?;
         let expected_map_payload_blake3 = map_payload.digest_hex()?;
+        let lease_blake3 = lease
+            .digest_hex()
+            .map_err(|_| NetworkResolutionTransactionError::InvalidLease)?;
+        let expected_replay_record_blake3 = hash_serialized_domain(
+            REPLAY_RECORD_DOMAIN,
+            &ReplayRecordBinding {
+                lease_blake3: &lease_blake3,
+                replay_key: bound_lease.replay_key(),
+                resolver_key_id: bound_lease.resolver_key_id(),
+                authority_evidence_blake3: bound_lease.authority_evidence_blake3(),
+            },
+        )?;
 
         Ok(Self {
             schema_version: NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION,
@@ -451,6 +471,7 @@ impl NetworkResolutionTransaction {
             authority_evidence_blake3: bound_lease.authority_evidence_blake3().to_owned(),
             resolver_key_id: bound_lease.resolver_key_id().to_owned(),
             replay_key: bound_lease.replay_key().to_owned(),
+            expected_replay_record_blake3,
             expected_map_payload_blake3,
             prior_active_generation,
             prior_active_map_payload_blake3,
@@ -492,6 +513,9 @@ impl NetworkResolutionTransaction {
                 if !is_digest(&replay_record_blake3) {
                     return Err(NetworkResolutionTransactionError::InvalidDigest);
                 }
+                if replay_record_blake3 != self.expected_replay_record_blake3 {
+                    return Err(NetworkResolutionTransactionError::ReplayRecordConflict);
+                }
                 self.pending_replay_record_blake3 = Some(replay_record_blake3);
                 self.state = NetworkResolutionTransactionState::NonceReconciliationRequired;
             }
@@ -520,6 +544,9 @@ impl NetworkResolutionTransaction {
                 self.require_state(NetworkResolutionTransactionState::Prepared)?;
                 if !is_digest(&replay_record_blake3) {
                     return Err(NetworkResolutionTransactionError::InvalidDigest);
+                }
+                if replay_record_blake3 != self.expected_replay_record_blake3 {
+                    return Err(NetworkResolutionTransactionError::ReplayRecordConflict);
                 }
                 self.replay_record_blake3 = Some(replay_record_blake3);
                 self.state = NetworkResolutionTransactionState::NonceConsumed;
@@ -703,6 +730,10 @@ impl NetworkResolutionTransaction {
         &self.replay_key
     }
 
+    pub fn expected_replay_record_blake3(&self) -> &str {
+        &self.expected_replay_record_blake3
+    }
+
     pub fn prior_active_generation(&self) -> u64 {
         self.prior_active_generation
     }
@@ -830,9 +861,10 @@ mod tests {
     }
 
     fn stage_and_verify(transaction: &mut NetworkResolutionTransaction) {
+        let replay_record_blake3 = transaction.expected_replay_record_blake3().to_owned();
         transaction
             .apply(NetworkResolutionTransactionEvent::NonceConsumed {
-                replay_record_blake3: "bb".repeat(32),
+                replay_record_blake3,
             })
             .unwrap();
         let map_digest = transaction.expected_map_payload_blake3().to_owned();
@@ -943,8 +975,9 @@ mod tests {
     #[test]
     fn nonce_consumption_unknown_requires_replay_ledger_reconciliation() {
         let mut tx = started();
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumptionUnknown {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         assert_eq!(
@@ -959,8 +992,9 @@ mod tests {
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Prepared);
 
+        let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
         tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3,
         })
         .unwrap();
         assert_eq!(tx.state(), NetworkResolutionTransactionState::NonceConsumed);
@@ -1157,7 +1191,7 @@ mod tests {
         ));
         assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
         assert!(tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
-            replay_record_blake3: "bb".repeat(32),
+            replay_record_blake3: tx.expected_replay_record_blake3().to_owned(),
         }).is_err());
         assert!(!tx.may_execute());
     }
