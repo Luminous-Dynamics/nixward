@@ -1082,6 +1082,10 @@ mod tests {
     use super::*;
     use crate::network_resolution_lease::DnssecStatus;
     use crate::network_covenant::NetworkProtocol;
+    use crate::network_activation::{
+        NetworkActivationIntent, NetworkActivationOperation, NETWORK_ACTIVATION_SCHEMA_VERSION,
+    };
+    use crate::network_runtime_lab::NETWORK_RUNTIME_LAB_BACKEND;
     use std::net::IpAddr;
 
     fn lease() -> NetworkResolutionLeaseV1 {
@@ -1113,20 +1117,47 @@ mod tests {
         }
     }
 
+    fn activation(lease: &NetworkResolutionLeaseV1) -> AuthorizedNetworkActivation {
+        AuthorizedNetworkActivation::test_only(NetworkActivationIntent {
+            schema_version: NETWORK_ACTIVATION_SCHEMA_VERSION,
+            holon_id: lease.holon_id.clone(),
+            operation: NetworkActivationOperation::Activate,
+            backend: NETWORK_RUNTIME_LAB_BACKEND.into(),
+            enforcement_plan_blake3: "11".repeat(32),
+            production_readiness_blake3: "22".repeat(32),
+            network_policy_blake3: lease.network_policy_blake3.clone(),
+            target_system_toplevel: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".into(),
+            bpf_object_blake3: "99".repeat(32),
+            target_policy_generation: lease.policy_generation,
+            prior_activation_receipt_blake3: None,
+            rollback_invariant: "preserve-nixos-nftables-baseline-v46".into(),
+            reasoning_authority: "none".into(),
+        })
+    }
+
     fn started() -> NetworkResolutionTransaction {
         let lease = lease();
         let bound = ParentBoundNetworkResolutionLease::test_only(lease, 109);
+        let activation = activation(bound.lease());
         let payload = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
+            &activation,
             "88".repeat(32),
-            "99".repeat(32),
             41,
             102,
             7,
         )
         .unwrap();
-        NetworkResolutionTransaction::begin(&bound, payload, 102, 7, 40, "cc".repeat(32))
-            .unwrap()
+        NetworkResolutionTransaction::begin(
+            &bound,
+            &activation,
+            payload,
+            102,
+            7,
+            40,
+            "cc".repeat(32),
+        )
+        .unwrap()
     }
 
     fn stage_and_verify(transaction: &mut NetworkResolutionTransaction) {
@@ -1155,10 +1186,11 @@ mod tests {
     fn map_payload_rejects_substitution_of_workload_port_policy_or_address_set() {
         let lease = lease();
         let bound = ParentBoundNetworkResolutionLease::test_only(lease, 109);
+        let activation = activation(bound.lease());
         let mut payload = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
+            &activation,
             "88".repeat(32),
-            "99".repeat(32),
             41,
             102,
             7,
@@ -1168,6 +1200,7 @@ mod tests {
         assert_eq!(
             NetworkResolutionTransaction::begin(
                 &bound,
+                &activation,
                 payload,
                 102,
                 7,
@@ -1179,7 +1212,7 @@ mod tests {
 
         let mut wrong_cgroup = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
-            "99".repeat(32),
+            &activation,
             "99".repeat(32),
             41,
             102,
@@ -1194,8 +1227,8 @@ mod tests {
 
         let canonical_payload = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
+            &activation,
             "88".repeat(32),
-            "99".repeat(32),
             41,
             102,
             7,
@@ -1203,22 +1236,15 @@ mod tests {
         .unwrap();
         let changed_cgroup = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
+            &activation,
             "77".repeat(32),
-            "99".repeat(32),
             41,
             102,
             7,
         )
         .unwrap();
-        let changed_program = NetworkResolutionMapPayloadV1::for_lease(
-            &bound,
-            "88".repeat(32),
-            "66".repeat(32),
-            41,
-            102,
-            7,
-        )
-        .unwrap();
+        let mut changed_program = canonical_payload.clone();
+        changed_program.bpf_program_blake3 = "66".repeat(32);
         assert_ne!(
             canonical_payload.digest_hex().unwrap(),
             changed_cgroup.digest_hex().unwrap()
@@ -1226,6 +1252,18 @@ mod tests {
         assert_ne!(
             canonical_payload.digest_hex().unwrap(),
             changed_program.digest_hex().unwrap()
+        );
+        assert_eq!(
+            NetworkResolutionTransaction::begin(
+                &bound,
+                &activation,
+                changed_program,
+                102,
+                7,
+                40,
+                "cc".repeat(32)
+            ),
+            Err(NetworkResolutionTransactionError::ActivationBindingMismatch)
         );
 
         let mut wrong_parent_capability = canonical_payload.clone();
@@ -1246,6 +1284,7 @@ mod tests {
             assert_eq!(
                 NetworkResolutionTransaction::begin(
                     &bound,
+                    &activation,
                     substituted,
                     102,
                     7,
@@ -1255,16 +1294,32 @@ mod tests {
                 Err(NetworkResolutionTransactionError::MapPayloadMismatch)
             );
         }
-    }
 
+        let mut other_policy_intent = activation.intent().clone();
+        other_policy_intent.network_policy_blake3 = "ab".repeat(32);
+        let other_activation = AuthorizedNetworkActivation::test_only(other_policy_intent);
+        assert_eq!(
+            NetworkResolutionTransaction::begin(
+                &bound,
+                &other_activation,
+                canonical_payload,
+                102,
+                7,
+                40,
+                "cc".repeat(32)
+            ),
+            Err(NetworkResolutionTransactionError::ActivationBindingMismatch)
+        );
+    }
     #[test]
     fn transaction_refuses_expired_parent_lease_or_stale_policy_generation() {
         let lease = lease();
         let bound = ParentBoundNetworkResolutionLease::test_only(lease, 104);
+        let activation = activation(bound.lease());
         let payload = NetworkResolutionMapPayloadV1::for_lease(
             &bound,
+            &activation,
             "88".repeat(32),
-            "99".repeat(32),
             41,
             102,
             7,
@@ -1273,6 +1328,7 @@ mod tests {
         assert!(matches!(
             NetworkResolutionTransaction::begin(
                 &bound,
+                &activation,
                 payload.clone(),
                 105,
                 7,
@@ -1284,6 +1340,7 @@ mod tests {
         assert!(matches!(
             NetworkResolutionTransaction::begin(
                 &bound,
+                &activation,
                 payload,
                 102,
                 8,
@@ -1293,7 +1350,6 @@ mod tests {
             Err(NetworkResolutionTransactionError::PolicyGenerationMismatch)
         ));
     }
-
     #[test]
     fn new_transaction_binds_lease_request_hop_and_exact_next_generation() {
         let tx = started();
