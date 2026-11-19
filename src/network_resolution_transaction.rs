@@ -2132,6 +2132,39 @@ mod tests {
     }
 
     #[test]
+    fn journal_detects_timestamp_and_policy_generation_tampering() {
+        let mut source = started();
+        let event = NetworkResolutionTransactionEvent::NonceConsumed {
+            replay_record_blake3: source.expected_replay_record_blake3().to_owned(),
+        };
+        let record = source.next_journal_record(event, 102_000, 7).unwrap();
+
+        let mut timestamp_tampered = started();
+        let mut changed_time = record.clone();
+        changed_time.observed_at_unix_ms = 102_001;
+        assert_eq!(
+            timestamp_tampered.apply_journal_record(changed_time),
+            Err(NetworkResolutionTransactionError::JournalDigestMismatch)
+        );
+        assert_eq!(
+            timestamp_tampered.state(),
+            NetworkResolutionTransactionState::Conflict
+        );
+
+        let mut policy_tampered = started();
+        let mut changed_policy = record;
+        changed_policy.active_policy_generation = 8;
+        assert_eq!(
+            policy_tampered.apply_journal_record(changed_policy),
+            Err(NetworkResolutionTransactionError::JournalDigestMismatch)
+        );
+        assert_eq!(
+            policy_tampered.state(),
+            NetworkResolutionTransactionState::Conflict
+        );
+    }
+
+    #[test]
     fn journal_rejects_reordered_or_duplicate_records() {
         let mut source = started();
         let replay_record_blake3 = source.expected_replay_record_blake3().to_owned();
