@@ -495,3 +495,5 @@ The authority windows have intentionally different meanings:
 `execution_eligible_at_ms` is therefore a fail-closed comparison gate, not an authorization token. A production broker must source cgroup/BPF/map observations from authenticated kernel read-back and retain the deny-by-default baseline. If any read-back is missing, stale or ambiguous, do not admit the flow.
 
 `LEASE-061`–`LEASE-063` cover timestamp/policy binding, delayed reconciliation after expiry, and cgroup/BPF/map identity at flow admission. All remain unexecuted source-level cases pending exact-head validation.
+
+The journal conformance corpus also adds `LEASE-064` and `LEASE-065`: modifying the timestamp or observed active policy generation after record creation must fail the hash check and quarantine the reducer. The record digest now covers the full event, transaction identity, sequence, previous head, observation time and policy generation. These are integrity checks only; a trusted broker must still authenticate the origin of those samples and externally anchor/sign journal heads.
