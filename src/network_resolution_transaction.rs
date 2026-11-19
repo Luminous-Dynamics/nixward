@@ -18,6 +18,7 @@ use thiserror::Error;
 
 pub const NETWORK_RESOLUTION_TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const TRANSACTION_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-transaction:v1\0";
+const MAP_PAYLOAD_DOMAIN: &[u8] = b"symthaea:nixward:network-resolution-map-payload:v1\0";
 
 fn is_digest(value: &str) -> bool {
     value.len() == 64
