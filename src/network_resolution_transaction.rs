@@ -71,6 +71,8 @@ pub struct ParentBoundNetworkResolutionLease {
     parent_authority_lease_blake3: String,
     parent_expires_at_unix: u64,
     active_policy_generation: u64,
+    resolver_authority_issued_at_ms: u64,
+    resolver_authority_expires_at_ms: u64,
     authority_evidence_blake3: String,
     resolver_key_id: String,
     replay_key: String,
@@ -117,6 +119,8 @@ impl ParentBoundNetworkResolutionLease {
             parent_authority_lease_blake3,
             parent_expires_at_unix: parent_lease.expires_at_unix,
             active_policy_generation,
+            resolver_authority_issued_at_ms: authorized.verified_evidence().issued_at_ms(),
+            resolver_authority_expires_at_ms: authorized.verified_evidence().expires_at_ms(),
             authority_evidence_blake3: authorized.evidence_blake3().to_owned(),
             resolver_key_id: authorized.signer_key_id().to_owned(),
             replay_key: authorized.replay_key().to_owned(),
@@ -131,11 +135,28 @@ impl ParentBoundNetworkResolutionLease {
         lease: NetworkResolutionLeaseV1,
         parent_expires_at_unix: u64,
     ) -> Self {
+        Self::test_only_with_resolver_expiry(
+            lease,
+            parent_expires_at_unix,
+            0,
+            u64::MAX,
+        )
+    }
+
+    #[cfg(test)]
+    fn test_only_with_resolver_expiry(
+        lease: NetworkResolutionLeaseV1,
+        parent_expires_at_unix: u64,
+        resolver_authority_issued_at_ms: u64,
+        resolver_authority_expires_at_ms: u64,
+    ) -> Self {
         Self {
             parent_policy_blake3: lease.network_policy_blake3.clone(),
             parent_capability_blake3: lease.parent_capability_blake3.clone(),
             parent_authority_lease_blake3: lease.parent_authority_lease_blake3.clone(),
             active_policy_generation: lease.policy_generation,
+            resolver_authority_issued_at_ms,
+            resolver_authority_expires_at_ms,
             authority_evidence_blake3: "aa".repeat(32),
             resolver_key_id: lease.issuer_key_id.clone(),
             replay_key: "bb".repeat(32),
@@ -177,6 +198,15 @@ impl ParentBoundNetworkResolutionLease {
         now_unix: u64,
         active_policy_generation: u64,
     ) -> Result<(), NetworkResolutionTransactionError> {
+        let now_ms = now_unix
+            .checked_mul(1_000)
+            .ok_or(NetworkResolutionTransactionError::InvalidTimeWindow)?;
+        if self.resolver_authority_expires_at_ms <= self.resolver_authority_issued_at_ms
+            || now_ms < self.resolver_authority_issued_at_ms
+            || now_ms >= self.resolver_authority_expires_at_ms
+        {
+            return Err(NetworkResolutionTransactionError::ResolverAuthorityExpired);
+        }
         if active_policy_generation != self.active_policy_generation
             || active_policy_generation != self.lease.policy_generation
         {
@@ -1073,6 +1103,8 @@ pub enum NetworkResolutionTransactionError {
     ActivationBindingMismatch,
     #[error("parent capability or resolution lease is expired")]
     ParentLeaseExpired,
+    #[error("signed resolver authority evidence is expired or not yet valid")]
+    ResolverAuthorityExpired,
     #[error("parent authority lease expires before the resolution lease")]
     ParentLeaseTimeMismatch,
     #[error("active policy generation differs from the parent-bound lease")]
@@ -1354,6 +1386,29 @@ mod tests {
             Err(NetworkResolutionTransactionError::ActivationBindingMismatch)
         );
     }
+    #[test]
+    fn transaction_refuses_expired_resolver_signature_even_when_lease_is_live() {
+        let lease = lease();
+        let bound = ParentBoundNetworkResolutionLease::test_only_with_resolver_expiry(
+            lease,
+            109,
+            100_000,
+            101_000,
+        );
+        let activation = activation(bound.lease());
+        assert!(matches!(
+            NetworkResolutionMapPayloadV1::for_lease(
+                &bound,
+                &activation,
+                "88".repeat(32),
+                41,
+                102,
+                7,
+            ),
+            Err(NetworkResolutionTransactionError::ResolverAuthorityExpired)
+        ));
+    }
+
     #[test]
     fn transaction_refuses_expired_parent_lease_or_stale_policy_generation() {
         let lease = lease();
