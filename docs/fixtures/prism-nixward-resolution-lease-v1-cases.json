@@ -786,6 +786,17 @@
         "value": "mutate a valid serialized TCP rule to ICMP or Any"
       },
       "oracle": "NetworkEnforcementPlan::validate rejects unsupported protocol values even when the plan bypasses the capability compiler"
+    },
+    {
+      "id": "LEASE-072",
+      "family": "journal_integrity",
+      "title": "journal rejects regressing observation time even when record hash is recomputed",
+      "operation": "deny",
+      "mutation": {
+        "path": "journal.observed_at_unix_ms",
+        "value": "create a later sequence record with a lower observed time and recompute its valid record hash"
+      },
+      "oracle": "the reducer tracks last_observed_at_unix_ms and requires non-decreasing timestamps at record creation and replay; regressed records enter terminal Conflict"
     }
   ]
 }
