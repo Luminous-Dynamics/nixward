@@ -533,7 +533,7 @@ mod tests {
                 claims: BTreeMap::new(),
             }],
             max_ttl_ms: 60_000,
-            allowed_audiences: vec!["nixward-test".into()],
+            allowed_audiences: vec![audience.to_owned()],
         };
         AuthorityVerifier::new(&policy)
             .unwrap()
@@ -548,6 +548,35 @@ mod tests {
         assert_eq!(policy["source_claim"], "not-activated-by-generated-source");
         assert_eq!(policy["automatic_activation"], false);
         assert_eq!(policy["reasoning_authority"], "none");
+    }
+
+    #[test]
+    fn network_activation_challenge_binds_intent_holon_and_audience() {
+        let intent = NetworkActivationIntent {
+            schema_version: 1,
+            holon_id: "holon-a".into(),
+            operation: NetworkActivationOperation::Activate,
+            backend: NETWORK_RUNTIME_LAB_BACKEND.into(),
+            enforcement_plan_blake3: "11".repeat(32),
+            production_readiness_blake3: "22".repeat(32),
+            network_policy_blake3: "33".repeat(32),
+            target_system_toplevel: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".into(),
+            bpf_object_blake3: "44".repeat(32),
+            target_policy_generation: 1,
+            prior_activation_receipt_blake3: None,
+            rollback_invariant: "preserve-nixos-nftables-baseline-v46".into(),
+            reasoning_authority: "none".into(),
+        };
+        let challenge = intent
+            .authority_challenge([7u8; 32], 1_000_000, 30_000)
+            .unwrap();
+        assert_eq!(challenge.action, AuthorityAction::NetworkActivate);
+        assert_eq!(challenge.subject_blake3, intent.digest_hex().unwrap());
+        assert_eq!(
+            challenge.holon_id,
+            network_activation_authority_holon_blake3(&intent.holon_id)
+        );
+        assert_eq!(challenge.audience, NETWORK_ACTIVATION_AUDIENCE);
     }
 
     #[test]
