@@ -1001,6 +1001,19 @@ mod tests {
     }
 
     #[test]
+    fn nonce_consumption_rejects_record_not_bound_to_this_lease() {
+        let mut tx = started();
+        assert_eq!(
+            tx.apply(NetworkResolutionTransactionEvent::NonceConsumed {
+                replay_record_blake3: "ff".repeat(32),
+            }),
+            Err(NetworkResolutionTransactionError::ReplayRecordConflict)
+        );
+        assert_eq!(tx.state(), NetworkResolutionTransactionState::Conflict);
+        assert!(!tx.may_execute());
+    }
+
+    #[test]
     fn nonce_ledger_mismatch_quarantines_transaction() {
         let mut tx = started();
         let replay_record_blake3 = tx.expected_replay_record_blake3().to_owned();
