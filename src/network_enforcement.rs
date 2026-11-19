@@ -540,6 +540,15 @@ fn compile_capability(capability: &NetworkCapability) -> Result<KernelNetworkRul
     ) {
         return Err("host/listen ingress remains in the nftables baseline in V40".into());
     }
+    match capability.protocol {
+        NetworkProtocol::Tcp | NetworkProtocol::Udp => {}
+        NetworkProtocol::Icmp => {
+            return Err("ICMP is not implemented by the V40 connect/sendmsg hook contract".into());
+        }
+        NetworkProtocol::Any => {
+            return Err("protocol Any includes transports not enforced by the V40 hook contract; split into explicit TCP/UDP capabilities".into());
+        }
+    }
     match &capability.destinations {
         DestinationSet::Hostnames { .. } => {
             return Err("hostname capabilities require an authenticated DNS/resolution covenant before kernel pinning".into());
@@ -657,7 +666,11 @@ mod tests {
             protocol,
             destinations: destination,
             address_scope,
-            ports: vec![PortRange { from: 443, to: 443 }],
+            ports: if protocol == NetworkProtocol::Icmp {
+                Vec::new()
+            } else {
+                vec![PortRange { from: 443, to: 443 }]
+            },
             justification: "sync".into(),
         };
         NetworkPolicyPlan::new("holon-a", vec![workload], vec![capability]).unwrap()
@@ -760,6 +773,53 @@ mod tests {
             weakened_plan.validate(),
             Err(NetworkEnforcementError::KernelFeatureRequirementsMismatch)
         ));
+    }
+
+    #[test]
+    fn v40_refuses_icmp_because_no_icmp_hook_is_qualified() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Icmp,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.unresolved.len(), 1);
+        assert!(
+            plan.unresolved[0].reason.contains("ICMP is not implemented"),
+            "ICMP must not become an apparently enforceable kernel rule"
+        );
+        assert!(matches!(
+            plan.activation_eligibility(
+                &KernelFeatureProbe {
+                    schema_version: 1,
+                    kernel_release: "test".into(),
+                    cgroup_mode: "v2-unified".into(),
+                    observed_features: plan.required_kernel_features.clone(),
+                    probe_method: "fixture".into(),
+                },
+                &[]
+            ),
+            Err(NetworkEnforcementError::UnresolvedRules(1))
+        ));
+    }
+
+    #[test]
+    fn v40_refuses_protocol_any_instead_of_overclaiming_all_protocol_coverage() {
+        let policy = policy_with_protocol(
+            DestinationSet::Cidrs {
+                values: vec!["203.0.113.0/24".into()],
+            },
+            NetworkProtocol::Any,
+        );
+        let plan = NetworkEnforcementPlan::compile(&policy).unwrap();
+        assert!(plan.rules.is_empty());
+        assert_eq!(plan.unresolved.len(), 1);
+        assert!(
+            plan.unresolved[0].reason.contains("protocol Any"),
+            "wildcard transport authority must be split into supported explicit transports"
+        );
     }
 
     #[test]
