@@ -182,12 +182,29 @@ struct ParsedCapability {
 }
 
 fn parse_capability(capability: &NetworkCapability) -> Result<ParsedCapability, String> {
+    if capability.direction != NetworkDirection::Egress {
+        return Err("ingress/listen is unsupported in the agent egress profile".into());
+    }
     let destinations = match &capability.destinations {
         DestinationSet::Cidrs { values } => {
             if values.is_empty() || values.len() > MAX_CIDRS_PER_CAPABILITY {
                 return Err("CIDR count outside v0.1 model".into());
             }
-            values.iter().map(|value| IpRange::parse(value)).collect::<Result<Vec<_>, _>>()?
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                let range = IpRange::parse(value)?;
+                let is_v4_all = range.family == AddressFamily::V4
+                    && range.start == 0
+                    && range.end == u128::from(u32::MAX);
+                let is_v6_all = range.family == AddressFamily::V6
+                    && range.start == 0
+                    && range.end == u128::MAX;
+                if is_v4_all || is_v6_all {
+                    return Err("all-address CIDR is prohibited in the v0.1 agent profile".into());
+                }
+                parsed.push(range);
+            }
+            parsed
         }
         DestinationSet::Hostnames { .. } => {
             return Err("hostname requires authenticated DNS/connection evidence".into())
@@ -665,6 +682,26 @@ mod tests {
             justification: "test".into(),
         }]).unwrap();
         assert_eq!(check_policy_within_boundary(&boundary, &candidate).state, ContainmentState::Unsupported);
+    }
+
+    #[test]
+    fn ingress_and_all_address_routes_are_unsupported() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(workload.clone(), vec![]);
+        let ingress = NetworkPolicyPlan::new("tenant-a", vec![workload.clone()], vec![NetworkCapability {
+            schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
+            capability_id: "ingress".into(),
+            workload_blake3: workload.digest_hex().unwrap(),
+            direction: NetworkDirection::Ingress,
+            protocol: NetworkProtocol::Tcp,
+            destinations: DestinationSet::Cidrs { values: vec!["203.0.113.0/24".into()] },
+            ports: vec![PortRange { from: 443, to: 443 }],
+            justification: "test".into(),
+        }]).unwrap();
+        assert_eq!(check_policy_within_boundary(&boundary, &ingress).state, ContainmentState::Unsupported);
+
+        let all = policy(workload.clone(), vec![capability(&workload, "all", &["0.0.0.0/0"], &[(443, 443)])]);
+        assert_eq!(check_policy_within_boundary(&boundary, &all).state, ContainmentState::Unsupported);
     }
 
     #[test]
