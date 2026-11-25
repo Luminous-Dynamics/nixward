@@ -13,6 +13,11 @@ Consequential machine changes use an evidence-bound transaction lifecycle:
 Cognitive signals and natural-language conversation are advisory only; they never constitute machine-mutation authority. See [docs/SYSTEM_TRANSACTION_ARCHITECTURE.md](docs/SYSTEM_TRANSACTION_ARCHITECTURE.md) for the canonical model.
 
 
+
+## Network policy containment proof (research v0.1)
+
+Nixward includes a conservative policy-subset checker for exact workload identities, TCP/UDP, canonical CIDRs and port ranges. It emits a concrete witness for added reach and returns Unsupported/Inconclusive rather than guessing outside its model. It has a 100,000 comparison-work budget and returns Inconclusive on oversized inputs. It does not authorize or activate a policy. See docs/NETWORK_POLICY_CONTAINMENT_V0_1.md.
+
 ## Software Ingress Covenant
 
 Nixward does **not** act as an imperative package manager. A cryptographic
