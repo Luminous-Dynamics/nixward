@@ -23,6 +23,7 @@ pub const MAX_POLICY_WORKLOADS: usize = 256;
 pub const MAX_POLICY_CAPABILITIES: usize = 1024;
 pub const MAX_CIDRS_PER_CAPABILITY: usize = 256;
 pub const MAX_PORT_RANGES_PER_CAPABILITY: usize = 256;
+pub const MAX_POLICY_COMPARISON_WORK: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -421,6 +422,36 @@ pub fn check_policy_within_boundary(
         return report;
     }
 
+    let mut estimated_work = 0usize;
+    for capability in &candidate.capabilities {
+        let destination_count = match &capability.destinations {
+            DestinationSet::Cidrs { values } => values.len(),
+            DestinationSet::Hostnames { .. } | DestinationSet::Zone { .. } => 1,
+        };
+        let matching_count = matching_boundary_rules(capability, boundary).len();
+        let unit_work = destination_count
+            .checked_mul(capability.ports.len())
+            .and_then(|value| value.checked_mul(matching_count.saturating_add(1)));
+        let Some(unit_work) = unit_work else {
+            report.state = ContainmentState::Inconclusive;
+            report.unsupported_reasons.push("policy comparison work estimate overflowed".into());
+            return report;
+        };
+        let Some(total_work) = estimated_work.checked_add(unit_work) else {
+            report.state = ContainmentState::Inconclusive;
+            report.unsupported_reasons.push("policy comparison work estimate overflowed".into());
+            return report;
+        };
+        estimated_work = total_work;
+        if estimated_work > MAX_POLICY_COMPARISON_WORK {
+            report.state = ContainmentState::Inconclusive;
+            report.unsupported_reasons.push(format!(
+                "policy comparison work {estimated_work} exceeds budget {MAX_POLICY_COMPARISON_WORK}"
+            ));
+            return report;
+        }
+    }
+
     let mut unsupported = false;
     for capability in &candidate.capabilities {
         let parsed_candidate = match parse_capability(capability) {
@@ -629,6 +660,32 @@ mod tests {
         let boundary = policy(workload.clone(), vec![]);
         let candidate = policy(workload.clone(), vec![capability(&workload, "bad", &["203.0.113.17/24"], &[(443, 443)])]);
         assert_eq!(check_policy_within_boundary(&boundary, &candidate).state, ContainmentState::Unsupported);
+    }
+
+    #[test]
+    fn oversized_policy_is_inconclusive_not_unbounded() {
+        let workload = workload("worker", "worker.service", "1");
+        let cidrs: Vec<String> = (0..256)
+            .map(|i| format!("198.18.0.{i}/32"))
+            .collect();
+        let ports: Vec<PortRange> = (1..=256)
+            .map(|port| PortRange { from: port, to: port })
+            .collect();
+        let cap = NetworkCapability {
+            schema_version: NETWORK_COVENANT_SCHEMA_VERSION,
+            capability_id: "large".into(),
+            workload_blake3: workload.digest_hex().unwrap(),
+            direction: NetworkDirection::Egress,
+            protocol: NetworkProtocol::Tcp,
+            destinations: DestinationSet::Cidrs { values: cidrs },
+            ports,
+            justification: "bounded resource test".into(),
+        };
+        let boundary = policy(workload.clone(), vec![cap.clone()]);
+        let candidate = policy(workload, vec![cap]);
+        let report = check_policy_within_boundary(&boundary, &candidate);
+        assert_eq!(report.state, ContainmentState::Inconclusive);
+        assert!(!report.runtime_enforcement_proven);
     }
 
     #[test]
