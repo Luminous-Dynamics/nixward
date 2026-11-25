@@ -51,7 +51,7 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Twenty-one Rust tests cover the current finite proof domain, including three exhaustive 4-element differential corpora:
+Twenty-two Rust tests cover the current finite proof domain, including three exhaustive 4-element differential corpora:
 1. identical policy and the permanent non-runtime-enforcement claim;
 2. narrower CIDR/port policy;
 3. IPv4 CIDR-union coverage;
@@ -60,7 +60,7 @@ Twenty-one Rust tests cover the current finite proof domain, including three exh
 6. concrete destination and port expansion witnesses;
 7. first-uncovered-address witness for partial CIDR overlap;
 8. protocol isolation (TCP does not cover UDP);
-9. a broad `Any` protocol boundary remains Unsupported rather than becoming a false expansion, while explicit supported coverage still proves Within;
+9. a broad `Any` protocol boundary remains Unsupported rather than becoming a false expansion, while explicit supported coverage still proves Within; report digests are deterministic and bind the decision and evidence fields;
 10. workload identity expansion;
 11. hostname and zone selectors;
 12. ingress and all-address selectors;
