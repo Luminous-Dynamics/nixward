@@ -774,6 +774,28 @@ mod tests {
     }
 
     #[test]
+    fn any_protocol_rule_does_not_block_explicit_full_coverage() {
+        let workload = workload("worker", "worker.service", "1");
+        let mut broad = capability(&workload, "any-protocol", &["203.0.113.0/24"], &[(443, 443)]);
+        broad.protocol = NetworkProtocol::Any;
+        let explicit = capability(
+            &workload,
+            "tcp-explicit",
+            &["203.0.113.0/24"],
+            &[(443, 443)],
+        );
+        let boundary = policy(workload.clone(), vec![broad, explicit]);
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        assert_eq!(
+            check_policy_within_boundary(&boundary, &candidate).state,
+            ContainmentState::Within
+        );
+    }
+
+    #[test]
     fn tcp_boundary_does_not_cover_udp_candidate() {
         let workload = workload("worker", "worker.service", "1");
         let boundary = policy(
