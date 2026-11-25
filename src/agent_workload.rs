@@ -855,6 +855,13 @@ mod tests {
         assert_ne!(contract.policy_boundary_blake3, contract.network_policy_blake3);
         assert_eq!(contract.policy_containment_prover_version, NETWORK_CONTAINMENT_PROVER_VERSION);
         assert_eq!(contract.policy_containment_report_blake3.len(), 64);
+        let mut changed_boundary = contract.clone();
+        changed_boundary.policy_boundary_blake3 = "f".repeat(64);
+        assert_ne!(
+            contract.digest_hex().unwrap(),
+            changed_boundary.digest_hex().unwrap(),
+            "owner boundary must be inside the signed contract subject"
+        );
         assert_eq!(verified.signer_key_id, "owner-key-1");
         assert!(!verified.replay_key.is_empty());
     }
