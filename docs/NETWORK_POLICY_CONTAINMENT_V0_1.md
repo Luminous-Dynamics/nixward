@@ -51,20 +51,23 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Thirteen Rust tests cover:
-1. identical policy;
+Seventeen Rust tests cover the current finite proof domain:
+1. identical policy and the permanent non-runtime-enforcement claim;
 2. narrower CIDR/port policy;
-3. union of adjacent CIDR boundary ranges;
-4. union of adjacent port ranges;
-5. concrete counterexample for a new destination;
-6. concrete counterexample for a new port;
-7. new workload identity;
-8. hostname unsupported;
-9. zone unsupported;
-10. malformed/non-canonical CIDR unsupported;
-11. containment reports never claim runtime enforcement;\n12. oversized policy input returns Inconclusive rather than consuming unbounded evaluation work.
+3. IPv4 CIDR-union coverage;
+4. IPv6 adjacent-prefix union coverage;
+5. adjacent port-range union coverage;
+6. concrete destination and port expansion witnesses;
+7. first-uncovered-address witness for partial CIDR overlap;
+8. protocol isolation (TCP does not cover UDP);
+9. a broad `Any` protocol boundary remains Unsupported rather than becoming a false expansion;
+10. workload identity expansion;
+11. hostname and zone selectors;
+12. ingress and all-address selectors;
+13. malformed/non-canonical CIDR;
+14. oversized input returns Inconclusive.
 
-These are source-level test cases only until a Rust toolchain executes them. No compilation, clippy, formatting, Nix build or CI pass is claimed.
+These are source-level test cases only until executed with the pinned Rust toolchain. No compilation, clippy, formatting, Nix build or CI pass is claimed.
 
 ## Next integration stages
 
