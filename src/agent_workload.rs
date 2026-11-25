@@ -800,6 +800,38 @@ mod tests {
     }
 
     #[test]
+    fn rejects_policy_proof_replay_after_candidate_policy_changes() {
+        let (_, guest_plan, guest_receipt, workload, policy, _) =
+            fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let stale_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+
+        let mut changed_policy = policy.clone();
+        changed_policy.capabilities[0].destinations = DestinationSet::Cidrs {
+            values: vec!["203.0.113.18/32".into()],
+        };
+        let changed_enforcement = NetworkEnforcementPlan::compile(&changed_policy).unwrap();
+        let result = AgentTaskNetworkContract::bind(
+            "tenant-a",
+            "task-atr-001",
+            "a".repeat(64),
+            "b".repeat(64),
+            &guest_plan,
+            &guest_receipt,
+            &workload,
+            &changed_policy,
+            &stale_proof,
+            &changed_enforcement,
+            1_000_000,
+            60_000,
+            [12; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(AgentTaskNetworkError::PolicyContainmentMismatch)
+        ));
+    }
+
+    #[test]
     fn owner_signature_is_bound_to_the_complete_task_network_contract() {
         let (contract, _, _, _, _, _) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
@@ -809,6 +841,9 @@ mod tests {
         let verifier = AuthorityVerifier::new(&authority_policy(&signing)).unwrap();
         let verified = contract.verify_authorization(&verifier, &signature, 1_030_000).unwrap();
         assert_eq!(verified.subject_blake3, contract.digest_hex().unwrap());
+        assert_eq!(contract.policy_boundary_blake3, contract.network_policy_blake3);
+        assert_eq!(contract.policy_containment_prover_version, NETWORK_CONTAINMENT_PROVER_VERSION);
+        assert_eq!(contract.policy_containment_report_blake3.len(), 64);
         assert_eq!(verified.signer_key_id, "owner-key-1");
         assert!(!verified.replay_key.is_empty());
     }
