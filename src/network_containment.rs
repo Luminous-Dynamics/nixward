@@ -24,7 +24,7 @@ pub const MAX_POLICY_CAPABILITIES: usize = 1024;
 pub const MAX_CIDRS_PER_CAPABILITY: usize = 256;
 pub const MAX_PORT_RANGES_PER_CAPABILITY: usize = 256;
 pub const MAX_POLICY_COMPARISON_WORK: usize = 100_000;
-const REPORT_DIGEST_DOMAIN: &[u8] = b"nixward:network-policy-containment-report:v1\\0";
+const REPORT_DIGEST_DOMAIN: &[u8] = b"nixward:network-policy-containment-report:v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
