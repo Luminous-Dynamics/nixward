@@ -14,7 +14,7 @@ Cognitive signals and natural-language conversation are advisory only; they neve
 
 
 
-## Agentic workload binding (research v0.1)
+## Agentic workload binding (research v0.1; contract schema v2)
 
 Nixward now has a typed task-bound contract that binds one rootless OCI S2 guest plan and its plan-consistency/artifact-identity receipt to one tenant-scoped workload identity, one declared network policy, and an expiring owner-signable authorization subject. The current `observe_oci` path does not independently verify live rootless/read-only/host-network/mount state, so the receipt is explicitly not a runtime-isolation attestation. The contract is marked `bound-not-runtime-enforced`; it does not launch guests or claim production BPF enforcement. See [docs/AGENT_TASK_BOUNDARY_V0_1.md](docs/AGENT_TASK_BOUNDARY_V0_1.md) for trust boundaries, tests and remaining qualification work.
 
@@ -234,3 +234,6 @@ Measured on 16,384-dim vectors (criterion, release mode):
 ## License
 
 MIT
+
+
+The contract now requires the opaque `VerifiedPolicyContainment` token from the finite-set policy prover. The schema-v2 owner-signable subject binds the exact owner-boundary digest, candidate-policy digest, prover version and containment-report digest. This is policy-delta proof, not runtime enforcement; the status remains `bound-not-runtime-enforced-v2` and the compiled plan remains disabled pending independent host/runtime evidence.
