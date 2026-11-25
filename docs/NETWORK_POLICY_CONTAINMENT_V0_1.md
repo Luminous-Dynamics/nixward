@@ -10,7 +10,7 @@ The question is narrowly defined:
 
 **Can the candidate grant any workload, direction, protocol, destination or port tuple that is absent from the declared boundary?**
 
-The v0.1 checker answers this for exact WorkloadIdentity digests, TCP/UDP, canonical IPv4/IPv6 CIDRs and explicit port ranges.
+The v0.1 checker answers this for exact WorkloadIdentity digests, egress-only TCP/UDP, canonical IPv4/IPv6 CIDRs and explicit port ranges. Ingress, Listen and all-address routes are unsupported.
 
 ## Result states
 
@@ -51,7 +51,7 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Twelve Rust tests cover:
+Thirteen Rust tests cover:
 1. identical policy;
 2. narrower CIDR/port policy;
 3. union of adjacent CIDR boundary ranges;
