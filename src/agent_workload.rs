@@ -41,6 +41,7 @@ const TARGET_SET_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-target-set:v1\0";
 
 pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_TASK_NETWORK_STATUS: &str = "bound-not-runtime-enforced-v1";
+pub const GUEST_RECEIPT_SCOPE: &str = "plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1";
 pub const AGENT_TASK_MAX_TTL_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ pub struct AgentTaskNetworkContract {
     pub task_plan_blake3: String,
     pub guest_plan_blake3: String,
     pub guest_receipt_blake3: String,
+    pub guest_receipt_scope: String,
     pub artifact_identity: String,
     pub workload_blake3: String,
     pub network_policy_blake3: String,
@@ -111,6 +113,11 @@ impl AgentTaskNetworkContract {
 
         // Re-derive the receipt from the original plan and observed runtime
         // fields. Do not accept a caller-mutated receipt as proof.
+        // IMPORTANT: this re-derivation checks structural consistency and
+        // artifact/launch identity only. The current observe_oci adapter fills
+        // rootless/read-only/host-network/mount fields partly from the plan;
+        // it does not independently inspect the running container. Never
+        // treat this receipt as runtime isolation attestation.
         let rederived_receipt =
             GuestRealizationReceipt::verify(guest_plan, guest_receipt.observation.clone())?;
         if rederived_receipt != *guest_receipt
@@ -203,6 +210,7 @@ impl AgentTaskNetworkContract {
             task_plan_blake3,
             guest_plan_blake3,
             guest_receipt_blake3,
+            guest_receipt_scope: GUEST_RECEIPT_SCOPE.into(),
             artifact_identity,
             workload_blake3,
             network_policy_blake3: network_policy.digest_hex()?,
@@ -223,6 +231,7 @@ impl AgentTaskNetworkContract {
         if self.schema_version != AGENT_TASK_NETWORK_SCHEMA_VERSION
             || self.kind != "symthaea-agent-task-network-contract-v1"
             || self.status != AGENT_TASK_NETWORK_STATUS
+            || self.guest_receipt_scope != GUEST_RECEIPT_SCOPE
         {
             return Err(AgentTaskNetworkError::UnsupportedSchema);
         }
@@ -668,6 +677,7 @@ mod tests {
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
         contract.validate_at(1_030_000).unwrap();
         assert_eq!(contract.status, AGENT_TASK_NETWORK_STATUS);
+        assert_eq!(contract.guest_receipt_scope, GUEST_RECEIPT_SCOPE);
         assert!(!contract.activation_performed);
         assert_eq!(contract.reasoning_authority, "none");
     }
