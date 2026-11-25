@@ -37,6 +37,8 @@ The new \`agent_workload\` module binds:
 
 The owner-signable challenge uses \`AuthorityAction::NetworkActivate\` and signs the digest of the entire contract. A changed task, principal, artifact, workload, policy, destination set or expiry changes the subject and invalidates an earlier signature.
 
+The contract also carries the machine-readable receipt scope `plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1`. This is required because the current `observe_oci` adapter checks the image digest but populates rootless, host-network, read-only and mount observations partly from the requested plan. It does not independently inspect the live container configuration. The receipt can bind the requested artifact and launch plan, but it must not be used as runtime isolation proof.
+
 The nonce entropy passed to the constructor must come from the host OS CSPRNG. This module does not generate entropy or consume the replay key. The participant must atomically consume the verifier's replay key immediately before any consequential act.
 
 ## 4. High-risk workload profile v0.1
