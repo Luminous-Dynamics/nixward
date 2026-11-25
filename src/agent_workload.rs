@@ -31,6 +31,7 @@ use crate::software_ingress::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 const CONTRACT_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-contract:v1\0";
@@ -274,7 +275,7 @@ impl AgentTaskNetworkContract {
         hash_json(CONTRACT_DOMAIN, self)
     }
 
-    /// Produce the owner-signable challenge for this exact task binding.
+    /// nonce_entropy must come from the host OS CSPRNG; this module does not generate entropy.\n    /// Produce the owner-signable challenge for this exact task binding.
     /// This does not sign, consume replay state, or activate networking.
     pub fn authority_challenge(
         &self,
@@ -341,6 +342,10 @@ fn validate_agent_capabilities(
         if capability.direction != NetworkDirection::Egress
             || !matches!(capability.protocol, NetworkProtocol::Tcp | NetworkProtocol::Udp)
             || !ids.insert(capability.capability_id.as_str())
+            || capability.ports.is_empty()
+            || capability.ports.iter().any(|range| {
+                range.to.saturating_sub(range.from) > 31
+            })
         {
             return Err(AgentTaskNetworkError::InvalidNetworkCapability);
         }
@@ -350,6 +355,7 @@ fn validate_agent_capabilities(
                     if cidr == "0.0.0.0/0" || cidr == "::/0" {
                         return Err(AgentTaskNetworkError::UnboundedDestination);
                     }
+                    validate_canonical_cidr(cidr)?;
                 }
             }
             DestinationSet::Hostnames { .. } => {
@@ -361,6 +367,49 @@ fn validate_agent_capabilities(
         }
     }
     Ok(())
+}
+
+fn validate_canonical_cidr(value: &str) -> Result<(), AgentTaskNetworkError> {
+    let Some((address, prefix_text)) = value.split_once('/') else {
+        return Err(AgentTaskNetworkError::InvalidCidr);
+    };
+    if prefix_text.contains('/') || prefix_text.is_empty() {
+        return Err(AgentTaskNetworkError::InvalidCidr);
+    }
+    let prefix = prefix_text
+        .parse::<u8>()
+        .map_err(|_| AgentTaskNetworkError::InvalidCidr)?;
+    if let Ok(ip) = address.parse::<Ipv4Addr>() {
+        if prefix > 32 {
+            return Err(AgentTaskNetworkError::InvalidCidr);
+        }
+        let bits = u32::from(ip);
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        if bits & mask != bits {
+            return Err(AgentTaskNetworkError::NonCanonicalCidr);
+        }
+        return Ok(());
+    }
+    if let Ok(ip) = address.parse::<Ipv6Addr>() {
+        if prefix > 128 {
+            return Err(AgentTaskNetworkError::InvalidCidr);
+        }
+        let bits = u128::from(ip);
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix)
+        };
+        if bits & mask != bits {
+            return Err(AgentTaskNetworkError::NonCanonicalCidr);
+        }
+        return Ok(());
+    }
+    Err(AgentTaskNetworkError::InvalidCidr)
 }
 
 fn validate_token(
@@ -438,6 +487,10 @@ pub enum AgentTaskNetworkError {
     InvalidNetworkCapability,
     #[error("agent task cannot use all-address destinations")]
     UnboundedDestination,
+    #[error("agent task destination is not a valid IPv4/IPv6 CIDR")]
+    InvalidCidr,
+    #[error("agent task CIDR contains host bits; use its canonical network address")]
+    NonCanonicalCidr,
     #[error("hostname egress requires an authenticated DNS/resolution proof")]
     HostnameNeedsResolutionProof,
     #[error("compiled network enforcement plan does not match exact policy or remains unresolved")]
@@ -624,6 +677,22 @@ mod tests {
             values: vec!["0.0.0.0/0".into()],
         });
         assert!(matches!(result, Err(AgentTaskNetworkError::UnboundedDestination)));
+    }
+
+    #[test]
+    fn rejects_invalid_and_noncanonical_cidr_ranges() {
+        let invalid = build_fixture(DestinationSet::Cidrs {
+            values: vec!["not-an-ip/24".into()],
+        });
+        assert!(matches!(invalid, Err(AgentTaskNetworkError::InvalidCidr)));
+
+        let noncanonical = build_fixture(DestinationSet::Cidrs {
+            values: vec!["203.0.113.17/24".into()],
+        });
+        assert!(matches!(
+            noncanonical,
+            Err(AgentTaskNetworkError::NonCanonicalCidr)
+        ));
     }
 
     #[test]
