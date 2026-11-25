@@ -6,7 +6,7 @@
 
 Bind a high-risk agent task to one exact execution identity and one separately authorized network policy. The intended object is:
 
-\`tenant / Holon + task + principal + task-plan digest + pinned guest artifact + realized launch receipt + workload identity + network policy + compiled policy + expiry + owner signature\`
+`tenant / Holon + task + principal + task-plan digest + pinned guest artifact + realized launch receipt + workload identity + network policy + compiled policy + expiry + owner signature`
 
 The contract is designed for the ARTEX-like capability class: planner/worker systems that may spawn children, enumerate assets, invoke tools, retain task memory and iterate after an initial goal. It does not depend on ARTEX names, ports, User-Agents, model providers, or scanner signatures.
 
@@ -24,7 +24,7 @@ The contract is designed for the ARTEX-like capability class: planner/worker sys
 
 ## 3. AgentTaskNetworkContract
 
-The new \`agent_workload\` module binds:
+The new `agent_workload` module binds:
 
 - one human-readable Holon / tenant identifier and its domain-separated digest;
 - one task ID, agent-principal digest, and full task-plan digest;
@@ -33,9 +33,9 @@ The new \`agent_workload\` module binds:
 - exactly one workload in the NetworkPolicyPlan;
 - the exact policy digest, compiled enforcement-plan digest and allowed-destination-set digest;
 - issuance time, expiry (maximum 15 minutes), and nonce digest;
-- an explicit status of \`bound-not-runtime-enforced-v1\`.
+- an explicit status of `bound-not-runtime-enforced-v1`.
 
-The owner-signable challenge uses \`AuthorityAction::NetworkActivate\` and signs the digest of the entire contract. A changed task, principal, artifact, workload, policy, destination set or expiry changes the subject and invalidates an earlier signature.
+The owner-signable challenge uses `AuthorityAction::NetworkActivate` and signs the digest of the entire contract. A changed task, principal, artifact, workload, policy, destination set or expiry changes the subject and invalidates an earlier signature.
 
 The contract also carries the machine-readable receipt scope `plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1`. This is required because the current `observe_oci` adapter checks the image digest but populates rootless, host-network, read-only and mount observations partly from the requested plan. It does not independently inspect the live container configuration. The receipt can bind the requested artifact and launch plan, but it must not be used as runtime isolation proof.
 
@@ -68,7 +68,7 @@ This v0.1 contract does **not**:
 - implement dynamic lease issuance/revocation or replay-key consumption;
 - grant Symthaea host shell access or automatic remediation authority.
 
-The network-enforcement plan must remain \`disabled-until-runtime-proof-v40\`. A passing runtime-lab report is only backend maturity evidence; target-host feature probes, exact cgroup bindings and a separate owner-authorized activation path are still required.
+The network-enforcement plan must remain `disabled-until-runtime-proof-v40`. A passing runtime-lab report is only backend maturity evidence; target-host feature probes, exact cgroup bindings and a separate owner-authorized activation path are still required.
 
 ## 6. Tests added
 
@@ -99,7 +99,7 @@ Extend the runtime backend so exact task cgroups—not merely workload-plan iden
 Add a resolution contract binding hostname, DNSSEC/trusted resolver policy, answer set, TTL, CNAME chain, resolver identity, task/policy digest, and connection-time destination. Revalidate redirects and connect targets. Where L7 semantics matter, use a separately authenticated egress proxy rather than pretending an L3 CIDR allowlist validates HTTPS hostnames.
 
 ### P3 — isolated runtime replay
-Run only synthetic fixtures in a disposable NixOS VM. Record target-host kernel probes, cgroup identity, actual packet allow/deny receipts, process lineage, guest observation and independent service oracle. A model statement such as \`blocked=true\` is never a receipt.
+Run only synthetic fixtures in a disposable NixOS VM. Record target-host kernel probes, cgroup identity, actual packet allow/deny receipts, process lineage, guest observation and independent service oracle. A model statement such as `blocked=true` is never a receipt.
 
 ### P4 — task security benchmark
 Use Platform ATR-001..ATR-020 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
@@ -107,7 +107,7 @@ Use Platform ATR-001..ATR-020 and report hard-gate effects, task completion, fal
 ## 8. External alignment
 
 - OASB-1 / OASB Eval: map identity/provenance, capability authorization, supply chain, credential protection, operational controls and monitoring. Do not reuse self-labelled benign samples to estimate false-positive rates.
-- IETF draft \`draft-hcf-bpm-agent-security-benchmark-profiles-00\`: declare the system-under-test boundary and scenario profile with every metric; its status is work in progress, not a final standard.
+- IETF draft `draft-hcf-bpm-agent-security-benchmark-profiles-00`: declare the system-under-test boundary and scenario profile with every metric; its status is work in progress, not a final standard.
 - MITRE ATT&CK Evaluations: map technique coverage, detection/protection outcomes and source-of-action disclosure, but compare only matched configurations and scenarios.
 - AgentDojo / indirect-injection work: report attack success and legitimate-task utility together; safe abandonment is not successful task completion.
 
