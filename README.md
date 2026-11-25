@@ -16,7 +16,7 @@ Cognitive signals and natural-language conversation are advisory only; they neve
 
 ## Network policy containment proof (research v0.1)
 
-Nixward includes a conservative policy-subset checker for exact workload identities, TCP/UDP, canonical CIDRs and port ranges. It emits a concrete witness for added reach and returns Unsupported/Inconclusive rather than guessing outside its model. It does not authorize or activate a policy. See docs/NETWORK_POLICY_CONTAINMENT_V0_1.md.
+Nixward includes a conservative policy-subset checker for exact workload identities, TCP/UDP, canonical CIDRs and port ranges. It emits a concrete witness for added reach and returns Unsupported/Inconclusive rather than guessing outside its model. It has a 100,000 comparison-work budget and returns Inconclusive on oversized inputs. It does not authorize or activate a policy. See docs/NETWORK_POLICY_CONTAINMENT_V0_1.md.
 
 ## Software Ingress Covenant
 
