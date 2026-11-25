@@ -16,7 +16,7 @@ The contract is designed for the ARTEX-like capability class: planner/worker sys
 |---|---|---|
 | Software Ingress Covenant | S2/S3 artifact identity, guest permissions, digest-bound plan | That an agent task is authorized or that every runtime control is active |
 | Rootless OCI guest launcher | Rootless Podman command, digest-pinned image, read-only root option, no host network mode | Per-task egress enforcement when networking is enabled |
-| GuestRealizationReceipt | The observed OCI artifact and launch-contract fields match the requested plan | Cryptographic authenticity of the observation source by itself |
+| GuestRealizationReceipt | Structural consistency between the requested OCI plan, artifact identity and launch-contract fields | Actual runtime rootless/read-only/no-host-network state or cryptographic authenticity of the observation source |
 | WorkloadIdentity | Holon + guest-plan digest + artifact identity + launch-authority digest | That the network policy is attached to the intended live cgroup |
 | NetworkPolicyPlan | Exact workload-scoped declared egress; host ingress/forward default deny; no reasoning authority | Workload egress is still marked declared, not runtime-enforced |
 | NetworkEnforcementPlan | Exact rules, required kernel hooks, cgroup bindings and fail-closed runtime proof contract | It is not activated by compilation or by lab readiness |
@@ -113,6 +113,6 @@ Use Platform ATR-001..ATR-020 and report hard-gate effects, task completion, fal
 
 The correct current claim is narrow:
 
-**Nixward now has a typed, expiring, owner-signable contract that can bind one OCI guest task to one tenant workload and one exact declared egress policy, while refusing unresolved hostnames and unsafe guest profiles.**
+**Nixward now has a typed, expiring, owner-signable contract that binds one OCI guest plan and its plan-consistency receipt to one tenant workload and one exact declared egress policy, while refusing unresolved hostnames and unsafe guest profiles. This is not a runtime isolation attestation.**
 
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
