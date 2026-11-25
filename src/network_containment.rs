@@ -238,7 +238,10 @@ fn matching_boundary_rules<'a>(
     boundary.capabilities.iter().filter(|rule| {
         rule.workload_blake3 == capability.workload_blake3
             && rule.direction == capability.direction
-            && rule.protocol == capability.protocol
+            // An Any rule may cover this protocol, but parse_capability rejects
+            // it as unsupported. Keep it in the comparison so it yields
+            // Unsupported rather than a false expansion witness.
+            && (rule.protocol == capability.protocol || rule.protocol == NetworkProtocol::Any)
     }).collect()
 }
 
@@ -753,6 +756,67 @@ mod tests {
         let report = check_policy_within_boundary(&boundary, &candidate);
         assert_eq!(report.state, ContainmentState::Inconclusive);
         assert!(!report.runtime_enforcement_proven);
+    }
+
+    #[test]
+    fn any_protocol_boundary_is_unsupported_not_false_expansion() {
+        let workload = workload("worker", "worker.service", "1");
+        let mut broad = capability(&workload, "any-protocol", &["203.0.113.0/24"], &[(443, 443)]);
+        broad.protocol = NetworkProtocol::Any;
+        let boundary = policy(workload.clone(), vec![broad]);
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let report = check_policy_within_boundary(&boundary, &candidate);
+        assert_eq!(report.state, ContainmentState::Unsupported);
+        assert!(!report.unsupported_reasons.is_empty());
+    }
+
+    #[test]
+    fn tcp_boundary_does_not_cover_udp_candidate() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(
+            workload.clone(),
+            vec![capability(&workload, "tcp-only", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let mut udp = capability(&workload, "udp", &["203.0.113.0/24"], &[(443, 443)]);
+        udp.protocol = NetworkProtocol::Udp;
+        let candidate = policy(workload, vec![udp]);
+        let report = check_policy_within_boundary(&boundary, &candidate);
+        assert_eq!(report.state, ContainmentState::Exceeds);
+        assert_eq!(report.counterexamples[0].protocol, Some(NetworkProtocol::Udp));
+    }
+
+    #[test]
+    fn ipv6_union_of_adjacent_boundary_ranges_covers_candidate() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(workload.clone(), vec![
+            capability(&workload, "v6-low", &["2001:db8:1:2::/65"], &[(443, 443)]),
+            capability(&workload, "v6-high", &["2001:db8:1:2:8000::/65"], &[(443, 443)]),
+        ]);
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "v6-full", &["2001:db8:1:2::/64"], &[(443, 443)])],
+        );
+        assert_eq!(check_policy_within_boundary(&boundary, &candidate).state, ContainmentState::Within);
+    }
+
+    #[test]
+    fn partial_cidr_overlap_returns_first_uncovered_address() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(
+            workload.clone(),
+            vec![capability(&workload, "half", &["203.0.113.0/25"], &[(443, 443)])],
+        );
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "full", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let report = check_policy_within_boundary(&boundary, &candidate);
+        assert_eq!(report.state, ContainmentState::Exceeds);
+        assert_eq!(report.counterexamples[0].destination.as_deref(), Some("203.0.113.128"));
+        assert_eq!(report.counterexamples[0].port, Some(443));
     }
 
     #[test]
