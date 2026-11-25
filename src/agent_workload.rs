@@ -284,8 +284,10 @@ impl AgentTaskNetworkContract {
         hash_json(CONTRACT_DOMAIN, self)
     }
 
-    /// nonce_entropy must come from the host OS CSPRNG; this module does not generate entropy.\n    /// Produce the owner-signable challenge for this exact task binding.
-    /// nonce_entropy must come from the host OS CSPRNG; this module does not generate entropy.
+    /// Produce the owner-signable challenge for this exact task binding.
+    ///
+    /// `nonce_entropy` must come from the host OS CSPRNG; this module does not
+    /// generate entropy, sign the challenge, consume replay state, or activate networking.
     /// This does not sign, consume replay state, or activate networking.
     pub fn authority_challenge(
         &self,
