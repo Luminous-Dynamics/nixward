@@ -51,7 +51,7 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Seventeen Rust tests cover the current finite proof domain:
+Nineteen Rust tests cover the current finite proof domain, including two exhaustive 4-element differential corpora:
 1. identical policy and the permanent non-runtime-enforcement claim;
 2. narrower CIDR/port policy;
 3. IPv4 CIDR-union coverage;
@@ -65,7 +65,10 @@ Seventeen Rust tests cover the current finite proof domain:
 11. hostname and zone selectors;
 12. ingress and all-address selectors;
 13. malformed/non-canonical CIDR;
-14. oversized input returns Inconclusive.
+14. oversized input returns Inconclusive;
+15. exhaustive small IPv4 address-set comparison against direct set inclusion (225 pairs);
+16. exhaustive small port-set comparison against direct set inclusion (225 pairs).
+
 
 These are source-level test cases only until executed with the pinned Rust toolchain. No compilation, clippy, formatting, Nix build or CI pass is claimed.
 
