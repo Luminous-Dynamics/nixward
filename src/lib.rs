@@ -68,6 +68,7 @@ pub mod software_ingress;
 pub mod guest_realization;
 
 /// Detached cryptographic authority challenges and trust policies.
+pub mod agent_workload;
 pub mod authority_signature;
 pub mod owner_root;
 pub mod release_integrity;
