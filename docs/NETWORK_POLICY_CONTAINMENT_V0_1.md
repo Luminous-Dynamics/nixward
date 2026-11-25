@@ -17,7 +17,7 @@ The v0.1 checker answers this for exact WorkloadIdentity digests, TCP/UDP, canon
 - Within — every modeled candidate network tuple is contained by the boundary.
 - Exceeds — a candidate workload or a concrete network tuple is outside the boundary. The report includes a counterexample witness.
 - Unsupported — input contains a selector or policy shape outside the modeled domain, or validation is insufficient to prove a subset.
-- Inconclusive — deterministic work limits are exceeded.
+- Inconclusive — deterministic work limits are exceeded. V0.1 caps policy sizes and comparison work at 100,000 estimated CIDR/port/boundary-rule interactions.
 
 Only Within is eligible to proceed to a separate owner authorization step. The checker never signs, authorizes, consumes a replay key, launches a workload or activates enforcement.
 
@@ -51,7 +51,7 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Eleven Rust tests cover:
+Twelve Rust tests cover:
 1. identical policy;
 2. narrower CIDR/port policy;
 3. union of adjacent CIDR boundary ranges;
@@ -62,7 +62,7 @@ Eleven Rust tests cover:
 8. hostname unsupported;
 9. zone unsupported;
 10. malformed/non-canonical CIDR unsupported;
-11. containment reports never claim runtime enforcement.
+11. containment reports never claim runtime enforcement;\n12. oversized policy input returns Inconclusive rather than consuming unbounded evaluation work.
 
 These are source-level test cases only until a Rust toolchain executes them. No compilation, clippy, formatting, Nix build or CI pass is claimed.
 
