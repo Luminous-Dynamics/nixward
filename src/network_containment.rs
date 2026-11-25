@@ -820,6 +820,78 @@ mod tests {
     }
 
     #[test]
+    fn exhaustive_small_ipv4_subset_matches_set_inclusion_oracle() {
+        let workload = workload("worker", "worker.service", "1");
+        for boundary_mask in 1u8..16 {
+            let boundary_values: Vec<String> = (0..4)
+                .filter(|bit| boundary_mask & (1 << bit) != 0)
+                .map(|host| format!("198.18.0.{host}/32"))
+                .collect();
+            let boundary_refs: Vec<&str> = boundary_values.iter().map(String::as_str).collect();
+            let boundary = policy(
+                workload.clone(),
+                vec![capability(&workload, "boundary", &boundary_refs, &[(443, 443)])],
+            );
+
+            for candidate_mask in 1u8..16 {
+                let candidate_values: Vec<String> = (0..4)
+                    .filter(|bit| candidate_mask & (1 << bit) != 0)
+                    .map(|host| format!("198.18.0.{host}/32"))
+                    .collect();
+                let candidate_refs: Vec<&str> =
+                    candidate_values.iter().map(String::as_str).collect();
+                let candidate = policy(
+                    workload.clone(),
+                    vec![capability(&workload, "candidate", &candidate_refs, &[(443, 443)])],
+                );
+
+                let expected_subset = candidate_mask & !boundary_mask == 0;
+                let report = check_policy_within_boundary(&boundary, &candidate);
+                assert_eq!(
+                    report.state,
+                    if expected_subset { ContainmentState::Within } else { ContainmentState::Exceeds },
+                    "candidate mask {candidate_mask:04b}, boundary mask {boundary_mask:04b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_small_port_subset_matches_set_inclusion_oracle() {
+        let workload = workload("worker", "worker.service", "1");
+        let cidrs = ["198.18.0.1/32"];
+        for boundary_mask in 1u8..16 {
+            let boundary_ports: Vec<(u16, u16)> = (0..4)
+                .filter(|bit| boundary_mask & (1 << bit) != 0)
+                .map(|port| (1000 + port, 1000 + port))
+                .collect();
+            let boundary = policy(
+                workload.clone(),
+                vec![capability(&workload, "boundary", &cidrs, &boundary_ports)],
+            );
+
+            for candidate_mask in 1u8..16 {
+                let candidate_ports: Vec<(u16, u16)> = (0..4)
+                    .filter(|bit| candidate_mask & (1 << bit) != 0)
+                    .map(|port| (1000 + port, 1000 + port))
+                    .collect();
+                let candidate = policy(
+                    workload.clone(),
+                    vec![capability(&workload, "candidate", &cidrs, &candidate_ports)],
+                );
+
+                let expected_subset = candidate_mask & !boundary_mask == 0;
+                let report = check_policy_within_boundary(&boundary, &candidate);
+                assert_eq!(
+                    report.state,
+                    if expected_subset { ContainmentState::Within } else { ContainmentState::Exceeds },
+                    "candidate port mask {candidate_mask:04b}, boundary mask {boundary_mask:04b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn report_never_claims_runtime_enforcement() {
         let workload = workload("worker", "worker.service", "1");
         let policy = policy(workload, vec![]);
