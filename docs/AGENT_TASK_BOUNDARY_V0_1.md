@@ -124,7 +124,7 @@ Use Platform ATR-001..ATR-020 and report hard-gate effects, task completion, fal
 - MITRE ATT&CK Evaluations: map technique coverage, detection/protection outcomes and source-of-action disclosure, but compare only matched configurations and scenarios.
 - AgentDojo / indirect-injection work: report attack success and legitimate-task utility together; safe abandonment is not successful task completion.
 
-## 9. Claim ceiling
+## 10. Claim ceiling
 
 The correct current claim is narrow:
 
@@ -133,4 +133,4 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression control: the task contract now rejects all IPv4/IPv6 `/0` CIDRs by numeric prefix semantics, including expanded IPv6 zero-address spelling. Eleven Rust tests are present but have not been compiled or executed.
+Source-level regression control: the task contract now rejects all IPv4/IPv6 `/0` CIDRs by numeric prefix semantics, including expanded IPv6 zero-address spelling. Twelve task-contract Rust tests and 24 imported policy-containment tests are present but have not been compiled or executed.
