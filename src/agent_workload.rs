@@ -25,6 +25,7 @@ use crate::network_covenant::{
     WorkloadIdentity, WorkloadSource,
 };
 use crate::network_enforcement::{NetworkEnforcementError, NetworkEnforcementPlan};
+use crate::network_containment::{VerifiedPolicyContainment, NETWORK_CONTAINMENT_PROVER_VERSION};
 use crate::software_ingress::{
     OciGuestPlan, SoftwareIngressError, SoftwareIngressPlan, SoftwareIngressSpec,
     SoftwareTrustClass,
@@ -34,12 +35,12 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
-const CONTRACT_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-contract:v1\0";
+const CONTRACT_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-contract:v2\0";
 const HOLON_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-holon:v1\0";
 const NONCE_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-nonce:v1\0";
 const TARGET_SET_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-target-set:v1\0";
 
-pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 2;
 pub const AGENT_TASK_NETWORK_STATUS: &str = "bound-not-runtime-enforced-v1";
 pub const GUEST_RECEIPT_SCOPE: &str = "plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1";
 pub const AGENT_TASK_MAX_TTL_MS: u64 = 15 * 60 * 1000;
@@ -63,6 +64,10 @@ pub struct AgentTaskNetworkContract {
     pub network_policy_blake3: String,
     pub network_enforcement_plan_blake3: String,
     pub allowed_destinations_blake3: String,
+    /// Owner-bound finite-set policy-containment result; not runtime enforcement.
+    pub policy_boundary_blake3: String,
+    pub policy_containment_report_blake3: String,
+    pub policy_containment_prover_version: String,
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     pub nonce_blake3: String,
@@ -83,6 +88,7 @@ impl AgentTaskNetworkContract {
         guest_receipt: &GuestRealizationReceipt,
         workload: &WorkloadIdentity,
         network_policy: &NetworkPolicyPlan,
+        policy_proof: &VerifiedPolicyContainment,
         enforcement_plan: &NetworkEnforcementPlan,
         issued_at_ms: u64,
         ttl_ms: u64,
@@ -169,6 +175,15 @@ impl AgentTaskNetworkContract {
         // contract before those capabilities can be admitted.
         validate_agent_capabilities(network_policy)?;
 
+        let network_policy_blake3 = network_policy.digest_hex()?;
+        validate_digest("policy boundary digest", policy_proof.boundary_policy_blake3())?;
+        validate_digest("policy containment report digest", policy_proof.report_digest_blake3())?;
+        if policy_proof.candidate_policy_blake3() != network_policy_blake3
+            || policy_proof.prover_version() != NETWORK_CONTAINMENT_PROVER_VERSION
+        {
+            return Err(AgentTaskNetworkError::PolicyContainmentMismatch);
+        }
+
         if oci.permissions.network != !network_policy.capabilities.is_empty() {
             return Err(AgentTaskNetworkError::NetworkPermissionMismatch);
         }
@@ -202,7 +217,7 @@ impl AgentTaskNetworkContract {
 
         let contract = Self {
             schema_version: AGENT_TASK_NETWORK_SCHEMA_VERSION,
-            kind: "symthaea-agent-task-network-contract-v1".into(),
+            kind: "symthaea-agent-task-network-contract-v2".into(),
             holon_id,
             holon_blake3,
             task_id,
@@ -216,6 +231,9 @@ impl AgentTaskNetworkContract {
             network_policy_blake3: network_policy.digest_hex()?,
             network_enforcement_plan_blake3: enforcement_plan.digest_hex()?,
             allowed_destinations_blake3,
+            policy_boundary_blake3: policy_proof.boundary_policy_blake3().to_owned(),
+            policy_containment_report_blake3: policy_proof.report_digest_blake3().to_owned(),
+            policy_containment_prover_version: policy_proof.prover_version().to_owned(),
             issued_at_ms,
             expires_at_ms,
             nonce_blake3,
@@ -229,7 +247,7 @@ impl AgentTaskNetworkContract {
 
     pub fn validate(&self) -> Result<(), AgentTaskNetworkError> {
         if self.schema_version != AGENT_TASK_NETWORK_SCHEMA_VERSION
-            || self.kind != "symthaea-agent-task-network-contract-v1"
+            || self.kind != "symthaea-agent-task-network-contract-v2"
             || self.status != AGENT_TASK_NETWORK_STATUS
             || self.guest_receipt_scope != GUEST_RECEIPT_SCOPE
         {
@@ -247,6 +265,8 @@ impl AgentTaskNetworkContract {
             ("network policy digest", &self.network_policy_blake3),
             ("network enforcement digest", &self.network_enforcement_plan_blake3),
             ("target-set digest", &self.allowed_destinations_blake3),
+            ("policy boundary digest", &self.policy_boundary_blake3),
+            ("policy containment report digest", &self.policy_containment_report_blake3),
             ("nonce digest", &self.nonce_blake3),
         ] {
             validate_digest(label, digest)?;
@@ -261,6 +281,9 @@ impl AgentTaskNetworkContract {
             || self.expires_at_ms - self.issued_at_ms > AGENT_TASK_MAX_TTL_MS
         {
             return Err(AgentTaskNetworkError::InvalidTtl);
+        }
+        if self.policy_containment_prover_version != NETWORK_CONTAINMENT_PROVER_VERSION {
+            return Err(AgentTaskNetworkError::PolicyContainmentMismatch);
         }
         if self.activation_performed || self.reasoning_authority != "none" {
             return Err(AgentTaskNetworkError::AuthorityEscalation);
@@ -483,6 +506,8 @@ pub enum AgentTaskNetworkError {
     InvalidValue(&'static str),
     #[error("invalid agent task network digest: {0}")]
     InvalidDigest(&'static str),
+    #[error("policy-containment proof does not bind the exact candidate policy or approved prover")]
+    PolicyContainmentMismatch,
     #[error("invalid task grant TTL")]
     InvalidTtl,
     #[error("task grant is expired or not yet valid")]
@@ -615,6 +640,8 @@ mod tests {
         };
         let policy = NetworkPolicyPlan::new("tenant-a", vec![workload.clone()], vec![capability])?;
         let enforcement = NetworkEnforcementPlan::compile(&policy)?;
+        let policy_proof = verify_policy_within_boundary(&policy, &policy)
+            .map_err(|_| AgentTaskNetworkError::PolicyContainmentMismatch)?;
         let contract = AgentTaskNetworkContract::bind(
             "tenant-a",
             "task-atr-001",
@@ -624,6 +651,7 @@ mod tests {
             &guest_receipt,
             &workload,
             &policy,
+            &policy_proof,
             &enforcement,
             1_000_000,
             60_000,
@@ -747,9 +775,10 @@ mod tests {
         ).unwrap();
         let policy = NetworkPolicyPlan::new("tenant-a", vec![other_workload], vec![]).unwrap();
         let enforcement = NetworkEnforcementPlan::compile(&policy).unwrap();
+        let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &guest_receipt, &workload, &policy, &enforcement,
+            &guest_plan, &guest_receipt, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [7; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::PolicyWorkloadMismatch)));
@@ -759,11 +788,12 @@ mod tests {
     fn rejects_guest_receipt_substitution() {
         let (_, guest_plan, receipt, workload, policy, enforcement) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
         let mut substituted = receipt.clone();
         substituted.artifact_identity = "registry.invalid/other@sha256:".to_string() + &"e".repeat(64);
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &substituted, &workload, &policy, &enforcement,
+            &guest_plan, &substituted, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [8; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::GuestReceiptMismatch)));
@@ -813,6 +843,7 @@ mod tests {
     fn refuses_host_mounts_and_privileged_guest_authority() {
         let (_, guest_plan, receipt, workload, policy, enforcement) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
         let mut changed_plan = guest_plan.clone();
         let SoftwareIngressSpec::OciGuest(oci) = &mut changed_plan.spec else {
             unreachable!()
@@ -824,7 +855,7 @@ mod tests {
         });
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &changed_plan, &receipt, &workload, &policy, &enforcement,
+            &changed_plan, &receipt, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [11; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::UnsafeGuestIsolation)));
