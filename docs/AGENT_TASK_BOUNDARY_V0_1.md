@@ -118,3 +118,6 @@ The correct current claim is narrow:
 **Nixward now has a typed, expiring, owner-signable contract that binds one OCI guest plan and its plan-consistency receipt to one tenant workload and one exact declared egress policy, while refusing unresolved hostnames and unsafe guest profiles. This is not a runtime isolation attestation.**
 
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
+
+
+Source-level regression control: the task contract now rejects all IPv4/IPv6 `/0` CIDRs by numeric prefix semantics, including expanded IPv6 zero-address spelling. Eleven Rust tests are present but have not been compiled or executed.
