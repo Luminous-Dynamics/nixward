@@ -16,7 +16,7 @@ Cognitive signals and natural-language conversation are advisory only; they neve
 
 ## Agentic workload binding (research v0.1)
 
-Nixward now has a typed task-bound contract that joins a rootless OCI S2 guest realization, one tenant-scoped workload identity, one declared network policy, and an expiring owner-signable authorization subject. The contract is intentionally marked `bound-not-runtime-enforced`; it does not launch guests or claim production BPF enforcement. See [docs/AGENT_TASK_BOUNDARY_V0_1.md](docs/AGENT_TASK_BOUNDARY_V0_1.md) for trust boundaries, tests and remaining qualification work.
+Nixward now has a typed task-bound contract that binds one rootless OCI S2 guest plan and its plan-consistency/artifact-identity receipt to one tenant-scoped workload identity, one declared network policy, and an expiring owner-signable authorization subject. The current `observe_oci` path does not independently verify live rootless/read-only/host-network/mount state, so the receipt is explicitly not a runtime-isolation attestation. The contract is marked `bound-not-runtime-enforced`; it does not launch guests or claim production BPF enforcement. See [docs/AGENT_TASK_BOUNDARY_V0_1.md](docs/AGENT_TASK_BOUNDARY_V0_1.md) for trust boundaries, tests and remaining qualification work.
 
 ## Software Ingress Covenant
 
