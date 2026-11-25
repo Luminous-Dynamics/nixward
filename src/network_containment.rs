@@ -428,14 +428,44 @@ pub fn check_policy_within_boundary(
             DestinationSet::Cidrs { values } => values.len(),
             DestinationSet::Hostnames { .. } | DestinationSet::Zone { .. } => 1,
         };
-        let matching_count = matching_boundary_rules(capability, boundary).len();
-        let unit_work = destination_count
-            .checked_mul(capability.ports.len())
-            .and_then(|value| value.checked_mul(matching_count.saturating_add(1)));
-        let Some(unit_work) = unit_work else {
-            report.state = ContainmentState::Inconclusive;
-            report.unsupported_reasons.push("policy comparison work estimate overflowed".into());
-            return report;
+        let candidate_rectangles = match destination_count.checked_mul(capability.ports.len()) {
+            Some(value) => value,
+            None => {
+                report.state = ContainmentState::Inconclusive;
+                report.unsupported_reasons.push("candidate rectangle estimate overflowed".into());
+                return report;
+            }
+        };
+        let mut boundary_rule_cost = 1usize;
+        for rule in matching_boundary_rules(capability, boundary) {
+            let rule_destinations = match &rule.destinations {
+                DestinationSet::Cidrs { values } => values.len(),
+                DestinationSet::Hostnames { .. } | DestinationSet::Zone { .. } => 1,
+            };
+            let rule_cost = match rule_destinations.checked_mul(rule.ports.len().max(1)) {
+                Some(value) => value,
+                None => {
+                    report.state = ContainmentState::Inconclusive;
+                    report.unsupported_reasons.push("boundary rule estimate overflowed".into());
+                    return report;
+                }
+            };
+            boundary_rule_cost = match boundary_rule_cost.checked_add(rule_cost) {
+                Some(value) => value,
+                None => {
+                    report.state = ContainmentState::Inconclusive;
+                    report.unsupported_reasons.push("boundary work estimate overflowed".into());
+                    return report;
+                }
+            };
+        }
+        let unit_work = match candidate_rectangles.checked_mul(boundary_rule_cost) {
+            Some(value) => value,
+            None => {
+                report.state = ContainmentState::Inconclusive;
+                report.unsupported_reasons.push("policy comparison work estimate overflowed".into());
+                return report;
+            }
         };
         let Some(total_work) = estimated_work.checked_add(unit_work) else {
             report.state = ContainmentState::Inconclusive;
