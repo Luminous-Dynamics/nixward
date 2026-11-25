@@ -41,7 +41,7 @@ const NONCE_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-nonce:v1\0";
 const TARGET_SET_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-target-set:v1\0";
 
 pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_TASK_NETWORK_STATUS: &str = "bound-not-runtime-enforced-v1";
+pub const AGENT_TASK_NETWORK_STATUS: &str = "bound-not-runtime-enforced-v2";
 pub const GUEST_RECEIPT_SCOPE: &str = "plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1";
 pub const AGENT_TASK_MAX_TTL_MS: u64 = 15 * 60 * 1000;
 
@@ -640,7 +640,18 @@ mod tests {
         };
         let policy = NetworkPolicyPlan::new("tenant-a", vec![workload.clone()], vec![capability])?;
         let enforcement = NetworkEnforcementPlan::compile(&policy)?;
-        let policy_proof = verify_policy_within_boundary(&policy, &policy)
+        validate_agent_capabilities(&policy)?;
+        let mut owner_boundary = policy.clone();
+        for cap in &mut owner_boundary.capabilities {
+            if let DestinationSet::Cidrs { values } = &mut cap.destinations {
+                for cidr in values {
+                    if cidr == "203.0.113.17/32" {
+                        *cidr = "203.0.113.0/24".into();
+                    }
+                }
+            }
+        }
+        let policy_proof = verify_policy_within_boundary(&owner_boundary, &policy)
             .map_err(|_| AgentTaskNetworkError::PolicyContainmentMismatch)?;
         let contract = AgentTaskNetworkContract::bind(
             "tenant-a",
@@ -841,7 +852,7 @@ mod tests {
         let verifier = AuthorityVerifier::new(&authority_policy(&signing)).unwrap();
         let verified = contract.verify_authorization(&verifier, &signature, 1_030_000).unwrap();
         assert_eq!(verified.subject_blake3, contract.digest_hex().unwrap());
-        assert_eq!(contract.policy_boundary_blake3, contract.network_policy_blake3);
+        assert_ne!(contract.policy_boundary_blake3, contract.network_policy_blake3);
         assert_eq!(contract.policy_containment_prover_version, NETWORK_CONTAINMENT_PROVER_VERSION);
         assert_eq!(contract.policy_containment_report_blake3.len(), 64);
         assert_eq!(verified.signer_key_id, "owner-key-1");
