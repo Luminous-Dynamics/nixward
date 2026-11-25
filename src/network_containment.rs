@@ -823,8 +823,8 @@ mod tests {
     fn exhaustive_small_ipv4_subset_matches_set_inclusion_oracle() {
         let workload = workload("worker", "worker.service", "1");
         for boundary_mask in 1u8..16 {
-            let boundary_values: Vec<String> = (0..4)
-                .filter(|bit| boundary_mask & (1 << bit) != 0)
+            let boundary_values: Vec<String> = (0u32..4)
+                .filter(|bit| boundary_mask & (1u8 << *bit) != 0)
                 .map(|host| format!("198.18.0.{host}/32"))
                 .collect();
             let boundary_refs: Vec<&str> = boundary_values.iter().map(String::as_str).collect();
@@ -834,7 +834,7 @@ mod tests {
             );
 
             for candidate_mask in 1u8..16 {
-                let candidate_values: Vec<String> = (0..4)
+                let candidate_values: Vec<String> = (0u32..4)
                     .filter(|bit| candidate_mask & (1 << bit) != 0)
                     .map(|host| format!("198.18.0.{host}/32"))
                     .collect();
@@ -861,9 +861,9 @@ mod tests {
         let workload = workload("worker", "worker.service", "1");
         let cidrs = ["198.18.0.1/32"];
         for boundary_mask in 1u8..16 {
-            let boundary_ports: Vec<(u16, u16)> = (0..4)
-                .filter(|bit| boundary_mask & (1 << bit) != 0)
-                .map(|port| (1000 + port, 1000 + port))
+            let boundary_ports: Vec<(u16, u16)> = (0u32..4)
+                .filter(|bit| boundary_mask & (1u8 << *bit) != 0)
+                .map(|port| (1000u16 + port as u16, 1000u16 + port as u16))
                 .collect();
             let boundary = policy(
                 workload.clone(),
@@ -871,9 +871,9 @@ mod tests {
             );
 
             for candidate_mask in 1u8..16 {
-                let candidate_ports: Vec<(u16, u16)> = (0..4)
+                let candidate_ports: Vec<(u16, u16)> = (0u32..4)
                     .filter(|bit| candidate_mask & (1 << bit) != 0)
-                    .map(|port| (1000 + port, 1000 + port))
+                    .map(|port| (1000u16 + port as u16, 1000u16 + port as u16))
                     .collect();
                 let candidate = policy(
                     workload.clone(),
