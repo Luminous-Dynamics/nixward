@@ -835,7 +835,7 @@ mod tests {
 
             for candidate_mask in 1u8..16 {
                 let candidate_values: Vec<String> = (0u32..4)
-                    .filter(|bit| candidate_mask & (1 << bit) != 0)
+                    .filter(|bit| candidate_mask & (1u8 << *bit) != 0)
                     .map(|host| format!("198.18.0.{host}/32"))
                     .collect();
                 let candidate_refs: Vec<&str> =
@@ -872,7 +872,7 @@ mod tests {
 
             for candidate_mask in 1u8..16 {
                 let candidate_ports: Vec<(u16, u16)> = (0u32..4)
-                    .filter(|bit| candidate_mask & (1 << bit) != 0)
+                    .filter(|bit| candidate_mask & (1u8 << *bit) != 0)
                     .map(|port| (1000u16 + port as u16, 1000u16 + port as u16))
                     .collect();
                 let candidate = policy(
