@@ -24,6 +24,7 @@ pub const MAX_POLICY_CAPABILITIES: usize = 1024;
 pub const MAX_CIDRS_PER_CAPABILITY: usize = 256;
 pub const MAX_PORT_RANGES_PER_CAPABILITY: usize = 256;
 pub const MAX_POLICY_COMPARISON_WORK: usize = 100_000;
+const REPORT_DIGEST_DOMAIN: &[u8] = b"nixward:network-policy-containment-report:v1\\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +99,19 @@ impl PolicyContainmentReport {
             unsupported_reasons: Vec::new(),
             runtime_enforcement_proven: false,
         }
+    }
+
+    /// Domain-separated digest of this exact report, including its decision,
+    /// policy digests, prover version, deltas, counterexamples and limitations.
+    /// This is an integrity commitment only; it is not an owner signature or
+    /// evidence that the declared network policy is active at runtime.
+    pub fn digest_hex(&self) -> Result<String, serde_json::Error> {
+        let encoded = serde_json::to_vec(self)?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(REPORT_DIGEST_DOMAIN);
+        hasher.update(&(encoded.len() as u64).to_le_bytes());
+        hasher.update(&encoded);
+        Ok(hasher.finalize().to_hex().to_string())
     }
 }
 
@@ -756,6 +770,27 @@ mod tests {
         let report = check_policy_within_boundary(&boundary, &candidate);
         assert_eq!(report.state, ContainmentState::Inconclusive);
         assert!(!report.runtime_enforcement_proven);
+    }
+
+    #[test]
+    fn report_digest_is_deterministic_and_binds_decision() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let report = check_policy_within_boundary(&boundary, &candidate);
+        let digest = report.digest_hex().unwrap();
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, report.clone().digest_hex().unwrap());
+
+        let mut changed = report;
+        changed.state = ContainmentState::Exceeds;
+        assert_ne!(digest, changed.digest_hex().unwrap());
     }
 
     #[test]
