@@ -57,6 +57,7 @@ pub mod network_calibration;
 pub mod network_calibration_harness;
 pub mod network_cognition;
 pub mod network_covenant;
+pub mod network_containment;
 pub mod network_enforcement;
 pub mod network_runtime_lab;
 pub mod network_telemetry;
