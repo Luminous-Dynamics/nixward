@@ -13,6 +13,11 @@ Consequential machine changes use an evidence-bound transaction lifecycle:
 Cognitive signals and natural-language conversation are advisory only; they never constitute machine-mutation authority. See [docs/SYSTEM_TRANSACTION_ARCHITECTURE.md](docs/SYSTEM_TRANSACTION_ARCHITECTURE.md) for the canonical model.
 
 
+
+## Agentic workload binding (research v0.1)
+
+Nixward now has a typed task-bound contract that joins a rootless OCI S2 guest realization, one tenant-scoped workload identity, one declared network policy, and an expiring owner-signable authorization subject. The contract is intentionally marked `bound-not-runtime-enforced`; it does not launch guests or claim production BPF enforcement. See [docs/AGENT_TASK_BOUNDARY_V0_1.md](docs/AGENT_TASK_BOUNDARY_V0_1.md) for trust boundaries, tests and remaining qualification work.
+
 ## Software Ingress Covenant
 
 Nixward does **not** act as an imperative package manager. A cryptographic
