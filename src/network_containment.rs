@@ -437,7 +437,7 @@ pub fn check_policy_within_boundary(
         let matching = matching_boundary_rules(capability, boundary);
         for candidate_ip in &parsed_candidate.destinations {
             for candidate_port in &parsed_candidate.ports {
-                match check_rectangle(*candidate_ip, *candidate_port, &matching) {
+                match check_rectangle(*candidate_ip, candidate_port.clone(), &matching) {
                     Ok(None) => {}
                     Ok(Some((address, port))) => {
                         report.state = ContainmentState::Exceeds;
