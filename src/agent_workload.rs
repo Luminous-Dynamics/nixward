@@ -276,6 +276,7 @@ impl AgentTaskNetworkContract {
     }
 
     /// nonce_entropy must come from the host OS CSPRNG; this module does not generate entropy.\n    /// Produce the owner-signable challenge for this exact task binding.
+    /// nonce_entropy must come from the host OS CSPRNG; this module does not generate entropy.
     /// This does not sign, consume replay state, or activate networking.
     pub fn authority_challenge(
         &self,
