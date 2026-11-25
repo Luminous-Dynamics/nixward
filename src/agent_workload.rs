@@ -520,7 +520,7 @@ mod tests {
     };
     use crate::guest_realization::{GuestObservation, OciObservation, oci_mounts_digest_hex};
     use crate::network_covenant::{
-        NetworkCapability, PortRange, WorkloadSource, NETWORK_COVENANT_SCHEMA_VERSION,
+        NetworkCapability, WorkloadSource, NETWORK_COVENANT_SCHEMA_VERSION,
     };
     use crate::software_ingress::{GuestPermissionEnvelope, OciGuestPlan};
     use ed25519_dalek::{Signer, SigningKey};
