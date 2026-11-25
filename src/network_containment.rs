@@ -892,6 +892,56 @@ mod tests {
     }
 
     #[test]
+    fn exhaustive_small_destination_port_product_matches_tuple_set_oracle() {
+        let workload = workload("worker", "worker.service", "1");
+        let addresses = ["198.18.0.1/32", "198.18.0.2/32"];
+        let ports = [1000u16, 1001u16];
+
+        for boundary_mask in 1u8..16 {
+            let mut boundary_caps = Vec::new();
+            for (address_index, address) in addresses.iter().enumerate() {
+                for (port_index, port) in ports.iter().enumerate() {
+                    let bit = (address_index * ports.len()) + port_index;
+                    if boundary_mask & (1u8 << bit) != 0 {
+                        boundary_caps.push(capability(
+                            &workload,
+                            &format!("boundary-{bit}"),
+                            &[*address],
+                            &[(*port, *port)],
+                        ));
+                    }
+                }
+            }
+            let boundary = policy(workload.clone(), boundary_caps);
+
+            for candidate_mask in 1u8..16 {
+                let mut candidate_caps = Vec::new();
+                for (address_index, address) in addresses.iter().enumerate() {
+                    for (port_index, port) in ports.iter().enumerate() {
+                        let bit = (address_index * ports.len()) + port_index;
+                        if candidate_mask & (1u8 << bit) != 0 {
+                            candidate_caps.push(capability(
+                                &workload,
+                                &format!("candidate-{bit}"),
+                                &[*address],
+                                &[(*port, *port)],
+                            ));
+                        }
+                    }
+                }
+                let candidate = policy(workload.clone(), candidate_caps);
+                let expected_subset = candidate_mask & !boundary_mask == 0;
+                let report = check_policy_within_boundary(&boundary, &candidate);
+                assert_eq!(
+                    report.state,
+                    if expected_subset { ContainmentState::Within } else { ContainmentState::Exceeds },
+                    "candidate tuple mask {candidate_mask:04b}, boundary tuple mask {boundary_mask:04b}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn report_never_claims_runtime_enforcement() {
         let workload = workload("worker", "worker.service", "1");
         let policy = policy(workload, vec![]);
