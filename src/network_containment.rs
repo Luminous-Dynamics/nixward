@@ -115,6 +115,78 @@ impl PolicyContainmentReport {
     }
 }
 
+/// Opaque proof token produced only when the finite-set checker returns
+/// `Within`. Its private fields prevent callers from fabricating a token by
+/// filling in digest strings. It is still not an owner signature or runtime
+/// enforcement attestation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerifiedPolicyContainment {
+    report_digest_blake3: String,
+    boundary_policy_blake3: String,
+    candidate_policy_blake3: String,
+    prover_version: String,
+}
+
+impl VerifiedPolicyContainment {
+    pub fn report_digest_blake3(&self) -> &str {
+        &self.report_digest_blake3
+    }
+
+    pub fn boundary_policy_blake3(&self) -> &str {
+        &self.boundary_policy_blake3
+    }
+
+    pub fn candidate_policy_blake3(&self) -> &str {
+        &self.candidate_policy_blake3
+    }
+
+    pub fn prover_version(&self) -> &str {
+        &self.prover_version
+    }
+}
+
+/// Re-runs containment and returns an opaque token only for a fully modeled
+/// `Within` result. Exceeds, Unsupported and Inconclusive return their full
+/// report to the caller and cannot be coerced into a token.
+pub fn verify_policy_within_boundary(
+    boundary: &NetworkPolicyPlan,
+    candidate: &NetworkPolicyPlan,
+) -> Result<VerifiedPolicyContainment, PolicyContainmentReport> {
+    let mut report = check_policy_within_boundary(boundary, candidate);
+    if report.state != ContainmentState::Within || report.runtime_enforcement_proven {
+        return Err(report);
+    }
+
+    let (Some(boundary_policy_blake3), Some(candidate_policy_blake3)) = (
+        report.boundary_policy_blake3.clone(),
+        report.candidate_policy_blake3.clone(),
+    ) else {
+        report.state = ContainmentState::Unsupported;
+        report.unsupported_reasons.push(
+            "within report is missing a boundary or candidate policy digest".into(),
+        );
+        return Err(report);
+    };
+
+    let report_digest_blake3 = match report.digest_hex() {
+        Ok(digest) => digest,
+        Err(error) => {
+            report.state = ContainmentState::Unsupported;
+            report.unsupported_reasons.push(format!(
+                "containment report could not be serialized for commitment: {error}"
+            ));
+            return Err(report);
+        }
+    };
+
+    Ok(VerifiedPolicyContainment {
+        report_digest_blake3,
+        boundary_policy_blake3,
+        candidate_policy_blake3,
+        prover_version: report.prover_version.clone(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddressFamily {
     V4,
@@ -770,6 +842,57 @@ mod tests {
         let report = check_policy_within_boundary(&boundary, &candidate);
         assert_eq!(report.state, ContainmentState::Inconclusive);
         assert!(!report.runtime_enforcement_proven);
+    }
+
+    #[test]
+    fn opaque_verified_token_binds_within_report_and_both_policies() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        let proof = verify_policy_within_boundary(&boundary, &candidate).unwrap();
+        assert_eq!(proof.boundary_policy_blake3(), boundary.digest_hex().unwrap());
+        assert_eq!(proof.candidate_policy_blake3(), candidate.digest_hex().unwrap());
+        assert_eq!(proof.prover_version(), NETWORK_CONTAINMENT_PROVER_VERSION);
+        assert_eq!(proof.report_digest_blake3().len(), 64);
+    }
+
+    #[test]
+    fn opaque_verified_token_is_not_issued_for_exceeds_or_unsupported() {
+        let workload = workload("worker", "worker.service", "1");
+        let boundary = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/25"], &[(443, 443)])],
+        );
+        let candidate = policy(
+            workload.clone(),
+            vec![capability(&workload, "https", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        assert_eq!(
+            verify_policy_within_boundary(&boundary, &candidate)
+                .unwrap_err()
+                .state,
+            ContainmentState::Exceeds
+        );
+
+        let mut unsupported = policy(
+            workload.clone(),
+            vec![capability(&workload, "host", &["203.0.113.0/24"], &[(443, 443)])],
+        );
+        unsupported.capabilities[0].destinations = DestinationSet::Hostnames {
+            values: vec!["api.example.invalid".into()],
+        };
+        assert_eq!(
+            verify_policy_within_boundary(&boundary, &unsupported)
+                .unwrap_err()
+                .state,
+            ContainmentState::Unsupported
+        );
     }
 
     #[test]
