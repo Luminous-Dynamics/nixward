@@ -51,7 +51,7 @@ Unsupported never silently becomes Within.
 
 ## Tests added
 
-Twenty-two Rust tests cover the current finite proof domain, including three exhaustive 4-element differential corpora:
+Twenty-four Rust tests cover the current finite proof domain, including three exhaustive 4-element differential corpora:
 1. identical policy and the permanent non-runtime-enforcement claim;
 2. narrower CIDR/port policy;
 3. IPv4 CIDR-union coverage;
@@ -86,3 +86,6 @@ These are source-level test cases only until executed with the pinned Rust toolc
 NVIDIA OpenShell's open-source prover models selected credentialed-reach and capability-expansion questions with Z3. Its docs explicitly distinguish formal permission reach from semantic destructiveness. Nixward v0.1 starts with a simpler exact finite-set reference checker; it should remain a trustworthy oracle for the supported subset before an SMT backend is added.
 
 Pinned review source: OpenShell commit 9f7cc51329c775441b953499633ab765831cff38.
+
+
+The module also exposes `verify_policy_within_boundary`, which recomputes the containment result and returns a `VerifiedPolicyContainment` token only for `Within`. The token has private fields and commits to the exact boundary-policy digest, candidate-policy digest, prover version and report digest. `Exceeds`, `Unsupported` and `Inconclusive` return the full report instead. The token is suitable as a future input to the task authorization subject, but it is not an owner signature and does not establish runtime enforcement.
