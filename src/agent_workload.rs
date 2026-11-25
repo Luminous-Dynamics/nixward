@@ -404,6 +404,9 @@ fn validate_canonical_cidr(value: &str) -> Result<(), AgentTaskNetworkError> {
         if bits & mask != bits {
             return Err(AgentTaskNetworkError::NonCanonicalCidr);
         }
+        if prefix == 0 {
+            return Err(AgentTaskNetworkError::UnboundedDestination);
+        }
         return Ok(());
     }
     if let Ok(ip) = address.parse::<Ipv6Addr>() {
@@ -418,6 +421,9 @@ fn validate_canonical_cidr(value: &str) -> Result<(), AgentTaskNetworkError> {
         };
         if bits & mask != bits {
             return Err(AgentTaskNetworkError::NonCanonicalCidr);
+        }
+        if prefix == 0 {
+            return Err(AgentTaskNetworkError::UnboundedDestination);
         }
         return Ok(());
     }
@@ -690,6 +696,17 @@ mod tests {
             values: vec!["0.0.0.0/0".into()],
         });
         assert!(matches!(result, Err(AgentTaskNetworkError::UnboundedDestination)));
+    }
+
+    #[test]
+    fn rejects_expanded_ipv6_default_route() {
+        let result = build_fixture(DestinationSet::Cidrs {
+            values: vec!["0:0:0:0:0:0:0:0/0".into()],
+        });
+        assert!(matches!(
+            result,
+            Err(AgentTaskNetworkError::UnboundedDestination)
+        ));
     }
 
     #[test]
