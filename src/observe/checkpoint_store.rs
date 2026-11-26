@@ -1453,7 +1453,8 @@ mod tests {
         OCI_WITNESS_TREE_HEAD_KIND, VerifiedOciWitnessQuorum,
     };
     use crate::observe::witness_branch_ledger::{
-        make_test_verified_branch_endorsements, VerifiedOciWitnessBranchQuorum,
+        make_test_verified_branch_endorsements, make_test_verified_branch_endorsements_after_parent,
+        VerifiedOciWitnessBranchQuorum,
     };
     use ed25519_dalek::SigningKey;
 
@@ -1517,6 +1518,23 @@ mod tests {
     ) -> VerifiedOciWitnessBranchQuorum {
         let endorsements =
             make_test_verified_branch_endorsements(checkpoint, request, witness_keys).unwrap();
+        VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
+    }
+
+    fn branch_quorum_after_parent(
+        checkpoint: &VerifiedOciObserverCheckpoint,
+        request: &OciObserverWitnessRequest,
+        witness_keys: &[TrustedOciWitnessKey],
+        quorum: VerifiedOciWitnessQuorum,
+        parent_checkpoint: &VerifiedOciObserverCheckpoint,
+    ) -> VerifiedOciWitnessBranchQuorum {
+        let endorsements = make_test_verified_branch_endorsements_after_parent(
+            checkpoint,
+            request,
+            witness_keys,
+            Some(parent_checkpoint),
+        )
+        .unwrap();
         VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
     }
 
@@ -1770,7 +1788,13 @@ mod tests {
 
         assert!(matches!(
             store.finalize_witness_quorum(
-                &branch_quorum(&second, &second_request, &stale_witness_keys, stale_genesis_quorum.clone()),
+                &branch_quorum_after_parent(
+                    &second,
+                    &second_request,
+                    &stale_witness_keys,
+                    stale_genesis_quorum.clone(),
+                    &first,
+                ),
                 &observer_key,
                 &stale_witness_keys,
                 1_400,
