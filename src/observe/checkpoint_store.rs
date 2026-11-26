@@ -1397,6 +1397,41 @@ mod tests {
     }
 
     #[test]
+    fn rejects_observer_public_key_substitution_under_same_key_id_and_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let mut observer_key = trusted_observer_key();
+        observer_key.public_key_hex = "ff".repeat(32);
+        let mut store = open_store(&temp);
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+        assert!(matches!(
+            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            Err(OciObserverCheckpointStoreError::ObserverKeyNotCurrentlyValid)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
+    }
+
+    #[test]
+    fn rejects_witness_public_key_substitution_under_same_key_id_and_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (mut witness_keys, quorum) =
+            make_test_witness_quorum_for_request(&request, 2).unwrap();
+        witness_keys[0].public_key_hex = "ff".repeat(32);
+        let observer_key = trusted_observer_key();
+        let mut store = open_store(&temp);
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+        assert!(matches!(
+            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
+    }
+
+    #[test]
     fn rejects_witness_key_revoked_after_receipt_verification() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
