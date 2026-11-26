@@ -1182,6 +1182,13 @@ impl OciObserverCheckpointStore {
     }
 
     #[cfg(test)]
+    fn schema_version(&self) -> Result<i64, OciObserverCheckpointStoreError> {
+        self.connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(OciObserverCheckpointStoreError::from)
+    }
+
+    #[cfg(test)]
     fn journal_configuration(&self) -> Result<(String, i64), OciObserverCheckpointStoreError> {
         let journal_mode: String =
             self.connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
@@ -1370,6 +1377,60 @@ mod tests {
             store.prepare_checkpoint(&second, &second_request, 1_500),
             Err(OciObserverCheckpointStoreError::Quarantined)
         ));
+    }
+
+    #[test]
+    fn migrates_v1_checkpoint_history_atomically_to_v2() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("observer-checkpoints.sqlite");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).read(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        drop(options.open(&path).unwrap());
+
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(OBSERVER_STATE_DDL).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE checkpoint_history (
+                        observer_id TEXT NOT NULL,
+                        checkpoint_digest TEXT NOT NULL,
+                        machine_id TEXT NOT NULL,
+                        boot_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL CHECK (sequence > 0),
+                        parent_digest TEXT,
+                        snapshot_digest TEXT NOT NULL,
+                        chain_head_digest TEXT NOT NULL,
+                        key_id TEXT NOT NULL,
+                        key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+                        expires_at_ms INTEGER NOT NULL,
+                        request_digest TEXT NOT NULL,
+                        request_bytes BLOB NOT NULL,
+                        state TEXT NOT NULL CHECK (
+                            state IN ('prepared', 'reconciliation_required', 'quarantined')
+                        ),
+                        created_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY (observer_id, checkpoint_digest),
+                        UNIQUE (observer_id, sequence)
+                    );
+                    PRAGMA user_version=1;",
+                )
+                .unwrap();
+        }
+
+        let store = open_store(&temp);
+        assert_eq!(store.schema_version().unwrap(), 2);
+        store.integrity_check().unwrap();
+        let head = store
+            .witness_tree_head(&"a1".repeat(32), "witness-a")
+            .unwrap();
+        assert_eq!(head.tree_size, 0);
+        assert_eq!(head.root_hash_sha256, empty_merkle_root_sha256());
     }
 
     #[test]
