@@ -111,7 +111,7 @@ Fourteen task-contract Rust unit tests cover:
 13. runtime snapshot substitution rejection when the image identity differs;
 14. runtime process-start mutation invalidating the owner signature.
 
-The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 14 task-contract tests, 24 policy-containment tests and 18 OCI-observer tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, runtime-lab or CI pass is claimed here.
+The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 14 task-contract tests, 24 policy-containment tests, 22 OCI-observer tests and six receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
 
 ## 9. Next qualification increments
 
@@ -146,4 +146,4 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs and mismatched runtime image snapshots are rejected. The task-binding branch contains 13 task-contract tests, 24 policy-containment tests and 18 OCI-observer tests. None has been compiled or executed.
+Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, and shared cgroup namespaces are rejected. The task-binding branch contains 14 task-contract tests, 24 policy-containment tests, 22 OCI-observer tests and six receipt-chain tests. None has been compiled or executed.
