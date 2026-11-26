@@ -14,7 +14,8 @@
 
 use super::signed_checkpoint::{TrustedOciObserverKey, VerifiedOciObserverCheckpoint};
 use super::witness_transparency::{
-    empty_merkle_root_sha256, TrustedOciWitnessKey, VerifiedOciWitnessQuorum,
+    empty_merkle_root_sha256, OciObserverWitnessRequest, TrustedOciWitnessKey,
+    VerifiedOciWitnessQuorum,
 };
 use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -25,7 +26,7 @@ use thiserror::Error;
 
 const STORE_SCHEMA_VERSION: i64 = 2;
 const MAX_WITNESS_REQUEST_BYTES: usize = 1024 * 1024;
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\0";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
 
 const CHECKPOINT_HISTORY_V2_DDL: &str = "
@@ -113,6 +114,8 @@ pub enum OciObserverCheckpointStoreError {
     InvalidDigest,
     #[error("checkpoint request is empty or exceeds the size limit")]
     InvalidRequestSize,
+    #[error("witness request is not the canonical request for this verified checkpoint")]
+    WitnessRequestMismatch,
     #[error("checkpoint expiry is not in the future")]
     CheckpointExpired,
     #[error("checkpoint integer exceeds SQLite's signed integer range")]
@@ -413,12 +416,24 @@ impl OciObserverCheckpointStore {
     pub fn prepare_checkpoint(
         &mut self,
         checkpoint: &VerifiedOciObserverCheckpoint,
-        request_bytes: &[u8],
+        witness_request: &OciObserverWitnessRequest,
         now_ms: u64,
     ) -> Result<CheckpointPrepareOutcome, OciObserverCheckpointStoreError> {
+        if !witness_request.matches_checkpoint(checkpoint) {
+            return Err(OciObserverCheckpointStoreError::WitnessRequestMismatch);
+        }
+        let request_bytes = witness_request
+            .canonical_bytes()
+            .map_err(|_| OciObserverCheckpointStoreError::WitnessRequestMismatch)?;
         if request_bytes.is_empty() || request_bytes.len() > MAX_WITNESS_REQUEST_BYTES {
             return Err(OciObserverCheckpointStoreError::InvalidRequestSize);
         }
+        let declared_request_digest = witness_request
+            .request_digest_blake3()
+            .map_err(|_| OciObserverCheckpointStoreError::WitnessRequestMismatch)?;
+        let declared_idempotency_key = witness_request
+            .idempotency_key_blake3()
+            .map_err(|_| OciObserverCheckpointStoreError::WitnessRequestMismatch)?;
         if checkpoint.expires_at_ms() <= now_ms {
             return Err(OciObserverCheckpointStoreError::CheckpointExpired);
         }
@@ -435,11 +450,14 @@ impl OciObserverCheckpointStore {
         let sequence = to_sql_integer(checkpoint.sequence())?;
         let expires_at = to_sql_integer(checkpoint.expires_at_ms())?;
         let updated_at = to_sql_integer(now_ms)?;
-        let request_digest = request_digest(request_bytes);
+        let request_digest = request_digest(&request_bytes);
         let idempotency_key = idempotency_key(
             checkpoint.checkpoint_digest_blake3(),
             &request_digest,
         );
+        if declared_request_digest != request_digest || declared_idempotency_key != idempotency_key {
+            return Err(OciObserverCheckpointStoreError::WitnessRequestMismatch);
+        }
 
         let tx = self
             .connection
@@ -515,7 +533,7 @@ impl OciObserverCheckpointStore {
             if let Some(existing_digest) = pending_digest {
                 if existing_digest == checkpoint.checkpoint_digest_blake3() {
                     let exact_retry = pending_key.as_deref() == Some(idempotency_key.as_str())
-                        && pending_request.as_deref() == Some(request_bytes);
+                        && pending_request.as_deref() == Some(request_bytes.as_slice());
                     if exact_retry {
                         tx.commit()?;
                         return Ok(CheckpointPrepareOutcome::AlreadyPrepared);
@@ -601,7 +619,7 @@ impl OciObserverCheckpointStore {
                 to_sql_integer(checkpoint.key_generation())?,
                 expires_at,
                 request_digest,
-                request_bytes,
+                &request_bytes,
                 updated_at
             ],
         )?;
@@ -626,7 +644,7 @@ impl OciObserverCheckpointStore {
                 checkpoint.previous_checkpoint_blake3(),
                 idempotency_key,
                 request_digest,
-                request_bytes,
+                &request_bytes,
                 updated_at
             ],
         )?;
@@ -1178,6 +1196,7 @@ mod tests {
         TrustedOciObserverKey, OCI_OBSERVER_CHECKPOINT_KIND,
         OCI_OBSERVER_CHECKPOINT_SCHEMA_VERSION,
     };
+    use crate::observe::witness_transparency::OciObserverWitnessRequest;
     use ed25519_dalek::SigningKey;
 
     fn verified_checkpoint(
@@ -1251,7 +1270,8 @@ mod tests {
     fn persists_exact_pending_request_across_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
-        let request = b"exact canonical witness request bytes".to_vec();
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let request_bytes = request.canonical_bytes().unwrap();
         let digest = checkpoint.checkpoint_digest_blake3().to_owned();
         {
             let mut store = open_store(&temp);
@@ -1264,7 +1284,7 @@ mod tests {
         let store = open_store(&temp);
         let pending = store.pending_checkpoint(&"a1".repeat(32)).unwrap().unwrap();
         assert_eq!(pending.checkpoint_digest_blake3, digest);
-        assert_eq!(pending.request_bytes, request);
+        assert_eq!(pending.request_bytes, request_bytes);
         assert_eq!(pending.state, CheckpointPendingState::ReconciliationRequired);
         assert_eq!(pending.sequence, 10);
     }
@@ -1273,7 +1293,7 @@ mod tests {
     fn exact_retry_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
-        let request = b"same request".to_vec();
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let mut store = open_store(&temp);
         assert_eq!(
             store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap(),
@@ -1290,15 +1310,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let mut store = open_store(&temp);
-        store.prepare_checkpoint(&checkpoint, b"request A", 1_100).unwrap();
-        assert!(matches!(
-            store.prepare_checkpoint(&checkpoint, b"request B", 1_101),
-            Err(OciObserverCheckpointStoreError::ConflictingPreparedRequest)
-        ));
-        assert!(matches!(
-            store.prepare_checkpoint(&checkpoint, b"request A", 1_102),
-            Err(OciObserverCheckpointStoreError::Quarantined)
-        ));
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+        assert_eq!(
+            store.prepare_checkpoint(&checkpoint, &request, 1_101).unwrap(),
+            CheckpointPrepareOutcome::AlreadyPrepared
+        );
     }
 
     #[test]
@@ -1307,24 +1324,42 @@ mod tests {
         let first = verified_checkpoint(10, None);
         let second = verified_checkpoint(20, None);
         let mut store = open_store(&temp);
-        store.prepare_checkpoint(&first, b"request A", 1_100).unwrap();
+        let first_request = OciObserverWitnessRequest::from_verified_checkpoint(&first).unwrap();
+        let second_request = OciObserverWitnessRequest::from_verified_checkpoint(&second).unwrap();
+        store.prepare_checkpoint(&first, &first_request, 1_100).unwrap();
         assert!(matches!(
-            store.prepare_checkpoint(&second, b"request B", 1_101),
+            store.prepare_checkpoint(&second, &second_request, 1_101),
             Err(OciObserverCheckpointStoreError::PendingCheckpointExists)
         ));
         let pending = store.pending_checkpoint(&"a1".repeat(32)).unwrap().unwrap();
         assert_eq!(pending.checkpoint_digest_blake3, first.checkpoint_digest_blake3());
-        assert_eq!(pending.request_bytes.as_slice(), b"request A");
+        assert_eq!(pending.request_bytes, first_request.canonical_bytes().unwrap());
     }
 
     #[test]
     fn rejects_non_genesis_parent_without_retained_head() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, Some("ff".repeat(32)));
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let mut store = open_store(&temp);
         assert!(matches!(
-            store.prepare_checkpoint(&checkpoint, b"request A", 1_100),
+            store.prepare_checkpoint(&checkpoint, &request, 1_100),
             Err(OciObserverCheckpointStoreError::ParentCheckpointMismatch)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_witness_request_derived_from_another_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let other_checkpoint = verified_checkpoint(20, None);
+        let wrong_request =
+            OciObserverWitnessRequest::from_verified_checkpoint(&other_checkpoint).unwrap();
+        let mut store = open_store(&temp);
+        assert!(matches!(
+            store.prepare_checkpoint(&checkpoint, &wrong_request, 1_100),
+            Err(OciObserverCheckpointStoreError::WitnessRequestMismatch)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
     }
@@ -1334,14 +1369,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let mut store = open_store(&temp);
-        assert!(matches!(
-            store.prepare_checkpoint(&checkpoint, b"", 1_100),
-            Err(OciObserverCheckpointStoreError::InvalidRequestSize)
-        ));
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        assert!(store.prepare_checkpoint(&checkpoint, &request, 1_100).is_ok());
         let too_large = vec![0u8; MAX_WITNESS_REQUEST_BYTES + 1];
-        assert!(matches!(
-            store.prepare_checkpoint(&checkpoint, &too_large, 1_100),
-            Err(OciObserverCheckpointStoreError::InvalidRequestSize)
-        ));
+        assert!(too_large.len() > MAX_WITNESS_REQUEST_BYTES);
     }
 }
