@@ -140,6 +140,10 @@ pub enum OciObserverCheckpointError {
     SnapshotMismatch,
     #[error("checkpoint chain head does not match the independently verified chain")]
     ChainHeadMismatch,
+    #[error("checkpoint boot ID does not match the independently verified chain epoch")]
+    BootIdentityMismatch,
+    #[error("checkpoint sequence does not match the independently verified chain sequence")]
+    SequenceMismatch,
     #[error("observer sequence is not strictly increasing")]
     SequenceRollback,
 }
@@ -261,6 +265,8 @@ pub struct OciObserverCheckpointExpectation {
     pub challenge_nonce: [u8; 32],
     pub expected_snapshot_digest_blake3: String,
     pub expected_chain_head_blake3: String,
+    pub expected_boot_id: String,
+    pub expected_sequence: u64,
     pub expected_previous_checkpoint_blake3: Option<String>,
     pub min_sequence_exclusive: u64,
     pub now_ms: u64,
@@ -408,11 +414,21 @@ pub fn verify_observer_checkpoint(
     if payload.chain_head_blake3 != expectation.expected_chain_head_blake3 {
         return Err(OciObserverCheckpointError::ChainHeadMismatch);
     }
+    validate_boot_id(&expectation.expected_boot_id)?;
+    if payload.boot_id != expectation.expected_boot_id {
+        return Err(OciObserverCheckpointError::BootIdentityMismatch);
+    }
     if payload.previous_checkpoint_blake3 != expectation.expected_previous_checkpoint_blake3 {
         return Err(OciObserverCheckpointError::PreviousCheckpointMismatch);
     }
     if payload.sequence <= expectation.min_sequence_exclusive {
         return Err(OciObserverCheckpointError::SequenceRollback);
+    }
+    if expectation.expected_sequence <= expectation.min_sequence_exclusive {
+        return Err(OciObserverCheckpointError::SequenceRollback);
+    }
+    if payload.sequence != expectation.expected_sequence {
+        return Err(OciObserverCheckpointError::SequenceMismatch);
     }
 
     let trusted_public_key = decode_hex::<32>(&trusted_key.public_key_hex)?;
@@ -476,6 +492,8 @@ mod tests {
             challenge_nonce: [9u8; 32],
             expected_snapshot_digest_blake3: "c3".repeat(32),
             expected_chain_head_blake3: "d4".repeat(32),
+            expected_boot_id: "11111111-2222-3333-4444-555555555555".into(),
+            expected_sequence: if min_sequence == 0 { 10 } else { 20 },
             expected_previous_checkpoint_blake3: previous,
             min_sequence_exclusive: min_sequence,
             now_ms: 1_000,
@@ -574,6 +592,28 @@ mod tests {
         assert_eq!(
             verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
             Err(OciObserverCheckpointError::CheckpointNotYetIssued)
+        );
+    }
+
+    #[test]
+    fn rejects_boot_epoch_substitution_against_verified_chain() {
+        let (signing, signed) = signed(None, 10);
+        let mut expected = expectation(None, 0);
+        expected.expected_boot_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into();
+        assert_eq!(
+            verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
+            Err(OciObserverCheckpointError::BootIdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_sequence_not_matching_verified_chain_terminal_sequence() {
+        let (signing, signed) = signed(None, 10);
+        let mut expected = expectation(None, 0);
+        expected.expected_sequence = 11;
+        assert_eq!(
+            verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
+            Err(OciObserverCheckpointError::SequenceMismatch)
         );
     }
 
