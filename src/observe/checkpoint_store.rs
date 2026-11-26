@@ -12,17 +12,88 @@
 //! and synchronous=FULL. It is not a remote anti-rollback anchor against a
 //! privileged local attacker who can restore the database and WAL together.
 
-use super::signed_checkpoint::VerifiedOciObserverCheckpoint;
+use super::signed_checkpoint::{TrustedOciObserverKey, VerifiedOciObserverCheckpoint};
+use super::witness_transparency::{
+    empty_merkle_root_sha256, TrustedOciWitnessKey, VerifiedOciWitnessQuorum,
+};
+use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const STORE_SCHEMA_VERSION: i64 = 1;
+const STORE_SCHEMA_VERSION: i64 = 2;
 const MAX_WITNESS_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
+
+const CHECKPOINT_HISTORY_V2_DDL: &str = "
+CREATE TABLE checkpoint_history (
+    observer_id TEXT NOT NULL,
+    checkpoint_digest TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    boot_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    parent_digest TEXT,
+    snapshot_digest TEXT NOT NULL,
+    chain_head_digest TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    expires_at_ms INTEGER NOT NULL,
+    request_digest TEXT NOT NULL,
+    request_bytes BLOB NOT NULL,
+    state TEXT NOT NULL CHECK (
+        state IN ('prepared', 'reconciliation_required', 'quarantined', 'witness_quorum_confirmed')
+    ),
+    created_at_ms INTEGER NOT NULL,
+    witness_quorum_digest TEXT,
+    witness_quorum_required INTEGER,
+    witness_receipt_count INTEGER,
+    witness_confirmed_at_ms INTEGER,
+    PRIMARY KEY (observer_id, checkpoint_digest),
+    UNIQUE (observer_id, sequence),
+    CHECK (
+        state != 'witness_quorum_confirmed'
+        OR (
+            witness_quorum_digest IS NOT NULL
+            AND witness_quorum_required IS NOT NULL
+            AND witness_receipt_count IS NOT NULL
+            AND witness_confirmed_at_ms IS NOT NULL
+        )
+    )
+);";
+
+const WITNESS_TABLES_DDL: &str = "
+CREATE TABLE witness_checkpoint_receipts (
+    observer_id TEXT NOT NULL,
+    checkpoint_digest TEXT NOT NULL,
+    witness_id TEXT NOT NULL,
+    trust_domain_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    tree_size INTEGER NOT NULL CHECK (tree_size > 0),
+    root_hash_sha256 TEXT NOT NULL,
+    receipt_digest_blake3 TEXT NOT NULL,
+    receipt_bytes BLOB NOT NULL,
+    PRIMARY KEY (observer_id, checkpoint_digest, witness_id),
+    FOREIGN KEY (observer_id, checkpoint_digest)
+        REFERENCES checkpoint_history(observer_id, checkpoint_digest)
+        ON DELETE RESTRICT
+);
+
+CREATE TABLE observer_witness_state (
+    observer_id TEXT NOT NULL,
+    witness_id TEXT NOT NULL,
+    trust_domain_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    tree_size INTEGER NOT NULL CHECK (tree_size > 0),
+    root_hash_sha256 TEXT NOT NULL,
+    receipt_digest_blake3 TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (observer_id, witness_id)
+);";
 
 #[derive(Debug, Error)]
 pub enum OciObserverCheckpointStoreError {
@@ -62,6 +133,16 @@ pub enum OciObserverCheckpointStoreError {
     PendingCheckpointNotFound,
     #[error("SQLite integrity_check reported corruption")]
     IntegrityCheckFailed,
+    #[error("verified witness quorum does not match the pending checkpoint request")]
+    WitnessQuorumMismatch,
+    #[error("observer key is not currently valid for checkpoint finalization")]
+    ObserverKeyNotCurrentlyValid,
+    #[error("witness key is not currently valid for checkpoint finalization")]
+    WitnessKeyNotCurrentlyValid,
+    #[error("witness tree head does not extend the locally retained witness head")]
+    WitnessTreeHeadMismatch,
+    #[error("witness receipt conflicts with an already persisted receipt")]
+    WitnessReceiptConflict,
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("filesystem error: {0}")]
@@ -72,6 +153,22 @@ pub enum OciObserverCheckpointStoreError {
 pub enum CheckpointPrepareOutcome {
     Prepared,
     AlreadyPrepared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointFinalizeOutcome {
+    Finalized,
+    AlreadyFinalized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedOciWitnessTreeHead {
+    pub witness_id: String,
+    pub trust_domain_id: String,
+    pub key_id: String,
+    pub key_generation: u64,
+    pub tree_size: u64,
+    pub root_hash_sha256: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,32 +370,35 @@ impl OciObserverCheckpointStore {
                             AND pending_request IS NOT NULL
                             AND pending_state IS NOT NULL)
                     )
-                 );
-
-                 CREATE TABLE checkpoint_history (
-                    observer_id TEXT NOT NULL,
-                    checkpoint_digest TEXT NOT NULL,
-                    machine_id TEXT NOT NULL,
-                    boot_id TEXT NOT NULL,
-                    sequence INTEGER NOT NULL CHECK (sequence > 0),
-                    parent_digest TEXT,
-                    snapshot_digest TEXT NOT NULL,
-                    chain_head_digest TEXT NOT NULL,
-                    key_id TEXT NOT NULL,
-                    key_generation INTEGER NOT NULL CHECK (key_generation > 0),
-                    expires_at_ms INTEGER NOT NULL,
-                    request_digest TEXT NOT NULL,
-                    request_bytes BLOB NOT NULL,
-                    state TEXT NOT NULL CHECK (
-                        state IN ('prepared', 'reconciliation_required', 'quarantined')
-                    ),
-                    created_at_ms INTEGER NOT NULL,
-                    PRIMARY KEY (observer_id, checkpoint_digest),
-                    UNIQUE (observer_id, sequence)
-                 );
-
-                 PRAGMA user_version=1;",
+                 );",
             )?;
+            connection.execute_batch(CHECKPOINT_HISTORY_V2_DDL)?;
+            connection.execute_batch(WITNESS_TABLES_DDL)?;
+            connection.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+        } else if schema_version == 1 {
+            let migration = format!(
+                "BEGIN EXCLUSIVE;
+                 ALTER TABLE checkpoint_history RENAME TO checkpoint_history_v1;
+                 {history_ddl}
+                 INSERT INTO checkpoint_history (
+                    observer_id, checkpoint_digest, machine_id, boot_id, sequence,
+                    parent_digest, snapshot_digest, chain_head_digest, key_id,
+                    key_generation, expires_at_ms, request_digest, request_bytes,
+                    state, created_at_ms
+                 )
+                 SELECT observer_id, checkpoint_digest, machine_id, boot_id, sequence,
+                        parent_digest, snapshot_digest, chain_head_digest, key_id,
+                        key_generation, expires_at_ms, request_digest, request_bytes,
+                        state, created_at_ms
+                 FROM checkpoint_history_v1;
+                 DROP TABLE checkpoint_history_v1;
+                 {witness_tables}
+                 PRAGMA user_version=2;
+                 COMMIT;",
+                history_ddl = CHECKPOINT_HISTORY_V2_DDL,
+                witness_tables = WITNESS_TABLES_DDL,
+            );
+            connection.execute_batch(&migration)?;
         } else if schema_version != STORE_SCHEMA_VERSION {
             return Err(OciObserverCheckpointStoreError::UnsupportedSchemaVersion);
         }
@@ -647,6 +747,385 @@ impl OciObserverCheckpointStore {
             },
         )
         .transpose()
+    }
+
+    /// Return the locally retained head for one witness. An absent row is
+    /// the RFC 9162 empty tree (size zero and SHA-256 of the empty string).
+    /// The caller must use this exact value as the prior-head expectation when
+    /// verifying the next receipt from that witness.
+    pub fn witness_tree_head(
+        &self,
+        observer_id_blake3: &str,
+        witness_id: &str,
+    ) -> Result<RetainedOciWitnessTreeHead, OciObserverCheckpointStoreError> {
+        validate_digest(observer_id_blake3)?;
+        if witness_id.is_empty()
+            || witness_id.len() > 128
+            || !witness_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        {
+            return Err(OciObserverCheckpointStoreError::InvalidDigest);
+        }
+        let row: Option<(String, String, i64, i64, String)> = self
+            .connection
+            .query_row(
+                "SELECT trust_domain_id, key_id, key_generation, tree_size, root_hash_sha256
+                 FROM observer_witness_state
+                 WHERE observer_id = ?1 AND witness_id = ?2",
+                params![observer_id_blake3, witness_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        if let Some((trust_domain_id, key_id, key_generation, tree_size, root_hash_sha256)) = row {
+            Ok(RetainedOciWitnessTreeHead {
+                witness_id: witness_id.to_owned(),
+                trust_domain_id,
+                key_id,
+                key_generation: u64::try_from(key_generation)
+                    .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?,
+                tree_size: u64::try_from(tree_size)
+                    .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?,
+                root_hash_sha256,
+            })
+        } else {
+            Ok(RetainedOciWitnessTreeHead {
+                witness_id: witness_id.to_owned(),
+                trust_domain_id: String::new(),
+                key_id: String::new(),
+                key_generation: 0,
+                tree_size: 0,
+                root_hash_sha256: empty_merkle_root_sha256(),
+            })
+        }
+    }
+
+    /// Finalize a prepared checkpoint only after a separately verified
+    /// witness-quorum token is supplied. Current observer and witness trust
+    /// records are rechecked immediately before the durable commit. This
+    /// closes the revocation-between-proof-and-commit window at the RP.
+    pub fn finalize_witness_quorum(
+        &mut self,
+        quorum: &VerifiedOciWitnessQuorum,
+        observer_key: &TrustedOciObserverKey,
+        witness_keys: &[TrustedOciWitnessKey],
+        now_ms: u64,
+    ) -> Result<CheckpointFinalizeOutcome, OciObserverCheckpointStoreError> {
+        validate_digest(quorum.checkpoint_digest_blake3())
+            .map_err(|_| OciObserverCheckpointStoreError::InvalidDigest)?;
+        validate_digest(quorum.request_digest_blake3())
+            .map_err(|_| OciObserverCheckpointStoreError::InvalidDigest)?;
+        validate_digest(quorum.idempotency_key_blake3())
+            .map_err(|_| OciObserverCheckpointStoreError::InvalidDigest)?;
+        let now = to_sql_integer(now_ms)?;
+
+        if witness_keys.len() != quorum.receipts().len()
+            || quorum.receipts().len() < quorum.required_trust_domains()
+        {
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        type ObserverRow = (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        );
+        let observer_state: Option<ObserverRow> = tx
+            .query_row(
+                "SELECT machine_id, pending_checkpoint_digest, pending_request_digest,
+                        pending_idempotency_key, pending_state, quarantined
+                 FROM observer_state WHERE observer_id = ?1",
+                [observer_key.observer_id_blake3.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((
+            machine_id,
+            pending_checkpoint,
+            pending_request_digest,
+            pending_idempotency,
+            pending_state,
+            quarantined,
+        )) = observer_state
+        else {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::PendingCheckpointNotFound);
+        };
+
+        if quarantined != 0 {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::Quarantined);
+        }
+
+        type HistoryRow = (String, i64, i64, String, String, Option<String>);
+        let history: Option<HistoryRow> = tx
+            .query_row(
+                "SELECT state, key_generation, expires_at_ms, machine_id, key_id,
+                        witness_quorum_digest
+                 FROM checkpoint_history
+                 WHERE observer_id = ?1 AND checkpoint_digest = ?2",
+                params![
+                    observer_key.observer_id_blake3,
+                    quorum.checkpoint_digest_blake3()
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((
+            history_state,
+            observer_key_generation,
+            expires_at_ms,
+            history_machine_id,
+            history_key_id,
+            existing_quorum_digest,
+        )) = history
+        else {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::PendingCheckpointNotFound);
+        };
+
+        let observer_key_valid = observer_key.machine_id_blake3 == machine_id
+            && observer_key.machine_id_blake3 == history_machine_id
+            && observer_key.observer_id_blake3 == observer_key.observer_id_blake3
+            && observer_key.key_id == history_key_id
+            && i64::try_from(observer_key.key_generation).ok() == Some(observer_key_generation)
+            && now_ms >= observer_key.valid_from_ms
+            && now_ms < observer_key.valid_until_ms
+            && !observer_key
+                .revoked_at_ms
+                .is_some_and(|revoked_at| now_ms >= revoked_at)
+            && expires_at_ms > now;
+        if !observer_key_valid {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::ObserverKeyNotCurrentlyValid);
+        }
+
+        // Exact retry after the transaction committed but the caller lost its
+        // response is safe only when the persisted quorum digest is identical.
+        if history_state == "witness_quorum_confirmed" {
+            if existing_quorum_digest.as_deref()
+                == Some(quorum.evidence_digest_blake3())
+            {
+                tx.commit()?;
+                return Ok(CheckpointFinalizeOutcome::AlreadyFinalized);
+            }
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        if !matches!(history_state.as_str(), "prepared" | "reconciliation_required")
+            || pending_checkpoint.as_deref() != Some(quorum.checkpoint_digest_blake3())
+            || pending_request_digest.as_deref() != Some(quorum.request_digest_blake3())
+            || pending_idempotency.as_deref() != Some(quorum.idempotency_key_blake3())
+            || !matches!(
+                pending_state.as_deref(),
+                Some("prepared") | Some("reconciliation_required")
+            )
+        {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        let mut witness_ids = BTreeSet::new();
+        let mut trust_domains = BTreeSet::new();
+        for key in witness_keys {
+            if !witness_ids.insert(key.witness_id.clone())
+                || !trust_domains.insert(key.trust_domain_id.clone())
+            {
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+            }
+        }
+
+        for verified in quorum.receipts() {
+            let trusted = witness_keys
+                .iter()
+                .find(|key| key.witness_id == verified.witness_id());
+            let Some(trusted) = trusted else {
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid);
+            };
+            let witness_valid = trusted.trust_domain_id == verified.trust_domain_id()
+                && trusted.key_id == verified.key_id()
+                && trusted.key_generation == verified.key_generation()
+                && now_ms >= trusted.valid_from_ms
+                && now_ms < trusted.valid_until_ms
+                && !trusted
+                    .revoked_at_ms
+                    .is_some_and(|revoked_at| now_ms >= revoked_at);
+            if !witness_valid {
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid);
+            }
+
+            let stored_head: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT tree_size, root_hash_sha256
+                     FROM observer_witness_state
+                     WHERE observer_id = ?1 AND witness_id = ?2",
+                    params![observer_key.observer_id_blake3, verified.witness_id()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let (stored_size, stored_root) = if let Some((size, root)) = stored_head {
+                (size, root)
+            } else {
+                (0, empty_merkle_root_sha256())
+            };
+            let expected_previous_size = i64::try_from(verified.previous_tree_size())
+                .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?;
+            if stored_size != expected_previous_size
+                || stored_root != verified.previous_root_sha256()
+            {
+                tx.execute(
+                    "UPDATE observer_state
+                     SET quarantined = 1, pending_state = 'quarantined', updated_at_ms = ?2
+                     WHERE observer_id = ?1",
+                    params![observer_key.observer_id_blake3, now],
+                )?;
+                tx.execute(
+                    "UPDATE checkpoint_history SET state = 'quarantined'
+                     WHERE observer_id = ?1 AND checkpoint_digest = ?2",
+                    params![observer_key.observer_id_blake3, quorum.checkpoint_digest_blake3()],
+                )?;
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessTreeHeadMismatch);
+            }
+        }
+
+        for verified in quorum.receipts() {
+            let key = witness_keys
+                .iter()
+                .find(|candidate| candidate.witness_id == verified.witness_id())
+                .ok_or(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid)?;
+
+            tx.execute(
+                "INSERT INTO witness_checkpoint_receipts (
+                    observer_id, checkpoint_digest, witness_id, trust_domain_id,
+                    key_id, key_generation, tree_size, root_hash_sha256,
+                    receipt_digest_blake3, receipt_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    observer_key.observer_id_blake3,
+                    quorum.checkpoint_digest_blake3(),
+                    verified.witness_id(),
+                    verified.trust_domain_id(),
+                    verified.key_id(),
+                    to_sql_integer(verified.key_generation())?,
+                    to_sql_integer(verified.tree_size())?,
+                    verified.root_hash_sha256(),
+                    verified.receipt_digest_blake3(),
+                    verified.receipt_bytes()
+                ],
+            )?;
+
+            tx.execute(
+                "INSERT INTO observer_witness_state (
+                    observer_id, witness_id, trust_domain_id, key_id, key_generation,
+                    tree_size, root_hash_sha256, receipt_digest_blake3, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(observer_id, witness_id) DO UPDATE SET
+                    trust_domain_id = excluded.trust_domain_id,
+                    key_id = excluded.key_id,
+                    key_generation = excluded.key_generation,
+                    tree_size = excluded.tree_size,
+                    root_hash_sha256 = excluded.root_hash_sha256,
+                    receipt_digest_blake3 = excluded.receipt_digest_blake3,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    observer_key.observer_id_blake3,
+                    verified.witness_id(),
+                    verified.trust_domain_id(),
+                    verified.key_id(),
+                    to_sql_integer(verified.key_generation())?,
+                    to_sql_integer(verified.tree_size())?,
+                    verified.root_hash_sha256(),
+                    verified.receipt_digest_blake3(),
+                    now
+                ],
+            )?;
+        }
+
+        let changed_history = tx.execute(
+            "UPDATE checkpoint_history
+             SET state = 'witness_quorum_confirmed',
+                 witness_quorum_digest = ?3,
+                 witness_quorum_required = ?4,
+                 witness_receipt_count = ?5,
+                 witness_confirmed_at_ms = ?6
+             WHERE observer_id = ?1 AND checkpoint_digest = ?2
+                   AND state IN ('prepared', 'reconciliation_required')",
+            params![
+                observer_key.observer_id_blake3,
+                quorum.checkpoint_digest_blake3(),
+                quorum.evidence_digest_blake3(),
+                to_sql_integer(quorum.required_trust_domains() as u64)?,
+                to_sql_integer(quorum.receipts().len() as u64)?,
+                now
+            ],
+        )?;
+        if changed_history != 1 {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        let changed_state = tx.execute(
+            "UPDATE observer_state
+             SET accepted_checkpoint_digest = pending_checkpoint_digest,
+                 accepted_boot_id = pending_boot_id,
+                 accepted_sequence = pending_sequence,
+                 pending_checkpoint_digest = NULL,
+                 pending_boot_id = NULL,
+                 pending_sequence = NULL,
+                 pending_parent_digest = NULL,
+                 pending_idempotency_key = NULL,
+                 pending_request_digest = NULL,
+                 pending_request = NULL,
+                 pending_state = NULL,
+                 updated_at_ms = ?2
+             WHERE observer_id = ?1
+                   AND pending_checkpoint_digest = ?3
+                   AND quarantined = 0",
+            params![
+                observer_key.observer_id_blake3,
+                now,
+                quorum.checkpoint_digest_blake3()
+            ],
+        )?;
+        if changed_state != 1 {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        tx.commit()?;
+        Ok(CheckpointFinalizeOutcome::Finalized)
     }
 
     /// Run SQLite's integrity_check before an admission decision. This only
