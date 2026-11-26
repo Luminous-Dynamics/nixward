@@ -100,7 +100,7 @@ impl OciObserverReceiptChain {
                 return Err(OciReceiptChainError::BootTransitionRequired);
             }
         }
-        if snapshot.observer_sequence_end() < snapshot.observer_sequence_start() {
+        if snapshot.observer_sequence_end() <= snapshot.observer_sequence_start() {
             return Err(OciReceiptChainError::SequenceRollback);
         }
         if let Some(last) = self.last_sequence {
@@ -192,10 +192,19 @@ impl OciObserverReceiptChain {
                 return Err(OciReceiptChainError::ChainLinkMismatch);
             }
             if let Some(last) = last_sequence {
-                if link.payload.sequence_start <= last || link.payload.sequence_end < link.payload.sequence_start {
+                if link.payload.sequence_start <= last
+                    || (link.payload.kind == OciReceiptLinkKind::Snapshot
+                        && link.payload.sequence_end <= link.payload.sequence_start)
+                    || (link.payload.kind == OciReceiptLinkKind::BootEpochTransition
+                        && link.payload.sequence_end != link.payload.sequence_start)
+                {
                     return Err(OciReceiptChainError::SequenceRollback);
                 }
-            } else if link.payload.sequence_end < link.payload.sequence_start {
+            } else if (link.payload.kind == OciReceiptLinkKind::Snapshot
+                && link.payload.sequence_end <= link.payload.sequence_start)
+                || (link.payload.kind == OciReceiptLinkKind::BootEpochTransition
+                    && link.payload.sequence_end != link.payload.sequence_start)
+            {
                 return Err(OciReceiptChainError::SequenceRollback);
             }
 
