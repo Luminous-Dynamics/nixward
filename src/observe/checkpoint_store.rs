@@ -922,12 +922,12 @@ impl OciObserverCheckpointStore {
             .map_err(|_| OciObserverCheckpointStoreError::InvalidDigest)?;
         let now = to_sql_integer(now_ms)?;
 
-        // This store implements the high-assurance admission profile only.
+        // This store implements the high-assurance 3-of-4 admission profile only.
         // A one-witness development quorum must never be upgraded into this
         // durable admission path.
-        if quorum.required_trust_domains() != 2
-            || quorum.receipts().len() < 2
-            || quorum.receipts().len() > 3
+        if quorum.required_trust_domains() != 3
+            || quorum.receipts().len() < 3
+            || quorum.receipts().len() > 4
             || witness_keys.len() != quorum.receipts().len()
         {
             return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
@@ -1482,11 +1482,11 @@ mod tests {
     }
 
     #[test]
-    fn finalizes_checkpoint_only_after_two_distinct_witness_domains() {
+    fn finalizes_checkpoint_only_after_three_distinct_witness_domains() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
-        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 3).unwrap();
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
 
@@ -1500,10 +1500,13 @@ mod tests {
 
         let head_a = store.witness_tree_head("a1".repeat(32).as_str(), "witness-a").unwrap();
         let head_b = store.witness_tree_head("a1".repeat(32).as_str(), "witness-b").unwrap();
+        let head_c = store.witness_tree_head("a1".repeat(32).as_str(), "witness-c").unwrap();
         assert_eq!(head_a.tree_size, 1);
         assert_eq!(head_b.tree_size, 1);
+        assert_eq!(head_c.tree_size, 1);
         assert_eq!(head_a.trust_domain_id, "operator-a");
         assert_eq!(head_b.trust_domain_id, "operator-b");
+        assert_eq!(head_c.trust_domain_id, "operator-c");
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
         store.integrity_check().unwrap();
 
@@ -1522,7 +1525,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
-        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 3).unwrap();
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
@@ -1594,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_single_witness_quorum_for_high_assurance_finalization() {
+    fn refuses_single_witness_quorum_for_three_of_four_finalization() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
@@ -1615,7 +1618,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
-        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 3).unwrap();
         let mut observer_key = trusted_observer_key();
         observer_key.public_key_hex = "ff".repeat(32);
         let mut store = open_store(&temp);
@@ -1633,7 +1636,7 @@ mod tests {
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let (mut witness_keys, quorum) =
-            make_test_witness_quorum_for_request(&request, 2).unwrap();
+            make_test_witness_quorum_for_request(&request, 3).unwrap();
         witness_keys[0].public_key_hex = "ff".repeat(32);
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
@@ -1651,7 +1654,7 @@ mod tests {
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let (mut witness_keys, quorum) =
-            make_test_witness_quorum_for_request(&request, 2).unwrap();
+            make_test_witness_quorum_for_request(&request, 3).unwrap();
         witness_keys[0].revoked_at_ms = Some(1_150);
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
@@ -1670,7 +1673,7 @@ mod tests {
         let first = verified_checkpoint(10, None);
         let first_request = OciObserverWitnessRequest::from_verified_checkpoint(&first).unwrap();
         let (witness_keys, first_quorum) =
-            make_test_witness_quorum_for_request(&first_request, 2).unwrap();
+            make_test_witness_quorum_for_request(&first_request, 3).unwrap();
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&first, &first_request, 1_100).unwrap();
@@ -1684,7 +1687,7 @@ mod tests {
         );
         let second_request = OciObserverWitnessRequest::from_verified_checkpoint(&second).unwrap();
         let (stale_witness_keys, stale_genesis_quorum) =
-            make_test_witness_quorum_for_request(&second_request, 2).unwrap();
+            make_test_witness_quorum_for_request(&second_request, 3).unwrap();
         store.prepare_checkpoint(&second, &second_request, 1_300).unwrap();
 
         assert!(matches!(
@@ -1951,3 +1954,5 @@ mod tests {
         assert!(store.prepare_checkpoint(&checkpoint, &request, 1_100).is_ok());
     }
 }
+
+
