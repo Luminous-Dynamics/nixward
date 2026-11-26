@@ -164,3 +164,10 @@ The proof receipt envelope is Nixward-specific, using RFC 9162 Merkle hashing/in
 The new `observe::witness_branch_ledger` module implements a durable one-branch signing rule: one signed checkpoint digest per observer parent/sequence, exact idempotent retry, strict parent/sequence advancement, and persistent branch quarantine on a competing digest attempt. It binds the operator-provisioned witness key ID/generation and exact public-key bytes, and never stores private key material.
 
 This ledger is not yet bound into the Merkle receipt's leaf or required by the quorum verifier. That integration is tracked in [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172); current Merkle receipt verification and branch endorsement verification remain separate claims.
+
+
+## Witness one-branch ledger update (26 November 2026)
+
+The new `observe::witness_branch_ledger` signer component persists a unique checkpoint digest for each observer parent/sequence before returning an Ed25519 branch endorsement. It supports exact retry with the same stored endorsement and records/quarantines competing branch attempts. Six source-level tests cover the core state transitions.
+
+This is not yet bound into the Merkle witness receipt. The verifier can still accept a valid Merkle receipt without the separate branch endorsement. Treat the signer ledger and the receipt/quorum verifier as separate assurance evidence until [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172) integrates the endorsement digest and signature into the Merkle leaf and quorum admission.
