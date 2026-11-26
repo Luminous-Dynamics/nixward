@@ -393,7 +393,7 @@ impl OciObserverCheckpointStore {
             _pending_parent,
             pending_key,
             pending_request,
-            pending_state,
+            _pending_state,
             quarantined,
         )) = state
         {
@@ -818,22 +818,19 @@ mod tests {
         ));
         let pending = store.pending_checkpoint(&"a1".repeat(32)).unwrap().unwrap();
         assert_eq!(pending.checkpoint_digest_blake3, first.checkpoint_digest_blake3());
-        assert_eq!(pending.request_bytes, b"request A");
+        assert_eq!(pending.request_bytes.as_slice(), b"request A");
     }
 
     #[test]
-    fn parent_checkpoint_is_required_when_local_history_exists() {
+    fn rejects_non_genesis_parent_without_retained_head() {
         let temp = tempfile::tempdir().unwrap();
-        let first = verified_checkpoint(10, None);
+        let checkpoint = verified_checkpoint(10, Some("ff".repeat(32)));
         let mut store = open_store(&temp);
-        store.prepare_checkpoint(&first, b"request A", 1_100).unwrap();
-        let other_observer = verified_checkpoint(20, Some("ff".repeat(32)));
-        // Observer is the same, so the pending checkpoint blocks a new head
-        // before parent continuity is considered.
         assert!(matches!(
-            store.prepare_checkpoint(&other_observer, b"request B", 1_101),
-            Err(OciObserverCheckpointStoreError::PendingCheckpointExists)
+            store.prepare_checkpoint(&checkpoint, b"request A", 1_100),
+            Err(OciObserverCheckpointStoreError::ParentCheckpointMismatch)
         ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
     }
 
     #[test]
