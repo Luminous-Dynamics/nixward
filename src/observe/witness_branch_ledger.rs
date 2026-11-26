@@ -573,19 +573,26 @@ impl OciWitnessBranchLedger {
         &mut self,
         checkpoint: &VerifiedOciObserverCheckpoint,
         request: &OciObserverWitnessRequest,
+        current_trust: &TrustedOciWitnessKey,
         signing_key: &SigningKey,
         now_ms: u64,
     ) -> Result<(WitnessBranchOutcome, OciWitnessBranchEndorsement), OciWitnessBranchLedgerError> {
         if !request.matches_checkpoint(checkpoint) {
             return Err(OciWitnessBranchLedgerError::WitnessRequestMismatch);
         }
-        if encode_hex(signing_key.verifying_key().as_bytes()) != self.public_key_hex {
+        if current_trust.witness_id != self.witness_id
+            || current_trust.trust_domain_id != self.trust_domain_id
+            || current_trust.key_id != self.key_id
+            || current_trust.key_generation != self.key_generation
+            || current_trust.public_key_hex != self.public_key_hex
+            || encode_hex(signing_key.verifying_key().as_bytes()) != self.public_key_hex
+        {
             return Err(OciWitnessBranchLedgerError::SigningKeyMismatch);
         }
-        if now_ms < self.valid_from_ms || now_ms >= self.valid_until_ms {
+        if now_ms < current_trust.valid_from_ms || now_ms >= current_trust.valid_until_ms {
             return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
         }
-        if self.revoked_at_ms.is_some_and(|revoked_at| now_ms >= revoked_at) {
+        if current_trust.revoked_at_ms.is_some_and(|revoked_at| now_ms >= revoked_at) {
             return Err(OciWitnessBranchLedgerError::KeyRevoked);
         }
         if checkpoint.expires_at_ms() <= now_ms {
@@ -911,10 +918,10 @@ pub(crate) fn make_test_verified_branch_endorsements_after_parent(
         if let Some(parent) = parent_checkpoint {
             let parent_request = OciObserverWitnessRequest::from_verified_checkpoint(parent)
                 .map_err(|_| OciWitnessBranchLedgerError::WitnessRequestMismatch)?;
-            ledger.endorse_checkpoint_branch(parent, &parent_request, &signing_key, 1_150)?;
+            ledger.endorse_checkpoint_branch(parent, &parent_request, trust, &signing_key, 1_150)?;
         }
         let (_, endorsement) =
-            ledger.endorse_checkpoint_branch(checkpoint, request, &signing_key, 1_200)?;
+            ledger.endorse_checkpoint_branch(checkpoint, request, trust, &signing_key, 1_200)?;
         verified.push(verify_witness_branch_endorsement(
             &endorsement,
             trust,
@@ -1025,7 +1032,7 @@ mod tests {
 
         let mut ledger = open_ledger(&temp, &trust);
         let (outcome, retry) = ledger
-            .endorse_checkpoint_branch(&checkpoint, &request, &signing, 1_200)
+            .endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_200)
             .unwrap();
         assert_eq!(outcome, WitnessBranchOutcome::AlreadySigned);
         assert_eq!(retry, endorsement);
@@ -1051,10 +1058,10 @@ mod tests {
         let second_request = OciObserverWitnessRequest::from_verified_checkpoint(&second).unwrap();
         let mut ledger = open_ledger(&temp, &trust);
         ledger
-            .endorse_checkpoint_branch(&first, &first_request, &signing, 1_100)
+            .endorse_checkpoint_branch(&first, &first_request, &trust, &signing, 1_100)
             .unwrap();
         assert!(matches!(
-            ledger.endorse_checkpoint_branch(&second, &second_request, &signing, 1_200),
+            ledger.endorse_checkpoint_branch(&second, &second_request, &trust, &signing, 1_200),
             Err(OciWitnessBranchLedgerError::ConflictingBranch)
         ));
         assert_eq!(
@@ -1078,10 +1085,10 @@ mod tests {
         let second_request = OciObserverWitnessRequest::from_verified_checkpoint(&second).unwrap();
         let mut ledger = open_ledger(&temp, &trust);
         ledger
-            .endorse_checkpoint_branch(&first, &first_request, &signing, 1_100)
+            .endorse_checkpoint_branch(&first, &first_request, &trust, &signing, 1_100)
             .unwrap();
         ledger
-            .endorse_checkpoint_branch(&second, &second_request, &signing, 1_200)
+            .endorse_checkpoint_branch(&second, &second_request, &trust, &signing, 1_200)
             .unwrap();
         assert_eq!(
             ledger.accepted_head("a1".repeat(32).as_str()).unwrap(),
@@ -1098,14 +1105,14 @@ mod tests {
         let first_request = OciObserverWitnessRequest::from_verified_checkpoint(&first).unwrap();
         let mut ledger = open_ledger(&temp, &trust);
         ledger
-            .endorse_checkpoint_branch(&first, &first_request, &signing, 1_100)
+            .endorse_checkpoint_branch(&first, &first_request, &trust, &signing, 1_100)
             .unwrap();
 
         let stale_parent = verified_checkpoint(20, None, 8);
         let stale_request =
             OciObserverWitnessRequest::from_verified_checkpoint(&stale_parent).unwrap();
         assert!(matches!(
-            ledger.endorse_checkpoint_branch(&stale_parent, &stale_request, &signing, 1_200),
+            ledger.endorse_checkpoint_branch(parent, &parent_request, trust, &signing_key, 1_150),
             Err(OciWitnessBranchLedgerError::ParentCheckpointMismatch)
         ));
     }
@@ -1120,7 +1127,7 @@ mod tests {
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let mut ledger = open_ledger(&temp, &trust);
         assert!(matches!(
-            ledger.endorse_checkpoint_branch(&checkpoint, &request, &wrong_signing, 1_100),
+            ledger.endorse_checkpoint_branch(&checkpoint, &request, &trust, &wrong_signing, 1_100),
             Err(OciWitnessBranchLedgerError::SigningKeyMismatch)
         ));
     }
@@ -1135,7 +1142,7 @@ mod tests {
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let mut ledger = open_ledger(&temp, &trust);
         assert!(matches!(
-            ledger.endorse_checkpoint_branch(&checkpoint, &request, &signing, 1_200),
+            ledger.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_200),
             Err(OciWitnessBranchLedgerError::KeyRevoked)
         ));
     }
