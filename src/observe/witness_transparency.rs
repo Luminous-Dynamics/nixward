@@ -233,14 +233,14 @@ pub fn verify_merkle_consistency_sha256(
     if old_size > new_size || consistency_path.len() > MAX_MERKLE_PROOF_NODES {
         return Err(OciWitnessProofError::InvalidConsistencyProof);
     }
-    if old_size == 0 {
-        if old_root == sha256(&[]) && consistency_path.is_empty() {
+    if old_size == new_size {
+        if old_root == new_root && consistency_path.is_empty() {
             return Ok(());
         }
         return Err(OciWitnessProofError::InvalidConsistencyProof);
     }
-    if old_size == new_size {
-        if old_root == new_root && consistency_path.is_empty() {
+    if old_size == 0 {
+        if new_size > 0 && old_root == sha256(&[]) && consistency_path.is_empty() {
             return Ok(());
         }
         return Err(OciWitnessProofError::InvalidConsistencyProof);
@@ -1030,6 +1030,14 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_zero_size_tree_heads() {
+        assert_eq!(
+            verify_merkle_consistency_sha256(0, &empty_merkle_root_sha256(), 0, &"ff".repeat(32), &[]),
+            Err(OciWitnessProofError::InvalidConsistencyProof)
+        );
     }
 
     #[test]
