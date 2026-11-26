@@ -900,6 +900,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_runtime_snapshot_bound_to_a_different_image() {
+        let (_, guest_plan, receipt, workload, policy, enforcement) =
+            fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let wrong_runtime = crate::observe::oci_runtime::test_fixture_for_contract(
+            &format!("sha256:{}", "f".repeat(64))
+        );
+        let result = AgentTaskNetworkContract::bind(
+            "tenant-a",
+            "task-atr-001",
+            "a".repeat(64),
+            "b".repeat(64),
+            &guest_plan,
+            &receipt,
+            &wrong_runtime,
+            &workload,
+            &policy,
+            &policy_proof,
+            &enforcement,
+            1_000_000,
+            60_000,
+            [13; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(AgentTaskNetworkError::RuntimeObservationMismatch)
+        ));
+    }
+
+    #[test]
     fn rejects_policy_proof_replay_after_candidate_policy_changes() {
         let (_, guest_plan, guest_receipt, workload, policy, _) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
