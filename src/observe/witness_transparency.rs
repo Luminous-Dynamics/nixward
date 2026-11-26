@@ -68,6 +68,8 @@ pub enum OciWitnessProofError {
     DuplicateTrustDomain,
     #[error("witnesses disagree on the checkpoint or request commitment")]
     WitnessSubjectDisagreement,
+    #[error("signed tree heads do not establish equivocation")]
+    NotEquivocation,
 }
 
 fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], OciWitnessProofError> {
@@ -563,6 +565,99 @@ pub struct OciWitnessQuorumSubject {
     pub checkpoint_digest_blake3: String,
     pub request_digest_blake3: String,
     pub idempotency_key_blake3: String,
+}
+
+/// Opaque cryptographic evidence that one provisioned witness key signed
+/// two different roots for the same tree size. This is a historical proof;
+/// it remains meaningful even after the witness key is revoked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOciWitnessEquivocation {
+    witness_id: String,
+    key_id: String,
+    key_generation: u64,
+    tree_size: u64,
+    first_root_sha256: String,
+    second_root_sha256: String,
+    first_tree_head_digest_blake3: String,
+    second_tree_head_digest_blake3: String,
+}
+
+impl VerifiedOciWitnessEquivocation {
+    pub fn witness_id(&self) -> &str { &self.witness_id }
+    pub fn key_id(&self) -> &str { &self.key_id }
+    pub fn key_generation(&self) -> u64 { self.key_generation }
+    pub fn tree_size(&self) -> u64 { self.tree_size }
+    pub fn first_root_sha256(&self) -> &str { &self.first_root_sha256 }
+    pub fn second_root_sha256(&self) -> &str { &self.second_root_sha256 }
+    pub fn first_tree_head_digest_blake3(&self) -> &str { &self.first_tree_head_digest_blake3 }
+    pub fn second_tree_head_digest_blake3(&self) -> &str { &self.second_tree_head_digest_blake3 }
+}
+
+/// Verify two signed tree heads from the same provisioned witness key. A
+/// different root at the same tree size is cryptographic evidence of
+/// equivocation. This detects a split view only after both statements are
+/// brought together by gossip or an independent monitor.
+pub fn verify_witness_tree_head_equivocation(
+    first: &SignedOciWitnessTreeHead,
+    second: &SignedOciWitnessTreeHead,
+    trusted_key: &TrustedOciWitnessKey,
+) -> Result<VerifiedOciWitnessEquivocation, OciWitnessProofError> {
+    validate_identifier(&trusted_key.witness_id)?;
+    validate_identifier(&trusted_key.key_id)?;
+    validate_trust_domain(&trusted_key.trust_domain_id)?;
+    if trusted_key.key_generation == 0
+        || trusted_key.valid_until_ms <= trusted_key.valid_from_ms
+    {
+        return Err(OciWitnessProofError::InvalidShape);
+    }
+    if first.witness_id != trusted_key.witness_id
+        || second.witness_id != trusted_key.witness_id
+        || first.key_id != trusted_key.key_id
+        || second.key_id != trusted_key.key_id
+        || first.key_generation != trusted_key.key_generation
+        || second.key_generation != trusted_key.key_generation
+        || first.tree_size != second.tree_size
+    {
+        return Err(OciWitnessProofError::WitnessIdentityMismatch);
+    }
+    let first_bytes = first.signing_bytes()?;
+    let second_bytes = second.signing_bytes()?;
+    let public_key = decode_hex::<32>(&trusted_key.public_key_hex)?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| OciWitnessProofError::InvalidEncoding)?;
+    let first_signature = Signature::from_bytes(&decode_hex::<64>(&first.signature_hex)?);
+    let second_signature = Signature::from_bytes(&decode_hex::<64>(&second.signature_hex)?);
+    verifying_key
+        .verify_strict(&first_bytes, &first_signature)
+        .map_err(|_| OciWitnessProofError::InvalidTreeHeadSignature)?;
+    verifying_key
+        .verify_strict(&second_bytes, &second_signature)
+        .map_err(|_| OciWitnessProofError::InvalidTreeHeadSignature)?;
+    if first.root_hash_sha256 == second.root_hash_sha256 {
+        return Err(OciWitnessProofError::NotEquivocation);
+    }
+
+    let first_bytes = serde_json::to_vec(first).map_err(|_| OciWitnessProofError::InvalidShape)?;
+    let second_bytes = serde_json::to_vec(second).map_err(|_| OciWitnessProofError::InvalidShape)?;
+    let mut first_digest = blake3::Hasher::new();
+    first_digest.update(RECEIPT_DIGEST_DOMAIN);
+    first_digest.update(&(first_bytes.len() as u64).to_le_bytes());
+    first_digest.update(&first_bytes);
+    let mut second_digest = blake3::Hasher::new();
+    second_digest.update(RECEIPT_DIGEST_DOMAIN);
+    second_digest.update(&(second_bytes.len() as u64).to_le_bytes());
+    second_digest.update(&second_bytes);
+
+    Ok(VerifiedOciWitnessEquivocation {
+        witness_id: first.witness_id.clone(),
+        key_id: first.key_id.clone(),
+        key_generation: first.key_generation,
+        tree_size: first.tree_size,
+        first_root_sha256: first.root_hash_sha256.clone(),
+        second_root_sha256: second.root_hash_sha256.clone(),
+        first_tree_head_digest_blake3: first_digest.finalize().to_hex().to_string(),
+        second_tree_head_digest_blake3: second_digest.finalize().to_hex().to_string(),
+    })
 }
 
 pub struct OciWitnessEvidence<'a> {
@@ -1136,6 +1231,138 @@ mod tests {
         assert_eq!(verified.witness_id(), "witness-a");
         assert_eq!(verified.tree_size(), 1);
         assert_eq!(verified.checkpoint_digest_blake3(), "11".repeat(32));
+    }
+
+    #[test]
+    fn detects_two_valid_signed_roots_at_the_same_tree_size() {
+        let signing = SigningKey::from_bytes(&[42u8; 32]);
+        let trust = trusted(&signing, "witness-a");
+        let make_head = |root: &str| {
+            let mut head = SignedOciWitnessTreeHead {
+                schema_version: OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
+                kind: OCI_WITNESS_TREE_HEAD_KIND.to_owned(),
+                witness_id: trust.witness_id.clone(),
+                key_id: trust.key_id.clone(),
+                key_generation: trust.key_generation,
+                tree_size: 7,
+                root_hash_sha256: root.to_owned(),
+                timestamp_ms: 1_100,
+                signature_hex: String::new(),
+            };
+            head.signature_hex = encode_hex(&signing.sign(&head.signing_bytes().unwrap()).to_bytes());
+            head
+        };
+        let first = make_head(&"aa".repeat(32));
+        let second = make_head(&"bb".repeat(32));
+        let evidence = verify_witness_tree_head_equivocation(&first, &second, &trust).unwrap();
+        assert_eq!(evidence.witness_id(), "witness-a");
+        assert_eq!(evidence.tree_size(), 7);
+        assert_ne!(evidence.first_root_sha256(), evidence.second_root_sha256());
+        assert_ne!(
+            evidence.first_tree_head_digest_blake3(),
+            evidence.second_tree_head_digest_blake3()
+        );
+    }
+
+    #[test]
+    fn rejects_same_root_as_non_equivocation() {
+        let signing = SigningKey::from_bytes(&[42u8; 32]);
+        let trust = trusted(&signing, "witness-a");
+        let make_head = || {
+            let mut head = SignedOciWitnessTreeHead {
+                schema_version: OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
+                kind: OCI_WITNESS_TREE_HEAD_KIND.to_owned(),
+                witness_id: trust.witness_id.clone(),
+                key_id: trust.key_id.clone(),
+                key_generation: trust.key_generation,
+                tree_size: 7,
+                root_hash_sha256: "aa".repeat(32),
+                timestamp_ms: 1_100,
+                signature_hex: String::new(),
+            };
+            head.signature_hex = encode_hex(&signing.sign(&head.signing_bytes().unwrap()).to_bytes());
+            head
+        };
+        let first = make_head();
+        let second = make_head();
+        assert_eq!(
+            verify_witness_tree_head_equivocation(&first, &second, &trust),
+            Err(OciWitnessProofError::NotEquivocation)
+        );
+    }
+
+    #[test]
+    fn rejects_equivocation_pair_signed_by_untrusted_key() {
+        let signing = SigningKey::from_bytes(&[42u8; 32]);
+        let wrong_signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted(&signing, "witness-a");
+        let make_head = |key: &SigningKey, root: &str| {
+            let mut head = SignedOciWitnessTreeHead {
+                schema_version: OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
+                kind: OCI_WITNESS_TREE_HEAD_KIND.to_owned(),
+                witness_id: trust.witness_id.clone(),
+                key_id: trust.key_id.clone(),
+                key_generation: trust.key_generation,
+                tree_size: 7,
+                root_hash_sha256: root.to_owned(),
+                timestamp_ms: 1_100,
+                signature_hex: String::new(),
+            };
+            head.signature_hex = encode_hex(&key.sign(&head.signing_bytes().unwrap()).to_bytes());
+            head
+        };
+        let first = make_head(&signing, &"aa".repeat(32));
+        let second = make_head(&wrong_signing, &"bb".repeat(32));
+        assert_eq!(
+            verify_witness_tree_head_equivocation(&first, &second, &trust),
+            Err(OciWitnessProofError::InvalidTreeHeadSignature)
+        );
+    }
+
+    #[test]
+    fn verifies_published_rfc9162_seven_leaf_proof_shapes() {
+        let entries: Vec<Vec<u8>> = (0..7)
+            .map(|index| format!("rfc9162-leaf-{index}").into_bytes())
+            .collect();
+        let root = encode_hex(&mth(&entries));
+
+        for index in [0usize, 3, 4] {
+            let proof = inclusion_path(&entries, index);
+            assert_eq!(proof.len(), 3);
+            let leaf = merkle_leaf_hash_sha256(&entries[index]);
+            verify_merkle_inclusion_sha256(
+                &leaf,
+                index as u64,
+                7,
+                &proof,
+                &root,
+            )
+            .unwrap();
+        }
+        let last_proof = inclusion_path(&entries, 6);
+        assert_eq!(last_proof.len(), 2);
+        verify_merkle_inclusion_sha256(
+            &merkle_leaf_hash_sha256(&entries[6]),
+            6,
+            7,
+            &last_proof,
+            &root,
+        )
+        .unwrap();
+
+        for (old_size, expected_path_len) in [(3usize, 4usize), (4, 1), (6, 3)] {
+            let old_root = encode_hex(&mth(&entries[..old_size]));
+            let proof = consistency_path(old_size, &entries);
+            assert_eq!(proof.len(), expected_path_len);
+            verify_merkle_consistency_sha256(
+                old_size as u64,
+                &old_root,
+                7,
+                &root,
+                &proof,
+            )
+            .unwrap();
+        }
     }
 
     #[test]
