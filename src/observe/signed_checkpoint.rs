@@ -600,6 +600,57 @@ mod tests {
     }
 
     #[test]
+    fn accepts_checkpoint_extending_retained_parent_and_sequence() {
+        let (signing, first_signed) = signed(None, 10);
+        let first = verify_observer_checkpoint(
+            &first_signed,
+            &trusted(&signing),
+            &expectation(None, 0),
+        )
+        .unwrap();
+
+        let mut second_payload = payload(
+            Some(first.checkpoint_digest_blake3().to_owned()),
+            20,
+        );
+        second_payload.challenge_blake3 = observer_challenge_digest(&[8u8; 32]);
+        second_payload.issued_at_ms = 1_050;
+        second_payload.expires_at_ms = 1_950;
+        let second_signed = sign_observer_checkpoint(second_payload, &signing).unwrap();
+
+        let mut second_expectation = expectation(
+            Some(first.checkpoint_digest_blake3().to_owned()),
+            10,
+        );
+        second_expectation.challenge_nonce = [8u8; 32];
+        second_expectation.now_ms = 1_100;
+        let second = verify_observer_checkpoint(
+            &second_signed,
+            &trusted(&signing),
+            &second_expectation,
+        )
+        .unwrap();
+
+        assert_eq!(second.sequence(), 20);
+        assert_eq!(second.key_generation(), first.key_generation());
+        assert_eq!(
+            second.checkpoint_digest_blake3(),
+            second_signed.payload
+                .signing_bytes()
+                .map(|bytes| {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update(CHECKPOINT_DIGEST_DOMAIN);
+                    hasher.update(&(bytes.len() as u64).to_le_bytes());
+                    hasher.update(&bytes);
+                    hasher.update(&decode_hex::<32>(&second_signed.signer_public_key_hex).unwrap());
+                    hasher.update(&decode_hex::<64>(&second_signed.signature_hex).unwrap());
+                    hasher.finalize().to_hex().to_string()
+                })
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn rejects_previous_checkpoint_rollback_or_fork() {
         let (signing, signed) = signed(Some("11".repeat(32)), 10);
         assert_eq!(
