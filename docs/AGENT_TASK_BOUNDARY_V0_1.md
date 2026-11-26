@@ -192,3 +192,10 @@ The network gossip/cross-monitor transport remains unimplemented; no global non-
 Current Nixward source corpus: 136 source-level Rust test functions (15 task contract + 24 containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 18 durable store + 21 witness transparency). None has been compiled or executed; exact-head Nixward CI is not reported and the local environment has no Cargo/rustc/rustfmt/Nix.
 
 The native store is schema v4, persists exact observer/witness public keys and 3-of-4 quorum receipt bytes/high-water marks, and supports receiver-side persistent equivocation evidence/quarantine. The task-binding contract does **not** yet consume the finalized witness checkpoint. No real witness service, cross-client gossip transport, remote key distribution, hardware-backed measured boot, runtime enforcement or independent effect receipts are claimed.
+
+
+### Durable one-branch witness signing ledger (26 Nov 2026)
+
+A new native-only `observe::witness_branch_ledger` persists each witness's decision for an observer parent/sequence before returning an Ed25519 endorsement. It allows an exact idempotent retry, rejects a competing checkpoint digest at the same branch slot, records conflict evidence and quarantines the observer branch. It checks exact witness public-key bytes, key generation, validity and revocation. Six source-level tests have been added.
+
+This signer ledger is not yet integrated into the Merkle leaf or quorum verifier; see [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). The current 3-of-4 quorum receipt verifier does not yet require a branch endorsement, so keep the single-branch safety assumption explicit until integration passes.
