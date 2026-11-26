@@ -90,7 +90,7 @@ The durable design should combine:
 
 Qualification must crash the observer after every persistence boundary: sequence allocation, payload write, link write, fsync, checkpoint request, checkpoint acknowledgement, key rotation and boot transition. Restore old snapshots, truncate tails, reorder links, replay a valid old prefix and simulate lost acknowledgements. Every uncertain result must become Inconclusive and deny new consequential authority until reconciliation.
 
-The current receipt-chain module has structural hash-link checks. The 26 November change rejects noncanonical boot UUID aliases, transitions without an intervening snapshot and reuse of a previously seen boot ID, including on imported/rehashed links. These checks do not create persistence, signatures, an anchor or a trusted boot-transition source.
+The current receipt-chain module has structural hash-link checks. The 26 November changes reject noncanonical boot UUID aliases, transitions without an intervening snapshot, reuse of a previously seen boot ID, and unknown fields on both the serialized receipt envelope and payload. The chain verifier applies the boot-state checks to imported/rehashed links, while strict deserialization rejects uncommitted extension fields. These checks do not create persistence, signatures, an anchor or a trusted boot-transition source.
 
 ## 5. Policy proof must cover the actual capability
 
@@ -224,7 +224,7 @@ For each backend, test allowed and denied TCP, UDP and IPv6; DNS rebinding/TTL a
 
 ### P4 — Publish reproducible results
 
-- Use Platform ATR-001..ATR-039 plus hidden family-disjoint combinations.
+- Use Platform ATR-001..ATR-040 plus hidden family-disjoint combinations.
 - Publish per-scenario outcome vectors, all hard-gate violations, utility, attribution, evidence provenance, p50/p95/p99 latency, overhead and confidence bounds.
 - Freeze exact heads, inputs and manifests. A skipped or queued runner is pending—not a pass.
 
