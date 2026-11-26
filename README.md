@@ -236,4 +236,4 @@ Measured on 16,384-dim vectors (criterion, release mode):
 MIT
 
 
-The contract now requires the opaque `VerifiedPolicyContainment` token from the finite-set policy prover. The schema-v2 owner-signable subject binds the exact owner-boundary digest, candidate-policy digest, prover version and containment-report digest. This is policy-delta proof, not runtime enforcement; the status remains `bound-not-runtime-enforced-v2` and the compiled plan remains disabled pending independent host/runtime evidence.
+The schema-v3 task contract requires the opaque `VerifiedPolicyContainment` token from the finite-set policy prover and the bounded OCI source-consistency snapshot. Its owner-signable subject binds the exact owner-boundary digest, candidate-policy digest, prover version, containment-report digest and runtime snapshot identity. The containment report uses its own versioned policy-proof schema; neither proof establishes runtime enforcement. The task status remains `runtime-observed-not-enforced-v3`, and the compiled enforcement plan remains disabled pending independent host/runtime evidence.
