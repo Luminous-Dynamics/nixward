@@ -163,3 +163,16 @@ Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric p
 The new `observe::checkpoint_store` module uses native SQLite WAL with `synchronous=FULL` and persists the exact verified checkpoint parent and exact witness request before network I/O. It supports a single unresolved checkpoint per observer, byte-identical idempotent retries, conflict quarantine, explicit reconciliation-required state and recovery of the exact pending bytes. It does not yet accept witness receipts or mark a checkpoint confirmed. The store intentionally cannot make local PREPARED state into task authority.
 
 Seven source-level store tests bring the branch total to 104 (15 + 24 + 27 + 13 + 18 + 7). None have been compiled or executed. No local Cargo/Rust/Nix toolchain or exact-head Nixward CI result is available in this environment. See [durable witness protocol](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md) and [issue #170](https://github.com/Luminous-Dynamics/nixward/issues/170).
+
+
+### Witness receipt verifier and durable 2-of-3 finalization (26 Nov 2026)
+
+The native observer layer now includes:
+- `observe::witness_transparency`: RFC 9162 Merkle leaf/node hashing, inclusion and consistency proof verification, signed Nixward-specific tree-head receipts, exact witness leaf/request binding, key lifecycle/revocation and opaque quorum evidence;
+- an opaque canonical witness request derived from `VerifiedOciObserverCheckpoint`;
+- `observe::checkpoint_store` schema-v2 atomic setup/migration and a 2-of-3 finalization path that persists witness receipts/high-water marks and advances the accepted checkpoint only after the verified quorum is supplied. Finalization rechecks current observer/witness trust and evidence age, and quarantines a conflicting local witness high-water mark;
+- signed-tree-head equivocation verification for two same-size conflicting roots under one trusted witness key. This requires a gossip/monitor channel to bring both signed views together; that transport is not implemented.
+
+The task-binding contract still does **not** consume the durable store's confirmed state or enable network enforcement. No real witness service, remote trust distribution, hardware measured boot, gossip transport, live cgroup/BPF effect receipt or runtime qualification is implemented.
+
+The current Nixward source corpus is 131 authored Rust test functions: 15 task + 24 containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 13 checkpoint store + 21 witness transparency. None has been compiled or executed; no Nixward exact-head CI or local Rust/Nix runner evidence is available.
