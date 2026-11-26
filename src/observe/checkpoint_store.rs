@@ -14,8 +14,8 @@
 
 use super::signed_checkpoint::{TrustedOciObserverKey, VerifiedOciObserverCheckpoint};
 use super::witness_transparency::{
-    empty_merkle_root_sha256, OciObserverWitnessRequest, TrustedOciWitnessKey,
-    VerifiedOciWitnessQuorum,
+    empty_merkle_root_sha256, verify_witness_tree_head_equivocation, OciObserverWitnessRequest,
+    SignedOciWitnessTreeHead, TrustedOciWitnessKey, VerifiedOciWitnessQuorum,
 };
 use std::collections::BTreeSet;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const STORE_SCHEMA_VERSION: i64 = 3;
+const STORE_SCHEMA_VERSION: i64 = 4;
 const MAX_WITNESS_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
@@ -135,6 +135,24 @@ CREATE TABLE observer_witness_state (
     PRIMARY KEY (observer_id, witness_id)
 );";
 
+const WITNESS_EQUIVOCATION_DDL: &str = "
+CREATE TABLE witness_equivocation_evidence (
+    evidence_digest_blake3 TEXT PRIMARY KEY NOT NULL,
+    witness_id TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    tree_size INTEGER NOT NULL CHECK (tree_size > 0),
+    first_root_sha256 TEXT NOT NULL,
+    second_root_sha256 TEXT NOT NULL,
+    first_tree_head_digest_blake3 TEXT NOT NULL,
+    second_tree_head_digest_blake3 TEXT NOT NULL,
+    first_tree_head_bytes BLOB NOT NULL,
+    second_tree_head_bytes BLOB NOT NULL,
+    detected_at_ms INTEGER NOT NULL
+);
+CREATE INDEX witness_equivocation_by_identity
+    ON witness_equivocation_evidence(witness_id, key_id, key_generation);";
+
 #[derive(Debug, Error)]
 pub enum OciObserverCheckpointStoreError {
     #[error("checkpoint store path is invalid or unsafe")]
@@ -187,6 +205,8 @@ pub enum OciObserverCheckpointStoreError {
     WitnessTreeHeadMismatch,
     #[error("witness receipt conflicts with an already persisted receipt")]
     WitnessReceiptConflict,
+    #[error("witness identity has previously produced signed equivocation evidence")]
+    WitnessEquivocationQuarantined,
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("filesystem error: {0}")]
@@ -381,10 +401,11 @@ impl OciObserverCheckpointStore {
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version == 0 {
             let create_schema = format!(
-                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} PRAGMA user_version=3; COMMIT;",
+                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} {equivocation} PRAGMA user_version=4; COMMIT;",
                 observer_state = OBSERVER_STATE_DDL,
                 history = CHECKPOINT_HISTORY_V3_DDL,
                 witness = WITNESS_TABLES_DDL,
+                equivocation = WITNESS_EQUIVOCATION_DDL,
             );
             connection.execute_batch(&create_schema)?;
 
@@ -416,14 +437,16 @@ impl OciObserverCheckpointStore {
                         END
                     WHERE pending_checkpoint_digest IS NOT NULL
                        OR accepted_checkpoint_digest IS NOT NULL;
-                 PRAGMA user_version=3;
+                 {equivocation}
+                 PRAGMA user_version=4;
                  COMMIT;",
                 history_ddl = CHECKPOINT_HISTORY_V3_DDL,
                 witness_tables = WITNESS_TABLES_DDL,
+                equivocation = WITNESS_EQUIVOCATION_DDL,
             );
             connection.execute_batch(&migration)?;
         } else if schema_version == 2 {
-            connection.execute_batch(
+            let migration = format!(
                 "BEGIN EXCLUSIVE;
                  ALTER TABLE checkpoint_history
                     ADD COLUMN observer_public_key_hex TEXT NOT NULL DEFAULT '';
@@ -445,8 +468,19 @@ impl OciObserverCheckpointStore {
                            SELECT 1 FROM observer_witness_state w
                            WHERE w.observer_id = observer_state.observer_id
                        );
-                 PRAGMA user_version=3;
+                 {equivocation}
+                 PRAGMA user_version=4;
                  COMMIT;",
+                equivocation = WITNESS_EQUIVOCATION_DDL,
+            );
+            connection.execute_batch(&migration)?;
+        } else if schema_version == 3 {
+            connection.execute_batch(
+                "BEGIN EXCLUSIVE;
+                 {equivocation}
+                 PRAGMA user_version=4;
+                 COMMIT;",
+                equivocation = WITNESS_EQUIVOCATION_DDL,
             )?;
         } else if schema_version != STORE_SCHEMA_VERSION {
             return Err(OciObserverCheckpointStoreError::UnsupportedSchemaVersion);
