@@ -378,7 +378,7 @@ fn parse_procfs_evidence(
     if !no_new_privileges {
         return Err(OciRuntimeObservationError::NoNewPrivilegesMissing);
     }
-    let mount_count = mountinfo.lines().filter(|line| !line.trim().is_empty()).count();
+    let (root_mount_read_only, mount_count) = parse_mountinfo(mountinfo)?;
     Ok(ProcfsProcessEvidence {
         pid,
         start_time_ticks: parse_process_start_ticks(stat)?,
@@ -396,7 +396,7 @@ fn parse_procfs_evidence(
         gid_map: parse_proc_id_map(gid_map)?,
         namespaces,
         host_namespaces,
-        root_mount_read_only: parse_root_mount_readonly(mountinfo)?,
+        root_mount_read_only,
         mount_count,
         mountinfo_blake3: blake3::hash(mountinfo.as_bytes()).to_hex().to_string(),
         boot_id: normalize_boot_id(boot_id)?,
@@ -590,18 +590,51 @@ fn parse_unified_cgroup_path(cgroup: &str) -> Result<String, OciRuntimeObservati
     }
     Ok(path)
 }
-fn parse_root_mount_readonly(mountinfo: &str) -> Result<bool, OciRuntimeObservationError> {
-    let roots: Vec<bool> = mountinfo.lines().filter_map(|line| {
+fn parse_mountinfo(mountinfo: &str) -> Result<(bool, usize), OciRuntimeObservationError> {
+    let mut mount_ids = std::collections::BTreeSet::new();
+    let mut root_read_only = None;
+    let mut mount_count = 0usize;
+
+    for line in mountinfo.lines().filter(|line| !line.trim().is_empty()) {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        (fields.get(4).copied() == Some("/")).then(|| {
-            fields.get(5).map(|v| v.split(',').any(|option| option == "ro")).unwrap_or(false)
-        })
-    }).collect();
-    match roots.as_slice() {
-        [readonly] => Ok(*readonly),
-        [] => Err(OciRuntimeObservationError::RootMountMissing),
-        _ => Err(OciRuntimeObservationError::AmbiguousRootMount),
+        let separator = fields.iter().position(|field| *field == "-")
+            .ok_or(OciRuntimeObservationError::InvalidMountInfo)?;
+        if separator < 6 || separator + 3 >= fields.len() {
+            return Err(OciRuntimeObservationError::InvalidMountInfo);
+        }
+        let mount_id = fields[0].parse::<u32>()
+            .map_err(|_| OciRuntimeObservationError::InvalidMountInfo)?;
+        let _parent_id = fields[1].parse::<u32>()
+            .map_err(|_| OciRuntimeObservationError::InvalidMountInfo)?;
+        let (major, minor) = fields[2].split_once(':')
+            .ok_or(OciRuntimeObservationError::InvalidMountInfo)?;
+        major.parse::<u32>().map_err(|_| OciRuntimeObservationError::InvalidMountInfo)?;
+        minor.parse::<u32>().map_err(|_| OciRuntimeObservationError::InvalidMountInfo)?;
+        if !mount_ids.insert(mount_id) {
+            return Err(OciRuntimeObservationError::DuplicateMountId);
+        }
+        let root = fields[3];
+        let mount_point = fields[4];
+        if root.is_empty() || mount_point.is_empty()
+            || fields[separator + 1].is_empty()
+            || fields[separator + 2].is_empty()
+        {
+            return Err(OciRuntimeObservationError::InvalidMountInfo);
+        }
+        if mount_point == "/" {
+            let read_only = fields[5].split(',').any(|option| option == "ro");
+            if root_read_only.replace(read_only).is_some() {
+                return Err(OciRuntimeObservationError::AmbiguousRootMount);
+            }
+        }
+        mount_count += 1;
     }
+
+    if mount_count == 0 {
+        return Err(OciRuntimeObservationError::IncompleteEvidence);
+    }
+    let root = root_read_only.ok_or(OciRuntimeObservationError::RootMountMissing)?;
+    Ok((root, mount_count))
 }
 fn parse_proc_id_map(raw: &str) -> Result<Vec<IdMapEntry>, OciRuntimeObservationError> {
     let mut entries = Vec::new();
@@ -698,6 +731,8 @@ pub enum OciRuntimeObservationError {
     #[error("cgroup evidence invalid")] InvalidCgroup,
     #[error("root mount missing")] RootMountMissing,
     #[error("multiple root mounts found")] AmbiguousRootMount,
+    #[error("malformed or incomplete mountinfo record")] InvalidMountInfo,
+    #[error("duplicate mount ID in mountinfo")] DuplicateMountId,
     #[error("UID/GID mapping invalid")] InvalidIdMap,
     #[error("namespace link does not contain an inode identity")] InvalidNamespaceLink,
     #[error("observation sequence or monotonic clock order invalid")] ObservationOrderInvalid,
@@ -807,6 +842,21 @@ mod tests {
         assert!(parse_root_mount_readonly("1 1 0:1 / / ro,relatime - overlay overlay rw\n").unwrap());
         assert!(!parse_root_mount_readonly("1 1 0:1 / / rw,relatime - overlay overlay rw\n").unwrap());
     }
+    #[test]
+    fn rejects_duplicate_mount_ids() {
+        let raw = concat!(
+            "1 1 0:1 / / ro - overlay overlay rw\n",
+            "1 1 0:2 / /proc rw - proc proc rw\n"
+        );
+        assert!(matches!(parse_mountinfo(raw), Err(OciRuntimeObservationError::DuplicateMountId)));
+    }
+
+    #[test]
+    fn rejects_malformed_mountinfo_records() {
+        assert!(matches!(parse_mountinfo("not a mount record\n"),
+            Err(OciRuntimeObservationError::InvalidMountInfo)));
+    }
+
     #[test]
     fn rejects_non_unified_cgroup_data() {
         assert!(matches!(parse_unified_cgroup_path("2:cpu:/legacy\n"),
