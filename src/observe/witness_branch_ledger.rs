@@ -889,6 +889,16 @@ pub(crate) fn make_test_verified_branch_endorsements(
     request: &OciObserverWitnessRequest,
     trusted_keys: &[TrustedOciWitnessKey],
 ) -> Result<Vec<VerifiedOciWitnessBranchEndorsement>, OciWitnessBranchLedgerError> {
+    make_test_verified_branch_endorsements_after_parent(checkpoint, request, trusted_keys, None)
+}
+
+#[cfg(test)]
+pub(crate) fn make_test_verified_branch_endorsements_after_parent(
+    checkpoint: &VerifiedOciObserverCheckpoint,
+    request: &OciObserverWitnessRequest,
+    trusted_keys: &[TrustedOciWitnessKey],
+    parent_checkpoint: Option<&VerifiedOciObserverCheckpoint>,
+) -> Result<Vec<VerifiedOciWitnessBranchEndorsement>, OciWitnessBranchLedgerError> {
     let mut verified = Vec::with_capacity(trusted_keys.len());
     for (index, trust) in trusted_keys.iter().enumerate() {
         let seed = 41u8 + index as u8;
@@ -898,6 +908,11 @@ pub(crate) fn make_test_verified_branch_endorsements(
             temp.path().join("witness-branch.sqlite"),
             trust,
         )?;
+        if let Some(parent) = parent_checkpoint {
+            let parent_request = OciObserverWitnessRequest::from_verified_checkpoint(parent)
+                .map_err(|_| OciWitnessBranchLedgerError::WitnessRequestMismatch)?;
+            ledger.endorse_checkpoint_branch(parent, &parent_request, &signing_key, 1_150)?;
+        }
         let (_, endorsement) =
             ledger.endorse_checkpoint_branch(checkpoint, request, &signing_key, 1_200)?;
         verified.push(verify_witness_branch_endorsement(
