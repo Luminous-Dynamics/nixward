@@ -138,7 +138,7 @@ This is only the durable PREPARED/reconciliation slice. There is no public witne
 
 A separate `observe::witness_transparency` module now accepts only the opaque `VerifiedOciObserverCheckpoint` token to create a canonical witness request. It verifies signed witness tree heads, RFC 9162 SHA-256 Merkle inclusion/consistency proofs, exact checkpoint/request/idempotency leaf commitment, current witness key identity/generation/revocation and distinct trust-domain quorum membership. The STH/receipt envelope is Nixward-specific and domain-separated; it is not a full RFC 9162 CT v2 log wire implementation.
 
-The native SQLite store now has a 2-of-3 finalization method that requires the opaque verified quorum and rechecks current observer and witness trust at the durable commit boundary. It compares each proof's previous tree head to the locally retained witness high-water mark and quarantines on mismatch. It persists exact receipt bytes and advances accepted state atomically.
+The native SQLite store now has a 3-of-4 finalization method that requires the opaque verified quorum and rechecks current observer and witness trust at the durable commit boundary. It compares each proof's previous tree head to the locally retained witness high-water mark and quarantines on mismatch. It persists exact receipt bytes and advances accepted state atomically.
 
 The module can verify two conflicting validly signed same-size tree heads as equivocation evidence, but it does not yet implement gossip distribution or automatically quarantine every relying party that has not received the evidence. It also does not launch or operate real witnesses. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md).
 
@@ -150,3 +150,10 @@ The durable admission store now enforces 3-of-4 independent witness receipts. Th
 The signed checkpoint token now exposes the exact verified signer public key in addition to key ID/generation. The store persists that public key and rechecks it against the current observer trust record at finalization. Witness receipt tokens likewise carry the exact verified public key; the store rechecks it against current witness trust and the retained per-witness high-water record. A reused ID/generation with changed key bytes is rejected.
 
 The receiver-side gossip path verifies two conflicting same-size signed tree heads, persists both raw statements, and quarantines local observers that have used the witness. No network gossip transport is implemented; independent monitor delivery remains a separate requirement.
+
+
+## Current Nixward branch status (26 November 2026)
+
+The downstream native checkpoint store now persists exact observer/witness public-key bytes and only finalizes when supplied an opaque verified 3-of-4 quorum. Current key ID/generation labels cannot be reused with different public-key bytes to authorize a new checkpoint. The receiver-side equivocation verifier accepts two signed tree heads at the same size from the same trusted witness key, confirms different roots, and the durable store persists the two raw statements and quarantines local observers that relied on that witness.
+
+The proof receipt envelope is Nixward-specific, using RFC 9162 Merkle hashing/inclusion/consistency algorithms; it is not the full RFC 9162 CT v2 wire protocol. Gossip distribution remains unimplemented: the relying party must receive conflicting views from an independent monitor/other client before it can detect split-view behavior.
