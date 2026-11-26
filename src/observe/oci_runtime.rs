@@ -785,11 +785,24 @@ fn hash_machine_id(value: &str) -> Result<String, OciRuntimeObservationError> {
 pub(crate) fn test_fixture_for_contract(
     image_digest: &str,
 ) -> OciRuntimeConsistencySnapshot {
+    test_fixture_for_contract_at(
+        image_digest,
+        10,
+        "11111111-2222-3333-4444-555555555555",
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_fixture_for_contract_at(
+    image_digest: &str,
+    sequence_start: u64,
+    boot_id: &str,
+) -> OciRuntimeConsistencySnapshot {
     OciRuntimeConsistencySnapshot {
         schema_version: OCI_RUNTIME_OBSERVER_SCHEMA_VERSION,
         kind: "nixward-oci-runtime-consistency-v1".into(),
-        observer_sequence_start: 10,
-        observer_sequence_end: 11,
+        observer_sequence_start: sequence_start,
+        observer_sequence_end: sequence_start + 1,
         observation_interval_ns: 100,
         podman_binary_blake3: "a".repeat(64),
         container_id: "c".repeat(64),
@@ -799,8 +812,10 @@ pub(crate) fn test_fixture_for_contract(
         process_pid: 4242,
         process_start_time_ticks: 123456,
         cgroup_path: "/machine.slice/agent-task.scope".into(),
-        namespaces: NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004, cgroup: 1005 },
-        boot_id: "11111111-2222-3333-4444-555555555555".into(),
+        namespaces: NamespaceInodes {
+            user: 1001, network: 1002, pid: 1003, mount: 1004, cgroup: 1005,
+        },
+        boot_id: boot_id.to_owned(),
         machine_id_blake3: "d".repeat(64),
         root_mount_read_only: true,
         no_new_privileges: true,
