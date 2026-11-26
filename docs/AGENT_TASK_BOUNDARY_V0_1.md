@@ -199,3 +199,10 @@ The native store is schema v4, persists exact observer/witness public keys and 3
 A new native-only `observe::witness_branch_ledger` persists each witness's decision for an observer parent/sequence before returning an Ed25519 endorsement. It allows an exact idempotent retry, rejects a competing checkpoint digest at the same branch slot, records conflict evidence and quarantines the observer branch. It checks exact witness public-key bytes, key generation, validity and revocation. Six source-level tests have been added.
 
 This signer ledger is not yet integrated into the Merkle leaf or quorum verifier; see [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). The current 3-of-4 quorum receipt verifier does not yet require a branch endorsement, so keep the single-branch safety assumption explicit until integration passes.
+
+
+### Current witness single-branch signer increment (26 Nov 2026)
+
+`observe::witness_branch_ledger` is a separate native signer-side prototype. It atomically persists one checkpoint digest for each observer parent/sequence before returning the Ed25519 endorsement, supports exact idempotent retry, rejects conflicting branch digests and quarantines the observer's signing head. It binds exact trusted key bytes and validity/revocation. Six source-level regression tests have been added.
+
+The endorsement is not yet required by the Merkle receipt verifier or final quorum token. This integration is tracked in [issue #172](https://github.com/Luminous-Dynamics/nixward). Keep the at-most-one-Byzantine 3-of-4 safety claim conditional on honest witness signers using this ledger (or an equivalent durable single-branch mechanism), until the receipt format proves that use.
