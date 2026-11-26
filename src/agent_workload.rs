@@ -162,7 +162,11 @@ impl AgentTaskNetworkContract {
             || runtime_observation.image_digest() != oci.image_digest
             || !runtime_observation.root_mount_read_only()
             || !runtime_observation.no_new_privileges()
+            || runtime_observation.seccomp_mode() != 2
             || runtime_observation.effective_capabilities() != 0
+            || runtime_observation.permitted_capabilities() != 0
+            || runtime_observation.bounding_capabilities() != 0
+            || runtime_observation.ambient_capabilities() != 0
             || runtime_observation.podman_declared_mount_count() != 0
             || runtime_observation.podman_declared_bind_count() != 0
             || runtime_observation.podman_declared_tmpfs_count() != 0
