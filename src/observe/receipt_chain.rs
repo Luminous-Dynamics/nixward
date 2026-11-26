@@ -23,6 +23,7 @@ pub enum OciReceiptLinkKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OciReceiptLinkPayload {
     schema_version: u32,
     kind: OciReceiptLinkKind,
@@ -35,6 +36,7 @@ struct OciReceiptLinkPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OciObserverReceiptLink {
     payload: OciReceiptLinkPayload,
     link_blake3: String,
@@ -453,6 +455,34 @@ mod tests {
         OciObserverReceiptChain::verify_chain(&observer(), &[]).unwrap();
         let chain = OciObserverReceiptChain::new(observer()).unwrap();
         assert!(chain.head_blake3().is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_receipt_envelope_fields_on_deserialization() {
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        chain.append_snapshot(&snapshot(10)).unwrap();
+        let mut value = serde_json::to_value(chain.links().first().unwrap()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "uncommitted_extension".to_owned(),
+            serde_json::Value::String("not-covered-by-link-digest".to_owned()),
+        );
+        assert!(serde_json::from_value::<OciObserverReceiptLink>(value).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_receipt_payload_fields_on_deserialization() {
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        chain.append_snapshot(&snapshot(10)).unwrap();
+        let mut value = serde_json::to_value(chain.links().first().unwrap()).unwrap();
+        value
+            .get_mut("payload")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "uncommitted_extension".to_owned(),
+                serde_json::Value::String("not-covered-by-link-digest".to_owned()),
+            );
+        assert!(serde_json::from_value::<OciObserverReceiptLink>(value).is_err());
     }
 
     #[test]
