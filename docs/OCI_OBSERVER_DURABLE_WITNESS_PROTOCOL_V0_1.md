@@ -152,7 +152,7 @@ Recovery is a protocol operation, not a best-effort repair. If the RP cannot pro
 
 ## 6. Local journal requirements
 
-The first implementation uses the repository's existing SQLite dependency behind a native-only module, without making observer snapshot collection depend on remote witness availability. The initial source slice is now present in `src/observe/checkpoint_store.rs`: it persists PREPARED records and exact witness request bytes, enforces idempotent retry/pending-state rules, and records RECONCILIATION_REQUIRED. It deliberately cannot mark a checkpoint WITNESS_QUORUM_CONFIRMED.
+The implementation uses the repository's existing SQLite dependency behind a native-only module, without making observer snapshot collection depend on remote witness availability. The initial source slice is now present in `src/observe/checkpoint_store.rs`: it persists PREPARED records and exact witness request bytes, enforces idempotent retry/pending-state rules, and records RECONCILIATION_REQUIRED. It deliberately cannot mark a checkpoint WITNESS_QUORUM_CONFIRMED.
 
 Required configuration and invariants:
 - one database per RP trust domain, outside the candidate/observer writable namespace;
@@ -232,7 +232,7 @@ Nixward's competitive claim should be **portable, proof-carrying authority and i
 
 ---
 
-**Claim boundary:** this is a proposed protocol and executable qualification specification. The SQLite store, witness API, quorum, Merkle proof verifier, crash tests, owner task-token integration and runtime enforcement are not implemented by this document.
+**Claim boundary:** this is a proposed protocol and executable qualification specification. The production witness API/transport, gossip distribution, full VM crash/power-loss fault injection, owner task-token integration and runtime enforcement remain unimplemented. The source verifier and local durable finalization are now implemented at prototype level; exact status is recorded in Section 13.
 
 
 ## 12. Current implementation status (26 November 2026)
@@ -243,12 +243,12 @@ Implemented source slice:
 - `BEGIN IMMEDIATE` prepare transaction binding observer/machine, checkpoint digest, boot/sequence, authenticated previous-checkpoint digest, snapshot/chain digests, key ID/generation, expiry, exact request bytes, request digest and derived idempotency key.
 - One unresolved checkpoint per observer. Exact byte-identical retries return `AlreadyPrepared`; different bytes for the same checkpoint quarantine; a distinct checkpoint cannot supersede a pending one.
 - Explicit `RECONCILIATION_REQUIRED` transition and retrieval of the exact pending request after an uncertain witness outcome.
-- Seven source-level regression tests.
+- Eighteen source-level regression tests in the checkpoint store.
 
 Not implemented:
 - witness request transport or server;
-- signed witness receipts, Merkle inclusion/consistency proof verifier, witness-key lifecycle or 3-of-4 quorum;
-- witness-head persistence and quorum finalization;
+- production witness transport/server and operator-controlled trust distribution;
+- network gossip/monitor transport for distributing cross-client tree heads;
 - any public operation producing a witness-confirmed admission token;
 - task-contract consumption, runtime enforcer attachment or effect verification;
 - crash/power-loss VM fault injection or Rust test execution.
@@ -263,7 +263,7 @@ The branch now contains a first executable source layer for witness verification
 - `src/observe/witness_transparency.rs` implements RFC 9162 Merkle tree hashing, inclusion proof and consistency proof verification with SHA-256 domain prefixes; strict signed tree-head receipts; exact leaf binding to witness ID/key generation, checkpoint digest, canonical request digest and idempotency key; witness-key validity/revocation checks; and opaque per-receipt/quorum verification results.
 - The signed tree-head wire structure is a **Nixward-specific, domain-separated envelope**, not the RFC 9162 Certificate Transparency v2 wire protocol. It uses the RFC 9162 tree hash/proof algorithms and includes an explicit `sha256-rfc9162` algorithm identifier in signed bytes.
 - `OciObserverWitnessRequest` is an opaque request built only from `VerifiedOciObserverCheckpoint`; the store no longer accepts arbitrary caller-supplied bytes as a checkpoint request.
-- `src/observe/checkpoint_store.rs` schema v2 has atomic initialization and v1→v2 migration. `finalize_witness_quorum` accepts only an opaque verified quorum, enforces a 3-of-4 profile (maximum three receipts), rechecks observer/witness key generation and revocation at commit time, checks witness-receipt age, compares each proof's prior tree head against the locally retained witness head, stores exact receipt bytes and new tree heads, and atomically advances the accepted observer checkpoint. A verified mismatch quarantines the observer.
+- `src/observe/checkpoint_store.rs` schema v4 has atomic initialization and v1→v2 migration. `finalize_witness_quorum` accepts only an opaque verified quorum, enforces a 3-of-4 profile (maximum three receipts), rechecks observer/witness key generation and revocation at commit time, checks witness-receipt age, compares each proof's prior tree head against the locally retained witness head, stores exact receipt bytes and new tree heads, and atomically advances the accepted observer checkpoint. A verified mismatch quarantines the observer.
 - The test-only fixture creates real Ed25519 signatures and proof objects for store integration tests; it is not a production witness server.
 
 The transparency verifier also includes `verify_witness_tree_head_equivocation`: it verifies two tree-head signatures under the same provisioned witness key and returns opaque evidence if the same witness/key generation signed different roots for the same tree size. **This is a detector, not a gossip transport.** The conflicting statements must be delivered through an independent gossip monitor or cross-witness channel. An isolated relying party cannot detect a split view it has never received.
@@ -288,3 +288,24 @@ The high-assurance store now requires **3-of-4**, not 2-of-3. With four trust do
 The 3-of-4 profile tolerates one unavailable witness. If only two witness receipts are available, read-only work may continue under its own existing authority, but new consequential checkpoint-backed mutations remain blocked.
 
 Current schema version is 4. Migrations from earlier un-fingerprinted schemas quarantine old pending/accepted state rather than assuming that a key ID/generation label identifies the same public key. New checkpoint and witness records bind the exact public-key hex used during signature verification, and finalization rejects same-ID/same-generation key substitution.
+
+
+## 16. Current exact source status (26 November 2026)
+
+The current public Nixward branch head is `d41aae39eccd771997088db44b22e2407565906a`. Current source corpus:
+- task contract: 15 test functions;
+- policy containment: 24;
+- OCI observer: 27;
+- receipt chain: 13;
+- signed checkpoint: 18;
+- durable checkpoint store: 18;
+- witness transparency: 21;
+- **total: 136 source-level Rust test functions**.
+
+The branch has no reported combined status checks or associated PR workflow runs for that head, and the available environment has no Cargo, rustc, rustfmt or Nix executable. None of the Rust test functions has been compiled or executed.
+
+The native-only local store is now schema version 4. It atomically initializes and migrates older schemas; stores exact observer/witness public-key fingerprints; and quarantines legacy accepted/pending states where the old database cannot recover key fingerprints. It requires a 3-of-4 quorum, rechecks exact current key bytes/generation/revocation and freshness, checks retained per-witness tree heads, persists exact receipts, and finalizes the checkpoint in one transaction.
+
+Receiver-side equivocation handling is also present: two conflicting valid signed tree heads for one witness/key generation/tree size can be verified, stored in `witness_equivocation_evidence`, and used to quarantine local observers that previously relied on the witness. Finalization checks this quarantine table.
+
+Still not implemented: a production witness service/API, independently administered key provisioning, cross-client gossip/monitor transport, VM hard-power-off and storage-restore tests, task-contract consumption, live cgroup/BPF enforcement, packet effect receipts, and service-state effect verification. A local receiver with no conflicting STH delivered cannot know that another client has a different view.
