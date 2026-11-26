@@ -633,20 +633,13 @@ mod tests {
 
         assert_eq!(second.sequence(), 20);
         assert_eq!(second.key_generation(), first.key_generation());
-        assert_eq!(
+        assert_ne!(
             second.checkpoint_digest_blake3(),
-            second_signed.payload
-                .signing_bytes()
-                .map(|bytes| {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update(CHECKPOINT_DIGEST_DOMAIN);
-                    hasher.update(&(bytes.len() as u64).to_le_bytes());
-                    hasher.update(&bytes);
-                    hasher.update(&decode_hex::<32>(&second_signed.signer_public_key_hex).unwrap());
-                    hasher.update(&decode_hex::<64>(&second_signed.signature_hex).unwrap());
-                    hasher.finalize().to_hex().to_string()
-                })
-                .unwrap()
+            first.checkpoint_digest_blake3()
+        );
+        assert_eq!(
+            second_signed.payload.previous_checkpoint_blake3.as_deref(),
+            Some(first.checkpoint_digest_blake3())
         );
     }
 
