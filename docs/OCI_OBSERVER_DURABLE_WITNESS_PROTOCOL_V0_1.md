@@ -152,7 +152,7 @@ Recovery is a protocol operation, not a best-effort repair. If the RP cannot pro
 
 ## 6. Local journal requirements
 
-The first implementation should use the repository's existing SQLite dependency behind a native-only module, without making the observer depend on remote witness availability while it is collecting a snapshot.
+The first implementation uses the repository's existing SQLite dependency behind a native-only module, without making observer snapshot collection depend on remote witness availability. The initial source slice is now present in `src/observe/checkpoint_store.rs`: it persists PREPARED records and exact witness request bytes, enforces idempotent retry/pending-state rules, and records RECONCILIATION_REQUIRED. It deliberately cannot mark a checkpoint WITNESS_QUORUM_CONFIRMED.
 
 Required configuration and invariants:
 - one database per RP trust domain, outside the candidate/observer writable namespace;
@@ -233,3 +233,24 @@ Nixward's competitive claim should be **portable, proof-carrying authority and i
 ---
 
 **Claim boundary:** this is a proposed protocol and executable qualification specification. The SQLite store, witness API, quorum, Merkle proof verifier, crash tests, owner task-token integration and runtime enforcement are not implemented by this document.
+
+
+## 12. Current implementation status (26 November 2026)
+
+Implemented source slice:
+- `src/observe/checkpoint_store.rs`, exported by `observe::checkpoint_store`.
+- Owner-only directory/database path checks, SQLite WAL and `synchronous=FULL`, foreign keys, bounded busy timeout and schema version 1.
+- `BEGIN IMMEDIATE` prepare transaction binding observer/machine, checkpoint digest, boot/sequence, authenticated previous-checkpoint digest, snapshot/chain digests, key ID/generation, expiry, exact request bytes, request digest and derived idempotency key.
+- One unresolved checkpoint per observer. Exact byte-identical retries return `AlreadyPrepared`; different bytes for the same checkpoint quarantine; a distinct checkpoint cannot supersede a pending one.
+- Explicit `RECONCILIATION_REQUIRED` transition and retrieval of the exact pending request after an uncertain witness outcome.
+- Seven source-level regression tests.
+
+Not implemented:
+- witness request transport or server;
+- signed witness receipts, Merkle inclusion/consistency proof verifier, witness-key lifecycle or 2-of-3 quorum;
+- witness-head persistence and quorum finalization;
+- any public operation producing a witness-confirmed admission token;
+- task-contract consumption, runtime enforcer attachment or effect verification;
+- crash/power-loss VM fault injection or Rust test execution.
+
+The branch currently contains 104 source-level Rust test functions, none compiled or executed. The local store is not a defence against a privileged attacker restoring the DB and WAL together; external witness high-water marks remain required.
