@@ -137,7 +137,7 @@ Add a resolution contract binding hostname, DNSSEC/trusted resolver policy, answ
 Run only synthetic fixtures in a disposable NixOS VM. Record target-host kernel probes, cgroup identity, actual packet allow/deny receipts, process lineage, guest observation and independent service oracle. A model statement such as `blocked=true` is never a receipt.
 
 ### P4 — task security benchmark
-Use Platform ATR-001..ATR-039 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
+Use Platform ATR-001..ATR-041 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
 
 ## 10. External alignment
 
@@ -155,4 +155,4 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 13 receipt-chain tests (79 total source-level test functions). None has been compiled or executed.
+Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests 13 receipt-chain tests and 15 signed-checkpoint tests (94 total source-level test functions). None has been compiled or executed.
