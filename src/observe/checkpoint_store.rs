@@ -475,13 +475,14 @@ impl OciObserverCheckpointStore {
             );
             connection.execute_batch(&migration)?;
         } else if schema_version == 3 {
-            connection.execute_batch(
+            let migration = format!(
                 "BEGIN EXCLUSIVE;
                  {equivocation}
                  PRAGMA user_version=4;
                  COMMIT;",
                 equivocation = WITNESS_EQUIVOCATION_DDL,
-            )?;
+            );
+            connection.execute_batch(&migration)?;
         } else if schema_version != STORE_SCHEMA_VERSION {
             return Err(OciObserverCheckpointStoreError::UnsupportedSchemaVersion);
         }
