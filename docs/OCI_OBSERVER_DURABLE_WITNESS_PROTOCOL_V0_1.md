@@ -309,3 +309,21 @@ The native-only local store is now schema version 4. It atomically initializes a
 Receiver-side equivocation handling is also present: two conflicting valid signed tree heads for one witness/key generation/tree size can be verified, stored in `witness_equivocation_evidence`, and used to quarantine local observers that previously relied on the witness. Finalization checks this quarantine table.
 
 Still not implemented: a production witness service/API, independently administered key provisioning, cross-client gossip/monitor transport, VM hard-power-off and storage-restore tests, task-contract consumption, live cgroup/BPF enforcement, packet effect receipts, and service-state effect verification. A local receiver with no conflicting STH delivered cannot know that another client has a different view.
+
+
+## 17. Durable single-branch witness signer (prototype; 26 November 2026)
+
+A new native-only `observe::witness_branch_ledger::OciWitnessBranchLedger` is present. It is the first implementation of the per-witness assumption required by 3-of-4 quorum intersection:
+
+- The ledger is bound to one operator-provisioned witness ID, trust domain, key ID/generation and exact public-key bytes.
+- It uses its own owner-only SQLite WAL/FULL journal.
+- For each observer, it retains the accepted machine/checkpoint/boot/sequence head.
+- It persists a unique branch slot keyed by observer ID, previous checkpoint digest and sequence before returning the Ed25519 endorsement.
+- An exact retry returns the same stored endorsement bytes.
+- A different checkpoint digest for the same observer parent/sequence is written to a conflict table and quarantines that observer branch; the ledger refuses to return even the historical endorsement as a live retry after quarantine.
+- A new endorsement must extend the exact accepted checkpoint digest and increase the sequence.
+- The signing key is passed by the caller and is not persisted.
+
+Six source-level tests cover persistence/idempotency after reopen, same-slot conflicting branch rejection and quarantine, exact next-parent acceptance, stale-parent rejection, same-label signing-key substitution, and revoked-key rejection.
+
+**Integration boundary:** the branch endorsement is not yet embedded in the Merkle receipt leaf or required by `verify_witness_receipt` / `verify_witness_quorum`. The 3-of-4 finalizer currently verifies the Merkle witness receipt, while the ledger independently enforces the witness's one-branch rule when used by a signer. Binding these two into one receipt is tracked in [Nixward issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). Until that work lands, do not claim that the current quorum token itself proves every witness used the durable branch ledger.
