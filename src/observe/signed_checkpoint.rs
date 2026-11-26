@@ -136,6 +136,10 @@ pub enum OciObserverCheckpointError {
     ChallengeMismatch,
     #[error("checkpoint does not extend the independently retained checkpoint")]
     PreviousCheckpointMismatch,
+    #[error("checkpoint snapshot digest does not match the independently observed snapshot")]
+    SnapshotMismatch,
+    #[error("checkpoint chain head does not match the independently verified chain")]
+    ChainHeadMismatch,
     #[error("observer sequence is not strictly increasing")]
     SequenceRollback,
 }
@@ -255,6 +259,8 @@ pub struct OciObserverCheckpointExpectation {
     pub observer_id_blake3: String,
     pub machine_id_blake3: String,
     pub challenge_nonce: [u8; 32],
+    pub expected_snapshot_digest_blake3: String,
+    pub expected_chain_head_blake3: String,
     pub expected_previous_checkpoint_blake3: Option<String>,
     pub min_sequence_exclusive: u64,
     pub now_ms: u64,
@@ -396,6 +402,12 @@ pub fn verify_observer_checkpoint(
     if payload.challenge_blake3 != observer_challenge_digest(&expectation.challenge_nonce) {
         return Err(OciObserverCheckpointError::ChallengeMismatch);
     }
+    if payload.snapshot_digest_blake3 != expectation.expected_snapshot_digest_blake3 {
+        return Err(OciObserverCheckpointError::SnapshotMismatch);
+    }
+    if payload.chain_head_blake3 != expectation.expected_chain_head_blake3 {
+        return Err(OciObserverCheckpointError::ChainHeadMismatch);
+    }
     if payload.previous_checkpoint_blake3 != expectation.expected_previous_checkpoint_blake3 {
         return Err(OciObserverCheckpointError::PreviousCheckpointMismatch);
     }
@@ -462,6 +474,8 @@ mod tests {
             observer_id_blake3: "a1".repeat(32),
             machine_id_blake3: "b2".repeat(32),
             challenge_nonce: [9u8; 32],
+            expected_snapshot_digest_blake3: "c3".repeat(32),
+            expected_chain_head_blake3: "d4".repeat(32),
             expected_previous_checkpoint_blake3: previous,
             min_sequence_exclusive: min_sequence,
             now_ms: 1_000,
@@ -560,6 +574,28 @@ mod tests {
         assert_eq!(
             verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
             Err(OciObserverCheckpointError::CheckpointNotYetIssued)
+        );
+    }
+
+    #[test]
+    fn rejects_snapshot_digest_substitution() {
+        let (signing, signed) = signed(None, 10);
+        let mut expected = expectation(None, 0);
+        expected.expected_snapshot_digest_blake3 = "ee".repeat(32);
+        assert_eq!(
+            verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
+            Err(OciObserverCheckpointError::SnapshotMismatch)
+        );
+    }
+
+    #[test]
+    fn rejects_chain_head_substitution() {
+        let (signing, signed) = signed(None, 10);
+        let mut expected = expectation(None, 0);
+        expected.expected_chain_head_blake3 = "ee".repeat(32);
+        assert_eq!(
+            verify_observer_checkpoint(&signed, &trusted(&signing), &expected),
+            Err(OciObserverCheckpointError::ChainHeadMismatch)
         );
     }
 
