@@ -211,6 +211,7 @@ pub struct RetainedOciWitnessTreeHead {
     pub trust_domain_id: String,
     pub key_id: String,
     pub key_generation: u64,
+    pub public_key_hex: String,
     pub tree_size: u64,
     pub root_hash_sha256: String,
 }
@@ -630,9 +631,9 @@ impl OciObserverCheckpointStore {
             "INSERT INTO checkpoint_history (
                 observer_id, checkpoint_digest, machine_id, boot_id, sequence,
                 parent_digest, snapshot_digest, chain_head_digest, key_id,
-                key_generation, expires_at_ms, request_digest, request_bytes,
+                key_generation, observer_public_key_hex, expires_at_ms, request_digest, request_bytes,
                 state, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'prepared', ?14)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'prepared', ?15)",
             params![
                 checkpoint.observer_id_blake3(),
                 checkpoint.checkpoint_digest_blake3(),
@@ -644,6 +645,7 @@ impl OciObserverCheckpointStore {
                 checkpoint.chain_head_blake3(),
                 checkpoint.key_id(),
                 to_sql_integer(checkpoint.key_generation())?,
+                checkpoint.signer_public_key_hex(),
                 expires_at,
                 request_digest,
                 &request_bytes,
@@ -814,23 +816,24 @@ impl OciObserverCheckpointStore {
         {
             return Err(OciObserverCheckpointStoreError::InvalidDigest);
         }
-        let row: Option<(String, String, i64, i64, String)> = self
+        let row: Option<(String, String, i64, String, i64, String)> = self
             .connection
             .query_row(
-                "SELECT trust_domain_id, key_id, key_generation, tree_size, root_hash_sha256
+                "SELECT trust_domain_id, key_id, key_generation, public_key_hex, tree_size, root_hash_sha256
                  FROM observer_witness_state
                  WHERE observer_id = ?1 AND witness_id = ?2",
                 params![observer_id_blake3, witness_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
             )
             .optional()?;
-        if let Some((trust_domain_id, key_id, key_generation, tree_size, root_hash_sha256)) = row {
+        if let Some((trust_domain_id, key_id, key_generation, public_key_hex, tree_size, root_hash_sha256)) = row {
             Ok(RetainedOciWitnessTreeHead {
                 witness_id: witness_id.to_owned(),
                 trust_domain_id,
                 key_id,
                 key_generation: u64::try_from(key_generation)
                     .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?,
+                public_key_hex,
                 tree_size: u64::try_from(tree_size)
                     .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?,
                 root_hash_sha256,
@@ -841,6 +844,7 @@ impl OciObserverCheckpointStore {
                 trust_domain_id: String::new(),
                 key_id: String::new(),
                 key_generation: 0,
+                public_key_hex: String::new(),
                 tree_size: 0,
                 root_hash_sha256: empty_merkle_root_sha256(),
             })
@@ -904,6 +908,7 @@ impl OciObserverCheckpointStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -927,11 +932,11 @@ impl OciObserverCheckpointStore {
             return Err(OciObserverCheckpointStoreError::Quarantined);
         }
 
-        type HistoryRow = (String, i64, i64, String, String, Option<String>);
+        type HistoryRow = (String, i64, i64, String, String, String, Option<String>);
         let history: Option<HistoryRow> = tx
             .query_row(
                 "SELECT state, key_generation, expires_at_ms, machine_id, key_id,
-                        witness_quorum_digest
+                        observer_public_key_hex, witness_quorum_digest
                  FROM checkpoint_history
                  WHERE observer_id = ?1 AND checkpoint_digest = ?2",
                 params![
@@ -957,6 +962,7 @@ impl OciObserverCheckpointStore {
             expires_at_ms,
             history_machine_id,
             history_key_id,
+            history_public_key_hex,
             existing_quorum_digest,
         )) = history
         else {
@@ -967,6 +973,8 @@ impl OciObserverCheckpointStore {
         let observer_key_valid = observer_key.machine_id_blake3 == machine_id
             && observer_key.machine_id_blake3 == history_machine_id
             && observer_key.key_id == history_key_id
+            && observer_key.public_key_hex == history_public_key_hex
+            && observer_key.public_key_hex == (/* exact key used by verified token is persisted */ history_public_key_hex.as_str())
             && i64::try_from(observer_key.key_generation).ok() == Some(observer_key_generation)
             && now_ms >= observer_key.valid_from_ms
             && now_ms < observer_key.valid_until_ms
@@ -1005,6 +1013,7 @@ impl OciObserverCheckpointStore {
             let witness_valid = trusted.trust_domain_id == verified.trust_domain_id()
                 && trusted.key_id == verified.key_id()
                 && trusted.key_generation == verified.key_generation()
+                && trusted.public_key_hex == verified.signer_public_key_hex()
                 && now_ms >= trusted.valid_from_ms
                 && now_ms < trusted.valid_until_ms
                 && !trusted
@@ -1048,20 +1057,20 @@ impl OciObserverCheckpointStore {
         }
 
         for verified in quorum.receipts() {
-            let stored_head: Option<(String, i64, String)> = tx
+            let stored_head: Option<(String, String, i64, String)> = tx
                 .query_row(
-                    "SELECT trust_domain_id, tree_size, root_hash_sha256
+                    "SELECT trust_domain_id, public_key_hex, tree_size, root_hash_sha256
                      FROM observer_witness_state
                      WHERE observer_id = ?1 AND witness_id = ?2",
                     params![observer_key.observer_id_blake3, verified.witness_id()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .optional()?;
-            let (stored_domain, stored_size, stored_root) =
-                if let Some((domain, size, root)) = stored_head {
-                    (Some(domain), size, root)
+            let (stored_domain, stored_public_key, stored_size, stored_root) =
+                if let Some((domain, public_key, size, root)) = stored_head {
+                    (Some(domain), Some(public_key), size, root)
                 } else {
-                    (None, 0, empty_merkle_root_sha256())
+                    (None, None, 0, empty_merkle_root_sha256())
                 };
             let expected_previous_size = i64::try_from(verified.previous_tree_size())
                 .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?;
@@ -1070,6 +1079,9 @@ impl OciObserverCheckpointStore {
                 || stored_domain
                     .as_deref()
                     .is_some_and(|domain| domain != verified.trust_domain_id())
+                || stored_public_key
+                    .as_deref()
+                    .is_some_and(|public_key| public_key != verified.signer_public_key_hex())
             {
                 tx.execute(
                     "UPDATE observer_state
@@ -1096,9 +1108,9 @@ impl OciObserverCheckpointStore {
             tx.execute(
                 "INSERT INTO witness_checkpoint_receipts (
                     observer_id, checkpoint_digest, witness_id, trust_domain_id,
-                    key_id, key_generation, tree_size, root_hash_sha256,
+                    key_id, key_generation, public_key_hex, tree_size, root_hash_sha256,
                     receipt_digest_blake3, receipt_bytes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     observer_key.observer_id_blake3,
                     quorum.checkpoint_digest_blake3(),
@@ -1106,6 +1118,7 @@ impl OciObserverCheckpointStore {
                     verified.trust_domain_id(),
                     verified.key_id(),
                     to_sql_integer(verified.key_generation())?,
+                    verified.signer_public_key_hex(),
                     to_sql_integer(verified.tree_size())?,
                     verified.root_hash_sha256(),
                     verified.receipt_digest_blake3(),
@@ -1116,12 +1129,13 @@ impl OciObserverCheckpointStore {
             tx.execute(
                 "INSERT INTO observer_witness_state (
                     observer_id, witness_id, trust_domain_id, key_id, key_generation,
-                    tree_size, root_hash_sha256, receipt_digest_blake3, updated_at_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    public_key_hex, tree_size, root_hash_sha256, receipt_digest_blake3, updated_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(observer_id, witness_id) DO UPDATE SET
                     trust_domain_id = excluded.trust_domain_id,
                     key_id = excluded.key_id,
                     key_generation = excluded.key_generation,
+                    public_key_hex = excluded.public_key_hex,
                     tree_size = excluded.tree_size,
                     root_hash_sha256 = excluded.root_hash_sha256,
                     receipt_digest_blake3 = excluded.receipt_digest_blake3,
@@ -1132,6 +1146,7 @@ impl OciObserverCheckpointStore {
                     verified.trust_domain_id(),
                     verified.key_id(),
                     to_sql_integer(verified.key_generation())?,
+                    verified.signer_public_key_hex(),
                     to_sql_integer(verified.tree_size())?,
                     verified.root_hash_sha256(),
                     verified.receipt_digest_blake3(),
