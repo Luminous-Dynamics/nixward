@@ -85,6 +85,7 @@ struct PodmanMountEvidence {
 struct PodmanInspectEvidence {
     container_id: String,
     image_id: String,
+    image_digest: String,
     image_name: String,
     running: bool,
     state: String,
@@ -145,6 +146,7 @@ pub struct OciRuntimeConsistencySnapshot {
     podman_binary_blake3: String,
     container_id: String,
     image_id: String,
+    image_digest: String,
     image_name: String,
     process_pid: u32,
     process_start_time_ticks: u64,
@@ -171,6 +173,7 @@ impl OciRuntimeConsistencySnapshot {
     pub fn observation_interval_ns(&self) -> u128 { self.observation_interval_ns }
     pub fn container_id(&self) -> &str { &self.container_id }
     pub fn image_id(&self) -> &str { &self.image_id }
+    pub fn image_digest(&self) -> &str { &self.image_digest }
     pub fn process_pid(&self) -> u32 { self.process_pid }
     pub fn process_start_time_ticks(&self) -> u64 { self.process_start_time_ticks }
     pub fn cgroup_path(&self) -> &str { &self.cgroup_path }
@@ -347,6 +350,7 @@ fn parse_podman_inspect(raw: &[u8]) -> Result<PodmanInspectEvidence, OciRuntimeO
     Ok(PodmanInspectEvidence {
         container_id: string_field(object, "id")?.to_ascii_lowercase(),
         image_id: string_field(object, "image")?.to_owned(),
+        image_digest: string_field(object, "imageDigest")?.to_owned(),
         image_name: string_field(object, "imageName")?.to_owned(),
         running: bool_field(state, "running")?,
         state: string_field(state, "status")?.to_ascii_lowercase(),
@@ -450,6 +454,7 @@ fn reconcile_frames(
         podman_binary_blake3: after.podman_binary_blake3,
         container_id: after.podman_inspect.container_id,
         image_id: after.podman_inspect.image_id,
+        image_digest: after.podman_inspect.image_digest,
         image_name: after.podman_inspect.image_name,
         process_pid: procfs.pid,
         process_start_time_ticks: procfs.start_time_ticks,
@@ -483,7 +488,7 @@ fn validate_frame(
     let info = &frame.podman_info;
     let procfs = &frame.procfs;
     if inspect.container_id != profile.container_id.to_ascii_lowercase()
-        || inspect.image_id != profile.image_digest
+        || inspect.image_digest != profile.image_digest
         || !inspect.running
         || inspect.state != "running"
         || inspect.pid != procfs.pid
@@ -722,7 +727,7 @@ fn hash_machine_id(value: &str) -> Result<String, OciRuntimeObservationError> {
 
 #[cfg(test)]
 pub(crate) fn test_fixture_for_contract(
-    image_id: &str,
+    image_digest: &str,
 ) -> OciRuntimeConsistencySnapshot {
     OciRuntimeConsistencySnapshot {
         schema_version: OCI_RUNTIME_OBSERVER_SCHEMA_VERSION,
@@ -732,7 +737,8 @@ pub(crate) fn test_fixture_for_contract(
         observation_interval_ns: 100,
         podman_binary_blake3: "a".repeat(64),
         container_id: "c".repeat(64),
-        image_id: image_id.to_owned(),
+        image_id: format!("sha256:{}", "b".repeat(64)),
+        image_digest: image_digest.to_owned(),
         image_name: "registry.invalid/worker:fixture".into(),
         process_pid: 4242,
         process_start_time_ticks: 123456,
@@ -823,8 +829,8 @@ mod tests {
     }
     fn inspect(container: &str) -> Vec<u8> {
         format!(
-            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","ReadonlyRootfs":true,"Privileged":false}},"Mounts":[]}}]"#,
-            "b".repeat(64)
+            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageDigest":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","ReadonlyRootfs":true,"Privileged":false}},"Mounts":[]}}]"#,
+            "b".repeat(64), "d".repeat(64)
         ).into_bytes()
     }
     fn procfs(pid: u32, start: u64) -> ProcfsProcessEvidence {
@@ -852,7 +858,7 @@ mod tests {
     fn profile() -> OciRuntimeProfile {
         OciRuntimeProfile {
             container_id: "a".repeat(64),
-            image_digest: format!("sha256:{}", "b".repeat(64)),
+            image_digest: format!("sha256:{}", "d".repeat(64)),
             cgroup_path: "/machine.slice/agent-task.scope".into(),
             allowed_effective_capabilities: 0,
         }
@@ -862,6 +868,8 @@ mod tests {
     fn parses_exact_podman_inspect_identity() {
         let parsed = parse_podman_inspect(&inspect(&"a".repeat(64))).unwrap();
         assert_eq!(parsed.container_id, "a".repeat(64));
+        assert_eq!(parsed.image_id, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(parsed.image_digest, format!("sha256:{}", "d".repeat(64)));
         assert_eq!(parsed.pid, 4242);
         assert!(parsed.read_only_root);
         assert!(parsed.mounts.is_empty());
