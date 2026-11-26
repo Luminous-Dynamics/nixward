@@ -1558,14 +1558,39 @@ mod tests {
                 timestamp_ms: 1_150,
                 signature_hex: String::new(),
             };
-            head.signature_hex =
-                signing.sign(&head.signing_bytes_for_test().unwrap()).to_bytes()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect();
+            head.signature_hex = signing
+                .sign(&head.signing_bytes().unwrap())
+                .to_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
             head
         };
-        let _ = make_head; // The public verifier test below exercises the signed statement path.
+        let first = make_head(&"aa".repeat(32));
+        let second = make_head(&"bb".repeat(32));
+        let quarantined = store
+            .record_witness_equivocation(&first, &second, &trusted, 1_300)
+            .unwrap();
+        assert_eq!(quarantined, 1);
+
+        let evidence_count: i64 = store.connection.query_row(
+            "SELECT COUNT(*) FROM witness_equivocation_evidence WHERE witness_id = ?1",
+            [&trusted.witness_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(evidence_count, 1);
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
+
+        let next_checkpoint = verified_checkpoint(
+            20,
+            Some(checkpoint.checkpoint_digest_blake3().to_owned()),
+        );
+        let next_request =
+            OciObserverWitnessRequest::from_verified_checkpoint(&next_checkpoint).unwrap();
+        assert!(matches!(
+            store.prepare_checkpoint(&next_checkpoint, &next_request, 1_400),
+            Err(OciObserverCheckpointStoreError::Quarantined)
+        ));
     }
 
     #[test]
