@@ -508,9 +508,14 @@ fn validate_frame(
     if !inspect.read_only_root || !procfs.root_mount_read_only {
         return Err(OciRuntimeObservationError::RootFilesystemWritable);
     }
+    let network_mode_is_isolated = matches!(
+        inspect.network_mode.as_str(),
+        "" | "default" | "bridge" | "none" | "slirp4netns" | "pasta"
+    );
+    let pid_mode_is_private = matches!(inspect.pid_mode.as_str(), "" | "private");
     if inspect.privileged || !inspect.mounts.is_empty()
         || !inspect.binds.is_empty() || !inspect.tmpfs.is_empty()
-        || inspect.network_mode == "host" || inspect.pid_mode == "host"
+        || !network_mode_is_isolated || !pid_mode_is_private
         || inspect.cgroup_mode != "private"
     {
         return Err(OciRuntimeObservationError::UnsafeContainerConfiguration);
@@ -858,8 +863,8 @@ pub enum OciRuntimeObservationError {
     #[error("Podman and procfs user/group mappings disagree")] RootlessMappingMismatch,
     #[error("container identity does not match expected ID, image or PID")] ContainerIdentityMismatch,
     #[error("root filesystem is not read-only in both sources")] RootFilesystemWritable,
-    #[error("privileged, host-network/PID or unexpected mount configuration")] UnsafeContainerConfiguration,
-    #[error("container shares a host user/network/PID/mount namespace")] HostNamespaceShared,
+    #[error("privileged, user-mounted, or non-private network/PID/cgroup namespace configuration")] UnsafeContainerConfiguration,
+    #[error("container shares a host user/network/PID/mount/cgroup namespace")] HostNamespaceShared,
     #[error("live process cgroup differs from the expected task cgroup")] CgroupMismatch,
     #[error("no_new_privs absent or effective capabilities exceed profile")] ExcessiveProcessAuthority,
     #[error("no_new_privs is not set")] NoNewPrivilegesMissing,
@@ -992,6 +997,32 @@ mod tests {
         assert!(parsed.mounts.is_empty());
         assert!(parsed.binds.is_empty());
         assert_eq!(parsed.tmpfs.len(), 1);
+        let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
+        candidate.podman_inspect = parsed;
+        assert!(matches!(
+            validate_frame(&profile(), &candidate),
+            Err(OciRuntimeObservationError::UnsafeContainerConfiguration)
+        ));
+    }
+
+    #[test]
+    fn rejects_container_shared_network_namespace_mode() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"NetworkMode\":\"bridge\"", "\"NetworkMode\":\"container:other\"");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
+        let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
+        candidate.podman_inspect = parsed;
+        assert!(matches!(
+            validate_frame(&profile(), &candidate),
+            Err(OciRuntimeObservationError::UnsafeContainerConfiguration)
+        ));
+    }
+
+    #[test]
+    fn rejects_container_shared_pid_namespace_mode() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"PidMode\":\"private\"", "\"PidMode\":\"container:other\"");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
         let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
         candidate.podman_inspect = parsed;
         assert!(matches!(
