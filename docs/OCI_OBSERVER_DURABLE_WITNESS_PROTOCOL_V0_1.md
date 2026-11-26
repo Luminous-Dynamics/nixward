@@ -327,3 +327,19 @@ A new native-only `observe::witness_branch_ledger::OciWitnessBranchLedger` is pr
 Six source-level tests cover persistence/idempotency after reopen, same-slot conflicting branch rejection and quarantine, exact next-parent acceptance, stale-parent rejection, same-label signing-key substitution, and revoked-key rejection.
 
 **Integration boundary:** the branch endorsement is not yet embedded in the Merkle receipt leaf or required by `verify_witness_receipt` / `verify_witness_quorum`. The 3-of-4 finalizer currently verifies the Merkle witness receipt, while the ledger independently enforces the witness's one-branch rule when used by a signer. Binding these two into one receipt is tracked in [Nixward issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). Until that work lands, do not claim that the current quorum token itself proves every witness used the durable branch ledger.
+
+
+## 18. Source implementation status after branch-lock increment (26 November 2026)
+
+Added and exported `observe::witness_branch_ledger::OciWitnessBranchLedger`:
+- witness identity is pinned to witness ID, trust-domain ID, key ID/generation, validity window and exact public-key bytes;
+- the native SQLite ledger uses WAL + `synchronous=FULL`, owner-only path checks and one atomic initialization transaction;
+- one branch slot is persisted for each observer/previous-checkpoint/sequence tuple before an Ed25519 endorsement is returned;
+- exact retries return the same stored endorsement;
+- a different checkpoint digest in the same branch slot is recorded in the conflict table and quarantines the observer head;
+- stale-parent, machine substitution, sequence rollback, signer-key substitution, revocation and expiry are rejected;
+- after a branch is quarantined, an exact retry does not return the stored endorsement as live authority.
+
+Six source-level tests cover reopen/idempotency, conflicting same-slot branch rejection, exact next-parent extension, stale-parent rejection, key substitution and revoked-key rejection.
+
+The endorsement is **not yet part of the Merkle witness receipt or quorum token**. A witness can currently create a durable endorsement, but the independent receipt verifier does not require it. Integration is tracked in [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). The source corpus is now 142 authored test functions (15 task + 24 containment + 27 OCI + 13 receipt chain + 18 signed checkpoint + 18 checkpoint store + 21 witness transparency + 6 branch ledger); none is compiled or executed.
