@@ -675,6 +675,7 @@ pub struct VerifiedOciWitnessReceipt {
     idempotency_key_blake3: String,
     key_id: String,
     key_generation: u64,
+    signer_public_key_hex: String,
     tree_head_timestamp_ms: u64,
     previous_tree_size: u64,
     previous_root_sha256: String,
@@ -705,6 +706,9 @@ impl VerifiedOciWitnessReceipt {
     }
     pub(crate) fn key_generation(&self) -> u64 {
         self.key_generation
+    }
+    pub(crate) fn signer_public_key_hex(&self) -> &str {
+        &self.signer_public_key_hex
     }
     pub(crate) fn tree_head_timestamp_ms(&self) -> u64 {
         self.tree_head_timestamp_ms
@@ -882,6 +886,7 @@ pub fn verify_witness_receipt(
         idempotency_key_blake3: receipt.idempotency_key_blake3.clone(),
         key_id: head.key_id.clone(),
         key_generation: head.key_generation,
+        signer_public_key_hex: encode_hex(&public_key),
         tree_head_timestamp_ms: head.timestamp_ms,
         previous_tree_size: receipt.previous_tree_size,
         previous_root_sha256: receipt.previous_root_sha256.clone(),
