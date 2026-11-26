@@ -408,7 +408,12 @@ impl OciObserverCheckpointStore {
                  {witness_tables}
                  UPDATE checkpoint_history SET state = 'quarantined'
                     WHERE state IN ('prepared', 'reconciliation_required');
-                 UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
+                 UPDATE observer_state
+                    SET quarantined = 1,
+                        pending_state = CASE
+                            WHEN pending_checkpoint_digest IS NOT NULL THEN 'quarantined'
+                            ELSE NULL
+                        END
                     WHERE pending_checkpoint_digest IS NOT NULL
                        OR accepted_checkpoint_digest IS NOT NULL;
                  PRAGMA user_version=3;
@@ -428,7 +433,12 @@ impl OciObserverCheckpointStore {
                     ADD COLUMN public_key_hex TEXT NOT NULL DEFAULT '';
                  UPDATE checkpoint_history SET state = 'quarantined'
                     WHERE state IN ('prepared', 'reconciliation_required');
-                 UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
+                 UPDATE observer_state
+                    SET quarantined = 1,
+                        pending_state = CASE
+                            WHEN pending_checkpoint_digest IS NOT NULL THEN 'quarantined'
+                            ELSE NULL
+                        END
                     WHERE pending_checkpoint_digest IS NOT NULL
                        OR accepted_checkpoint_digest IS NOT NULL
                        OR EXISTS (
