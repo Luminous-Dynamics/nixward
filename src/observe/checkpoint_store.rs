@@ -139,6 +139,8 @@ pub enum OciObserverCheckpointStoreError {
     ObserverKeyNotCurrentlyValid,
     #[error("witness key is not currently valid for checkpoint finalization")]
     WitnessKeyNotCurrentlyValid,
+    #[error("witness tree-head evidence is too old or from the future")]
+    WitnessTreeHeadStale,
     #[error("witness tree head does not extend the locally retained witness head")]
     WitnessTreeHeadMismatch,
     #[error("witness receipt conflicts with an already persisted receipt")]
@@ -810,6 +812,7 @@ impl OciObserverCheckpointStore {
         observer_key: &TrustedOciObserverKey,
         witness_keys: &[TrustedOciWitnessKey],
         now_ms: u64,
+        max_witness_receipt_age_ms: u64,
     ) -> Result<CheckpointFinalizeOutcome, OciObserverCheckpointStoreError> {
         validate_digest(quorum.checkpoint_digest_blake3())
             .map_err(|_| OciObserverCheckpointStoreError::InvalidDigest)?;
@@ -913,7 +916,6 @@ impl OciObserverCheckpointStore {
 
         let observer_key_valid = observer_key.machine_id_blake3 == machine_id
             && observer_key.machine_id_blake3 == history_machine_id
-            && observer_key.observer_id_blake3 == observer_key.observer_id_blake3
             && observer_key.key_id == history_key_id
             && i64::try_from(observer_key.key_generation).ok() == Some(observer_key_generation)
             && now_ms >= observer_key.valid_from_ms
@@ -927,32 +929,10 @@ impl OciObserverCheckpointStore {
             return Err(OciObserverCheckpointStoreError::ObserverKeyNotCurrentlyValid);
         }
 
-        // Exact retry after the transaction committed but the caller lost its
-        // response is safe only when the persisted quorum digest is identical.
-        if history_state == "witness_quorum_confirmed" {
-            if existing_quorum_digest.as_deref()
-                == Some(quorum.evidence_digest_blake3())
-            {
-                tx.commit()?;
-                return Ok(CheckpointFinalizeOutcome::AlreadyFinalized);
-            }
-            tx.commit()?;
-            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
-        }
-
-        if !matches!(history_state.as_str(), "prepared" | "reconciliation_required")
-            || pending_checkpoint.as_deref() != Some(quorum.checkpoint_digest_blake3())
-            || pending_request_digest.as_deref() != Some(quorum.request_digest_blake3())
-            || pending_idempotency.as_deref() != Some(quorum.idempotency_key_blake3())
-            || !matches!(
-                pending_state.as_deref(),
-                Some("prepared") | Some("reconciliation_required")
-            )
-        {
-            tx.commit()?;
-            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
-        }
-
+        // Re-appraise witness trust and freshness at the final commit boundary.
+        // The quorum token proves that the receipts passed verification earlier;
+        // this check prevents a later revocation or stale tree head from being
+        // converted into current admission authority.
         let mut witness_ids = BTreeSet::new();
         let mut trust_domains = BTreeSet::new();
         for key in witness_keys {
@@ -984,25 +964,62 @@ impl OciObserverCheckpointStore {
                 tx.commit()?;
                 return Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid);
             }
+            let head_time = verified.tree_head_timestamp_ms();
+            if head_time > now_ms || now_ms.saturating_sub(head_time) > max_witness_receipt_age_ms {
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessTreeHeadStale);
+            }
+        }
 
-            let stored_head: Option<(i64, String)> = tx
+        // Exact retry after the transaction committed but the caller lost its
+        // response is safe only when the persisted quorum digest is identical.
+        if history_state == "witness_quorum_confirmed" {
+            if existing_quorum_digest.as_deref()
+                == Some(quorum.evidence_digest_blake3())
+            {
+                tx.commit()?;
+                return Ok(CheckpointFinalizeOutcome::AlreadyFinalized);
+            }
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        if !matches!(history_state.as_str(), "prepared" | "reconciliation_required")
+            || pending_checkpoint.as_deref() != Some(quorum.checkpoint_digest_blake3())
+            || pending_request_digest.as_deref() != Some(quorum.request_digest_blake3())
+            || pending_idempotency.as_deref() != Some(quorum.idempotency_key_blake3())
+            || !matches!(
+                pending_state.as_deref(),
+                Some("prepared") | Some("reconciliation_required")
+            )
+        {
+            tx.commit()?;
+            return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+        }
+
+        for verified in quorum.receipts() {
+            let stored_head: Option<(String, i64, String)> = tx
                 .query_row(
-                    "SELECT tree_size, root_hash_sha256
+                    "SELECT trust_domain_id, tree_size, root_hash_sha256
                      FROM observer_witness_state
                      WHERE observer_id = ?1 AND witness_id = ?2",
                     params![observer_key.observer_id_blake3, verified.witness_id()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
-            let (stored_size, stored_root) = if let Some((size, root)) = stored_head {
-                (size, root)
-            } else {
-                (0, empty_merkle_root_sha256())
-            };
+            let (stored_domain, stored_size, stored_root) =
+                if let Some((domain, size, root)) = stored_head {
+                    (Some(domain), size, root)
+                } else {
+                    (None, 0, empty_merkle_root_sha256())
+                };
             let expected_previous_size = i64::try_from(verified.previous_tree_size())
                 .map_err(|_| OciObserverCheckpointStoreError::IntegerOutOfRange)?;
             if stored_size != expected_previous_size
                 || stored_root != verified.previous_root_sha256()
+                || stored_domain
+                    .as_deref()
+                    .is_some_and(|domain| domain != verified.trust_domain_id())
             {
                 tx.execute(
                     "UPDATE observer_state
