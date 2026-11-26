@@ -929,6 +929,19 @@ mod tests {
     }
 
     #[test]
+    fn verifies_witness_receipt_extending_nonempty_prior_history() {
+        let signing = SigningKey::from_bytes(&[42u8; 32]);
+        let trust = trusted(&signing, "witness-a");
+        let prior = vec![b"older-0".to_vec(), b"older-1".to_vec()];
+        let (receipt, expectation) = receipt_fixture(&signing, &trust, &prior);
+        let verified =
+            verify_witness_receipt(&receipt, &trust, &subject(), &expectation).unwrap();
+        assert_eq!(verified.tree_size(), 3);
+        assert_eq!(verified.root_hash_sha256(), receipt.tree_head.root_hash_sha256);
+        assert_eq!(verified.checkpoint_digest_blake3(), "11".repeat(32));
+    }
+
+    #[test]
     fn rejects_prior_tree_head_substitution() {
         let signing = SigningKey::from_bytes(&[42u8; 32]);
         let trust = trusted(&signing, "witness-a");
