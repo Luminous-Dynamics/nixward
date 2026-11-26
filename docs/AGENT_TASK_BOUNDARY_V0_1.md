@@ -112,7 +112,7 @@ Fifteen task-contract Rust unit tests cover:
 14. runtime process-start mutation invalidating the owner signature;
 15. rejection of a runtime snapshot bound to a different task cgroup.
 
-The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 11 receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
+The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 13 receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
 
 ## 9. Next qualification increments
 
@@ -147,4 +147,4 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 11 receipt-chain tests (77 total source-level test functions). None has been compiled or executed. None has been compiled or executed.
+Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 13 receipt-chain tests (79 total source-level test functions). None has been compiled or executed. None has been compiled or executed.
