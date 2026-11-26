@@ -1086,6 +1086,18 @@ impl OciObserverCheckpointStore {
         }
 
         for verified in quorum.receipts() {
+            let branch_endorsement = quorum
+                .branch_endorsement_for(verified.witness_id())
+                .ok_or(OciObserverCheckpointStoreError::WitnessQuorumMismatch)?;
+            if branch_endorsement.checkpoint_digest_blake3() != quorum.checkpoint_digest_blake3()
+                || branch_endorsement.request_digest_blake3() != quorum.request_digest_blake3()
+                || branch_endorsement.key_id() != verified.key_id()
+                || branch_endorsement.key_generation() != verified.key_generation()
+                || branch_endorsement.signer_public_key_hex() != verified.signer_public_key_hex()
+            {
+                tx.commit()?;
+                return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
+            }
             let trusted = witness_keys
                 .iter()
                 .find(|key| key.witness_id == verified.witness_id());
@@ -1221,8 +1233,9 @@ impl OciObserverCheckpointStore {
                 "INSERT INTO witness_checkpoint_receipts (
                     observer_id, checkpoint_digest, witness_id, trust_domain_id,
                     key_id, key_generation, public_key_hex, tree_size, root_hash_sha256,
-                    receipt_digest_blake3, receipt_bytes
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    receipt_digest_blake3, receipt_bytes,
+                    branch_endorsement_digest_blake3, branch_endorsement_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     observer_key.observer_id_blake3,
                     quorum.checkpoint_digest_blake3(),
@@ -1234,7 +1247,9 @@ impl OciObserverCheckpointStore {
                     to_sql_integer(verified.tree_size())?,
                     verified.root_hash_sha256(),
                     verified.receipt_digest_blake3(),
-                    verified.receipt_bytes()
+                    verified.receipt_bytes(),
+                    branch_endorsement.endorsement_digest_blake3(),
+                    branch_endorsement.endorsement_bytes()
                 ],
             )?;
 
@@ -1435,7 +1450,10 @@ mod tests {
     use crate::observe::witness_transparency::{
         make_test_witness_quorum_for_request, OciObserverWitnessRequest,
         SignedOciWitnessTreeHead, OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
-        OCI_WITNESS_TREE_HEAD_KIND,
+        OCI_WITNESS_TREE_HEAD_KIND, VerifiedOciWitnessQuorum,
+    };
+    use crate::observe::witness_branch_ledger::{
+        make_test_verified_branch_endorsements, VerifiedOciWitnessBranchQuorum,
     };
     use ed25519_dalek::SigningKey;
 
@@ -1491,6 +1509,17 @@ mod tests {
         verify_observer_checkpoint(&signed, &trusted_key, &expectation).unwrap()
     }
 
+    fn branch_quorum(
+        checkpoint: &VerifiedOciObserverCheckpoint,
+        request: &OciObserverWitnessRequest,
+        witness_keys: &[TrustedOciWitnessKey],
+        quorum: VerifiedOciWitnessQuorum,
+    ) -> VerifiedOciWitnessBranchQuorum {
+        let endorsements =
+            make_test_verified_branch_endorsements(checkpoint, request, witness_keys).unwrap();
+        VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
+    }
+
     fn trusted_observer_key() -> TrustedOciObserverKey {
         let signing_key = SigningKey::from_bytes(&[42u8; 32]);
         TrustedOciObserverKey {
@@ -1525,7 +1554,7 @@ mod tests {
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         assert_eq!(
             store
-                .finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500)
+                .finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500)
                 .unwrap(),
             CheckpointFinalizeOutcome::Finalized
         );
@@ -1544,7 +1573,7 @@ mod tests {
 
         assert_eq!(
             store
-                .finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500)
+                .finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500)
                 .unwrap(),
             CheckpointFinalizeOutcome::AlreadyFinalized
         );
@@ -1562,7 +1591,7 @@ mod tests {
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         store
-            .finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500)
+            .finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500)
             .unwrap();
 
         let signing = SigningKey::from_bytes(&[41u8; 32]);
@@ -1634,12 +1663,12 @@ mod tests {
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let (witness_keys, quorum) =
-            make_test_witness_quorum_for_request(&request, 2).unwrap();
+            make_test_witness_quorum_for_request(&request, 3).unwrap();
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         assert!(matches!(
-            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            store.finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500),
             Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
@@ -1656,7 +1685,7 @@ mod tests {
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         assert!(matches!(
-            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            store.finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500),
             Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
@@ -1673,7 +1702,7 @@ mod tests {
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         assert!(matches!(
-            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            store.finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500),
             Err(OciObserverCheckpointStoreError::ObserverKeyNotCurrentlyValid)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
@@ -1691,7 +1720,7 @@ mod tests {
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
         assert!(matches!(
-            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            store.finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500),
             Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
@@ -1710,7 +1739,7 @@ mod tests {
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
 
         assert!(matches!(
-            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            store.finalize_witness_quorum(&branch_quorum(&checkpoint, &request, &witness_keys, quorum.clone()), &observer_key, &witness_keys, 1_200, 500),
             Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid)
         ));
         assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
@@ -1727,7 +1756,7 @@ mod tests {
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&first, &first_request, 1_100).unwrap();
         store
-            .finalize_witness_quorum(&first_quorum, &observer_key, &witness_keys, 1_200, 500)
+            .finalize_witness_quorum(&branch_quorum(&first, &first_request, &witness_keys, first_quorum.clone()), &observer_key, &witness_keys, 1_200, 500)
             .unwrap();
 
         let second = verified_checkpoint(
