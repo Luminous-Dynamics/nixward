@@ -1663,7 +1663,7 @@ mod tests {
         let checkpoint = verified_checkpoint(10, None);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
         let (witness_keys, quorum) =
-            make_test_witness_quorum_for_request(&request, 3).unwrap();
+            make_test_witness_quorum_for_request(&request, 2).unwrap();
         let observer_key = trusted_observer_key();
         let mut store = open_store(&temp);
         store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
