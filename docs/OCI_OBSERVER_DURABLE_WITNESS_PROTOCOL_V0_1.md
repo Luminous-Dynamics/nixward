@@ -254,3 +254,18 @@ Not implemented:
 - crash/power-loss VM fault injection or Rust test execution.
 
 The branch currently contains 104 source-level Rust test functions, none compiled or executed. The local store is not a defence against a privileged attacker restoring the DB and WAL together; external witness high-water marks remain required.
+
+
+## 13. Source implementation status (26 November 2026)
+
+The branch now contains a first executable source layer for witness verification and durable quorum finalization:
+
+- `src/observe/witness_transparency.rs` implements RFC 9162 Merkle tree hashing, inclusion proof and consistency proof verification with SHA-256 domain prefixes; strict signed tree-head receipts; exact leaf binding to witness ID/key generation, checkpoint digest, canonical request digest and idempotency key; witness-key validity/revocation checks; and opaque per-receipt/quorum verification results.
+- The signed tree-head wire structure is a **Nixward-specific, domain-separated envelope**, not the RFC 9162 Certificate Transparency v2 wire protocol. It uses the RFC 9162 tree hash/proof algorithms and includes an explicit `sha256-rfc9162` algorithm identifier in signed bytes.
+- `OciObserverWitnessRequest` is an opaque request built only from `VerifiedOciObserverCheckpoint`; the store no longer accepts arbitrary caller-supplied bytes as a checkpoint request.
+- `src/observe/checkpoint_store.rs` schema v2 has atomic initialization and v1→v2 migration. `finalize_witness_quorum` accepts only an opaque verified quorum, enforces a 2-of-3 profile (maximum three receipts), rechecks observer/witness key generation and revocation at commit time, checks witness-receipt age, compares each proof's prior tree head against the locally retained witness head, stores exact receipt bytes and new tree heads, and atomically advances the accepted observer checkpoint. A verified mismatch quarantines the observer.
+- The test-only fixture creates real Ed25519 signatures and proof objects for store integration tests; it is not a production witness server.
+
+The transparency verifier also includes `verify_witness_tree_head_equivocation`: it verifies two tree-head signatures under the same provisioned witness key and returns opaque evidence if the same witness/key generation signed different roots for the same tree size. **This is a detector, not a gossip transport.** The conflicting statements must be delivered through an independent gossip monitor or cross-witness channel. An isolated relying party cannot detect a split view it has never received.
+
+The source tree contains 131 test functions (15 task contract + 24 policy containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 13 checkpoint store + 21 witness transparency). None has been compiled or executed. There is no production witness service, gossip transport, remote trust distribution, TEE/measured-boot integration, task-contract consumption, live enforcement, or effect verification. SQLite/WAL remains locally rollbackable by a privileged host attacker; the external witness is still needed as the independent high-water authority.
