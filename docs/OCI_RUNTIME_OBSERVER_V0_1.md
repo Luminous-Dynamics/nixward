@@ -30,7 +30,7 @@ Both samples use one process-local monotonic clock. The observer rejects non-inc
 ## Fail-closed checks
 
 - Podman reports a running container with the expected immutable container ID and expected `ImageDigest`. The local `Image` ID is preserved separately and is not confused with the registry manifest digest.
-- Podman reports rootless execution, a read-only root, no privileged mode, no host network or host PID mode, and no additional user-declared `Mounts`, `Binds` or `Tmpfs`. Podman's inspect `Mounts` list alone is insufficient: `Binds` and `Tmpfs` are separate `HostConfig` fields, and tmpfs is not included in the ordinary mount list.
+- Podman reports rootless execution, a read-only root, no privileged mode, an isolated network mode from the supported allowlist, a private/default PID mode, a private cgroup mode, and no additional user-declared `Mounts`, `Binds` or `Tmpfs`. `container:<id>` and `ns:<path>` sharing modes are rejected, not merely the literal `host` mode. Podman's inspect `Mounts` list alone is insufficient: `Binds` and `Tmpfs` are separate `HostConfig` fields, and tmpfs is not included in the ordinary mount list.
 - Podman's UID/GID mappings match the process's live `uid_map` and `gid_map`.
 - The live root mount is read-only.
 - User, network, PID, mount and cgroup namespace inodes differ from the host observer's namespaces.
@@ -70,7 +70,7 @@ A signed snapshot would authenticate the observer key and bytes; it would not ma
 5. Reobserve at each consequential action and on lifecycle notifications; a single pair is not continuous monitoring.
 6. Add negative controls for PID reuse, container replacement, image mutation, namespace swaps, cgroup migration, stale boot identity, mount drift, capability expansion, Podman binary replacement and observer restart.
 
-The OCI runtime collector currently has 22 source-level Rust tests. The separately exported in-memory receipt-chain prototype has six tests; it detects link tampering/reordering and sequence rollback relative to a trusted head, but is not yet durable or externally anchored. No Rust compiler or runner was available during this change. No compilation, clippy, formatting, Nix build or live Podman collection is claimed.
+The OCI runtime collector currently has 25 source-level Rust tests. The separately exported in-memory receipt-chain prototype has six tests; it detects link tampering/reordering and sequence rollback relative to a trusted head, but is not yet durable or externally anchored. No Rust compiler or runner was available during this change. No compilation, clippy, formatting, Nix build or live Podman collection is claimed.
 
 
 ## Receipt-chain prototype
