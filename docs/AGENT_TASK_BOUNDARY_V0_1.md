@@ -120,7 +120,7 @@ A separate `observe::signed_checkpoint` module now signs a deterministic, domain
 
 The module returns an opaque `VerifiedOciObserverCheckpoint`, but the task contract does not consume it. The verifier caller must independently verify the snapshot and receipt chain before supplying their exact digests, generate and consume the nonce, and persist the returned checkpoint digest/sequence outside the workload. No persistent store, key enrollment/distribution, remote witness, measured boot, hardware key or runtime enforcement is implemented. This is a software-authenticated checkpoint prototype, not a host attestation.
 
-See [OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md](OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md). Its 15 source-level tests bring the overall branch corpus to 94 functions; none is compiled or executed.
+See [OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md](OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md). Its 18 source-level tests bring the pre-journal branch corpus to 97 functions; none is compiled or executed.
 
 ## 9. Next qualification increments
 
@@ -155,4 +155,11 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests, 13 receipt-chain tests and 18 signed-checkpoint tests (97 total source-level test functions). None has been compiled or executed.
+Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests, 13 receipt-chain tests, 18 signed-checkpoint tests and 7 checkpoint-store tests (104 total source-level test functions). None has been compiled or executed.
+
+
+### Durable relying-party checkpoint journal (26 Nov 2026)
+
+The new `observe::checkpoint_store` module uses native SQLite WAL with `synchronous=FULL` and persists the exact verified checkpoint parent and exact witness request before network I/O. It supports a single unresolved checkpoint per observer, byte-identical idempotent retries, conflict quarantine, explicit reconciliation-required state and recovery of the exact pending bytes. It does not yet accept witness receipts or mark a checkpoint confirmed. The store intentionally cannot make local PREPARED state into task authority.
+
+Seven source-level store tests bring the branch total to 104 (15 + 24 + 27 + 13 + 18 + 7). None have been compiled or executed. No local Cargo/Rust/Nix toolchain or exact-head Nixward CI result is available in this environment. See [durable witness protocol](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md) and [issue #170](https://github.com/Luminous-Dynamics/nixward/issues/170).
