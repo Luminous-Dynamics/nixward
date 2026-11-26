@@ -362,7 +362,7 @@ pub struct SignedOciWitnessTreeHead {
 }
 
 impl SignedOciWitnessTreeHead {
-    fn signing_bytes(&self) -> Result<Vec<u8>, OciWitnessProofError> {
+    pub(crate) fn signing_bytes(&self) -> Result<Vec<u8>, OciWitnessProofError> {
         if self.schema_version != OCI_WITNESS_RECEIPT_SCHEMA_VERSION
             || self.kind != OCI_WITNESS_TREE_HEAD_KIND
             || self.key_generation == 0
