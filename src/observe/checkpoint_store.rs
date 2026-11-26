@@ -1597,6 +1597,23 @@ mod tests {
     }
 
     #[test]
+    fn refuses_two_witness_quorum_for_three_of_four_finalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (witness_keys, quorum) =
+            make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let observer_key = trusted_observer_key();
+        let mut store = open_store(&temp);
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+        assert!(matches!(
+            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
+    }
+
+    #[test]
     fn refuses_single_witness_quorum_for_three_of_four_finalization() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
