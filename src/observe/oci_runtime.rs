@@ -93,6 +93,7 @@ struct PodmanInspectEvidence {
     pid: u32,
     network_mode: String,
     pid_mode: String,
+    cgroup_mode: String,
     read_only_root: bool,
     privileged: bool,
     mounts: Vec<PodmanMountEvidence>,
@@ -356,6 +357,7 @@ fn parse_podman_inspect(raw: &[u8]) -> Result<PodmanInspectEvidence, OciRuntimeO
         pid: number_field(state, "pid")?,
         network_mode: string_field(host_config, "networkMode")?.to_ascii_lowercase(),
         pid_mode: optional_string_field(host_config, "pidMode").unwrap_or_default().to_ascii_lowercase(),
+        cgroup_mode: string_field(host_config, "cgroupMode")?.to_ascii_lowercase(),
         read_only_root: bool_field(host_config, "readonlyRootfs")?,
         privileged: bool_field(host_config, "privileged")?,
         mounts,
@@ -509,6 +511,7 @@ fn validate_frame(
     if inspect.privileged || !inspect.mounts.is_empty()
         || !inspect.binds.is_empty() || !inspect.tmpfs.is_empty()
         || inspect.network_mode == "host" || inspect.pid_mode == "host"
+        || inspect.cgroup_mode != "private"
     {
         return Err(OciRuntimeObservationError::UnsafeContainerConfiguration);
     }
@@ -902,7 +905,7 @@ mod tests {
     }
     fn inspect(container: &str) -> Vec<u8> {
         format!(
-            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageDigest":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","ReadonlyRootfs":true,"Privileged":false,"Binds":[],"Tmpfs":{}}},"Mounts":[]}}]"#,
+            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageDigest":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","CgroupMode":"private","ReadonlyRootfs":true,"Privileged":false,"Binds":[],"Tmpfs":{}}},"Mounts":[]}}]"#,
             "b".repeat(64), "d".repeat(64)
         ).into_bytes()
     }
@@ -989,6 +992,19 @@ mod tests {
         assert!(parsed.mounts.is_empty());
         assert!(parsed.binds.is_empty());
         assert_eq!(parsed.tmpfs.len(), 1);
+        let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
+        candidate.podman_inspect = parsed;
+        assert!(matches!(
+            validate_frame(&profile(), &candidate),
+            Err(OciRuntimeObservationError::UnsafeContainerConfiguration)
+        ));
+    }
+
+    #[test]
+    fn rejects_host_cgroup_mode_even_when_namespace_observation_differs() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"CgroupMode\":\"private\"", "\"CgroupMode\":\"host\"");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
         let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
         candidate.podman_inspect = parsed;
         assert!(matches!(
