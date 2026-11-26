@@ -20,6 +20,7 @@ pub mod receipt_chain;
 pub mod signed_checkpoint;
 pub mod checkpoint_store;
 pub mod witness_transparency;
+pub mod witness_branch_ledger;
 pub mod store;
 pub mod systemd;
 
