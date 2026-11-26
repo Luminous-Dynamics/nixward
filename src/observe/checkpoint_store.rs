@@ -13,6 +13,7 @@
 //! privileged local attacker who can restore the database and WAL together.
 
 use super::signed_checkpoint::{TrustedOciObserverKey, VerifiedOciObserverCheckpoint};
+use super::witness_branch_ledger::VerifiedOciWitnessBranchQuorum;
 use super::witness_transparency::{
     empty_merkle_root_sha256, verify_witness_tree_head_equivocation, OciObserverWitnessRequest,
     SignedOciWitnessTreeHead, TrustedOciWitnessKey, VerifiedOciWitnessQuorum,
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const STORE_SCHEMA_VERSION: i64 = 4;
+const STORE_SCHEMA_VERSION: i64 = 5;
 const MAX_WITNESS_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
@@ -115,6 +116,8 @@ CREATE TABLE witness_checkpoint_receipts (
     root_hash_sha256 TEXT NOT NULL,
     receipt_digest_blake3 TEXT NOT NULL,
     receipt_bytes BLOB NOT NULL,
+    branch_endorsement_digest_blake3 TEXT NOT NULL DEFAULT '',
+    branch_endorsement_bytes BLOB NOT NULL DEFAULT X'',
     PRIMARY KEY (observer_id, checkpoint_digest, witness_id),
     FOREIGN KEY (observer_id, checkpoint_digest)
         REFERENCES checkpoint_history(observer_id, checkpoint_digest)
@@ -908,7 +911,7 @@ impl OciObserverCheckpointStore {
     /// closes the revocation-between-proof-and-commit window at the RP.
     pub fn finalize_witness_quorum(
         &mut self,
-        quorum: &VerifiedOciWitnessQuorum,
+        quorum: &VerifiedOciWitnessBranchQuorum,
         observer_key: &TrustedOciObserverKey,
         witness_keys: &[TrustedOciWitnessKey],
         now_ms: u64,
