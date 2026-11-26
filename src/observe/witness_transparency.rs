@@ -27,7 +27,7 @@ const QUORUM_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-quorum:v1\0";
 const WITNESS_REQUEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\0";
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
-const MAX_MERKLE_PROOF_NODES: usize = 64;
+const MAX_MERKLE_PROOF_NODES: usize = 65;
 const MAX_WITNESSES: usize = 3;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -377,6 +377,7 @@ impl SignedOciWitnessTreeHead {
         out.extend_from_slice(TREE_HEAD_DOMAIN);
         out.extend_from_slice(&self.schema_version.to_le_bytes());
         push_string(&mut out, &self.kind);
+        push_string(&mut out, OCI_WITNESS_TREE_HASH_ALGORITHM);
         push_string(&mut out, &self.witness_id);
         push_string(&mut out, &self.key_id);
         out.extend_from_slice(&self.key_generation.to_le_bytes());
@@ -861,6 +862,105 @@ pub fn verify_witness_quorum(
         receipts: verified,
         evidence_digest_blake3: digest.finalize().to_hex().to_string(),
     })
+}
+
+#[cfg(test)]
+pub(crate) fn make_test_witness_quorum_for_request(
+    request: &OciObserverWitnessRequest,
+    witness_count: usize,
+) -> Result<(Vec<TrustedOciWitnessKey>, VerifiedOciWitnessQuorum), OciWitnessProofError> {
+    use ed25519_dalek::{Signer, SigningKey};
+
+    if !(1..=MAX_WITNESSES).contains(&witness_count) {
+        return Err(OciWitnessProofError::InvalidQuorumThreshold);
+    }
+
+    let subject = OciWitnessQuorumSubject {
+        checkpoint_digest_blake3: request.checkpoint_digest_blake3().to_owned(),
+        request_digest_blake3: request.request_digest_blake3()?,
+        idempotency_key_blake3: request.idempotency_key_blake3()?,
+    };
+
+    let mut signing_keys = Vec::with_capacity(witness_count);
+    let mut trusted_keys = Vec::with_capacity(witness_count);
+    let mut receipts = Vec::with_capacity(witness_count);
+    let mut expectations = Vec::with_capacity(witness_count);
+
+    for index in 0..witness_count {
+        let seed = 41u8 + index as u8;
+        let signing_key = SigningKey::from_bytes(&[seed; 32]);
+        let suffix = (b'a' + index as u8) as char;
+        let witness_id = format!("witness-{suffix}");
+        let trusted_key = TrustedOciWitnessKey {
+            trust_domain_id: format!("operator-{suffix}"),
+            witness_id: witness_id.clone(),
+            key_id: format!("key-{suffix}"),
+            key_generation: 1,
+            public_key_hex: encode_hex(signing_key.verifying_key().as_bytes()),
+            valid_from_ms: 100,
+            valid_until_ms: 10_000,
+            revoked_at_ms: None,
+        };
+        let leaf_input = witness_leaf_input(
+            &trusted_key.witness_id,
+            &trusted_key.key_id,
+            trusted_key.key_generation,
+            &subject.checkpoint_digest_blake3,
+            &subject.request_digest_blake3,
+            &subject.idempotency_key_blake3,
+        )?;
+        let root = merkle_leaf_hash_sha256(&leaf_input);
+        let mut tree_head = SignedOciWitnessTreeHead {
+            schema_version: OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
+            kind: OCI_WITNESS_TREE_HEAD_KIND.to_owned(),
+            witness_id: trusted_key.witness_id.clone(),
+            key_id: trusted_key.key_id.clone(),
+            key_generation: trusted_key.key_generation,
+            tree_size: 1,
+            root_hash_sha256: encode_hex(&root),
+            timestamp_ms: 1_100,
+            signature_hex: String::new(),
+        };
+        tree_head.signature_hex =
+            encode_hex(&signing_key.sign(&tree_head.signing_bytes()?).to_bytes());
+
+        receipts.push(OciObserverWitnessReceipt {
+            schema_version: OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
+            kind: OCI_WITNESS_RECEIPT_KIND.to_owned(),
+            checkpoint_digest_blake3: subject.checkpoint_digest_blake3.clone(),
+            request_digest_blake3: subject.request_digest_blake3.clone(),
+            idempotency_key_blake3: subject.idempotency_key_blake3.clone(),
+            leaf_index: 0,
+            inclusion_path_sha256: Vec::new(),
+            previous_tree_size: 0,
+            previous_root_sha256: empty_merkle_root_sha256(),
+            consistency_path_sha256: Vec::new(),
+            tree_head,
+        });
+        expectations.push(OciWitnessReceiptExpectation {
+            previous_tree_size: 0,
+            previous_root_sha256: empty_merkle_root_sha256(),
+            now_ms: 1_200,
+            max_tree_head_age_ms: 500,
+            max_future_skew_ms: 0,
+        });
+        signing_keys.push(signing_key);
+        trusted_keys.push(trusted_key);
+    }
+
+    let evidence: Vec<OciWitnessEvidence<'_>> = receipts
+        .iter()
+        .zip(trusted_keys.iter())
+        .zip(expectations.iter())
+        .map(|((receipt, trusted_key), expectation)| OciWitnessEvidence {
+            receipt,
+            trusted_key,
+            expectation,
+        })
+        .collect();
+    let quorum = verify_witness_quorum(&subject, &evidence, witness_count)?;
+    drop(signing_keys);
+    Ok((trusted_keys, quorum))
 }
 
 #[cfg(test)]
