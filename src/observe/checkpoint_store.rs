@@ -159,7 +159,7 @@ fn prepare_database_path(path: &Path) -> Result<PathBuf, OciObserverCheckpointSt
     let file_name = path
         .file_name()
         .ok_or(OciObserverCheckpointStoreError::UnsafePath)?;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path\n        .parent()\n        .filter(|parent| !parent.as_os_str().is_empty())\n        .unwrap_or_else(|| Path::new("."));
     let canonical_parent = fs::canonicalize(parent)?;
     let parent_metadata = fs::metadata(&canonical_parent)?;
     if !parent_metadata.is_dir() {
