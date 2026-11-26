@@ -404,7 +404,7 @@ impl OciObserverCheckpointStore {
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version == 0 {
             let create_schema = format!(
-                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} {equivocation} PRAGMA user_version=4; COMMIT;",
+                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} {equivocation} PRAGMA user_version=5; COMMIT;",
                 observer_state = OBSERVER_STATE_DDL,
                 history = CHECKPOINT_HISTORY_V3_DDL,
                 witness = WITNESS_TABLES_DDL,
@@ -441,7 +441,7 @@ impl OciObserverCheckpointStore {
                     WHERE pending_checkpoint_digest IS NOT NULL
                        OR accepted_checkpoint_digest IS NOT NULL;
                  {equivocation}
-                 PRAGMA user_version=4;
+                 PRAGMA user_version=5;
                  COMMIT;",
                 history_ddl = CHECKPOINT_HISTORY_V3_DDL,
                 witness_tables = WITNESS_TABLES_DDL,
@@ -457,6 +457,10 @@ impl OciObserverCheckpointStore {
                     ADD COLUMN public_key_hex TEXT NOT NULL DEFAULT '';
                  ALTER TABLE observer_witness_state
                     ADD COLUMN public_key_hex TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_digest_blake3 TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_bytes BLOB NOT NULL DEFAULT X'';
                  UPDATE checkpoint_history SET state = 'quarantined'
                     WHERE state IN ('prepared', 'reconciliation_required');
                  UPDATE observer_state
@@ -472,7 +476,7 @@ impl OciObserverCheckpointStore {
                            WHERE w.observer_id = observer_state.observer_id
                        );
                  {equivocation}
-                 PRAGMA user_version=4;
+                 PRAGMA user_version=5;
                  COMMIT;",
                 equivocation = WITNESS_EQUIVOCATION_DDL,
             );
@@ -480,12 +484,38 @@ impl OciObserverCheckpointStore {
         } else if schema_version == 3 {
             let migration = format!(
                 "BEGIN EXCLUSIVE;
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_digest_blake3 TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_bytes BLOB NOT NULL DEFAULT X'';
+                 UPDATE checkpoint_history SET state = 'quarantined'
+                    WHERE state IN ('prepared', 'reconciliation_required', 'witness_quorum_confirmed');
+                 UPDATE observer_state
+                    SET quarantined = 1,
+                        pending_state = CASE WHEN pending_checkpoint_digest IS NOT NULL THEN 'quarantined' ELSE NULL END
+                    WHERE pending_checkpoint_digest IS NOT NULL OR accepted_checkpoint_digest IS NOT NULL;
                  {equivocation}
-                 PRAGMA user_version=4;
+                 PRAGMA user_version=5;
                  COMMIT;",
                 equivocation = WITNESS_EQUIVOCATION_DDL,
             );
             connection.execute_batch(&migration)?;
+        } else if schema_version == 4 {
+            connection.execute_batch(
+                "BEGIN EXCLUSIVE;
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_digest_blake3 TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN branch_endorsement_bytes BLOB NOT NULL DEFAULT X'';
+                 UPDATE checkpoint_history SET state = 'quarantined'
+                    WHERE state IN ('prepared', 'reconciliation_required', 'witness_quorum_confirmed');
+                 UPDATE observer_state
+                    SET quarantined = 1,
+                        pending_state = CASE WHEN pending_checkpoint_digest IS NOT NULL THEN 'quarantined' ELSE NULL END
+                    WHERE pending_checkpoint_digest IS NOT NULL OR accepted_checkpoint_digest IS NOT NULL;
+                 PRAGMA user_version=5;
+                 COMMIT;",
+            )?;
         } else if schema_version != STORE_SCHEMA_VERSION {
             return Err(OciObserverCheckpointStoreError::UnsupportedSchemaVersion);
         }
