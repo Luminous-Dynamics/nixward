@@ -8,6 +8,7 @@
 //! operate a transparency log, establish administrative independence between
 //! witnesses, or turn a Merkle proof into consensus.
 
+use super::signed_checkpoint::VerifiedOciObserverCheckpoint;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,6 +24,9 @@ const TREE_HEAD_DOMAIN: &[u8] = b"nixward:oci-observer-witness-tree-head:v1\0";
 const LEAF_DOMAIN: &[u8] = b"nixward:oci-observer-witness-leaf:v1\0";
 const RECEIPT_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-receipt-digest:v1\0";
 const QUORUM_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-quorum:v1\0";
+const WITNESS_REQUEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\0";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
+const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
 const MAX_MERKLE_PROOF_NODES: usize = 64;
 const MAX_WITNESSES: usize = 3;
 
@@ -420,6 +424,137 @@ pub struct OciWitnessReceiptExpectation {
     pub now_ms: u64,
     pub max_tree_head_age_ms: u64,
     pub max_future_skew_ms: u64,
+}
+
+/// Opaque, canonical witness request derived only from a verified observer
+/// checkpoint. Callers cannot independently edit the request fields or
+/// substitute arbitrary bytes while claiming they correspond to this token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciObserverWitnessRequest {
+    observer_id_blake3: String,
+    machine_id_blake3: String,
+    boot_id: String,
+    sequence: u64,
+    checkpoint_digest_blake3: String,
+    key_id: String,
+    key_generation: u64,
+    snapshot_digest_blake3: String,
+    chain_head_blake3: String,
+    previous_checkpoint_blake3: Option<String>,
+    challenge_blake3: String,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+impl OciObserverWitnessRequest {
+    pub fn from_verified_checkpoint(
+        checkpoint: &VerifiedOciObserverCheckpoint,
+    ) -> Result<Self, OciWitnessProofError> {
+        let request = Self {
+            observer_id_blake3: checkpoint.observer_id_blake3().to_owned(),
+            machine_id_blake3: checkpoint.machine_id_blake3().to_owned(),
+            boot_id: checkpoint.boot_id().to_owned(),
+            sequence: checkpoint.sequence(),
+            checkpoint_digest_blake3: checkpoint.checkpoint_digest_blake3().to_owned(),
+            key_id: checkpoint.key_id().to_owned(),
+            key_generation: checkpoint.key_generation(),
+            snapshot_digest_blake3: checkpoint.snapshot_digest_blake3().to_owned(),
+            chain_head_blake3: checkpoint.chain_head_blake3().to_owned(),
+            previous_checkpoint_blake3: checkpoint.previous_checkpoint_blake3().map(str::to_owned),
+            challenge_blake3: checkpoint.challenge_blake3().to_owned(),
+            issued_at_ms: checkpoint.issued_at_ms(),
+            expires_at_ms: checkpoint.expires_at_ms(),
+        };
+        request.canonical_bytes()?;
+        Ok(request)
+    }
+
+    pub fn checkpoint_digest_blake3(&self) -> &str {
+        &self.checkpoint_digest_blake3
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, OciWitnessProofError> {
+        if self.sequence == 0
+            || self.key_generation == 0
+            || self.issued_at_ms == 0
+            || self.expires_at_ms <= self.issued_at_ms
+        {
+            return Err(OciWitnessProofError::InvalidShape);
+        }
+        validate_digest(&self.observer_id_blake3)?;
+        validate_digest(&self.machine_id_blake3)?;
+        validate_digest(&self.checkpoint_digest_blake3)?;
+        validate_digest(&self.snapshot_digest_blake3)?;
+        validate_digest(&self.chain_head_blake3)?;
+        validate_digest(&self.challenge_blake3)?;
+        validate_identifier(&self.boot_id)?;
+        validate_identifier(&self.key_id)?;
+        if let Some(previous) = &self.previous_checkpoint_blake3 {
+            validate_digest(previous)?;
+        }
+
+        let mut out = Vec::with_capacity(512);
+        out.extend_from_slice(WITNESS_REQUEST_DOMAIN);
+        out.extend_from_slice(&OCI_WITNESS_RECEIPT_SCHEMA_VERSION.to_le_bytes());
+        push_string(&mut out, OCI_WITNESS_RECEIPT_KIND);
+        push_string(&mut out, &self.observer_id_blake3);
+        push_string(&mut out, &self.machine_id_blake3);
+        push_string(&mut out, &self.boot_id);
+        out.extend_from_slice(&self.sequence.to_le_bytes());
+        push_string(&mut out, &self.checkpoint_digest_blake3);
+        push_string(&mut out, &self.key_id);
+        out.extend_from_slice(&self.key_generation.to_le_bytes());
+        push_string(&mut out, &self.snapshot_digest_blake3);
+        push_string(&mut out, &self.chain_head_blake3);
+        match &self.previous_checkpoint_blake3 {
+            Some(previous) => {
+                out.push(1);
+                push_string(&mut out, previous);
+            }
+            None => out.push(0),
+        }
+        push_string(&mut out, &self.challenge_blake3);
+        out.extend_from_slice(&self.issued_at_ms.to_le_bytes());
+        out.extend_from_slice(&self.expires_at_ms.to_le_bytes());
+        Ok(out)
+    }
+
+    pub fn request_digest_blake3(&self) -> Result<String, OciWitnessProofError> {
+        let bytes = self.canonical_bytes()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(REQUEST_DIGEST_DOMAIN);
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    pub fn idempotency_key_blake3(&self) -> Result<String, OciWitnessProofError> {
+        let request_digest = self.request_digest_blake3()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(IDEMPOTENCY_DOMAIN);
+        hasher.update(&(self.checkpoint_digest_blake3.len() as u64).to_le_bytes());
+        hasher.update(self.checkpoint_digest_blake3.as_bytes());
+        hasher.update(&(request_digest.len() as u64).to_le_bytes());
+        hasher.update(request_digest.as_bytes());
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+
+    pub fn matches_checkpoint(&self, checkpoint: &VerifiedOciObserverCheckpoint) -> bool {
+        self.observer_id_blake3 == checkpoint.observer_id_blake3()
+            && self.machine_id_blake3 == checkpoint.machine_id_blake3()
+            && self.boot_id == checkpoint.boot_id()
+            && self.sequence == checkpoint.sequence()
+            && self.checkpoint_digest_blake3 == checkpoint.checkpoint_digest_blake3()
+            && self.key_id == checkpoint.key_id()
+            && self.key_generation == checkpoint.key_generation()
+            && self.snapshot_digest_blake3 == checkpoint.snapshot_digest_blake3()
+            && self.chain_head_blake3 == checkpoint.chain_head_blake3()
+            && self.previous_checkpoint_blake3.as_deref()
+                == checkpoint.previous_checkpoint_blake3()
+            && self.challenge_blake3 == checkpoint.challenge_blake3()
+            && self.issued_at_ms == checkpoint.issued_at_ms()
+            && self.expires_at_ms == checkpoint.expires_at_ms()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
