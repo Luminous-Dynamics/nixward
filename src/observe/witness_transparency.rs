@@ -620,6 +620,13 @@ pub fn verify_witness_tree_head_equivocation(
     {
         return Err(OciWitnessProofError::WitnessIdentityMismatch);
     }
+    if first.timestamp_ms < trusted_key.valid_from_ms
+        || first.timestamp_ms >= trusted_key.valid_until_ms
+        || second.timestamp_ms < trusted_key.valid_from_ms
+        || second.timestamp_ms >= trusted_key.valid_until_ms
+    {
+        return Err(OciWitnessProofError::KeyNotCurrentlyValid);
+    }
     let first_bytes = first.signing_bytes()?;
     let second_bytes = second.signing_bytes()?;
     let public_key = decode_hex::<32>(&trusted_key.public_key_hex)?;
