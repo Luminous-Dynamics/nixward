@@ -409,7 +409,8 @@ impl OciObserverCheckpointStore {
                  UPDATE checkpoint_history SET state = 'quarantined'
                     WHERE state IN ('prepared', 'reconciliation_required');
                  UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
-                    WHERE pending_checkpoint_digest IS NOT NULL;
+                    WHERE pending_checkpoint_digest IS NOT NULL
+                       OR accepted_checkpoint_digest IS NOT NULL;
                  PRAGMA user_version=3;
                  COMMIT;",
                 history_ddl = CHECKPOINT_HISTORY_V3_DDL,
@@ -428,7 +429,12 @@ impl OciObserverCheckpointStore {
                  UPDATE checkpoint_history SET state = 'quarantined'
                     WHERE state IN ('prepared', 'reconciliation_required');
                  UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
-                    WHERE pending_checkpoint_digest IS NOT NULL;
+                    WHERE pending_checkpoint_digest IS NOT NULL
+                       OR accepted_checkpoint_digest IS NOT NULL
+                       OR EXISTS (
+                           SELECT 1 FROM observer_witness_state w
+                           WHERE w.observer_id = observer_state.observer_id
+                       );
                  PRAGMA user_version=3;
                  COMMIT;",
             )?;
@@ -951,6 +957,7 @@ impl OciObserverCheckpointStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -974,7 +981,6 @@ impl OciObserverCheckpointStore {
             && observer_key.machine_id_blake3 == history_machine_id
             && observer_key.key_id == history_key_id
             && observer_key.public_key_hex == history_public_key_hex
-            && observer_key.public_key_hex == (/* exact key used by verified token is persisted */ history_public_key_hex.as_str())
             && i64::try_from(observer_key.key_generation).ok() == Some(observer_key_generation)
             && now_ms >= observer_key.valid_from_ms
             && now_ms < observer_key.valid_until_ms
@@ -1440,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_checkpoint_history_atomically_to_v2() {
+    fn migrates_v1_checkpoint_history_atomically_to_v3() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("observer-checkpoints.sqlite");
         let mut options = fs::OpenOptions::new();
@@ -1484,13 +1490,75 @@ mod tests {
         }
 
         let store = open_store(&temp);
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), 3);
         store.integrity_check().unwrap();
         let head = store
             .witness_tree_head(&"a1".repeat(32), "witness-a")
             .unwrap();
         assert_eq!(head.tree_size, 0);
         assert_eq!(head.root_hash_sha256, empty_merkle_root_sha256());
+    }
+
+    #[test]
+    fn migrates_v2_database_and_quarantines_unfingerprinted_witness_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("observer-checkpoints.sqlite");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).read(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        drop(options.open(&path).unwrap());
+
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(OBSERVER_STATE_DDL).unwrap();
+            connection.execute_batch(
+                "CREATE TABLE checkpoint_history (
+                    observer_id TEXT NOT NULL, checkpoint_digest TEXT NOT NULL,
+                    machine_id TEXT NOT NULL, boot_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    parent_digest TEXT, snapshot_digest TEXT NOT NULL, chain_head_digest TEXT NOT NULL,
+                    key_id TEXT NOT NULL, key_generation INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL,
+                    request_digest TEXT NOT NULL, request_bytes BLOB NOT NULL, state TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL, witness_quorum_digest TEXT,
+                    witness_quorum_required INTEGER, witness_receipt_count INTEGER,
+                    witness_confirmed_at_ms INTEGER,
+                    PRIMARY KEY (observer_id, checkpoint_digest), UNIQUE (observer_id, sequence)
+                 );
+                 CREATE TABLE witness_checkpoint_receipts (
+                    observer_id TEXT NOT NULL, checkpoint_digest TEXT NOT NULL,
+                    witness_id TEXT NOT NULL, trust_domain_id TEXT NOT NULL, key_id TEXT NOT NULL,
+                    key_generation INTEGER NOT NULL, tree_size INTEGER NOT NULL, root_hash_sha256 TEXT NOT NULL,
+                    receipt_digest_blake3 TEXT NOT NULL, receipt_bytes BLOB NOT NULL,
+                    PRIMARY KEY (observer_id, checkpoint_digest, witness_id)
+                 );
+                 CREATE TABLE observer_witness_state (
+                    observer_id TEXT NOT NULL, witness_id TEXT NOT NULL, trust_domain_id TEXT NOT NULL,
+                    key_id TEXT NOT NULL, key_generation INTEGER NOT NULL, tree_size INTEGER NOT NULL,
+                    root_hash_sha256 TEXT NOT NULL, receipt_digest_blake3 TEXT NOT NULL, updated_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (observer_id, witness_id)
+                 );
+                 INSERT INTO observer_state (observer_id, machine_id, accepted_checkpoint_digest,
+                    accepted_sequence, updated_at_ms)
+                 VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', 10, 1);
+                 PRAGMA user_version=2;",
+            )
+            .unwrap();
+        }
+
+        let store = open_store(&temp);
+        assert_eq!(store.schema_version().unwrap(), 3);
+        store.integrity_check().unwrap();
+        let quarantined: i64 = store.connection.query_row(
+            "SELECT quarantined FROM observer_state WHERE observer_id = ?1",
+            ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(quarantined, 1);
     }
 
     #[test]
