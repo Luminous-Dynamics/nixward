@@ -1133,6 +1133,32 @@ mod tests {
     }
 
     #[test]
+    fn observes_revocation_after_ledger_is_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let mut ledger = open_ledger(&temp, &trust);
+        let mut current_trust = trust.clone();
+        current_trust.revoked_at_ms = Some(1_150);
+        assert!(matches!(
+            ledger.endorse_checkpoint_branch(
+                &checkpoint,
+                &request,
+                &current_trust,
+                &signing,
+                1_200
+            ),
+            Err(OciWitnessBranchLedgerError::KeyRevoked)
+        ));
+        assert_eq!(
+            ledger.accepted_head("a1".repeat(32).as_str()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn rejects_revoked_or_expired_witness_key() {
         let temp = tempfile::tempdir().unwrap();
         let signing = SigningKey::from_bytes(&[43u8; 32]);
