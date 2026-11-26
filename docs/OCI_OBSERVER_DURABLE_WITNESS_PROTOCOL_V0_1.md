@@ -105,9 +105,9 @@ A witness must reject an append whose supplied prior head does not match its ret
 
 ### 4.5 RP verifies witness quorum
 
-For the high-assurance profile, require **2-of-3 independently administered witnesses**. The threat assumption is at most one Byzantine witness in the three-member set; keys, operators, storage and network paths must be meaningfully independent. This quorum is not a generic consensus protocol and does not protect against two colluding or commonly compromised witnesses.
+For the high-assurance profile, require **3-of-4 independently administered witnesses**. The threat assumption is at most one Byzantine witness in the four-member set; keys, operators, storage and network paths must be meaningfully independent. Any two 3-of-4 quorums overlap in at least two witnesses, so at least one common witness is honest under this assumption. That honest witness must durably refuse to sign two different checkpoint digests for the same observer parent/sequence. A 2-of-3 rule would not guarantee an honest member in the intersection: the two quorums could overlap only at the Byzantine witness. This is not a generic consensus protocol and does not protect against two colluding or commonly compromised witnesses.
 
-The RP verifies every receipt against a pinned witness key set, including:
+The RP requires three distinct witness receipts out of four provisioned, independently administered trust domains. One unavailable witness can be tolerated; if fewer than three can provide current consistent evidence, consequential authority remains blocked. The RP verifies every receipt against a pinned witness key set, including:
 - signature, witness identity and current key generation;
 - exact observer/checkpoint/request digest;
 - Merkle inclusion proof;
@@ -117,7 +117,7 @@ The RP verifies every receipt against a pinned witness key set, including:
 
 All counted witnesses must attest to the same checkpoint digest. Their log roots need not be identical because they are independent logs, but each must prove append-only continuity from its own previously retained head. A conflict or a verified fork from any trusted witness moves the observer to QUARANTINED, even when another witness returned success.
 
-For lower-assurance local development, a one-witness profile may be used only if the evidence manifest labels it as such. It must not be represented as 2-of-3, multi-witness or equivocation-resistant.
+For verifier-unit tests, one- and two-witness sub-threshold evidence may be exercised, but the durable admission store rejects it. A low-assurance local-only experiment must be separately labelled and must not use the 3-of-4 admission finalization path.
 
 ### 4.6 RP finalizes locally
 
@@ -204,7 +204,7 @@ These are proposed hard gates, not measured performance:
 - 0 accepted stale/revoked/forked checkpoint;
 - 100% rejection of the enumerated rollback, conflicting-idempotency and proof-substitution controls;
 - 100% recovery to the same accepted checkpoint after response-loss and process-crash permutations, or explicit quarantine;
-- 2-of-3 witness confirmation for high-assurance profile;
+- 3-of-4 witness confirmation for high-assurance profile;
 - no sequence reuse after process restart or host reboot;
 - p95 local journal transaction latency and p95 witness quorum latency separately measured;
 - p95 time to revoke admission after key/witness revocation measured, target <1 second after revocation delivery in the isolated lab;
@@ -218,7 +218,7 @@ A zero observed violation remains sample-limited. Report case-family counts, rep
 2. Add a deterministic fake witness implementing the exact request/receipt protocol; use it to test retry, fork and crash semantics before networking.
 3. Add a Merkle inclusion/consistency proof verifier with checked test vectors; do not write a custom production log until verifying interoperable vectors.
 4. Add a real witness adapter behind a narrow trait and a pinned trust store; no agent-controlled endpoints or key discovery.
-5. Add 2-of-3 quorum state and VM crash/restore qualification.
+5. Add 3-of-4 quorum state and VM crash/restore qualification.
 6. Only then expose a non-deserializable witness-backed admission token to task binding. Keep runtime activation disabled until live enforcer attachment and independent effect receipts pass separately.
 
 ## 11. Industry comparison and benchmark positioning
@@ -247,7 +247,7 @@ Implemented source slice:
 
 Not implemented:
 - witness request transport or server;
-- signed witness receipts, Merkle inclusion/consistency proof verifier, witness-key lifecycle or 2-of-3 quorum;
+- signed witness receipts, Merkle inclusion/consistency proof verifier, witness-key lifecycle or 3-of-4 quorum;
 - witness-head persistence and quorum finalization;
 - any public operation producing a witness-confirmed admission token;
 - task-contract consumption, runtime enforcer attachment or effect verification;
@@ -263,9 +263,28 @@ The branch now contains a first executable source layer for witness verification
 - `src/observe/witness_transparency.rs` implements RFC 9162 Merkle tree hashing, inclusion proof and consistency proof verification with SHA-256 domain prefixes; strict signed tree-head receipts; exact leaf binding to witness ID/key generation, checkpoint digest, canonical request digest and idempotency key; witness-key validity/revocation checks; and opaque per-receipt/quorum verification results.
 - The signed tree-head wire structure is a **Nixward-specific, domain-separated envelope**, not the RFC 9162 Certificate Transparency v2 wire protocol. It uses the RFC 9162 tree hash/proof algorithms and includes an explicit `sha256-rfc9162` algorithm identifier in signed bytes.
 - `OciObserverWitnessRequest` is an opaque request built only from `VerifiedOciObserverCheckpoint`; the store no longer accepts arbitrary caller-supplied bytes as a checkpoint request.
-- `src/observe/checkpoint_store.rs` schema v2 has atomic initialization and v1→v2 migration. `finalize_witness_quorum` accepts only an opaque verified quorum, enforces a 2-of-3 profile (maximum three receipts), rechecks observer/witness key generation and revocation at commit time, checks witness-receipt age, compares each proof's prior tree head against the locally retained witness head, stores exact receipt bytes and new tree heads, and atomically advances the accepted observer checkpoint. A verified mismatch quarantines the observer.
+- `src/observe/checkpoint_store.rs` schema v2 has atomic initialization and v1→v2 migration. `finalize_witness_quorum` accepts only an opaque verified quorum, enforces a 3-of-4 profile (maximum three receipts), rechecks observer/witness key generation and revocation at commit time, checks witness-receipt age, compares each proof's prior tree head against the locally retained witness head, stores exact receipt bytes and new tree heads, and atomically advances the accepted observer checkpoint. A verified mismatch quarantines the observer.
 - The test-only fixture creates real Ed25519 signatures and proof objects for store integration tests; it is not a production witness server.
 
 The transparency verifier also includes `verify_witness_tree_head_equivocation`: it verifies two tree-head signatures under the same provisioned witness key and returns opaque evidence if the same witness/key generation signed different roots for the same tree size. **This is a detector, not a gossip transport.** The conflicting statements must be delivered through an independent gossip monitor or cross-witness channel. An isolated relying party cannot detect a split view it has never received.
 
 The source tree contains 131 test functions (15 task contract + 24 policy containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 13 checkpoint store + 21 witness transparency). None has been compiled or executed. There is no production witness service, gossip transport, remote trust distribution, TEE/measured-boot integration, task-contract consumption, live enforcement, or effect verification. SQLite/WAL remains locally rollbackable by a privileged host attacker; the external witness is still needed as the independent high-water authority.
+
+
+## 14. Cross-client gossip and durable equivocation quarantine
+
+A separate relying party may never see the conflicting tree head another client received. Merkle inclusion and consistency proofs only validate one presented view against one retained prior head; they do not prove that all clients were shown the same view. RFC 9162 §11.3 explicitly leaves gossip out of scope and says clients can detect split views by comparing signed tree heads. Trillian's Gossip Hub is an experimental example of collecting and cross-comparing observer views; Sigstore's Rekor design also describes witnesses and stable checkpoints for split-view detection.
+
+Nixward now has two receiver-side pieces:
+- `verify_witness_tree_head_equivocation` cryptographically verifies two tree heads signed under the same provisioned witness key, for the same witness/key generation/tree size, and detects different roots.
+- `OciObserverCheckpointStore::record_witness_equivocation` persists both raw signed heads and their digests in `witness_equivocation_evidence`, quarantines every local observer whose accepted witness state includes that witness, and prevents future finalization against the quarantined witness identity.
+
+The gossip transport is still not implemented. A future monitor must collect signed tree heads from multiple independently operated relying parties/witnesses and deliver conflicting pairs to this receiver. Each relay or mirror must be outside the candidate's control. Do not infer global consistency merely because this local store has seen no conflict.
+
+## 15. Quorum safety correction
+
+The high-assurance store now requires **3-of-4**, not 2-of-3. With four trust domains and at most one Byzantine witness, two 3-member quorums intersect in at least two members, which includes at least one honest witness. Honest witnesses must bind one checkpoint digest to the observer's parent/sequence and refuse a second conflicting branch. A 2-of-3 quorum can intersect only at the single Byzantine member, so it does not provide the same quorum-intersection safety property.
+
+The 3-of-4 profile tolerates one unavailable witness. If only two witness receipts are available, read-only work may continue under its own existing authority, but new consequential checkpoint-backed mutations remain blocked.
+
+Current schema version is 4. Migrations from earlier un-fingerprinted schemas quarantine old pending/accepted state rather than assuming that a key ID/generation label identifies the same public key. New checkpoint and witness records bind the exact public-key hex used during signature verification, and finalization rejects same-ID/same-generation key substitution.
