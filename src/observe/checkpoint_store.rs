@@ -959,7 +959,6 @@ impl OciObserverCheckpointStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
-                        row.get(6)?,
                     ))
                 },
             )
