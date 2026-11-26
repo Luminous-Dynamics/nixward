@@ -176,3 +176,12 @@ The native observer layer now includes:
 The task-binding contract still does **not** consume the durable store's confirmed state or enable network enforcement. No real witness service, remote trust distribution, hardware measured boot, gossip transport, live cgroup/BPF effect receipt or runtime qualification is implemented.
 
 The current Nixward source corpus is 131 authored Rust test functions: 15 task + 24 containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 13 checkpoint store + 21 witness transparency. None has been compiled or executed; no Nixward exact-head CI or local Rust/Nix runner evidence is available.
+
+
+### Quorum-intersection and gossip quarantine hardening (26 Nov 2026)
+
+The store's high-assurance finalization rule is now **3-of-4 independent witnesses**, with the explicit at-most-one-Byzantine assumption. Two such quorums intersect in at least two members, so at least one honest witness must be common, provided honest witnesses enforce one checkpoint branch per observer parent/sequence. The previous 2-of-3 threshold did not guarantee an honest quorum intersection and has been retired.
+
+The store now binds the exact public key bytes used for observer and witness signature verification, not only key ID/generation. Schema-v4 migrations quarantine legacy accepted/pending state whose key fingerprints cannot be recovered. A receiver-side witness-equivocation method persists both conflicting signed tree heads and quarantines observers that relied on that witness. Finalization rejects any witness identity with recorded equivocation evidence.
+
+The network gossip/cross-monitor transport remains unimplemented; no global non-equivocation claim is made.
