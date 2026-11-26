@@ -988,6 +988,24 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_change_invalidates_the_owner_signature() {
+        let (contract, _, _, _, _, _) =
+            fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let signing = SigningKey::from_bytes(&[44; 32]);
+        let challenge = contract.authority_challenge("nixward-agent-egress", [14; 32]).unwrap();
+        let signature = signed(&signing, challenge);
+        let verifier = AuthorityVerifier::new(&authority_policy(&signing)).unwrap();
+
+        let mut changed = contract.clone();
+        changed.runtime_process_start_time_ticks += 1;
+        let result = changed.verify_authorization(&verifier, &signature, 1_030_000);
+        assert!(matches!(
+            result,
+            Err(AgentTaskNetworkError::Authority(AuthorityError::SubjectMismatch))
+        ));
+    }
+
+    #[test]
     fn task_or_policy_change_invalidates_the_old_authorization() {
         let (mut contract, _, _, _, _, _) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
