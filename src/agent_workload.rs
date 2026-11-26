@@ -159,7 +159,7 @@ impl AgentTaskNetworkContract {
         if !runtime_observation.source_agreement()
             || !runtime_observation.stable_across_observation_window()
             || runtime_observation.runtime_enforcement_proven()
-            || runtime_observation.image_id() != oci.image_digest
+            || runtime_observation.image_digest() != oci.image_digest
             || !runtime_observation.root_mount_read_only()
             || !runtime_observation.no_new_privileges()
             || runtime_observation.effective_capabilities() != 0
