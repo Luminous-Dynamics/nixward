@@ -17,6 +17,7 @@ pub mod hardware;
 pub mod journal;
 pub mod oci_runtime;
 pub mod receipt_chain;
+pub mod signed_checkpoint;
 pub mod store;
 pub mod systemd;
 
