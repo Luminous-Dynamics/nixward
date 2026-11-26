@@ -287,6 +287,7 @@ pub struct VerifiedOciObserverCheckpoint {
     sequence: u64,
     snapshot_digest_blake3: String,
     chain_head_blake3: String,
+    previous_checkpoint_blake3: Option<String>,
     expires_at_ms: u64,
 }
 
@@ -317,6 +318,9 @@ impl VerifiedOciObserverCheckpoint {
     }
     pub fn chain_head_blake3(&self) -> &str {
         &self.chain_head_blake3
+    }
+    pub fn previous_checkpoint_blake3(&self) -> Option<&str> {
+        self.previous_checkpoint_blake3.as_deref()
     }
     pub fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
@@ -460,6 +464,7 @@ pub fn verify_observer_checkpoint(
         sequence: payload.sequence,
         snapshot_digest_blake3: payload.snapshot_digest_blake3.clone(),
         chain_head_blake3: payload.chain_head_blake3.clone(),
+        previous_checkpoint_blake3: payload.previous_checkpoint_blake3.clone(),
         expires_at_ms: payload.expires_at_ms,
     })
 }
