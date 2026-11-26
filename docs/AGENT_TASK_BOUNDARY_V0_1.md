@@ -94,7 +94,7 @@ The network-enforcement plan must remain `disabled-until-runtime-proof-v40`. A p
 
 ## 8. Tests added
 
-Fourteen task-contract Rust unit tests cover:
+Fifteen task-contract Rust unit tests cover:
 
 1. exact one-tenant / one-task / one-artifact / one-policy binding;
 2. wildcard CIDR rejection;
@@ -109,9 +109,10 @@ Fourteen task-contract Rust unit tests cover:
 11. expanded IPv6 default-route rejection;
 12. stale policy-proof rejection after candidate policy mutation;
 13. runtime snapshot substitution rejection when the image identity differs;
-14. runtime process-start mutation invalidating the owner signature.
+14. runtime process-start mutation invalidating the owner signature;
+15. rejection of a runtime snapshot bound to a different task cgroup.
 
-The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 14 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and six receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
+The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 11 receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
 
 ## 9. Next qualification increments
 
@@ -128,7 +129,7 @@ Add a resolution contract binding hostname, DNSSEC/trusted resolver policy, answ
 Run only synthetic fixtures in a disposable NixOS VM. Record target-host kernel probes, cgroup identity, actual packet allow/deny receipts, process lineage, guest observation and independent service oracle. A model statement such as `blocked=true` is never a receipt.
 
 ### P4 — task security benchmark
-Use Platform ATR-001..ATR-036 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
+Use Platform ATR-001..ATR-039 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
 
 ## 10. External alignment
 
@@ -146,4 +147,4 @@ The correct current claim is narrow:
 This is not evidence that production network enforcement is active. That requires the target/runtime qualification sequence above.
 
 
-Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 14 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and six receipt-chain tests. None has been compiled or executed.
+Source-level regression controls: IPv4/IPv6 `/0` CIDRs are rejected by numeric prefix semantics; stale policy proofs, mismatched runtime image snapshots, declared binds/tmpfs, shared cgroup/network/PID modes, missing seccomp filter mode and any nonzero capability set under the strict profile are rejected. The task-binding branch contains 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 11 receipt-chain tests (77 total source-level test functions). None has been compiled or executed. None has been compiled or executed.
