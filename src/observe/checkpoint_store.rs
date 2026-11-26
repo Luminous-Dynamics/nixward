@@ -24,12 +24,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-const STORE_SCHEMA_VERSION: i64 = 2;
+const STORE_SCHEMA_VERSION: i64 = 3;
 const MAX_WITNESS_REQUEST_BYTES: usize = 1024 * 1024;
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
 
-const CHECKPOINT_HISTORY_V2_DDL: &str = "
+const CHECKPOINT_HISTORY_V3_DDL: &str = "
 CREATE TABLE checkpoint_history (
     observer_id TEXT NOT NULL,
     checkpoint_digest TEXT NOT NULL,
@@ -41,6 +41,7 @@ CREATE TABLE checkpoint_history (
     chain_head_digest TEXT NOT NULL,
     key_id TEXT NOT NULL,
     key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    observer_public_key_hex TEXT NOT NULL DEFAULT '',
     expires_at_ms INTEGER NOT NULL,
     request_digest TEXT NOT NULL,
     request_bytes BLOB NOT NULL,
@@ -109,6 +110,7 @@ CREATE TABLE witness_checkpoint_receipts (
     trust_domain_id TEXT NOT NULL,
     key_id TEXT NOT NULL,
     key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    public_key_hex TEXT NOT NULL DEFAULT '',
     tree_size INTEGER NOT NULL CHECK (tree_size > 0),
     root_hash_sha256 TEXT NOT NULL,
     receipt_digest_blake3 TEXT NOT NULL,
@@ -125,6 +127,7 @@ CREATE TABLE observer_witness_state (
     trust_domain_id TEXT NOT NULL,
     key_id TEXT NOT NULL,
     key_generation INTEGER NOT NULL CHECK (key_generation > 0),
+    public_key_hex TEXT NOT NULL DEFAULT '',
     tree_size INTEGER NOT NULL CHECK (tree_size > 0),
     root_hash_sha256 TEXT NOT NULL,
     receipt_digest_blake3 TEXT NOT NULL,
@@ -377,9 +380,9 @@ impl OciObserverCheckpointStore {
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version == 0 {
             let create_schema = format!(
-                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} PRAGMA user_version=2; COMMIT;",
+                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} PRAGMA user_version=3; COMMIT;",
                 observer_state = OBSERVER_STATE_DDL,
-                history = CHECKPOINT_HISTORY_V2_DDL,
+                history = CHECKPOINT_HISTORY_V3_DDL,
                 witness = WITNESS_TABLES_DDL,
             );
             connection.execute_batch(&create_schema)?;
@@ -402,12 +405,32 @@ impl OciObserverCheckpointStore {
                  FROM checkpoint_history_v1;
                  DROP TABLE checkpoint_history_v1;
                  {witness_tables}
-                 PRAGMA user_version=2;
+                 UPDATE checkpoint_history SET state = 'quarantined'
+                    WHERE state IN ('prepared', 'reconciliation_required');
+                 UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
+                    WHERE pending_checkpoint_digest IS NOT NULL;
+                 PRAGMA user_version=3;
                  COMMIT;",
-                history_ddl = CHECKPOINT_HISTORY_V2_DDL,
+                history_ddl = CHECKPOINT_HISTORY_V3_DDL,
                 witness_tables = WITNESS_TABLES_DDL,
             );
             connection.execute_batch(&migration)?;
+        } else if schema_version == 2 {
+            connection.execute_batch(
+                "BEGIN EXCLUSIVE;
+                 ALTER TABLE checkpoint_history
+                    ADD COLUMN observer_public_key_hex TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE witness_checkpoint_receipts
+                    ADD COLUMN public_key_hex TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE observer_witness_state
+                    ADD COLUMN public_key_hex TEXT NOT NULL DEFAULT '';
+                 UPDATE checkpoint_history SET state = 'quarantined'
+                    WHERE state IN ('prepared', 'reconciliation_required');
+                 UPDATE observer_state SET quarantined = 1, pending_state = 'quarantined'
+                    WHERE pending_checkpoint_digest IS NOT NULL;
+                 PRAGMA user_version=3;
+                 COMMIT;",
+            )?;
         } else if schema_version != STORE_SCHEMA_VERSION {
             return Err(OciObserverCheckpointStoreError::UnsupportedSchemaVersion);
         }
