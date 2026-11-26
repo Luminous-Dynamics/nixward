@@ -224,7 +224,7 @@ For each backend, test allowed and denied TCP, UDP and IPv6; DNS rebinding/TTL a
 
 ### P4 — Publish reproducible results
 
-- Use Platform ATR-001..ATR-040 plus hidden family-disjoint combinations.
+- Use Platform ATR-001..ATR-041 plus hidden family-disjoint combinations.
 - Publish per-scenario outcome vectors, all hard-gate violations, utility, attribution, evidence provenance, p50/p95/p99 latency, overhead and confidence bounds.
 - Freeze exact heads, inputs and manifests. A skipped or queued runner is pending—not a pass.
 
