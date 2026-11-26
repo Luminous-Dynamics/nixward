@@ -141,3 +141,12 @@ A separate `observe::witness_transparency` module now accepts only the opaque `V
 The native SQLite store now has a 2-of-3 finalization method that requires the opaque verified quorum and rechecks current observer and witness trust at the durable commit boundary. It compares each proof's previous tree head to the locally retained witness high-water mark and quarantines on mismatch. It persists exact receipt bytes and advances accepted state atomically.
 
 The module can verify two conflicting validly signed same-size tree heads as equivocation evidence, but it does not yet implement gossip distribution or automatically quarantine every relying party that has not received the evidence. It also does not launch or operate real witnesses. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md).
+
+
+## 3-of-4 witness and exact trust-key binding update (26 November 2026)
+
+The durable admission store now enforces 3-of-4 independent witness receipts. This is a deliberate correction to the earlier 2-of-3 proposal: for four provisioned trust domains and at most one Byzantine member, any two three-member quorums intersect in at least two members, guaranteeing at least one honest overlap. A 2-of-3 quorum can intersect only in the Byzantine witness. Honest witnesses must refuse to append conflicting checkpoint digests for the same observer parent/sequence.
+
+The signed checkpoint token now exposes the exact verified signer public key in addition to key ID/generation. The store persists that public key and rechecks it against the current observer trust record at finalization. Witness receipt tokens likewise carry the exact verified public key; the store rechecks it against current witness trust and the retained per-witness high-water record. A reused ID/generation with changed key bytes is rejected.
+
+The receiver-side gossip path verifies two conflicting same-size signed tree heads, persists both raw statements, and quarantines local observers that have used the witness. No network gossip transport is implemented; independent monitor delivery remains a separate requirement.
