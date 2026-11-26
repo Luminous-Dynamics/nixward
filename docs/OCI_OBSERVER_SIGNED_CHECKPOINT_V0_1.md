@@ -157,3 +157,10 @@ The receiver-side gossip path verifies two conflicting same-size signed tree hea
 The downstream native checkpoint store now persists exact observer/witness public-key bytes and only finalizes when supplied an opaque verified 3-of-4 quorum. Current key ID/generation labels cannot be reused with different public-key bytes to authorize a new checkpoint. The receiver-side equivocation verifier accepts two signed tree heads at the same size from the same trusted witness key, confirms different roots, and the durable store persists the two raw statements and quarantines local observers that relied on that witness.
 
 The proof receipt envelope is Nixward-specific, using RFC 9162 Merkle hashing/inclusion/consistency algorithms; it is not the full RFC 9162 CT v2 wire protocol. Gossip distribution remains unimplemented: the relying party must receive conflicting views from an independent monitor/other client before it can detect split-view behavior.
+
+
+## Durable witness signer update (26 November 2026)
+
+The new `observe::witness_branch_ledger` module implements a durable one-branch signing rule: one signed checkpoint digest per observer parent/sequence, exact idempotent retry, strict parent/sequence advancement, and persistent branch quarantine on a competing digest attempt. It binds the operator-provisioned witness key ID/generation and exact public-key bytes, and never stores private key material.
+
+This ledger is not yet bound into the Merkle receipt's leaf or required by the quorum verifier. That integration is tracked in [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172); current Merkle receipt verification and branch endorsement verification remain separate claims.
