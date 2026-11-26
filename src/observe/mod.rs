@@ -19,6 +19,7 @@ pub mod oci_runtime;
 pub mod receipt_chain;
 pub mod signed_checkpoint;
 pub mod checkpoint_store;
+pub mod witness_transparency;
 pub mod store;
 pub mod systemd;
 
