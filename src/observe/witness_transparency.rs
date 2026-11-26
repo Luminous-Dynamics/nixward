@@ -905,7 +905,8 @@ pub fn verify_witness_receipt(
 }
 
 /// Verify a quorum of distinct witness identities in distinct operator-assigned
-/// trust domains. All receipts must commit to exactly the same checkpoint,
+/// trust domains (up to four). The durable high-assurance store separately
+/// enforces a 3-of-4 profile. All receipts must commit to exactly the same checkpoint,
 /// request and idempotency key. A 2-of-3 threshold is a policy assumption, not
 /// a proof that the trust domains are operationally independent.
 pub fn verify_witness_quorum(
