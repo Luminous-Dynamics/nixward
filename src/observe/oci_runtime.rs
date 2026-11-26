@@ -190,6 +190,8 @@ impl OciRuntimeConsistencySnapshot {
     pub fn no_new_privileges(&self) -> bool { self.no_new_privileges }
     pub fn effective_capabilities(&self) -> u64 { self.effective_capabilities }
     pub fn podman_declared_mount_count(&self) -> usize { self.podman_declared_mount_count }
+    pub fn podman_declared_bind_count(&self) -> usize { self.podman_declared_bind_count }
+    pub fn podman_declared_tmpfs_count(&self) -> usize { self.podman_declared_tmpfs_count }
     pub fn host_network(&self) -> bool { self.host_network }
     pub fn host_pid(&self) -> bool { self.host_pid }
     pub fn privileged(&self) -> bool { self.privileged }
