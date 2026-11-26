@@ -94,7 +94,7 @@ The network-enforcement plan must remain `disabled-until-runtime-proof-v40`. A p
 
 ## 8. Tests added
 
-Thirteen task-contract Rust unit tests cover:
+Fourteen task-contract Rust unit tests cover:
 
 1. exact one-tenant / one-task / one-artifact / one-policy binding;
 2. wildcard CIDR rejection;
@@ -108,9 +108,10 @@ Thirteen task-contract Rust unit tests cover:
 10. host mount and unsafe guest profile rejection;
 11. expanded IPv6 default-route rejection;
 12. stale policy-proof rejection after candidate policy mutation;
-13. runtime snapshot substitution rejection when the image identity differs.
+13. runtime snapshot substitution rejection when the image identity differs;
+14. runtime process-start mutation invalidating the owner signature.
 
-The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 13 task-contract tests, 24 policy-containment tests and 18 OCI-observer tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, runtime-lab or CI pass is claimed here.
+The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 14 task-contract tests, 24 policy-containment tests and 18 OCI-observer tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, runtime-lab or CI pass is claimed here.
 
 ## 9. Next qualification increments
 
