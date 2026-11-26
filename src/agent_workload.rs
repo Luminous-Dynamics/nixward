@@ -164,6 +164,8 @@ impl AgentTaskNetworkContract {
             || !runtime_observation.no_new_privileges()
             || runtime_observation.effective_capabilities() != 0
             || runtime_observation.podman_declared_mount_count() != 0
+            || runtime_observation.podman_declared_bind_count() != 0
+            || runtime_observation.podman_declared_tmpfs_count() != 0
             || runtime_observation.host_network()
             || runtime_observation.host_pid()
             || runtime_observation.privileged()
