@@ -283,6 +283,7 @@ pub struct VerifiedOciObserverCheckpoint {
     machine_id_blake3: String,
     key_id: String,
     key_generation: u64,
+    signer_public_key_hex: String,
     boot_id: String,
     sequence: u64,
     snapshot_digest_blake3: String,
@@ -308,6 +309,9 @@ impl VerifiedOciObserverCheckpoint {
     }
     pub fn key_generation(&self) -> u64 {
         self.key_generation
+    }
+    pub fn signer_public_key_hex(&self) -> &str {
+        &self.signer_public_key_hex
     }
     pub fn boot_id(&self) -> &str {
         &self.boot_id
@@ -468,6 +472,7 @@ pub fn verify_observer_checkpoint(
         machine_id_blake3: payload.machine_id_blake3.clone(),
         key_id: payload.key_id.clone(),
         key_generation: payload.key_generation,
+        signer_public_key_hex: encode_hex(&trusted_public_key),
         boot_id: payload.boot_id.clone(),
         sequence: payload.sequence,
         snapshot_digest_blake3: payload.snapshot_digest_blake3.clone(),
