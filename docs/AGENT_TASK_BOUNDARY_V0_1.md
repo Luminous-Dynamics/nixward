@@ -61,13 +61,13 @@ Why hostnames are rejected: the current compiler does not have an authenticated 
 
 
 
-## 5. Policy containment is a required v2 input
+## 5. Policy containment proof (introduced in v2, required in v3)
 
 The task contract no longer accepts only a declared candidate policy. Its constructor requires a VerifiedPolicyContainment value from verify_policy_within_boundary(boundary, candidate). The contract checks that the token's candidate digest equals the exact NetworkPolicyPlan digest and that its prover version is the approved nixward-network-policy-containment-v0.1 implementation. It then embeds the boundary digest, report digest and prover version in the task-contract subject.
 
 The owner signature over the complete task contract therefore covers both the candidate policy and the boundary against which it was checked. Reusing a token after candidate policy mutation is rejected. Exceeds, Unsupported and Inconclusive outcomes cannot produce the required token.
 
-This improves authorization review but does not make the boundary self-authenticating: the owner must review and authorize the boundary digest included in the contract. Nor does it prove network enforcement. The policy prover's report permanently states runtime_enforcement_proven=false; task status remains bound-not-runtime-enforced-v2 and the enforcement plan remains disabled pending independent runtime evidence.
+This improves authorization review but does not make the boundary self-authenticating: the owner must review and authorize the boundary digest included in the contract. Nor does it prove network enforcement. The policy prover's report permanently states runtime_enforcement_proven=false; task status remains runtime-observed-not-enforced-v3 and the enforcement plan remains disabled pending independent runtime enforcement evidence.
 
 
 
@@ -127,7 +127,7 @@ Add a resolution contract binding hostname, DNSSEC/trusted resolver policy, answ
 Run only synthetic fixtures in a disposable NixOS VM. Record target-host kernel probes, cgroup identity, actual packet allow/deny receipts, process lineage, guest observation and independent service oracle. A model statement such as `blocked=true` is never a receipt.
 
 ### P4 — task security benchmark
-Use Platform ATR-001..ATR-020 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
+Use Platform ATR-001..ATR-036 and report hard-gate effects, task completion, false refusals, false assurance, attribution, p50/p95 detection and containment, resource budget and provenance. Keep evaluator-private ground truth outside the candidate boundary.
 
 ## 10. External alignment
 
