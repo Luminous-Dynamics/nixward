@@ -65,6 +65,42 @@ CREATE TABLE checkpoint_history (
     )
 );";
 
+const OBSERVER_STATE_DDL: &str = "
+CREATE TABLE observer_state (
+    observer_id TEXT PRIMARY KEY NOT NULL,
+    machine_id TEXT NOT NULL,
+    accepted_checkpoint_digest TEXT,
+    accepted_boot_id TEXT,
+    accepted_sequence INTEGER,
+    pending_checkpoint_digest TEXT,
+    pending_boot_id TEXT,
+    pending_sequence INTEGER,
+    pending_parent_digest TEXT,
+    pending_idempotency_key TEXT,
+    pending_request_digest TEXT,
+    pending_request BLOB,
+    pending_state TEXT,
+    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
+    updated_at_ms INTEGER NOT NULL,
+    CHECK (
+        (pending_checkpoint_digest IS NULL
+            AND pending_boot_id IS NULL
+            AND pending_sequence IS NULL
+            AND pending_parent_digest IS NULL
+            AND pending_idempotency_key IS NULL
+            AND pending_request_digest IS NULL
+            AND pending_request IS NULL
+            AND pending_state IS NULL)
+        OR
+        (pending_checkpoint_digest IS NOT NULL
+            AND pending_boot_id IS NOT NULL
+            AND pending_sequence IS NOT NULL
+            AND pending_idempotency_key IS NOT NULL
+            AND pending_request_digest IS NOT NULL
+            AND pending_request IS NOT NULL
+            AND pending_state IS NOT NULL)
+    )
+);";
 const WITNESS_TABLES_DDL: &str = "
 CREATE TABLE witness_checkpoint_receipts (
     observer_id TEXT NOT NULL,
@@ -340,46 +376,14 @@ impl OciObserverCheckpointStore {
         let schema_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version == 0 {
-            connection.execute_batch(
-                "CREATE TABLE observer_state (
-                    observer_id TEXT PRIMARY KEY NOT NULL,
-                    machine_id TEXT NOT NULL,
-                    accepted_checkpoint_digest TEXT,
-                    accepted_boot_id TEXT,
-                    accepted_sequence INTEGER,
-                    pending_checkpoint_digest TEXT,
-                    pending_boot_id TEXT,
-                    pending_sequence INTEGER,
-                    pending_parent_digest TEXT,
-                    pending_idempotency_key TEXT,
-                    pending_request_digest TEXT,
-                    pending_request BLOB,
-                    pending_state TEXT,
-                    quarantined INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
-                    updated_at_ms INTEGER NOT NULL,
-                    CHECK (
-                        (pending_checkpoint_digest IS NULL
-                            AND pending_boot_id IS NULL
-                            AND pending_sequence IS NULL
-                            AND pending_parent_digest IS NULL
-                            AND pending_idempotency_key IS NULL
-                            AND pending_request_digest IS NULL
-                            AND pending_request IS NULL
-                            AND pending_state IS NULL)
-                        OR
-                        (pending_checkpoint_digest IS NOT NULL
-                            AND pending_boot_id IS NOT NULL
-                            AND pending_sequence IS NOT NULL
-                            AND pending_idempotency_key IS NOT NULL
-                            AND pending_request_digest IS NOT NULL
-                            AND pending_request IS NOT NULL
-                            AND pending_state IS NOT NULL)
-                    )
-                 );",
-            )?;
-            connection.execute_batch(CHECKPOINT_HISTORY_V2_DDL)?;
-            connection.execute_batch(WITNESS_TABLES_DDL)?;
-            connection.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            let create_schema = format!(
+                "BEGIN EXCLUSIVE; {observer_state} {history} {witness} PRAGMA user_version=2; COMMIT;",
+                observer_state = OBSERVER_STATE_DDL,
+                history = CHECKPOINT_HISTORY_V2_DDL,
+                witness = WITNESS_TABLES_DDL,
+            );
+            connection.execute_batch(&create_schema)?;
+
         } else if schema_version == 1 {
             let migration = format!(
                 "BEGIN EXCLUSIVE;
@@ -1306,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_request_for_same_checkpoint_quarantines_observer() {
+    fn exact_checkpoint_request_replay_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
         let mut store = open_store(&temp);
@@ -1365,13 +1369,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_and_oversized_requests() {
+    fn canonical_witness_request_is_nonempty_bounded_and_digest_bound() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = verified_checkpoint(10, None);
-        let mut store = open_store(&temp);
         let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let request_bytes = request.canonical_bytes().unwrap();
+        assert!(!request_bytes.is_empty());
+        assert!(request_bytes.len() <= MAX_WITNESS_REQUEST_BYTES);
+        assert_eq!(
+            request.request_digest_blake3().unwrap(),
+            request_digest(&request_bytes)
+        );
+        assert_eq!(
+            request.idempotency_key_blake3().unwrap(),
+            idempotency_key(
+                checkpoint.checkpoint_digest_blake3(),
+                &request_digest(&request_bytes)
+            )
+        );
+        let mut store = open_store(&temp);
         assert!(store.prepare_checkpoint(&checkpoint, &request, 1_100).is_ok());
-        let too_large = vec![0u8; MAX_WITNESS_REQUEST_BYTES + 1];
-        assert!(too_large.len() > MAX_WITNESS_REQUEST_BYTES);
     }
 }
