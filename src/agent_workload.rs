@@ -26,6 +26,7 @@ use crate::network_covenant::{
 };
 use crate::network_enforcement::{NetworkEnforcementError, NetworkEnforcementPlan};
 use crate::network_containment::{VerifiedPolicyContainment, NETWORK_CONTAINMENT_PROVER_VERSION};
+use crate::observe::oci_runtime::OciRuntimeConsistencySnapshot;
 use crate::software_ingress::{
     OciGuestPlan, SoftwareIngressError, SoftwareIngressPlan, SoftwareIngressSpec,
     SoftwareTrustClass,
@@ -35,14 +36,15 @@ use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
-const CONTRACT_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-contract:v2\0";
+const CONTRACT_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-contract:v3\0";
 const HOLON_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-holon:v1\0";
 const NONCE_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-network-nonce:v1\0";
 const TARGET_SET_DOMAIN: &[u8] = b"symthaea:nixward:agent-task-target-set:v1\0";
 
-pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_TASK_NETWORK_STATUS: &str = "bound-not-runtime-enforced-v2";
+pub const AGENT_TASK_NETWORK_SCHEMA_VERSION: u32 = 3;
+pub const AGENT_TASK_NETWORK_STATUS: &str = "runtime-observed-not-enforced-v3";
 pub const GUEST_RECEIPT_SCOPE: &str = "plan-consistency-and-artifact-identity-only-not-runtime-isolation-proof-v1";
+pub const RUNTIME_OBSERVATION_SCOPE: &str = "podman-procfs-source-agreement-and-temporal-pair-not-host-attestation-or-enforcement-v1";
 pub const AGENT_TASK_MAX_TTL_MS: u64 = 15 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +61,17 @@ pub struct AgentTaskNetworkContract {
     pub guest_plan_blake3: String,
     pub guest_receipt_blake3: String,
     pub guest_receipt_scope: String,
+    pub runtime_observation_scope: String,
+    pub runtime_observation_blake3: String,
+    pub runtime_container_id: String,
+    pub runtime_process_pid: u32,
+    pub runtime_process_start_time_ticks: u64,
+    pub runtime_cgroup_path: String,
+    pub runtime_boot_id: String,
+    pub runtime_machine_id_blake3: String,
+    pub runtime_observer_sequence_start: u64,
+    pub runtime_observer_sequence_end: u64,
+    pub runtime_observation_interval_ns: u128,
     pub artifact_identity: String,
     pub workload_blake3: String,
     pub network_policy_blake3: String,
@@ -86,6 +99,7 @@ impl AgentTaskNetworkContract {
         task_plan_blake3: impl Into<String>,
         guest_plan: &SoftwareIngressPlan,
         guest_receipt: &GuestRealizationReceipt,
+        runtime_observation: &OciRuntimeConsistencySnapshot,
         workload: &WorkloadIdentity,
         network_policy: &NetworkPolicyPlan,
         policy_proof: &VerifiedPolicyContainment,
@@ -131,6 +145,42 @@ impl AgentTaskNetworkContract {
         {
             return Err(AgentTaskNetworkError::GuestReceiptMismatch);
         }
+
+        // The opaque token comes from the Linux Podman/procfs collector.
+        // It establishes bounded source agreement, not host attestation or active
+        // network enforcement.
+        let runtime_observation_blake3 = runtime_observation
+            .digest_blake3()
+            .map_err(|_| AgentTaskNetworkError::RuntimeObservationMismatch)?;
+        let runtime_container_id = runtime_observation.container_id().to_owned();
+        let runtime_cgroup_path = runtime_observation.cgroup_path().to_owned();
+        let runtime_boot_id = runtime_observation.boot_id().to_owned();
+        let runtime_machine_id_blake3 = runtime_observation.machine_id_blake3().to_owned();
+        if !runtime_observation.source_agreement()
+            || !runtime_observation.stable_across_observation_window()
+            || runtime_observation.runtime_enforcement_proven()
+            || runtime_observation.image_id() != oci.image_digest
+            || !runtime_observation.root_mount_read_only()
+            || !runtime_observation.no_new_privileges()
+            || runtime_observation.effective_capabilities() != 0
+            || runtime_observation.podman_declared_mount_count() != 0
+            || runtime_observation.host_network()
+            || runtime_observation.host_pid()
+            || runtime_observation.privileged()
+            || runtime_observation.process_pid() <= 1
+            || runtime_observation.process_start_time_ticks() == 0
+            || runtime_observation.observation_interval_ns() == 0
+            || runtime_observation.observer_sequence_end()
+                <= runtime_observation.observer_sequence_start()
+            || runtime_boot_id.len() != 36
+            || runtime_cgroup_path.is_empty()
+            || !runtime_cgroup_path.starts_with('/')
+        {
+            return Err(AgentTaskNetworkError::RuntimeObservationMismatch);
+        }
+        validate_digest("runtime container id", &runtime_container_id)?;
+        validate_digest("runtime machine id digest", &runtime_machine_id_blake3)?;
+        validate_digest("runtime observer snapshot digest", &runtime_observation_blake3)?;
 
         let launch_contract_blake3 = guest_plan.spec.authority_digest_hex()?;
         let guest_plan_blake3 = guest_plan.digest_hex()?;
@@ -217,7 +267,7 @@ impl AgentTaskNetworkContract {
 
         let contract = Self {
             schema_version: AGENT_TASK_NETWORK_SCHEMA_VERSION,
-            kind: "symthaea-agent-task-network-contract-v2".into(),
+            kind: "symthaea-agent-task-network-contract-v3".into(),
             holon_id,
             holon_blake3,
             task_id,
@@ -226,6 +276,17 @@ impl AgentTaskNetworkContract {
             guest_plan_blake3,
             guest_receipt_blake3,
             guest_receipt_scope: GUEST_RECEIPT_SCOPE.into(),
+            runtime_observation_scope: RUNTIME_OBSERVATION_SCOPE.into(),
+            runtime_observation_blake3,
+            runtime_container_id,
+            runtime_process_pid: runtime_observation.process_pid(),
+            runtime_process_start_time_ticks: runtime_observation.process_start_time_ticks(),
+            runtime_cgroup_path,
+            runtime_boot_id,
+            runtime_machine_id_blake3,
+            runtime_observer_sequence_start: runtime_observation.observer_sequence_start(),
+            runtime_observer_sequence_end: runtime_observation.observer_sequence_end(),
+            runtime_observation_interval_ns: runtime_observation.observation_interval_ns(),
             artifact_identity,
             workload_blake3,
             network_policy_blake3: network_policy.digest_hex()?,
@@ -247,9 +308,10 @@ impl AgentTaskNetworkContract {
 
     pub fn validate(&self) -> Result<(), AgentTaskNetworkError> {
         if self.schema_version != AGENT_TASK_NETWORK_SCHEMA_VERSION
-            || self.kind != "symthaea-agent-task-network-contract-v2"
+            || self.kind != "symthaea-agent-task-network-contract-v3"
             || self.status != AGENT_TASK_NETWORK_STATUS
             || self.guest_receipt_scope != GUEST_RECEIPT_SCOPE
+            || self.runtime_observation_scope != RUNTIME_OBSERVATION_SCOPE
         {
             return Err(AgentTaskNetworkError::UnsupportedSchema);
         }
@@ -261,6 +323,9 @@ impl AgentTaskNetworkContract {
             ("task plan digest", &self.task_plan_blake3),
             ("guest plan digest", &self.guest_plan_blake3),
             ("guest receipt digest", &self.guest_receipt_blake3),
+            ("runtime observation digest", &self.runtime_observation_blake3),
+            ("runtime container ID", &self.runtime_container_id),
+            ("runtime machine ID digest", &self.runtime_machine_id_blake3),
             ("workload digest", &self.workload_blake3),
             ("network policy digest", &self.network_policy_blake3),
             ("network enforcement digest", &self.network_enforcement_plan_blake3),
@@ -281,6 +346,17 @@ impl AgentTaskNetworkContract {
             || self.expires_at_ms - self.issued_at_ms > AGENT_TASK_MAX_TTL_MS
         {
             return Err(AgentTaskNetworkError::InvalidTtl);
+        }
+        if self.runtime_process_pid <= 1
+            || self.runtime_process_start_time_ticks == 0
+            || self.runtime_observer_sequence_start == 0
+            || self.runtime_observer_sequence_end <= self.runtime_observer_sequence_start
+            || self.runtime_observation_interval_ns == 0
+            || self.runtime_boot_id.len() != 36
+            || !self.runtime_cgroup_path.starts_with('/')
+            || self.runtime_cgroup_path.bytes().any(|b| b.is_ascii_control())
+        {
+            return Err(AgentTaskNetworkError::RuntimeObservationMismatch);
         }
         if self.policy_containment_prover_version != NETWORK_CONTAINMENT_PROVER_VERSION {
             return Err(AgentTaskNetworkError::PolicyContainmentMismatch);
@@ -508,6 +584,8 @@ pub enum AgentTaskNetworkError {
     InvalidDigest(&'static str),
     #[error("policy-containment proof does not bind the exact candidate policy or approved prover")]
     PolicyContainmentMismatch,
+    #[error("OCI runtime observation is missing, stale, source-discordant or outside the strict profile")]
+    RuntimeObservationMismatch,
     #[error("invalid task grant TTL")]
     InvalidTtl,
     #[error("task grant is expired or not yet valid")]
@@ -571,6 +649,13 @@ mod tests {
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn runtime_for(plan: &SoftwareIngressPlan) -> OciRuntimeConsistencySnapshot {
+        let SoftwareIngressSpec::OciGuest(oci) = &plan.spec else {
+            panic!("test plan must be OCI");
+        };
+        crate::observe::oci_runtime::test_fixture_for_contract(&oci.image_digest)
     }
 
     fn build_fixture(
@@ -653,6 +738,7 @@ mod tests {
         }
         let policy_proof = verify_policy_within_boundary(&owner_boundary, &policy)
             .map_err(|_| AgentTaskNetworkError::PolicyContainmentMismatch)?;
+        let runtime_observation = runtime_for(&guest_plan);
         let contract = AgentTaskNetworkContract::bind(
             "tenant-a",
             "task-atr-001",
@@ -660,6 +746,7 @@ mod tests {
             "b".repeat(64),
             &guest_plan,
             &guest_receipt,
+            &runtime_observation,
             &workload,
             &policy,
             &policy_proof,
@@ -787,9 +874,10 @@ mod tests {
         let policy = NetworkPolicyPlan::new("tenant-a", vec![other_workload], vec![]).unwrap();
         let enforcement = NetworkEnforcementPlan::compile(&policy).unwrap();
         let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let runtime_observation = runtime_for(&guest_plan);
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &guest_receipt, &workload, &policy, &policy_proof, &enforcement,
+            &guest_plan, &guest_receipt, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [7; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::PolicyWorkloadMismatch)));
@@ -800,11 +888,12 @@ mod tests {
         let (_, guest_plan, receipt, workload, policy, enforcement) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
         let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let runtime_observation = runtime_for(&guest_plan);
         let mut substituted = receipt.clone();
         substituted.artifact_identity = "registry.invalid/other@sha256:".to_string() + &"e".repeat(64);
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &substituted, &workload, &policy, &policy_proof, &enforcement,
+            &guest_plan, &substituted, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [8; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::GuestReceiptMismatch)));
@@ -815,6 +904,7 @@ mod tests {
         let (_, guest_plan, guest_receipt, workload, policy, _) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
         let stale_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let runtime_observation = runtime_for(&guest_plan);
 
         let mut changed_policy = policy.clone();
         changed_policy.capabilities[0].destinations = DestinationSet::Cidrs {
@@ -828,6 +918,7 @@ mod tests {
             "b".repeat(64),
             &guest_plan,
             &guest_receipt,
+            &runtime_observation,
             &workload,
             &changed_policy,
             &stale_proof,
@@ -897,6 +988,7 @@ mod tests {
         let (_, guest_plan, receipt, workload, policy, enforcement) =
             fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
         let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let runtime_observation = runtime_for(&guest_plan);
         let mut changed_plan = guest_plan.clone();
         let SoftwareIngressSpec::OciGuest(oci) = &mut changed_plan.spec else {
             unreachable!()
@@ -908,7 +1000,7 @@ mod tests {
         });
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &changed_plan, &receipt, &workload, &policy, &policy_proof, &enforcement,
+            &changed_plan, &receipt, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [11; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::UnsafeGuestIsolation)));
