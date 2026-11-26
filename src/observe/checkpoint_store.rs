@@ -1200,7 +1200,9 @@ mod tests {
         TrustedOciObserverKey, OCI_OBSERVER_CHECKPOINT_KIND,
         OCI_OBSERVER_CHECKPOINT_SCHEMA_VERSION,
     };
-    use crate::observe::witness_transparency::OciObserverWitnessRequest;
+    use crate::observe::witness_transparency::{
+        make_test_witness_quorum_for_request, OciObserverWitnessRequest,
+    };
     use ed25519_dalek::SigningKey;
 
     fn verified_checkpoint(
@@ -1255,9 +1257,119 @@ mod tests {
         verify_observer_checkpoint(&signed, &trusted_key, &expectation).unwrap()
     }
 
+    fn trusted_observer_key() -> TrustedOciObserverKey {
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        TrustedOciObserverKey {
+            observer_id_blake3: "a1".repeat(32),
+            machine_id_blake3: "b2".repeat(32),
+            key_id: "observer-primary".to_owned(),
+            key_generation: 7,
+            public_key_hex: {
+                let bytes = signing_key.verifying_key().to_bytes();
+                bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+            },
+            valid_from_ms: 100,
+            valid_until_ms: 10_000,
+            revoked_at_ms: None,
+        }
+    }
+
     fn open_store(temp: &tempfile::TempDir) -> OciObserverCheckpointStore {
         OciObserverCheckpointStore::open(temp.path().join("observer-checkpoints.sqlite"))
             .unwrap()
+    }
+
+    #[test]
+    fn finalizes_checkpoint_only_after_two_distinct_witness_domains() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 2).unwrap();
+        let observer_key = trusted_observer_key();
+        let mut store = open_store(&temp);
+
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+        assert_eq!(
+            store
+                .finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500)
+                .unwrap(),
+            CheckpointFinalizeOutcome::Finalized
+        );
+
+        let head_a = store.witness_tree_head("a1".repeat(32).as_str(), "witness-a").unwrap();
+        let head_b = store.witness_tree_head("a1".repeat(32).as_str(), "witness-b").unwrap();
+        assert_eq!(head_a.tree_size, 1);
+        assert_eq!(head_b.tree_size, 1);
+        assert_eq!(head_a.trust_domain_id, "operator-a");
+        assert_eq!(head_b.trust_domain_id, "operator-b");
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
+        store.integrity_check().unwrap();
+
+        assert_eq!(
+            store
+                .finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500)
+                .unwrap(),
+            CheckpointFinalizeOutcome::AlreadyFinalized
+        );
+    }
+
+    #[test]
+    fn rejects_witness_key_revoked_after_receipt_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = verified_checkpoint(10, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (mut witness_keys, quorum) =
+            make_test_witness_quorum_for_request(&request, 2).unwrap();
+        witness_keys[0].revoked_at_ms = Some(1_150);
+        let observer_key = trusted_observer_key();
+        let mut store = open_store(&temp);
+        store.prepare_checkpoint(&checkpoint, &request, 1_100).unwrap();
+
+        assert!(matches!(
+            store.finalize_witness_quorum(&quorum, &observer_key, &witness_keys, 1_200, 500),
+            Err(OciObserverCheckpointStoreError::WitnessKeyNotCurrentlyValid)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_some());
+    }
+
+    #[test]
+    fn quarantines_when_local_witness_high_water_mark_was_rolled_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = verified_checkpoint(10, None);
+        let first_request = OciObserverWitnessRequest::from_verified_checkpoint(&first).unwrap();
+        let (witness_keys, first_quorum) =
+            make_test_witness_quorum_for_request(&first_request, 2).unwrap();
+        let observer_key = trusted_observer_key();
+        let mut store = open_store(&temp);
+        store.prepare_checkpoint(&first, &first_request, 1_100).unwrap();
+        store
+            .finalize_witness_quorum(&first_quorum, &observer_key, &witness_keys, 1_200, 500)
+            .unwrap();
+
+        let second = verified_checkpoint(
+            20,
+            Some(first.checkpoint_digest_blake3().to_owned()),
+        );
+        let second_request = OciObserverWitnessRequest::from_verified_checkpoint(&second).unwrap();
+        let (stale_witness_keys, stale_genesis_quorum) =
+            make_test_witness_quorum_for_request(&second_request, 2).unwrap();
+        store.prepare_checkpoint(&second, &second_request, 1_300).unwrap();
+
+        assert!(matches!(
+            store.finalize_witness_quorum(
+                &stale_genesis_quorum,
+                &observer_key,
+                &stale_witness_keys,
+                1_400,
+                500
+            ),
+            Err(OciObserverCheckpointStoreError::WitnessTreeHeadMismatch)
+        ));
+        assert!(store.pending_checkpoint(&"a1".repeat(32)).unwrap().is_none());
+        assert!(matches!(
+            store.prepare_checkpoint(&second, &second_request, 1_500),
+            Err(OciObserverCheckpointStoreError::Quarantined)
+        ));
     }
 
     #[test]
