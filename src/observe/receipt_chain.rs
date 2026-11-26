@@ -99,6 +99,9 @@ impl OciObserverReceiptChain {
                 return Err(OciReceiptChainError::BootTransitionRequired);
             }
         }
+        if snapshot.observer_sequence_end() < snapshot.observer_sequence_start() {
+            return Err(OciReceiptChainError::SequenceRollback);
+        }
         if let Some(last) = self.last_sequence {
             if snapshot.observer_sequence_start() <= last
                 || snapshot.observer_sequence_end() <= last
@@ -136,6 +139,9 @@ impl OciObserverReceiptChain {
     ) -> Result<&OciObserverReceiptLink, OciReceiptChainError> {
         let new_boot_id = new_boot_id.into();
         validate_boot_id(&new_boot_id)?;
+        if self.current_boot_id.is_none() {
+            return Err(OciReceiptChainError::InvalidBootTransition);
+        }
         if self.current_boot_id.as_deref() == Some(new_boot_id.as_str()) {
             return Err(OciReceiptChainError::BootEpochUnchanged);
         }
@@ -288,36 +294,36 @@ pub enum OciReceiptChainError {
 mod tests {
     use super::*;
 
-    const OBSERVER: &str = "a5".repeat(32);
+    fn observer() -> String { "a5".repeat(32) }
     const BOOT_ONE: &str = "11111111-2222-3333-4444-555555555555";
     const BOOT_TWO: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
     fn snapshot(sequence: u64) -> OciRuntimeConsistencySnapshot {
-        let mut value = crate::observe::oci_runtime::test_fixture_for_contract(
-            &format!("sha256:{}", "d".repeat(64))
-        );
-        // Unit-test-only snapshot mutation is unavailable outside this module;
-        // the collector fixture already has a fixed 10..11 sequence.
-        // Clone via a serialized round trip to update private test fixture data.
-        let mut encoded = serde_json::to_value(&value).unwrap();
-        encoded["observer_sequence_start"] = serde_json::json!(sequence);
-        encoded["observer_sequence_end"] = serde_json::json!(sequence + 1);
-        value = serde_json::from_value(encoded).unwrap();
-        value
+        crate::observe::oci_runtime::test_fixture_for_contract_at(
+            &format!("sha256:{}", "d".repeat(64)),
+            sequence,
+            BOOT_ONE,
+        )
+    }
+
+    fn snapshot_on_boot(sequence: u64, boot_id: &str) -> OciRuntimeConsistencySnapshot {
+        crate::observe::oci_runtime::test_fixture_for_contract_at(
+            &format!("sha256:{}", "d".repeat(64)), sequence, boot_id,
+        )
     }
 
     #[test]
     fn appends_and_verifies_two_monotonic_snapshot_links() {
-        let mut chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
         chain.append_snapshot(&snapshot(10)).unwrap();
         chain.append_snapshot(&snapshot(12)).unwrap();
         assert_eq!(chain.links().len(), 2);
-        OciObserverReceiptChain::verify_chain(OBSERVER, chain.links()).unwrap();
+        OciObserverReceiptChain::verify_chain(&observer(), chain.links()).unwrap();
     }
 
     #[test]
     fn rejects_duplicate_or_rolled_back_snapshot_sequence() {
-        let mut chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
         chain.append_snapshot(&snapshot(10)).unwrap();
         assert!(matches!(
             chain.append_snapshot(&snapshot(10)),
@@ -327,32 +333,21 @@ mod tests {
 
     #[test]
     fn requires_explicit_boot_epoch_transition() {
-        let mut chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
         chain.append_snapshot(&snapshot(10)).unwrap();
-        let mut other = crate::observe::oci_runtime::test_fixture_for_contract(
-            &format!("sha256:{}", "d".repeat(64))
-        );
-        // Boot mutation is exercised via serde test reconstruction.
-        let mut encoded = serde_json::to_value(&other).unwrap();
-        encoded["boot_id"] = serde_json::json!(BOOT_TWO);
-        other = serde_json::from_value(encoded).unwrap();
+        let other = snapshot_on_boot(13, BOOT_TWO);
         assert!(matches!(
             chain.append_snapshot(&other),
             Err(OciReceiptChainError::BootTransitionRequired)
         ));
         chain.begin_boot_epoch(BOOT_TWO, 12).unwrap();
-        // New snapshot begins after the explicit transition sequence.
-        let mut encoded = serde_json::to_value(&other).unwrap();
-        encoded["observer_sequence_start"] = serde_json::json!(13);
-        encoded["observer_sequence_end"] = serde_json::json!(14);
-        other = serde_json::from_value(encoded).unwrap();
         chain.append_snapshot(&other).unwrap();
-        OciObserverReceiptChain::verify_chain(OBSERVER, chain.links()).unwrap();
+        OciObserverReceiptChain::verify_chain(&observer(), chain.links()).unwrap();
     }
 
     #[test]
     fn detects_link_reordering_and_payload_mutation() {
-        let mut chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
         chain.append_snapshot(&snapshot(10)).unwrap();
         chain.append_snapshot(&snapshot(12)).unwrap();
         let mut reversed = chain.links().to_vec();
@@ -371,7 +366,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_observer_identity() {
-        let mut chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
         chain.append_snapshot(&snapshot(10)).unwrap();
         assert!(matches!(
             OciObserverReceiptChain::verify_chain(&"bb".repeat(32), chain.links()),
@@ -381,8 +376,8 @@ mod tests {
 
     #[test]
     fn empty_chain_is_valid_but_needs_external_anchor() {
-        OciObserverReceiptChain::verify_chain(OBSERVER, &[]).unwrap();
-        let chain = OciObserverReceiptChain::new(OBSERVER).unwrap();
+        OciObserverReceiptChain::verify_chain(&observer(), &[]).unwrap();
+        let chain = OciObserverReceiptChain::new(observer()).unwrap();
         assert!(chain.head_blake3().is_none());
     }
 }
