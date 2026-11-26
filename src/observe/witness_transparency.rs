@@ -442,9 +442,15 @@ pub struct VerifiedOciWitnessReceipt {
     checkpoint_digest_blake3: String,
     request_digest_blake3: String,
     idempotency_key_blake3: String,
+    key_id: String,
+    key_generation: u64,
+    tree_head_timestamp_ms: u64,
+    previous_tree_size: u64,
+    previous_root_sha256: String,
     tree_size: u64,
     root_hash_sha256: String,
     receipt_digest_blake3: String,
+    receipt_bytes: Vec<u8>,
 }
 
 impl VerifiedOciWitnessReceipt {
@@ -462,6 +468,24 @@ impl VerifiedOciWitnessReceipt {
     }
     pub fn idempotency_key_blake3(&self) -> &str {
         &self.idempotency_key_blake3
+    }
+    pub(crate) fn key_id(&self) -> &str {
+        &self.key_id
+    }
+    pub(crate) fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+    pub(crate) fn tree_head_timestamp_ms(&self) -> u64 {
+        self.tree_head_timestamp_ms
+    }
+    pub(crate) fn previous_tree_size(&self) -> u64 {
+        self.previous_tree_size
+    }
+    pub(crate) fn previous_root_sha256(&self) -> &str {
+        &self.previous_root_sha256
+    }
+    pub(crate) fn receipt_bytes(&self) -> &[u8] {
+        &self.receipt_bytes
     }
     pub fn tree_size(&self) -> u64 {
         self.tree_size
@@ -625,9 +649,15 @@ pub fn verify_witness_receipt(
         checkpoint_digest_blake3: receipt.checkpoint_digest_blake3.clone(),
         request_digest_blake3: receipt.request_digest_blake3.clone(),
         idempotency_key_blake3: receipt.idempotency_key_blake3.clone(),
+        key_id: head.key_id.clone(),
+        key_generation: head.key_generation,
+        tree_head_timestamp_ms: head.timestamp_ms,
+        previous_tree_size: receipt.previous_tree_size,
+        previous_root_sha256: receipt.previous_root_sha256.clone(),
         tree_size: head.tree_size,
         root_hash_sha256: head.root_hash_sha256.clone(),
         receipt_digest_blake3: digest.finalize().to_hex().to_string(),
+        receipt_bytes,
     })
 }
 
