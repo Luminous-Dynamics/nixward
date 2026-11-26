@@ -49,7 +49,7 @@ Verification requires both a provisioned key and an explicit `OciObserverCheckpo
 
 - expected observer and machine identities;
 - the current 32-byte challenge nonce;
-- exact expected snapshot and chain-head digests, supplied only after their independent verification;
+- exact expected snapshot and chain-head digests, plus expected boot ID and terminal sequence, supplied only after independent chain verification;
 - the previous checkpoint digest retained by the relying party;
 - the minimum previously accepted sequence;
 - relying-party current time and maximum permitted checkpoint lifetime.
@@ -86,7 +86,7 @@ Every missing, malformed, expired, revoked, stale, contradictory or unsupported 
 
 ## Tests
 
-Sixteen source-level Rust tests cover:
+Eighteen source-level Rust tests cover:
 
 1. valid signing and verification against a separate trust record;
 2. payload tampering;
@@ -103,7 +103,9 @@ Sixteen source-level Rust tests cover:
 13. maximum checkpoint lifetime;
 14. snapshot digest substitution;
 15. receipt-chain head substitution;
-16. a valid second checkpoint extending the exact retained first checkpoint digest with a fresh nonce and increasing sequence.
+16. a valid second checkpoint extending the exact retained first checkpoint digest with a fresh nonce and increasing sequence;
+17. boot-epoch substitution against the independently verified chain;
+18. sequence mismatch against the independently verified chain terminal sequence.
 
 These test functions have not been compiled or executed in this environment.
 
