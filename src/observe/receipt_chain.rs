@@ -95,6 +95,11 @@ impl OciObserverReceiptChain {
         }
         let boot_id = snapshot.boot_id().to_owned();
         validate_boot_id(&boot_id)?;
+        if snapshot.observer_sequence_start() == 0
+            || snapshot.observer_sequence_end() <= snapshot.observer_sequence_start()
+        {
+            return Err(OciReceiptChainError::SequenceRollback);
+        }
         if let Some(current) = &self.current_boot_id {
             if current != &boot_id {
                 return Err(OciReceiptChainError::BootTransitionRequired);
@@ -140,6 +145,9 @@ impl OciObserverReceiptChain {
     ) -> Result<&OciObserverReceiptLink, OciReceiptChainError> {
         let new_boot_id = new_boot_id.into();
         validate_boot_id(&new_boot_id)?;
+        if transition_sequence == 0 {
+            return Err(OciReceiptChainError::SequenceRollback);
+        }
         if self.current_boot_id.is_none() {
             return Err(OciReceiptChainError::InvalidBootTransition);
         }
@@ -190,6 +198,9 @@ impl OciObserverReceiptChain {
             validate_digest(&link.link_blake3)?;
             if link.payload.previous_link_blake3.as_deref() != expected_previous {
                 return Err(OciReceiptChainError::ChainLinkMismatch);
+            }
+            if link.payload.sequence_start == 0 {
+                return Err(OciReceiptChainError::SequenceRollback);
             }
             if let Some(last) = last_sequence {
                 if link.payload.sequence_start <= last
@@ -264,8 +275,9 @@ fn validate_digest(value: &str) -> Result<(), OciReceiptChainError> {
 fn validate_boot_id(value: &str) -> Result<(), OciReceiptChainError> {
     let value = value.to_ascii_lowercase();
     let parts: Vec<&str> = value.split('-').collect();
+    let expected_lengths = [8, 4, 4, 4, 12];
     if parts.len() == 5
-        && parts.iter().map(|part| part.len()).sum::<usize>() == 32
+        && parts.iter().map(|part| part.len()).eq(expected_lengths)
         && parts.concat().bytes().all(|b| b.is_ascii_hexdigit())
     {
         Ok(())
@@ -381,6 +393,23 @@ mod tests {
         assert!(matches!(
             OciObserverReceiptChain::verify_chain(&"bb".repeat(32), chain.links()),
             Err(OciReceiptChainError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_sequence_snapshot() {
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        assert!(matches!(
+            chain.append_snapshot(&snapshot(0)),
+            Err(OciReceiptChainError::SequenceRollback)
+        ));
+    }
+
+    #[test]
+    fn rejects_noncanonical_uuid_segment_lengths() {
+        assert!(matches!(
+            validate_boot_id("1-1-1-1-1111111111111111111111111111"),
+            Err(OciReceiptChainError::InvalidBootId)
         ));
     }
 
