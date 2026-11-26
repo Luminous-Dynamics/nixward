@@ -112,7 +112,15 @@ Fifteen task-contract Rust unit tests cover:
 14. runtime process-start mutation invalidating the owner signature;
 15. rejection of a runtime snapshot bound to a different task cgroup.
 
-The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests and 13 receipt-chain tests. All are source-level only until executed with the pinned Rust toolchain. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
+The task-binding branch includes the finite-set network_containment module and the Linux OCI procfs observer. Schema-v3 AgentTaskNetworkContract requires both the opaque VerifiedPolicyContainment token and an OciRuntimeConsistencySnapshot. The current source corpus is 15 task-contract tests, 24 policy-containment tests, 27 OCI-observer tests, 13 receipt-chain tests and 15 signed-checkpoint tests. All are source-level only until executed with the pinned Rust toolchain. The separate signed-checkpoint prototype verifies Ed25519 signatures against an externally supplied trust record, verifier nonce, exact snapshot/chain digests, previous checkpoint digest, key generation/revocation and sequence/time expectations. It is not consumed by the task contract and does not establish hardware-backed attestation or durable checkpoint storage. No compile, clippy, formatting, Nix evaluation, live Podman collection, durable receipt-chain persistence, external anchoring, runtime-lab or CI pass is claimed here.
+
+### Signed observer-checkpoint prototype (26 Nov 2026)
+
+A separate `observe::signed_checkpoint` module now signs a deterministic, domain-separated checkpoint with Ed25519 and verifies it against a relying-party-supplied trust record and expectation. The payload binds observer/key identity and generation, machine/boot identity, sequence, exact snapshot and chain-head digests, previous accepted checkpoint digest, verifier nonce digest, issuance and expiry. The verifier rejects revoked/expired keys, stale or future checkpoints, nonce mismatch, key-generation changes, machine/observer substitution, parent/sequence rollback, and snapshot/chain digest substitution. Both serialized envelope and payload reject unknown fields.
+
+The module returns an opaque `VerifiedOciObserverCheckpoint`, but the task contract does not consume it. The verifier caller must independently verify the snapshot and receipt chain before supplying their exact digests, generate and consume the nonce, and persist the returned checkpoint digest/sequence outside the workload. No persistent store, key enrollment/distribution, remote witness, measured boot, hardware key or runtime enforcement is implemented. This is a software-authenticated checkpoint prototype, not a host attestation.
+
+See [OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md](OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md). Its 15 source-level tests bring the overall branch corpus to 94 functions; none is compiled or executed.
 
 ## 9. Next qualification increments
 
