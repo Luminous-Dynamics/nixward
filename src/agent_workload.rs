@@ -100,6 +100,7 @@ impl AgentTaskNetworkContract {
         guest_plan: &SoftwareIngressPlan,
         guest_receipt: &GuestRealizationReceipt,
         runtime_observation: &OciRuntimeConsistencySnapshot,
+        expected_task_cgroup_path: &str,
         workload: &WorkloadIdentity,
         network_policy: &NetworkPolicyPlan,
         policy_proof: &VerifiedPolicyContainment,
@@ -154,6 +155,15 @@ impl AgentTaskNetworkContract {
             .map_err(|_| AgentTaskNetworkError::RuntimeObservationMismatch)?;
         let runtime_container_id = runtime_observation.container_id().to_owned();
         let runtime_cgroup_path = runtime_observation.cgroup_path().to_owned();
+        if expected_task_cgroup_path.is_empty()
+            || !expected_task_cgroup_path.starts_with('/')
+            || expected_task_cgroup_path.contains("/../")
+            || expected_task_cgroup_path.ends_with("/..")
+            || expected_task_cgroup_path.bytes().any(|b| b.is_ascii_control())
+            || runtime_cgroup_path != expected_task_cgroup_path
+        {
+            return Err(AgentTaskNetworkError::RuntimeObservationMismatch);
+        }
         let runtime_boot_id = runtime_observation.boot_id().to_owned();
         let runtime_machine_id_blake3 = runtime_observation.machine_id_blake3().to_owned();
         if !runtime_observation.source_agreement()
@@ -753,6 +763,7 @@ mod tests {
             &guest_plan,
             &guest_receipt,
             &runtime_observation,
+            "/machine.slice/agent-task.scope",
             &workload,
             &policy,
             &policy_proof,
@@ -883,7 +894,7 @@ mod tests {
         let runtime_observation = runtime_for(&guest_plan);
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &guest_receipt, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
+            &guest_plan, &guest_receipt, &runtime_observation, "/machine.slice/agent-task.scope", &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [7; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::PolicyWorkloadMismatch)));
@@ -899,7 +910,7 @@ mod tests {
         substituted.artifact_identity = "registry.invalid/other@sha256:".to_string() + &"e".repeat(64);
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &guest_plan, &substituted, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
+            &guest_plan, &substituted, &runtime_observation, "/machine.slice/agent-task.scope", &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [8; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::GuestReceiptMismatch)));
@@ -921,6 +932,7 @@ mod tests {
             &guest_plan,
             &receipt,
             &wrong_runtime,
+            "/machine.slice/agent-task.scope",
             &workload,
             &policy,
             &policy_proof,
@@ -928,6 +940,35 @@ mod tests {
             1_000_000,
             60_000,
             [13; 32],
+        );
+        assert!(matches!(
+            result,
+            Err(AgentTaskNetworkError::RuntimeObservationMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejects_runtime_snapshot_from_another_task_cgroup() {
+        let (_, guest_plan, receipt, workload, policy, enforcement) =
+            fixture(DestinationSet::Cidrs { values: vec!["203.0.113.17/32".into()] });
+        let policy_proof = verify_policy_within_boundary(&policy, &policy).unwrap();
+        let runtime_observation = runtime_for(&guest_plan);
+        let result = AgentTaskNetworkContract::bind(
+            "tenant-a",
+            "task-atr-001",
+            "a".repeat(64),
+            "b".repeat(64),
+            &guest_plan,
+            &receipt,
+            &runtime_observation,
+            "/machine.slice/another-task.scope",
+            &workload,
+            &policy,
+            &policy_proof,
+            &enforcement,
+            1_000_000,
+            60_000,
+            [15; 32],
         );
         assert!(matches!(
             result,
@@ -955,6 +996,7 @@ mod tests {
             &guest_plan,
             &guest_receipt,
             &runtime_observation,
+            "/machine.slice/agent-task.scope",
             &workload,
             &changed_policy,
             &stale_proof,
@@ -1054,7 +1096,7 @@ mod tests {
         });
         let result = AgentTaskNetworkContract::bind(
             "tenant-a", "task-atr-001", "a".repeat(64), "b".repeat(64),
-            &changed_plan, &receipt, &runtime_observation, &workload, &policy, &policy_proof, &enforcement,
+            &changed_plan, &receipt, &runtime_observation, "/machine.slice/agent-task.scope", &workload, &policy, &policy_proof, &enforcement,
             1_000_000, 60_000, [11; 32],
         );
         assert!(matches!(result, Err(AgentTaskNetworkError::UnsafeGuestIsolation)));
