@@ -10,7 +10,9 @@
 //! transparency log, or cross-client gossip transport.
 
 use super::signed_checkpoint::VerifiedOciObserverCheckpoint;
-use super::witness_transparency::{OciObserverWitnessRequest, TrustedOciWitnessKey};
+use super::witness_transparency::{
+    OciObserverWitnessRequest, TrustedOciWitnessKey, VerifiedOciWitnessQuorum,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -168,6 +170,10 @@ pub struct VerifiedOciWitnessBranchEndorsement {
     checkpoint_digest_blake3: String,
     request_digest_blake3: String,
     endorsement_digest_blake3: String,
+    key_id: String,
+    key_generation: u64,
+    signer_public_key_hex: String,
+    endorsement_bytes: Vec<u8>,
 }
 
 impl VerifiedOciWitnessBranchEndorsement {
@@ -178,6 +184,90 @@ impl VerifiedOciWitnessBranchEndorsement {
     pub fn checkpoint_digest_blake3(&self) -> &str { &self.checkpoint_digest_blake3 }
     pub fn request_digest_blake3(&self) -> &str { &self.request_digest_blake3 }
     pub fn endorsement_digest_blake3(&self) -> &str { &self.endorsement_digest_blake3 }
+    pub fn key_id(&self) -> &str { &self.key_id }
+    pub fn key_generation(&self) -> u64 { self.key_generation }
+    pub fn signer_public_key_hex(&self) -> &str { &self.signer_public_key_hex }
+    pub fn endorsement_bytes(&self) -> &[u8] { &self.endorsement_bytes }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOciWitnessBranchQuorum {
+    witness_quorum: VerifiedOciWitnessQuorum,
+    branch_endorsements: Vec<VerifiedOciWitnessBranchEndorsement>,
+}
+
+impl VerifiedOciWitnessBranchQuorum {
+    /// Bind one independently verified single-branch endorsement to every
+    /// exact witness receipt in the transparency quorum.
+    pub fn bind(
+        witness_quorum: VerifiedOciWitnessQuorum,
+        branch_endorsements: Vec<VerifiedOciWitnessBranchEndorsement>,
+    ) -> Result<Self, OciWitnessBranchLedgerError> {
+        if branch_endorsements.len() != witness_quorum.receipts().len() {
+            return Err(OciWitnessBranchLedgerError::SubjectMismatch);
+        }
+        let mut witness_ids = std::collections::BTreeSet::new();
+        let mut trust_domains = std::collections::BTreeSet::new();
+        for endorsement in &branch_endorsements {
+            if !witness_ids.insert(endorsement.witness_id().to_owned())
+                || !trust_domains.insert(endorsement.trust_domain_id().to_owned())
+                || endorsement.checkpoint_digest_blake3()
+                    != witness_quorum.checkpoint_digest_blake3()
+                || endorsement.request_digest_blake3()
+                    != witness_quorum.request_digest_blake3()
+            {
+                return Err(OciWitnessBranchLedgerError::SubjectMismatch);
+            }
+        }
+        for receipt in witness_quorum.receipts() {
+            let endorsement = branch_endorsements
+                .iter()
+                .find(|item| item.witness_id() == receipt.witness_id())
+                .ok_or(OciWitnessBranchLedgerError::SubjectMismatch)?;
+            if endorsement.trust_domain_id() != receipt.trust_domain_id()
+                || endorsement.checkpoint_digest_blake3()
+                    != receipt.checkpoint_digest_blake3()
+                || endorsement.request_digest_blake3()
+                    != receipt.request_digest_blake3()
+            {
+                return Err(OciWitnessBranchLedgerError::SubjectMismatch);
+            }
+        }
+        Ok(Self {
+            witness_quorum,
+            branch_endorsements,
+        })
+    }
+
+    pub fn checkpoint_digest_blake3(&self) -> &str {
+        self.witness_quorum.checkpoint_digest_blake3()
+    }
+    pub fn request_digest_blake3(&self) -> &str {
+        self.witness_quorum.request_digest_blake3()
+    }
+    pub fn idempotency_key_blake3(&self) -> &str {
+        self.witness_quorum.idempotency_key_blake3()
+    }
+    pub fn evidence_digest_blake3(&self) -> &str {
+        self.witness_quorum.evidence_digest_blake3()
+    }
+    pub fn required_trust_domains(&self) -> usize {
+        self.witness_quorum.required_trust_domains()
+    }
+    pub fn receipts(&self) -> &[super::witness_transparency::VerifiedOciWitnessReceipt] {
+        self.witness_quorum.receipts()
+    }
+    pub fn branch_endorsements(&self) -> &[VerifiedOciWitnessBranchEndorsement] {
+        &self.branch_endorsements
+    }
+    pub fn branch_endorsement_for(
+        &self,
+        witness_id: &str,
+    ) -> Option<&VerifiedOciWitnessBranchEndorsement> {
+        self.branch_endorsements
+            .iter()
+            .find(|item| item.witness_id() == witness_id)
+    }
 }
 
 fn validate_digest(value: &str) -> Result<(), OciWitnessBranchLedgerError> {
@@ -771,7 +861,40 @@ pub fn verify_witness_branch_endorsement(
         checkpoint_digest_blake3: endorsement.checkpoint_digest_blake3.clone(),
         request_digest_blake3: endorsement.request_digest_blake3.clone(),
         endorsement_digest_blake3: digest.finalize().to_hex().to_string(),
+        key_id: endorsement.key_id.clone(),
+        key_generation: endorsement.key_generation,
+        signer_public_key_hex: trusted_key.public_key_hex.clone(),
+        endorsement_bytes: serde_json::to_vec(endorsement)
+            .map_err(|_| OciWitnessBranchLedgerError::InvalidShape)?,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn make_test_verified_branch_endorsements(
+    checkpoint: &VerifiedOciObserverCheckpoint,
+    request: &OciObserverWitnessRequest,
+    trusted_keys: &[TrustedOciWitnessKey],
+) -> Result<Vec<VerifiedOciWitnessBranchEndorsement>, OciWitnessBranchLedgerError> {
+    let mut verified = Vec::with_capacity(trusted_keys.len());
+    for (index, trust) in trusted_keys.iter().enumerate() {
+        let seed = 41u8 + index as u8;
+        let signing_key = SigningKey::from_bytes(&[seed; 32]);
+        let temp = tempfile::tempdir().map_err(|_| OciWitnessBranchLedgerError::InvalidShape)?;
+        let mut ledger = OciWitnessBranchLedger::open(
+            temp.path().join("witness-branch.sqlite"),
+            trust,
+        )?;
+        let (_, endorsement) =
+            ledger.endorse_checkpoint_branch(checkpoint, request, &signing_key, 1_200)?;
+        verified.push(verify_witness_branch_endorsement(
+            &endorsement,
+            trust,
+            checkpoint,
+            request,
+            1_200,
+        )?);
+    }
+    Ok(verified)
 }
 
 #[cfg(test)]
