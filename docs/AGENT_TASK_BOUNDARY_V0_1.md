@@ -165,12 +165,12 @@ The new `observe::checkpoint_store` module uses native SQLite WAL with `synchron
 Seven source-level store tests bring the branch total to 104 (15 + 24 + 27 + 13 + 18 + 7). None have been compiled or executed. No local Cargo/Rust/Nix toolchain or exact-head Nixward CI result is available in this environment. See [durable witness protocol](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md) and [issue #170](https://github.com/Luminous-Dynamics/nixward/issues/170).
 
 
-### Witness receipt verifier and durable 2-of-3 finalization (26 Nov 2026)
+### Witness receipt verifier and durable 3-of-4 finalization (26 Nov 2026)
 
 The native observer layer now includes:
 - `observe::witness_transparency`: RFC 9162 Merkle leaf/node hashing, inclusion and consistency proof verification, signed Nixward-specific tree-head receipts, exact witness leaf/request binding, key lifecycle/revocation and opaque quorum evidence;
 - an opaque canonical witness request derived from `VerifiedOciObserverCheckpoint`;
-- `observe::checkpoint_store` schema-v2 atomic setup/migration and a 2-of-3 finalization path that persists witness receipts/high-water marks and advances the accepted checkpoint only after the verified quorum is supplied. Finalization rechecks current observer/witness trust and evidence age, and quarantines a conflicting local witness high-water mark;
+- `observe::checkpoint_store` schema-v4 atomic setup/migration and a 3-of-4 finalization path that persists witness receipts/high-water marks and advances the accepted checkpoint only after the verified quorum is supplied. Finalization rechecks current observer/witness trust and evidence age, and quarantines a conflicting local witness high-water mark;
 - signed-tree-head equivocation verification for two same-size conflicting roots under one trusted witness key. This requires a gossip/monitor channel to bring both signed views together; that transport is not implemented.
 
 The task-binding contract still does **not** consume the durable store's confirmed state or enable network enforcement. No real witness service, remote trust distribution, hardware measured boot, gossip transport, live cgroup/BPF effect receipt or runtime qualification is implemented.
@@ -185,3 +185,10 @@ The store's high-assurance finalization rule is now **3-of-4 independent witness
 The store now binds the exact public key bytes used for observer and witness signature verification, not only key ID/generation. Schema-v4 migrations quarantine legacy accepted/pending state whose key fingerprints cannot be recovered. A receiver-side witness-equivocation method persists both conflicting signed tree heads and quarantines observers that relied on that witness. Finalization rejects any witness identity with recorded equivocation evidence.
 
 The network gossip/cross-monitor transport remains unimplemented; no global non-equivocation claim is made.
+
+
+### Current implementation and claim boundary (26 November 2026)
+
+Current Nixward source corpus: 136 source-level Rust test functions (15 task contract + 24 containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 18 durable store + 21 witness transparency). None has been compiled or executed; exact-head Nixward CI is not reported and the local environment has no Cargo/rustc/rustfmt/Nix.
+
+The native store is schema v4, persists exact observer/witness public keys and 3-of-4 quorum receipt bytes/high-water marks, and supports receiver-side persistent equivocation evidence/quarantine. The task-binding contract does **not** yet consume the finalized witness checkpoint. No real witness service, cross-client gossip transport, remote key distribution, hardware-backed measured boot, runtime enforcement or independent effect receipts are claimed.
