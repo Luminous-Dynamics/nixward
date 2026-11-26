@@ -94,6 +94,7 @@ impl OciObserverReceiptChain {
             return Err(OciReceiptChainError::SnapshotNotQualified);
         }
         let boot_id = snapshot.boot_id().to_owned();
+        validate_boot_id(&boot_id)?;
         if let Some(current) = &self.current_boot_id {
             if current != &boot_id {
                 return Err(OciReceiptChainError::BootTransitionRequired);
@@ -353,13 +354,13 @@ mod tests {
         let mut reversed = chain.links().to_vec();
         reversed.reverse();
         assert!(matches!(
-            OciObserverReceiptChain::verify_chain(OBSERVER, &reversed),
+            OciObserverReceiptChain::verify_chain(&observer(), &reversed),
             Err(OciReceiptChainError::ChainLinkMismatch) | Err(OciReceiptChainError::SequenceRollback)
         ));
         let mut tampered = chain.links().to_vec();
         tampered[0].payload.snapshot_digest_blake3 = Some("ff".repeat(32));
         assert!(matches!(
-            OciObserverReceiptChain::verify_chain(OBSERVER, &tampered),
+            OciObserverReceiptChain::verify_chain(&observer(), &tampered),
             Err(OciReceiptChainError::ChainLinkMismatch)
         ));
     }
