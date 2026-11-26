@@ -125,3 +125,10 @@ These test functions have not been compiled or executed in this environment.
 6. Keep network activation disabled until A5 enforcement and A6 effect verification are separately demonstrated.
 
 **Claim boundary:** this is a signed checkpoint prototype with verifier-supplied freshness and trust inputs. It does not implement production key custody, durable storage, remote witness/anchoring, measured boot, task-contract consumption or active runtime enforcement.
+
+
+## Relying-party journal implementation update (26 November 2026)
+
+The broader Nixward branch now contains a separate native-only `observe::checkpoint_store` module. It stores the exact verified checkpoint parent and identity fields plus exact witness request bytes in SQLite WAL with `synchronous=FULL`, and supports single-pending-checkpoint compare-and-append, exact retry, conflict quarantine, and `RECONCILIATION_REQUIRED` recovery. The opaque verified checkpoint now exposes its authenticated previous-checkpoint digest for this parent check.
+
+This is only the durable PREPARED/reconciliation slice. There is no public witness-confirmed/finalize operation, witness transport, Merkle proof verifier, quorum or task-contract integration. Do not treat a locally prepared checkpoint as admission authority. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md) and [issue #170](https://github.com/Luminous-Dynamics/nixward/issues/170).
