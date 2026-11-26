@@ -35,7 +35,7 @@ Both samples use one process-local monotonic clock. The observer rejects non-inc
 - The live root mount is read-only.
 - User, network, PID, mount and cgroup namespace inodes differ from the host observer's namespaces.
 - The process is in the exact expected cgroup.
-- `NoNewPrivs` is set and effective capabilities are within the configured mask.
+- `NoNewPrivs` is set, `Seccomp` is in filter mode (`2`), and **effective, permitted, bounding and ambient** capability sets are all within the configured mask.
 - Process start-time ticks, boot ID, machine identity, mountinfo digest and observer sequence are present and stable.
 
 Missing, malformed, unsupported, stale or contradictory evidence returns an error. A partial source set does not yield a snapshot.
