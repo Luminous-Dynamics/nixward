@@ -343,17 +343,7 @@ fn parse_podman_inspect(raw: &[u8]) -> Result<PodmanInspectEvidence, OciRuntimeO
     };
     let state = object_field(object, "state")?;
     let host_config = object_field(object, "hostConfig")?;
-    let mounts = array_field(object, "mounts")?
-        .iter()
-        .map(|mount| {
-            Ok(PodmanMountEvidence {
-                mount_type: string_field(mount, "type")?.to_owned(),
-                source: string_field(mount, "source")?.to_owned(),
-                destination: string_field(mount, "destination")?.to_owned(),
-                read_write: bool_field(mount, "rw")?,
-            })
-        })
-        .collect::<Result<Vec<_>, OciRuntimeObservationError>>()?;
+    let mounts = nullable_mount_array(object, "mounts")?;
     let binds = nullable_string_array(host_config, "binds")?;
     let tmpfs = nullable_string_map(host_config, "tmpfs")?;
     Ok(PodmanInspectEvidence {
@@ -545,6 +535,26 @@ fn validate_frame(
         return Err(OciRuntimeObservationError::IncompleteEvidence);
     }
     Ok(())
+}
+
+fn nullable_mount_array(
+    object: &serde_json::Value,
+    name: &str,
+) -> Result<Vec<PodmanMountEvidence>, OciRuntimeObservationError> {
+    match object_field(object, name)? {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(values) => values.iter()
+            .map(|mount| {
+                Ok(PodmanMountEvidence {
+                    mount_type: string_field(mount, "type")?.to_owned(),
+                    source: string_field(mount, "source")?.to_owned(),
+                    destination: string_field(mount, "destination")?.to_owned(),
+                    read_write: bool_field(mount, "rw")?,
+                })
+            })
+            .collect(),
+        _ => Err(OciRuntimeObservationError::InvalidJsonField(name.into())),
+    }
 }
 
 fn nullable_string_array(
@@ -931,6 +941,16 @@ mod tests {
         assert!(matches!(parse_podman_inspect(format!("[{raw}]").as_bytes()),
             Err(OciRuntimeObservationError::InvalidInspectDocument)));
     }
+    #[test]
+    fn accepts_explicit_null_mounts_only_when_binds_and_tmpfs_are_empty() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"Mounts\":[]", "\"Mounts\":null");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
+        assert!(parsed.mounts.is_empty());
+        assert!(parsed.binds.is_empty());
+        assert!(parsed.tmpfs.is_empty());
+    }
+
     #[test]
     fn rejects_configured_bind_even_when_inspect_mounts_is_empty() {
         let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
