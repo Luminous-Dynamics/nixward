@@ -12,7 +12,7 @@ The Linux-only `collect_live_pair` API requires:
 
 - an explicit absolute Podman executable path, canonicalized before use;
 - the full immutable container ID;
-- the exact expected image ID/digest;
+- the exact expected image manifest digest (Podman's `ImageDigest`; distinct from its local image ID in `Image`);
 - the expected task cgroup path;
 - an effective-capability allowlist (zero for the strictest profile);
 - a caller-allocated persistent observer sequence.
@@ -21,19 +21,19 @@ For each sample, the collector:
 
 1. hashes the configured Podman executable before and after invoking it, and invokes it without a shell;
 2. reads `podman info --format json` for rootless state and UID/GID mappings;
-3. reads `podman inspect --type container <full-id>` for container/image identity, process PID, running state, read-only-root configuration, host network/PID modes, privilege and declared mounts;
-4. independently reads the live host-side `/proc/<pid>` status, stat, cgroup, mountinfo, UID/GID maps and namespace links;
+3. reads `podman inspect --type container <full-id>` for the full container ID, separate local `Image` ID and `ImageDigest`, process PID, running state, read-only-root configuration, host network/PID modes, privilege, `Mounts`, `HostConfig.Binds` and `HostConfig.Tmpfs`;
+4. independently reads the live host-side `/proc/<pid>` status, stat, cgroup, mountinfo, UID/GID maps and namespace links for user, network, PID, mount and cgroup namespaces;
 5. reads the host boot ID and hashes the machine ID with a domain-separated BLAKE3 digest.
 
 Both samples use one process-local monotonic clock. The observer rejects non-increasing sequences/times and any change in container ID, image, PID, process-start ticks, cgroup, namespace inodes, host boot/machine identity, Podman executable digest, ID mappings, procfs mount digest or other captured source data.
 
 ## Fail-closed checks
 
-- Podman reports a running container with the expected immutable container and image IDs.
-- Podman reports rootless execution, a read-only root, no privileged mode, no host network or host PID mode, and no additional declared mounts.
+- Podman reports a running container with the expected immutable container ID and expected `ImageDigest`. The local `Image` ID is preserved separately and is not confused with the registry manifest digest.
+- Podman reports rootless execution, a read-only root, no privileged mode, no host network or host PID mode, and no additional user-declared `Mounts`, `Binds` or `Tmpfs`. Podman's inspect `Mounts` list alone is insufficient: `Binds` and `Tmpfs` are separate `HostConfig` fields, and tmpfs is not included in the ordinary mount list.
 - Podman's UID/GID mappings match the process's live `uid_map` and `gid_map`.
 - The live root mount is read-only.
-- User, network, PID and mount namespace inodes differ from the host observer's namespaces.
+- User, network, PID, mount and cgroup namespace inodes differ from the host observer's namespaces.
 - The process is in the exact expected cgroup.
 - `NoNewPrivs` is set and effective capabilities are within the configured mask.
 - Process start-time ticks, boot ID, machine identity, mountinfo digest and observer sequence are present and stable.
@@ -57,7 +57,7 @@ It also does not prove:
 - that the process remains unchanged after the observation window;
 - that a cgroup/BPF/network policy is attached or enforcing;
 - that DNS, proxy, redirect, QUIC or credential-provider paths are constrained;
-- that no hidden bind mount exists beyond what the current Podman/procfs checks can identify.
+- that the actual mount graph is fully equivalent to the intended OCI plan. The collector rejects user-declared `Mounts`, `Binds` and `Tmpfs`, but its current mountinfo parser validates records and root-read-only state rather than fully reconciling every mount source, propagation attribute and runtime-created mount against the complete plan.
 
 A signed snapshot would authenticate the observer key and bytes; it would not make false kernel claims true. Runtime enforcement and ongoing observation remain separate qualification gates.
 
@@ -65,9 +65,16 @@ A signed snapshot would authenticate the observer key and bytes; it would not ma
 
 1. Add an observer identity/key lifecycle, boot-bound sequence persistence and signed append-only receipts.
 2. Pin the Podman executable by file descriptor/inode or an equivalent execution identity mechanism, and attest the Podman service/daemon and helper binaries.
-3. Parse and classify every mountinfo entry, including propagation and source identity, and compare with the exact OCI mount plan.
+3. Fully reconcile every mountinfo entry—including propagation, root, source, filesystem type and options—with Podman's `Mounts`, `Binds`, `Tmpfs` and the exact OCI mount plan. Current code rejects declared user mounts and structurally validates mountinfo, but is not yet a complete mount-graph equivalence verifier.
 4. Independently observe cgroup v2 membership, controllers and attached BPF programs, then test packet allow/deny effects using evaluator-owned service oracles.
 5. Reobserve at each consequential action and on lifecycle notifications; a single pair is not continuous monitoring.
 6. Add negative controls for PID reuse, container replacement, image mutation, namespace swaps, cgroup migration, stale boot identity, mount drift, capability expansion, Podman binary replacement and observer restart.
 
-The current source module contains 18 Rust tests. They are source-level only; no Rust compiler or runner was available during this change. No compilation, clippy, formatting, Nix build or live Podman collection is claimed.
+The OCI runtime collector currently has 22 source-level Rust tests. The separately exported in-memory receipt-chain prototype has six tests; it detects link tampering/reordering and sequence rollback relative to a trusted head, but is not yet durable or externally anchored. No Rust compiler or runner was available during this change. No compilation, clippy, formatting, Nix build or live Podman collection is claimed.
+
+
+## Receipt-chain prototype
+
+The separate `observe::receipt_chain` module appends a domain-separated link containing observer identity digest, boot epoch, sequence interval, snapshot digest and previous-link digest. It rejects duplicate/non-increasing snapshot sequence numbers, payload mutation, link reordering and a boot-epoch change without an explicit transition record. The verifier recomputes every link digest.
+
+This chain is currently an in-memory structure. It does not persist with fsync/crash consistency, sign links, retain an observer key, or compare its head with an external anchor. Consequently it detects modifications relative to a trusted chain/head supplied to the verifier, but cannot detect an attacker replacing or truncating the entire chain and its head together. Persistent anti-rollback, observer-key revocation and external anchoring are tracked in Nixward issue #169. The task contract schema v3 currently binds a snapshot, not a durable chain link.
