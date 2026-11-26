@@ -86,7 +86,7 @@ Every missing, malformed, expired, revoked, stale, contradictory or unsupported 
 
 ## Tests
 
-Fifteen source-level Rust tests cover:
+Sixteen source-level Rust tests cover:
 
 1. valid signing and verification against a separate trust record;
 2. payload tampering;
@@ -102,7 +102,8 @@ Fifteen source-level Rust tests cover:
 12. key-validity-window enforcement;
 13. maximum checkpoint lifetime;
 14. snapshot digest substitution;
-15. receipt-chain head substitution.
+15. receipt-chain head substitution;
+16. a valid second checkpoint extending the exact retained first checkpoint digest with a fresh nonce and increasing sequence.
 
 These test functions have not been compiled or executed in this environment.
 
