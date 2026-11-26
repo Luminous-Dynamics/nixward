@@ -1770,7 +1770,7 @@ mod tests {
 
         assert!(matches!(
             store.finalize_witness_quorum(
-                &stale_genesis_quorum,
+                &branch_quorum(&second, &second_request, &stale_witness_keys, stale_genesis_quorum.clone()),
                 &observer_key,
                 &stale_witness_keys,
                 1_400,
@@ -1786,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_checkpoint_history_atomically_to_v3() {
+    fn migrates_v1_checkpoint_history_atomically_to_v5() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("observer-checkpoints.sqlite");
         let mut options = fs::OpenOptions::new();
@@ -1830,7 +1830,7 @@ mod tests {
         }
 
         let store = open_store(&temp);
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 5);
         store.integrity_check().unwrap();
         let head = store
             .witness_tree_head(&"a1".repeat(32), "witness-a")
@@ -1840,7 +1840,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v2_database_and_quarantines_unfingerprinted_witness_state() {
+    fn migrates_v2_database_and_quarantines_unfingerprinted_witness_state_to_v5() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("observer-checkpoints.sqlite");
         let mut options = fs::OpenOptions::new();
@@ -1891,7 +1891,7 @@ mod tests {
         }
 
         let store = open_store(&temp);
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert_eq!(store.schema_version().unwrap(), 5);
         store.integrity_check().unwrap();
         let quarantined: i64 = store.connection.query_row(
             "SELECT quarantined FROM observer_state WHERE observer_id = ?1",
