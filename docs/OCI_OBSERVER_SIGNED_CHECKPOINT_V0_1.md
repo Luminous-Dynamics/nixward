@@ -132,3 +132,12 @@ These test functions have not been compiled or executed in this environment.
 The broader Nixward branch now contains a separate native-only `observe::checkpoint_store` module. It stores the exact verified checkpoint parent and identity fields plus exact witness request bytes in SQLite WAL with `synchronous=FULL`, and supports single-pending-checkpoint compare-and-append, exact retry, conflict quarantine, and `RECONCILIATION_REQUIRED` recovery. The opaque verified checkpoint now exposes its authenticated previous-checkpoint digest for this parent check.
 
 This is only the durable PREPARED/reconciliation slice. There is no public witness-confirmed/finalize operation, witness transport, Merkle proof verifier, quorum or task-contract integration. Do not treat a locally prepared checkpoint as admission authority. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md) and [issue #170](https://github.com/Luminous-Dynamics/nixward/issues/170).
+
+
+## Downstream witness verification update (26 November 2026)
+
+A separate `observe::witness_transparency` module now accepts only the opaque `VerifiedOciObserverCheckpoint` token to create a canonical witness request. It verifies signed witness tree heads, RFC 9162 SHA-256 Merkle inclusion/consistency proofs, exact checkpoint/request/idempotency leaf commitment, current witness key identity/generation/revocation and distinct trust-domain quorum membership. The STH/receipt envelope is Nixward-specific and domain-separated; it is not a full RFC 9162 CT v2 log wire implementation.
+
+The native SQLite store now has a 2-of-3 finalization method that requires the opaque verified quorum and rechecks current observer and witness trust at the durable commit boundary. It compares each proof's previous tree head to the locally retained witness high-water mark and quarantines on mismatch. It persists exact receipt bytes and advances accepted state atomically.
+
+The module can verify two conflicting validly signed same-size tree heads as equivocation evidence, but it does not yet implement gossip distribution or automatically quarantine every relying party that has not received the evidence. It also does not launch or operate real witnesses. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md).
