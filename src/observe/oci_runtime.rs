@@ -114,6 +114,7 @@ struct ProcfsProcessEvidence {
     bounding_capabilities: u64,
     ambient_capabilities: u64,
     no_new_privileges: bool,
+    seccomp_mode: u8,
     cgroup_path: String,
     uid_map: Vec<IdMapEntry>,
     gid_map: Vec<IdMapEntry>,
@@ -156,6 +157,7 @@ pub struct OciRuntimeConsistencySnapshot {
     machine_id_blake3: String,
     root_mount_read_only: bool,
     no_new_privileges: bool,
+    seccomp_mode: u8,
     effective_capabilities: u64,
     permitted_capabilities: u64,
     bounding_capabilities: u64,
@@ -189,6 +191,10 @@ impl OciRuntimeConsistencySnapshot {
     pub fn podman_binary_blake3(&self) -> &str { &self.podman_binary_blake3 }
     pub fn root_mount_read_only(&self) -> bool { self.root_mount_read_only }
     pub fn no_new_privileges(&self) -> bool { self.no_new_privileges }
+    pub fn seccomp_mode(&self) -> u8 { self.seccomp_mode }
+    pub fn permitted_capabilities(&self) -> u64 { self.permitted_capabilities }
+    pub fn bounding_capabilities(&self) -> u64 { self.bounding_capabilities }
+    pub fn ambient_capabilities(&self) -> u64 { self.ambient_capabilities }
     pub fn effective_capabilities(&self) -> u64 { self.effective_capabilities }
     pub fn podman_declared_mount_count(&self) -> usize { self.podman_declared_mount_count }
     pub fn podman_declared_bind_count(&self) -> usize { self.podman_declared_bind_count }
@@ -401,6 +407,13 @@ fn parse_procfs_evidence(
     if !no_new_privileges {
         return Err(OciRuntimeObservationError::NoNewPrivilegesMissing);
     }
+    let seccomp_mode = fields.get("Seccomp")
+        .ok_or_else(|| OciRuntimeObservationError::MissingProcField("Seccomp".into()))?
+        .parse::<u8>()
+        .map_err(|_| OciRuntimeObservationError::InvalidProcField("Seccomp".into()))?;
+    if seccomp_mode != 2 {
+        return Err(OciRuntimeObservationError::SeccompFilterMissing);
+    }
     let (root_mount_read_only, mount_count) = parse_mountinfo(mountinfo)?;
     Ok(ProcfsProcessEvidence {
         pid,
@@ -414,6 +427,7 @@ fn parse_procfs_evidence(
         bounding_capabilities: hex_field(fields.get("CapBnd"), "CapBnd")?,
         ambient_capabilities: hex_field(fields.get("CapAmb"), "CapAmb")?,
         no_new_privileges,
+        seccomp_mode,
         cgroup_path: parse_unified_cgroup_path(cgroup)?,
         uid_map: parse_proc_id_map(uid_map)?,
         gid_map: parse_proc_id_map(gid_map)?,
@@ -467,6 +481,7 @@ fn reconcile_frames(
         machine_id_blake3: procfs.machine_id_blake3.clone(),
         root_mount_read_only: procfs.root_mount_read_only,
         no_new_privileges: procfs.no_new_privileges,
+        seccomp_mode: procfs.seccomp_mode,
         effective_capabilities: procfs.effective_capabilities,
         permitted_capabilities: procfs.permitted_capabilities,
         bounding_capabilities: procfs.bounding_capabilities,
@@ -531,8 +546,13 @@ fn validate_frame(
     if procfs.cgroup_path != profile.cgroup_path {
         return Err(OciRuntimeObservationError::CgroupMismatch);
     }
+    let allowed_caps = profile.allowed_effective_capabilities;
     if !procfs.no_new_privileges
-        || procfs.effective_capabilities & !profile.allowed_effective_capabilities != 0
+        || procfs.seccomp_mode != 2
+        || procfs.effective_capabilities & !allowed_caps != 0
+        || procfs.permitted_capabilities & !allowed_caps != 0
+        || procfs.bounding_capabilities & !allowed_caps != 0
+        || procfs.ambient_capabilities & !allowed_caps != 0
     {
         return Err(OciRuntimeObservationError::ExcessiveProcessAuthority);
     }
@@ -827,6 +847,7 @@ pub(crate) fn test_fixture_for_contract_at(
         machine_id_blake3: "d".repeat(64),
         root_mount_read_only: true,
         no_new_privileges: true,
+        seccomp_mode: 2,
         effective_capabilities: 0,
         permitted_capabilities: 0,
         bounding_capabilities: 0,
@@ -868,6 +889,7 @@ pub enum OciRuntimeObservationError {
     #[error("live process cgroup differs from the expected task cgroup")] CgroupMismatch,
     #[error("no_new_privs absent or effective capabilities exceed profile")] ExcessiveProcessAuthority,
     #[error("no_new_privs is not set")] NoNewPrivilegesMissing,
+    #[error("process is not running under seccomp filter mode")] SeccompFilterMissing,
     #[error("host boot or machine identity is invalid")] InvalidHostIdentity,
     #[error("procfs or Podman evidence is incomplete")] IncompleteEvidence,
     #[error("process ID is invalid")] InvalidProcessId,
@@ -896,7 +918,7 @@ mod tests {
             "Name:\tworker", "Uid:\t1000\t1000\t1000\t1000",
             "Gid:\t1000\t1000\t1000\t1000", "CapEff:\t0000000000000000",
             "CapPrm:\t0000000000000000", "CapBnd:\t0000000000000000",
-            "CapAmb:\t0000000000000000", "NoNewPrivs:\t1",
+            "CapAmb:\t0000000000000000", "NoNewPrivs:\t1", "Seccomp:\t2",
         ].join("\n")
     }
     fn stat(start: u64) -> String {
@@ -1074,6 +1096,53 @@ mod tests {
                 "11111111-2222-3333-4444-555555555555", "0123456789abcdef0123456789abcdef"),
             Err(OciRuntimeObservationError::NoNewPrivilegesMissing)));
     }
+    #[test]
+    fn rejects_process_without_seccomp_filter_mode() {
+        let disabled = status().replace("Seccomp:\t2", "Seccomp:\t0");
+        assert!(matches!(
+            parse_procfs_evidence(
+                4242, &disabled, &stat(42), "0::/machine.slice/agent-task.scope\n",
+                "36 25 0:32 / / ro,relatime - overlay overlay rw\n",
+                "0 100000 65536\n", "0 100000 65536\n",
+                NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004, cgroup: 1005 },
+                NamespaceInodes { user: 1, network: 2, pid: 3, mount: 4, cgroup: 5 },
+                "11111111-2222-3333-4444-555555555555",
+                "0123456789abcdef0123456789abcdef"
+            ),
+            Err(OciRuntimeObservationError::SeccompFilterMissing)
+        ));
+    }
+
+    #[test]
+    fn rejects_permitted_bounding_and_ambient_capability_expansion() {
+        let base = procfs(4242, 123);
+        for field in ["CapPrm", "CapBnd", "CapAmb"] {
+            let changed = status().replace(
+                &format!("{field}:\t0000000000000000"),
+                &format!("{field}:\t0000000000000001")
+            );
+            let parsed = parse_procfs_evidence(
+                4242,
+                &changed,
+                &stat(123),
+                "0::/machine.slice/agent-task.scope\n",
+                "36 25 0:32 / / ro,relatime - overlay overlay rw\n",
+                "0 100000 65536\n",
+                "0 100000 65536\n",
+                base.namespaces.clone(),
+                base.host_namespaces.clone(),
+                "11111111-2222-3333-4444-555555555555",
+                "0123456789abcdef0123456789abcdef",
+            ).unwrap();
+            let mut candidate = frame(11, 200, 4242, &"a".repeat(64));
+            candidate.procfs = parsed;
+            assert!(matches!(
+                validate_frame(&profile(), &candidate),
+                Err(OciRuntimeObservationError::ExcessiveProcessAuthority)
+            ), "must reject expansion of {field}");
+        }
+    }
+
     #[test]
     fn parses_read_only_root_mount() {
         assert!(parse_mountinfo("1 1 0:1 / / ro,relatime - overlay overlay rw\n").unwrap().0);
