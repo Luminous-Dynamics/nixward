@@ -9,6 +9,7 @@
 
 use crate::observe::oci_runtime::OciRuntimeConsistencySnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 const RECEIPT_LINK_DOMAIN: &[u8] = b"nixward:oci-observer-receipt-link:v1\0";
@@ -154,6 +155,19 @@ impl OciObserverReceiptChain {
         if self.current_boot_id.as_deref() == Some(new_boot_id.as_str()) {
             return Err(OciReceiptChainError::BootEpochUnchanged);
         }
+        // A transition must immediately follow a snapshot. Otherwise a caller
+        // could synthesize an arbitrary chain of boot epochs without any
+        // source-consistent observation between transitions.
+        if self.links.last().map(OciObserverReceiptLink::kind)
+            != Some(OciReceiptLinkKind::Snapshot)
+        {
+            return Err(OciReceiptChainError::BootTransitionRequiresSnapshot);
+        }
+        // A boot ID identifies one kernel boot epoch. Reusing an earlier ID
+        // would let a restored or fabricated epoch look like a new transition.
+        if self.links.iter().any(|link| link.boot_id() == new_boot_id) {
+            return Err(OciReceiptChainError::BootEpochReuse);
+        }
         if let Some(last) = self.last_sequence {
             if transition_sequence <= last {
                 return Err(OciReceiptChainError::SequenceRollback);
@@ -187,6 +201,8 @@ impl OciObserverReceiptChain {
         let mut expected_previous: Option<&str> = None;
         let mut current_boot: Option<&str> = None;
         let mut last_sequence: Option<u64> = None;
+        let mut previous_kind: Option<OciReceiptLinkKind> = None;
+        let mut seen_boot_epochs: BTreeSet<String> = BTreeSet::new();
 
         for link in links {
             if link.payload.schema_version != RECEIPT_CHAIN_VERSION
@@ -224,16 +240,25 @@ impl OciObserverReceiptChain {
                     if current_boot.is_some_and(|boot| boot != link.payload.boot_id) {
                         return Err(OciReceiptChainError::BootTransitionRequired);
                     }
+                    if current_boot.is_none() {
+                        seen_boot_epochs.insert(link.payload.boot_id.clone());
+                    }
                     let snapshot_digest = link.payload.snapshot_digest_blake3.as_deref()
                         .ok_or(OciReceiptChainError::SnapshotDigest)?;
                     validate_digest(snapshot_digest)?;
                 }
                 OciReceiptLinkKind::BootEpochTransition => {
+                    if previous_kind != Some(OciReceiptLinkKind::Snapshot) {
+                        return Err(OciReceiptChainError::BootTransitionRequiresSnapshot);
+                    }
                     if current_boot.is_none()
                         || current_boot == Some(link.payload.boot_id.as_str())
                         || link.payload.snapshot_digest_blake3.is_some()
                     {
                         return Err(OciReceiptChainError::InvalidBootTransition);
+                    }
+                    if !seen_boot_epochs.insert(link.payload.boot_id.clone()) {
+                        return Err(OciReceiptChainError::BootEpochReuse);
                     }
                 }
             }
@@ -242,6 +267,7 @@ impl OciObserverReceiptChain {
             if expected_link != link.link_blake3 {
                 return Err(OciReceiptChainError::ChainLinkMismatch);
             }
+            previous_kind = Some(link.payload.kind);
             current_boot = Some(&link.payload.boot_id);
             last_sequence = Some(link.payload.sequence_end);
             expected_previous = Some(&link.link_blake3);
@@ -273,7 +299,11 @@ fn validate_digest(value: &str) -> Result<(), OciReceiptChainError> {
 }
 
 fn validate_boot_id(value: &str) -> Result<(), OciReceiptChainError> {
-    let value = value.to_ascii_lowercase();
+    // Linux boot_id is a canonical lowercase UUID. Do not normalize aliases:
+    // distinct textual spellings must not be interpreted as distinct epochs.
+    if value != value.to_ascii_lowercase() {
+        return Err(OciReceiptChainError::InvalidBootId);
+    }
     let parts: Vec<&str> = value.split('-').collect();
     let expected_lengths = [8, 4, 4, 4, 12];
     if parts.len() == 5
@@ -300,6 +330,10 @@ pub enum OciReceiptChainError {
     BootEpochUnchanged,
     #[error("boot transition link is invalid")]
     InvalidBootTransition,
+    #[error("boot transition must immediately follow a snapshot link")]
+    BootTransitionRequiresSnapshot,
+    #[error("boot ID reappears after a later boot epoch")]
+    BootEpochReuse,
     #[error("observer sequence is duplicated, non-monotonic or rolled back")]
     SequenceRollback,
     #[error("observer identity or chain state does not match")]
@@ -319,6 +353,7 @@ mod tests {
     fn observer() -> String { "a5".repeat(32) }
     const BOOT_ONE: &str = "11111111-2222-3333-4444-555555555555";
     const BOOT_TWO: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    const BOOT_THREE: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
 
     fn snapshot(sequence: u64) -> OciRuntimeConsistencySnapshot {
         crate::observe::oci_runtime::test_fixture_for_contract_at(
@@ -418,5 +453,80 @@ mod tests {
         OciObserverReceiptChain::verify_chain(&observer(), &[]).unwrap();
         let chain = OciObserverReceiptChain::new(observer()).unwrap();
         assert!(chain.head_blake3().is_none());
+    }
+
+    #[test]
+    fn rejects_uppercase_boot_id_aliases() {
+        let uppercase = BOOT_ONE.to_ascii_uppercase();
+        assert!(matches!(
+            validate_boot_id(&uppercase),
+            Err(OciReceiptChainError::InvalidBootId)
+        ));
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        assert!(matches!(
+            chain.append_snapshot(&snapshot_on_boot(10, &uppercase)),
+            Err(OciReceiptChainError::InvalidBootId)
+        ));
+    }
+
+    #[test]
+    fn requires_a_snapshot_between_boot_epoch_transitions() {
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        chain.append_snapshot(&snapshot(10)).unwrap();
+        chain.begin_boot_epoch(BOOT_TWO, 12).unwrap();
+        assert!(matches!(
+            chain.begin_boot_epoch(BOOT_THREE, 14),
+            Err(OciReceiptChainError::BootTransitionRequiresSnapshot)
+        ));
+
+        // The deserialization/verifier boundary must enforce the same rule,
+        // even when an attacker recomputes the unkeyed link digest.
+        let payload = OciReceiptLinkPayload {
+            schema_version: RECEIPT_CHAIN_VERSION,
+            kind: OciReceiptLinkKind::BootEpochTransition,
+            observer_id_blake3: observer(),
+            boot_id: BOOT_THREE.to_owned(),
+            sequence_start: 14,
+            sequence_end: 14,
+            snapshot_digest_blake3: None,
+            previous_link_blake3: chain.head_blake3().map(str::to_owned),
+        };
+        let mut forged = chain.links().to_vec();
+        forged.push(build_link(payload).unwrap());
+        assert!(matches!(
+            OciObserverReceiptChain::verify_chain(&observer(), &forged),
+            Err(OciReceiptChainError::BootTransitionRequiresSnapshot)
+        ));
+    }
+
+    #[test]
+    fn rejects_reuse_of_a_previously_seen_boot_epoch() {
+        let mut chain = OciObserverReceiptChain::new(observer()).unwrap();
+        chain.append_snapshot(&snapshot(10)).unwrap();
+        chain.begin_boot_epoch(BOOT_TWO, 12).unwrap();
+        chain.append_snapshot(&snapshot_on_boot(14, BOOT_TWO)).unwrap();
+        assert!(matches!(
+            chain.begin_boot_epoch(BOOT_ONE, 16),
+            Err(OciReceiptChainError::BootEpochReuse)
+        ));
+
+        // Verify the imported-chain path independently, using a fresh,
+        // internally valid digest for the forged transition link.
+        let payload = OciReceiptLinkPayload {
+            schema_version: RECEIPT_CHAIN_VERSION,
+            kind: OciReceiptLinkKind::BootEpochTransition,
+            observer_id_blake3: observer(),
+            boot_id: BOOT_ONE.to_owned(),
+            sequence_start: 16,
+            sequence_end: 16,
+            snapshot_digest_blake3: None,
+            previous_link_blake3: chain.head_blake3().map(str::to_owned),
+        };
+        let mut forged = chain.links().to_vec();
+        forged.push(build_link(payload).unwrap());
+        assert!(matches!(
+            OciObserverReceiptChain::verify_chain(&observer(), &forged),
+            Err(OciReceiptChainError::BootEpochReuse)
+        ));
     }
 }
