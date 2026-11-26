@@ -1,0 +1,124 @@
+# OCI Observer Signed Checkpoint v0.1
+
+**Status:** source-level Ed25519 checkpoint-signing and verification prototype. Not a production remote-attestation system, durable anti-rollback service, external transparency witness, or runtime-enforcement proof.
+
+## Purpose
+
+The in-memory receipt chain authenticates its internal structure only relative to a trusted head. This module adds an attributable, challenge-bound signature over a checkpoint that commits to:
+
+- observer identity digest;
+- provisioned key ID and generation;
+- machine identity digest and canonical Linux boot UUID;
+- monotonic observer sequence;
+- exact runtime snapshot digest and independently verified receipt-chain head;
+- previous accepted checkpoint digest;
+- verifier-generated challenge nonce digest;
+- issue and expiry times.
+
+It reuses the repository's existing Ed25519 dependency and strict verification pattern. It does not add a cryptographic dependency.
+
+## Protocol
+
+### 1. Provisioned trust record
+
+The relying party obtains a `TrustedOciObserverKey` from an operator-controlled trust store, not from the candidate workload. It binds:
+
+- observer ID and machine ID;
+- key ID and generation;
+- Ed25519 public key;
+- validity start/end;
+- revocation time, if revoked.
+
+Key provisioning and the trust-store transport are outside this module. A production deployment should protect the trust store through an owner-controlled channel and use hardware-backed key custody where available. The observer signing key must never be placed in the guest or exposed to the agent.
+
+### 2. Freshness challenge
+
+The verifier generates a fresh 32-byte nonce from an OS CSPRNG and sends it to the observer. The checkpoint includes a domain-separated BLAKE3 digest of that nonce. The verifier supplies the exact nonce to the verifier function and consumes it once in its own state.
+
+This follows the nonce-based freshness model in IETF RATS architecture (RFC 9334). A nonce establishes that the signed evidence was produced after the challenge was generated; it does not prove that the underlying measurements were generated at that time. The observer must not sign stale cached claims as though newly observed.
+
+### 3. Deterministic signature
+
+The payload is encoded by an explicit field-order, length-prefixed binary encoder and a dedicated domain separator. JSON is only a transport format and is not the signing format. Both the envelope and payload reject unknown deserialized fields.
+
+The Ed25519 signature authenticates the exact payload bytes under the provisioned key. The checkpoint digest separately commits to the signing bytes, public key and signature.
+
+### 4. Verifier policy
+
+Verification requires both a provisioned key and an explicit `OciObserverCheckpointExpectation`. The expectation contains:
+
+- expected observer and machine identities;
+- the current 32-byte challenge nonce;
+- exact expected snapshot and chain-head digests, supplied only after their independent verification;
+- the previous checkpoint digest retained by the relying party;
+- the minimum previously accepted sequence;
+- relying-party current time and maximum permitted checkpoint lifetime.
+
+The verifier rejects mismatched identity, key ID/generation, challenge, snapshot, chain head, previous checkpoint, or sequence. It rejects checkpoints that have not yet been issued, have expired, exceed the policy lifetime, outlive the key validity window, or use a key revoked for new admission.
+
+A key revoked after a checkpoint was signed must not authorize a new task merely because the historical signature is mathematically valid. Historical audit verification is a separate operation and is not implemented by this admission verifier.
+
+### 5. Returned capability
+
+Successful verification returns an opaque `VerifiedOciObserverCheckpoint` with private fields and no deserialization implementation. It is evidence that the exact signed checkpoint passed this verifier's policy inputs.
+
+It is **not**:
+- an owner-signature or task-authorization capability;
+- a proof that kernel or procfs observations are truthful;
+- a measured-boot quote or TEE attestation;
+- proof that the policy is attached to a live cgroup;
+- a persistent anti-rollback record;
+- an external timestamp or transparency-log inclusion proof.
+
+The task contract does not consume this token yet. Schema-v3 remains `runtime-observed-not-enforced-v3`.
+
+## Anti-rollback and witness requirement
+
+The `previous_checkpoint_blake3` field and sequence check only prevent rollback when the relying party retains the latest accepted checkpoint digest and sequence outside the candidate/observer's mutable storage. The verifier must atomically persist the newly returned checkpoint digest and sequence before accepting the next checkpoint.
+
+If that relying-party state is lost or rolled back, this module cannot detect whole-history replacement. A separate witness/anchor service is still required for cross-host recovery and privileged local-attacker resistance.
+
+A future durable design should use crash-consistent local append, plus signed checkpoints or Merkle-tree consistency proofs from one or more independent witnesses. It should not trust a single local file or a single remote server's self-asserted latest head. Sigstore Rekor's architecture is a useful transparency-log reference: inclusion proofs bind entries to signed tree heads; consistency proofs establish that a later tree is an append-only extension of a previously retained checkpoint. That is a witness protocol, not something this module currently implements.
+
+## Error handling
+
+Every missing, malformed, expired, revoked, stale, contradictory or unsupported item is a rejection. Callers must not convert these outcomes into a warning or fallback pass. If the relying party cannot establish its previous checkpoint state, it must fail closed or perform an explicit recovery ceremony with independently reviewed authority.
+
+## Tests
+
+Fifteen source-level Rust tests cover:
+
+1. valid signing and verification against a separate trust record;
+2. payload tampering;
+3. nonce mismatch/replay;
+4. revoked-key rejection;
+5. checkpoint expiry;
+6. future issue time;
+7. previous-checkpoint fork/rollback;
+8. non-increasing sequence;
+9. key-generation substitution;
+10. machine identity substitution;
+11. unknown envelope/payload field rejection;
+12. key-validity-window enforcement;
+13. maximum checkpoint lifetime;
+14. snapshot digest substitution;
+15. receipt-chain head substitution.
+
+These test functions have not been compiled or executed in this environment.
+
+## Research alignment
+
+- IETF RATS Architecture, [RFC 9334](https://www.rfc-editor.org/rfc/rfc9334.html): attester, verifier and relying-party roles; nonce-based freshness; appraisal policy and trust-anchor separation.
+- Sigstore Rekor architecture, [consistency proofs](https://github.com/sigstore/architecture-docs/blob/main/rekor-spec.md#94-consistency-proofs): retain the latest signed checkpoint and verify append-only continuity.
+- NVIDIA OpenShell [v0.1.10 architecture](https://docs.nvidia.com/openshell/v0.1.10/about/architecture): runtime supervisor/workload boundary and mediated controls. This is a runtime comparator, not an attestation mechanism.
+
+## Next qualification
+
+1. Integrate only after the independent OCI snapshot and receipt-chain verifier have produced the exact digests passed into the expectation.
+2. Add operator-provisioned key enrollment, rotation and revocation state with authenticated distribution.
+3. Persist the relying party's accepted checkpoint digest and sequence with crash-consistent writes.
+4. Add an independent witness protocol with signed checkpoint receipts and consistency proofs.
+5. Test crash/restore, old-checkpoint replay, key rotation, revocation, nonce reuse and witness outage in a disposable NixOS VM.
+6. Keep network activation disabled until A5 enforcement and A6 effect verification are separately demonstrated.
+
+**Claim boundary:** this is a signed checkpoint prototype with verifier-supplied freshness and trust inputs. It does not implement production key custody, durable storage, remote witness/anchoring, measured boot, task-contract consumption or active runtime enforcement.
