@@ -116,6 +116,10 @@ struct ProcfsProcessEvidence {
     host_namespaces: NamespaceInodes,
     root_mount_read_only: bool,
     mount_count: usize,
+    podman_declared_mount_count: usize,
+    host_network: bool,
+    host_pid: bool,
+    privileged: bool,
     mountinfo_blake3: String,
     boot_id: String,
     machine_id_blake3: String,
@@ -171,6 +175,18 @@ impl OciRuntimeConsistencySnapshot {
     pub fn process_start_time_ticks(&self) -> u64 { self.process_start_time_ticks }
     pub fn cgroup_path(&self) -> &str { &self.cgroup_path }
     pub fn namespaces(&self) -> &NamespaceInodes { &self.namespaces }
+    pub fn boot_id(&self) -> &str { &self.boot_id }
+    pub fn machine_id_blake3(&self) -> &str { &self.machine_id_blake3 }
+    pub fn podman_binary_blake3(&self) -> &str { &self.podman_binary_blake3 }
+    pub fn root_mount_read_only(&self) -> bool { self.root_mount_read_only }
+    pub fn no_new_privileges(&self) -> bool { self.no_new_privileges }
+    pub fn effective_capabilities(&self) -> u64 { self.effective_capabilities }
+    pub fn podman_declared_mount_count(&self) -> usize { self.podman_declared_mount_count }
+    pub fn host_network(&self) -> bool { self.host_network }
+    pub fn host_pid(&self) -> bool { self.host_pid }
+    pub fn privileged(&self) -> bool { self.privileged }
+    pub fn source_agreement(&self) -> bool { self.source_agreement }
+    pub fn stable_across_observation_window(&self) -> bool { self.stable_across_observation_window }
     pub fn runtime_enforcement_proven(&self) -> bool { self.runtime_enforcement_proven }
 
     /// Domain-separated commitment to this snapshot. This is not a signature.
@@ -448,6 +464,10 @@ fn reconcile_frames(
         bounding_capabilities: procfs.bounding_capabilities,
         ambient_capabilities: procfs.ambient_capabilities,
         mount_count: procfs.mount_count,
+        podman_declared_mount_count: after.podman_inspect.mounts.len(),
+        host_network: after.podman_inspect.network_mode == "host",
+        host_pid: after.podman_inspect.pid_mode == "host",
+        privileged: after.podman_inspect.privileged,
         mountinfo_blake3: procfs.mountinfo_blake3.clone(),
         source_agreement: true,
         stable_across_observation_window: true,
@@ -700,6 +720,44 @@ fn hash_machine_id(value: &str) -> Result<String, OciRuntimeObservationError> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+#[cfg(test)]
+pub(crate) fn test_fixture_for_contract(
+    image_id: &str,
+) -> OciRuntimeConsistencySnapshot {
+    OciRuntimeConsistencySnapshot {
+        schema_version: OCI_RUNTIME_OBSERVER_SCHEMA_VERSION,
+        kind: "nixward-oci-runtime-consistency-v1".into(),
+        observer_sequence_start: 10,
+        observer_sequence_end: 11,
+        observation_interval_ns: 100,
+        podman_binary_blake3: "a".repeat(64),
+        container_id: "c".repeat(64),
+        image_id: image_id.to_owned(),
+        image_name: "registry.invalid/worker:fixture".into(),
+        process_pid: 4242,
+        process_start_time_ticks: 123456,
+        cgroup_path: "/machine.slice/agent-task.scope".into(),
+        namespaces: NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004 },
+        boot_id: "11111111-2222-3333-4444-555555555555".into(),
+        machine_id_blake3: "d".repeat(64),
+        root_mount_read_only: true,
+        no_new_privileges: true,
+        effective_capabilities: 0,
+        permitted_capabilities: 0,
+        bounding_capabilities: 0,
+        ambient_capabilities: 0,
+        mount_count: 7,
+        podman_declared_mount_count: 0,
+        host_network: false,
+        host_pid: false,
+        privileged: false,
+        mountinfo_blake3: "e".repeat(64),
+        source_agreement: true,
+        stable_across_observation_window: true,
+        runtime_enforcement_proven: false,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum OciRuntimeObservationError {
     #[error("invalid immutable OCI container ID")] InvalidContainerId,
@@ -755,9 +813,9 @@ mod tests {
         ].join("\n")
     }
     fn stat(start: u64) -> String {
-        let mut fields = vec!["0"; 20];
-        fields[0] = "S";
-        fields[19] = Box::leak(start.to_string().into_boxed_str());
+        let mut fields = vec!["0".to_owned(); 20];
+        fields[0] = "S".to_owned();
+        fields[19] = start.to_string();
         format!("4242 (agent worker)) {}\n", fields.join(" "))
     }
     fn info() -> Vec<u8> {
@@ -839,8 +897,8 @@ mod tests {
     }
     #[test]
     fn parses_read_only_root_mount() {
-        assert!(parse_root_mount_readonly("1 1 0:1 / / ro,relatime - overlay overlay rw\n").unwrap());
-        assert!(!parse_root_mount_readonly("1 1 0:1 / / rw,relatime - overlay overlay rw\n").unwrap());
+        assert!(parse_mountinfo("1 1 0:1 / / ro,relatime - overlay overlay rw\n").unwrap().0);
+        assert!(!parse_mountinfo("1 1 0:1 / / rw,relatime - overlay overlay rw\n").unwrap().0);
     }
     #[test]
     fn rejects_duplicate_mount_ids() {
