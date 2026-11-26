@@ -330,7 +330,7 @@ impl OciWitnessBranchLedger {
         }
 
         let database_path = prepare_database_path(path.as_ref())?;
-        let connection = Connection::open(database_path)?;
+        let mut connection = Connection::open(database_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -351,9 +351,9 @@ impl OciWitnessBranchLedger {
         let schema_version: i64 =
             connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if schema_version == 0 {
-            connection.execute_batch(
-                "BEGIN EXCLUSIVE;
-                 CREATE TABLE witness_identity (
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+            tx.execute_batch(
+                "CREATE TABLE witness_identity (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     witness_id TEXT NOT NULL,
                     trust_domain_id TEXT NOT NULL,
@@ -395,11 +395,9 @@ impl OciWitnessBranchLedger {
                     attempted_checkpoint_digest TEXT NOT NULL,
                     attempted_request_digest TEXT NOT NULL,
                     detected_at_ms INTEGER NOT NULL
-                 );
-                 PRAGMA user_version=1;
-                 COMMIT;",
+                 );",
             )?;
-            connection.execute(
+            tx.execute(
                 "INSERT INTO witness_identity (
                     singleton, witness_id, trust_domain_id, key_id, key_generation,
                     public_key_hex, valid_from_ms, valid_until_ms, revoked_at_ms
@@ -415,6 +413,8 @@ impl OciWitnessBranchLedger {
                     trusted_identity.revoked_at_ms.map(to_sql_integer).transpose()?
                 ],
             )?;
+            tx.execute_batch("PRAGMA user_version=1;")?;
+            tx.commit()?;
         } else if schema_version != WITNESS_BRANCH_SCHEMA_VERSION {
             return Err(OciWitnessBranchLedgerError::UnsupportedSchemaVersion);
         }
@@ -525,6 +525,17 @@ impl OciWitnessBranchLedger {
             if existing_checkpoint == checkpoint.checkpoint_digest_blake3()
                 && existing_request == request_digest
             {
+                let quarantined: Option<i64> = tx
+                    .query_row(
+                        "SELECT quarantined FROM witness_observer_head WHERE observer_id = ?1",
+                        [checkpoint.observer_id_blake3()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if quarantined.unwrap_or(0) != 0 {
+                    tx.commit()?;
+                    return Err(OciWitnessBranchLedgerError::ObserverBranchQuarantined);
+                }
                 let endorsement: OciWitnessBranchEndorsement =
                     serde_json::from_slice(&endorsement_json)
                         .map_err(|_| OciWitnessBranchLedgerError::InvalidShape)?;
@@ -582,7 +593,7 @@ impl OciWitnessBranchLedger {
                 tx.commit()?;
                 return Err(OciWitnessBranchLedgerError::SequenceRollback);
             }
-        } else if !checkpoint.previous_checkpoint_blake3().is_none() {
+        } else if checkpoint.previous_checkpoint_blake3().is_some() {
             tx.commit()?;
             return Err(OciWitnessBranchLedgerError::ParentCheckpointMismatch);
         }
