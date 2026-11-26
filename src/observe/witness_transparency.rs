@@ -28,7 +28,7 @@ const WITNESS_REQUEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
 const MAX_MERKLE_PROOF_NODES: usize = 65;
-const MAX_WITNESSES: usize = 3;
+const MAX_WITNESSES: usize = 4;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum OciWitnessProofError {
