@@ -64,6 +64,7 @@ pub struct NamespaceInodes {
     pub network: u64,
     pub pid: u64,
     pub mount: u64,
+    pub cgroup: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +96,8 @@ struct PodmanInspectEvidence {
     read_only_root: bool,
     privileged: bool,
     mounts: Vec<PodmanMountEvidence>,
+    binds: Vec<String>,
+    tmpfs: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,10 +120,6 @@ struct ProcfsProcessEvidence {
     host_namespaces: NamespaceInodes,
     root_mount_read_only: bool,
     mount_count: usize,
-    podman_declared_mount_count: usize,
-    host_network: bool,
-    host_pid: bool,
-    privileged: bool,
     mountinfo_blake3: String,
     boot_id: String,
     machine_id_blake3: String,
@@ -161,6 +160,12 @@ pub struct OciRuntimeConsistencySnapshot {
     bounding_capabilities: u64,
     ambient_capabilities: u64,
     mount_count: usize,
+    podman_declared_mount_count: usize,
+    podman_declared_bind_count: usize,
+    podman_declared_tmpfs_count: usize,
+    host_network: bool,
+    host_pid: bool,
+    privileged: bool,
     mountinfo_blake3: String,
     source_agreement: bool,
     stable_across_observation_window: bool,
@@ -306,7 +311,7 @@ fn read_namespaces(path: &Path) -> Result<NamespaceInodes, OciRuntimeObservation
     let read = |name: &str| -> Result<String, OciRuntimeObservationError> {
         Ok(fs::read_link(path.join(name))?.to_string_lossy().into_owned())
     };
-    parse_namespace_inodes(&read("user")?, &read("net")?, &read("pid")?, &read("mnt")?)
+    parse_namespace_inodes(&read("user")?, &read("net")?, &read("pid")?, &read("mnt")?, &read("cgroup")?)
 }
 
 fn hash_file(path: &Path) -> Result<String, OciRuntimeObservationError> {
@@ -347,6 +352,8 @@ fn parse_podman_inspect(raw: &[u8]) -> Result<PodmanInspectEvidence, OciRuntimeO
             })
         })
         .collect::<Result<Vec<_>, OciRuntimeObservationError>>()?;
+    let binds = nullable_string_array(host_config, "binds")?;
+    let tmpfs = nullable_string_map(host_config, "tmpfs")?;
     Ok(PodmanInspectEvidence {
         container_id: string_field(object, "id")?.to_ascii_lowercase(),
         image_id: string_field(object, "image")?.to_owned(),
@@ -360,6 +367,8 @@ fn parse_podman_inspect(raw: &[u8]) -> Result<PodmanInspectEvidence, OciRuntimeO
         read_only_root: bool_field(host_config, "readonlyRootfs")?,
         privileged: bool_field(host_config, "privileged")?,
         mounts,
+        binds,
+        tmpfs,
     })
 }
 
@@ -469,7 +478,11 @@ fn reconcile_frames(
         bounding_capabilities: procfs.bounding_capabilities,
         ambient_capabilities: procfs.ambient_capabilities,
         mount_count: procfs.mount_count,
-        podman_declared_mount_count: after.podman_inspect.mounts.len(),
+        podman_declared_mount_count: after.podman_inspect.mounts.len()
+            + after.podman_inspect.binds.len()
+            + after.podman_inspect.tmpfs.len(),
+        podman_declared_bind_count: after.podman_inspect.binds.len(),
+        podman_declared_tmpfs_count: after.podman_inspect.tmpfs.len(),
         host_network: after.podman_inspect.network_mode == "host",
         host_pid: after.podman_inspect.pid_mode == "host",
         privileged: after.podman_inspect.privileged,
@@ -502,6 +515,7 @@ fn validate_frame(
         return Err(OciRuntimeObservationError::RootFilesystemWritable);
     }
     if inspect.privileged || !inspect.mounts.is_empty()
+        || !inspect.binds.is_empty() || !inspect.tmpfs.is_empty()
         || inspect.network_mode == "host" || inspect.pid_mode == "host"
     {
         return Err(OciRuntimeObservationError::UnsafeContainerConfiguration);
@@ -510,6 +524,7 @@ fn validate_frame(
         || procfs.namespaces.network == procfs.host_namespaces.network
         || procfs.namespaces.pid == procfs.host_namespaces.pid
         || procfs.namespaces.mount == procfs.host_namespaces.mount
+        || procfs.namespaces.cgroup == procfs.host_namespaces.cgroup
     {
         return Err(OciRuntimeObservationError::HostNamespaceShared);
     }
@@ -528,6 +543,34 @@ fn validate_frame(
         return Err(OciRuntimeObservationError::IncompleteEvidence);
     }
     Ok(())
+}
+
+fn nullable_string_array(
+    object: &serde_json::Value,
+    name: &str,
+) -> Result<Vec<String>, OciRuntimeObservationError> {
+    match object_field(object, name)? {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(values) => values.iter()
+            .map(|value| value.as_str().map(str::to_owned)
+                .ok_or_else(|| OciRuntimeObservationError::InvalidJsonField(name.into())))
+            .collect(),
+        _ => Err(OciRuntimeObservationError::InvalidJsonField(name.into())),
+    }
+}
+
+fn nullable_string_map(
+    object: &serde_json::Value,
+    name: &str,
+) -> Result<BTreeMap<String, String>, OciRuntimeObservationError> {
+    match object_field(object, name)? {
+        serde_json::Value::Null => Ok(BTreeMap::new()),
+        serde_json::Value::Object(values) => values.iter()
+            .map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_owned()))
+                .ok_or_else(|| OciRuntimeObservationError::InvalidJsonField(name.into())))
+            .collect(),
+        _ => Err(OciRuntimeObservationError::InvalidJsonField(name.into())),
+    }
 }
 
 fn object_field<'a>(
@@ -689,13 +732,14 @@ fn parse_podman_id_map(values: &[serde_json::Value]) -> Result<Vec<IdMapEntry>, 
     Ok(entries)
 }
 fn parse_namespace_inodes(
-    user: &str, network: &str, pid: &str, mount: &str,
+    user: &str, network: &str, pid: &str, mount: &str, cgroup: &str,
 ) -> Result<NamespaceInodes, OciRuntimeObservationError> {
     Ok(NamespaceInodes {
         user: parse_namespace_inode(user, "user")?,
         network: parse_namespace_inode(network, "net")?,
         pid: parse_namespace_inode(pid, "pid")?,
         mount: parse_namespace_inode(mount, "mnt")?,
+        cgroup: parse_namespace_inode(cgroup, "cgroup")?,
     })
 }
 fn parse_namespace_inode(value: &str, kind: &str) -> Result<u64, OciRuntimeObservationError> {
@@ -743,7 +787,7 @@ pub(crate) fn test_fixture_for_contract(
         process_pid: 4242,
         process_start_time_ticks: 123456,
         cgroup_path: "/machine.slice/agent-task.scope".into(),
-        namespaces: NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004 },
+        namespaces: NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004, cgroup: 1005 },
         boot_id: "11111111-2222-3333-4444-555555555555".into(),
         machine_id_blake3: "d".repeat(64),
         root_mount_read_only: true,
@@ -754,6 +798,8 @@ pub(crate) fn test_fixture_for_contract(
         ambient_capabilities: 0,
         mount_count: 7,
         podman_declared_mount_count: 0,
+        podman_declared_bind_count: 0,
+        podman_declared_tmpfs_count: 0,
         host_network: false,
         host_pid: false,
         privileged: false,
@@ -829,7 +875,7 @@ mod tests {
     }
     fn inspect(container: &str) -> Vec<u8> {
         format!(
-            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageDigest":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","ReadonlyRootfs":true,"Privileged":false}},"Mounts":[]}}]"#,
+            r#"[{{"Id":"{container}","Image":"sha256:{}","ImageDigest":"sha256:{}","ImageName":"registry.invalid/worker:fixture","State":{{"Status":"running","Running":true,"Pid":4242}},"HostConfig":{{"NetworkMode":"bridge","PidMode":"private","ReadonlyRootfs":true,"Privileged":false,"Binds":[],"Tmpfs":{}}},"Mounts":[]}}]"#,
             "b".repeat(64), "d".repeat(64)
         ).into_bytes()
     }
@@ -839,8 +885,8 @@ mod tests {
             "0::/machine.slice/agent-task.scope\n",
             "36 25 0:32 / / ro,relatime - overlay overlay rw,lowerdir=/lower\n",
             "0 100000 65536\n", "0 100000 65536\n",
-            NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004 },
-            NamespaceInodes { user: 1, network: 2, pid: 3, mount: 4 },
+            NamespaceInodes { user: 1001, network: 1002, pid: 1003, mount: 1004, cgroup: 1005 },
+            NamespaceInodes { user: 1, network: 2, pid: 3, mount: 4, cgroup: 5 },
             "11111111-2222-3333-4444-555555555555",
             "0123456789abcdef0123456789abcdef",
         ).unwrap()
@@ -884,6 +930,47 @@ mod tests {
             Err(OciRuntimeObservationError::InvalidInspectDocument)));
     }
     #[test]
+    fn rejects_configured_bind_even_when_inspect_mounts_is_empty() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"Binds\":[]", "\"Binds\":[\"/host:/etc/hosts\"]");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
+        assert!(parsed.mounts.is_empty());
+        assert_eq!(parsed.binds.len(), 1);
+        let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
+        candidate.podman_inspect = parsed;
+        assert!(matches!(
+            validate_frame(&profile(), &candidate),
+            Err(OciRuntimeObservationError::UnsafeContainerConfiguration)
+        ));
+    }
+
+    #[test]
+    fn rejects_configured_tmpfs_even_when_inspect_mounts_is_empty() {
+        let raw = String::from_utf8(inspect(&"a".repeat(64))).unwrap()
+            .replace("\"Tmpfs\":{}", "\"Tmpfs\":{\"/run/agent\":\"rw,noexec\"}");
+        let parsed = parse_podman_inspect(raw.as_bytes()).unwrap();
+        assert!(parsed.mounts.is_empty());
+        assert!(parsed.binds.is_empty());
+        assert_eq!(parsed.tmpfs.len(), 1);
+        let mut candidate = frame(10, 100, 4242, &"a".repeat(64));
+        candidate.podman_inspect = parsed;
+        assert!(matches!(
+            validate_frame(&profile(), &candidate),
+            Err(OciRuntimeObservationError::UnsafeContainerConfiguration)
+        ));
+    }
+
+    #[test]
+    fn rejects_shared_host_cgroup_namespace() {
+        let mut after = frame(11, 200, 4242, &"a".repeat(64));
+        after.procfs.namespaces.cgroup = after.procfs.host_namespaces.cgroup;
+        assert!(matches!(
+            reconcile_frames(&profile(), frame(10, 100, 4242, &"a".repeat(64)), after),
+            Err(OciRuntimeObservationError::HostNamespaceShared)
+        ));
+    }
+
+    #[test]
     fn requires_rootless_uid_and_gid_mappings() {
         let invalid = br#"{"host":{"security":{"rootless":false},"idMappings":{"uidmap":[],"gidmap":[]}}}"#;
         assert!(matches!(parse_podman_info(invalid), Err(OciRuntimeObservationError::RootlessMappingMissing)));
@@ -898,8 +985,8 @@ mod tests {
         assert!(matches!(
             parse_procfs_evidence(4242, &bad, &stat(42), "0::/x\n",
                 "1 1 0:1 / / ro - overlay overlay rw\n", "0 100000 10\n", "0 100000 10\n",
-                NamespaceInodes { user: 2, network: 3, pid: 4, mount: 5 },
-                NamespaceInodes { user: 1, network: 1, pid: 1, mount: 1 },
+                NamespaceInodes { user: 2, network: 3, pid: 4, mount: 5, cgroup: 6 },
+                NamespaceInodes { user: 1, network: 1, pid: 1, mount: 1, cgroup: 1 },
                 "11111111-2222-3333-4444-555555555555", "0123456789abcdef0123456789abcdef"),
             Err(OciRuntimeObservationError::NoNewPrivilegesMissing)));
     }
