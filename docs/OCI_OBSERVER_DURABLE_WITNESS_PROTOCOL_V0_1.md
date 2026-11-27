@@ -377,3 +377,27 @@ The current witness-quorum argument is conditional: 3-of-4 has an honest interse
 **Evidence status:** all 143 counts above are source-level `#[test]` functions. They have not been compiled or executed in this environment. No exact-head Nixward workflow run was returned for `1beae84fb4670954e9b596e86f2f0e09b8c6283b`; no Cargo/rustc/rustfmt/Nix result is claimed.
 
 Still open: the versioned Merkle-leaf commitment to branch endorsements, witness API and operational key provisioning, cross-client gossip/monitor transport, hard-power-loss and full DB/WAL rollback qualification, task-contract consumption, independent live kernel/packet enforcement, and independently verified participant/service effects.
+
+
+## 20. Receipt v2 commits branch endorsement into the Merkle leaf — 27 November 2026
+
+This section supersedes the remaining-leaf-gap and 143-test statements in Section 19.
+
+The exact Nixward branch head after this source increment is `ffcd4bb451cd684c87fd939d10e0415326c78b40`. The selected implementation inventory is now **145 authored Rust test functions**: 15 task contract + 24 finite-set containment + 27 OCI observer + 13 receipt chain + 18 signed checkpoint + 19 checkpoint store + 22 witness transparency + 7 branch ledger.
+
+The witness receipt and signed tree-head envelope have been bumped to **schema version 2** with v2 kind strings and domain separation. The v2 leaf input now commits, in canonical field order, to:
+- witness ID, key ID and key generation;
+- checkpoint digest, request digest and idempotency key;
+- exact `branch_endorsement_digest_blake3` computed by the branch-endorsement verifier over its domain-separated canonical signing bytes and signature.
+
+The branch endorsement is signed before append and does not include the Merkle index, inclusion path or tree head, avoiding a circular commitment. The witness then appends the leaf containing that endorsement digest and returns the signed tree head and proof.
+
+The opaque `VerifiedOciWitnessReceipt` carries the endorsement digest proven by the inclusion path. `VerifiedOciWitnessBranchQuorum::bind` now requires the independently verified endorsement digest to equal the digest committed by that receipt, in addition to exact witness/trust-domain/checkpoint/request/key matching. The combined branch-quorum digest domain is versioned to v2. The relying-party finalizer independently rechecks the digest equality before committing the schema-v5 receipt/endorsement bytes and digest.
+
+Test fixtures now construct and verify branch endorsements before building the Merkle witness receipts. New negative controls prove that (a) changing the digest while retaining the inclusion proof fails Merkle verification and (b) binding a valid branch endorsement to a receipt whose Merkle leaf contains a placeholder digest fails quorum binding. Existing successful checkpoint-store finalization tests now use proofs built over the exact endorsements.
+
+**Compatibility boundary:** the current admission verifier is strict v2 and rejects v1 receipt/tree-head envelopes for new admission. A separate historical-only v1 audit verifier has not yet been implemented; old persisted bytes are retained/quarantined by store migration paths but should not be described as re-verifiable through the v2 verifier. A follow-on can add read-only v1 verification without allowing v1 evidence to produce new authority.
+
+**Evidence status:** 145 test annotations are present in the selected source modules, but no Rust compiler, Cargo, rustfmt or Nix executable is installed in this environment. They remain uncompiled and unexecuted. No exact-head Nixward CI run is claimed for `ffcd4bb451cd684c87fd939d10e0415326c78b40`.
+
+Still open: historical-only v1 audit verification; production witness API/operational key provisioning; cross-client gossip and quarantine fan-out; VM power-loss, old DB/WAL restore and witness-reconciliation qualification; task-contract consumption; continuous kernel/network enforcement; and independent packet/service effect receipts.
