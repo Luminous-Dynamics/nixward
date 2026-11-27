@@ -625,17 +625,10 @@ impl OciWitnessBranchLedger {
         {
             return Err(OciWitnessBranchLedgerError::TrustRecordExpanded);
         }
-        // Trust is intersected with the durable row in the same IMMEDIATE
-        // transaction as the branch lock. This prevents a stale open ledger
-        // handle from widening a validity/revocation restriction committed
-        // by another handle between an in-memory check and a signature.
-        let effective_valid_from = self.valid_from_ms.max(current_trust.valid_from_ms);
-        let effective_valid_until = self.valid_until_ms.min(current_trust.valid_until_ms);
-        let effective_revoked_at = match (self.revoked_at_ms, current_trust.revoked_at_ms) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
+        // The durable row is intersected atomically below, inside the same
+        // IMMEDIATE transaction as the branch lock. This is authoritative
+        // when another live handle has tightened the trust after this handle
+        // was opened.
         let request_bytes = request
             .canonical_bytes()
             .map_err(|_| OciWitnessBranchLedgerError::WitnessRequestMismatch)?;
@@ -704,10 +697,6 @@ impl OciWitnessBranchLedger {
             tx.commit()?;
             return Err(OciWitnessBranchLedgerError::KeyRevoked);
         }
-        self.valid_from_ms = effective_valid_from;
-        self.valid_until_ms = effective_valid_until;
-        self.revoked_at_ms = effective_revoked_at;
-
         let existing: Option<(String, String, Vec<u8>)> = tx
             .query_row(
                 "SELECT checkpoint_digest, request_digest, endorsement_json
@@ -1450,16 +1439,18 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            stale.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_120),
-            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
-                | Err(OciWitnessBranchLedgerError::KeyRevoked)
+            stale.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_160),
+            Err(OciWitnessBranchLedgerError::KeyRevoked)
         ));
         drop(revoker);
         drop(stale);
-        let mut reopened = OciWitnessBranchLedger::open(
-            temp.path().join("witness-branch.sqlite"), &trust
-        ).unwrap_err();
-        let _ = &mut reopened;
+        // The old trust snapshot may reopen the ledger, but it cannot clear
+        // the persisted future revocation; current signing still fails.
+        let mut reopened = open_ledger(&temp, &trust);
+        assert!(matches!(
+            reopened.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_160),
+            Err(OciWitnessBranchLedgerError::KeyRevoked)
+        ));
     }
 
 
