@@ -1094,6 +1094,8 @@ impl OciObserverCheckpointStore {
                 || branch_endorsement.key_id() != verified.key_id()
                 || branch_endorsement.key_generation() != verified.key_generation()
                 || branch_endorsement.signer_public_key_hex() != verified.signer_public_key_hex()
+                || branch_endorsement.endorsement_digest_blake3()
+                    != verified.branch_endorsement_digest_blake3()
             {
                 tx.commit()?;
                 return Err(OciObserverCheckpointStoreError::WitnessQuorumMismatch);
@@ -1448,7 +1450,7 @@ mod tests {
         OCI_OBSERVER_CHECKPOINT_SCHEMA_VERSION,
     };
     use crate::observe::witness_transparency::{
-        make_test_witness_quorum_for_request, OciObserverWitnessRequest,
+        make_test_witness_quorum_for_request, make_test_witness_quorum_for_request_with_branch_endorsement_digests, OciObserverWitnessRequest,
         SignedOciWitnessTreeHead, OCI_WITNESS_RECEIPT_SCHEMA_VERSION,
         OCI_WITNESS_TREE_HEAD_KIND, VerifiedOciWitnessQuorum,
     };
@@ -1514,10 +1516,20 @@ mod tests {
         checkpoint: &VerifiedOciObserverCheckpoint,
         request: &OciObserverWitnessRequest,
         witness_keys: &[TrustedOciWitnessKey],
-        quorum: VerifiedOciWitnessQuorum,
+        _quorum: VerifiedOciWitnessQuorum,
     ) -> VerifiedOciWitnessBranchQuorum {
         let endorsements =
             make_test_verified_branch_endorsements(checkpoint, request, witness_keys).unwrap();
+        let branch_digests: Vec<String> = endorsements
+            .iter()
+            .map(|endorsement| endorsement.endorsement_digest_blake3().to_owned())
+            .collect();
+        let (proof_keys, quorum) = make_test_witness_quorum_for_request_with_branch_endorsement_digests(
+            request,
+            &branch_digests,
+        )
+        .unwrap();
+        assert_eq!(proof_keys, witness_keys);
         VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
     }
 
@@ -1525,7 +1537,7 @@ mod tests {
         checkpoint: &VerifiedOciObserverCheckpoint,
         request: &OciObserverWitnessRequest,
         witness_keys: &[TrustedOciWitnessKey],
-        quorum: VerifiedOciWitnessQuorum,
+        _quorum: VerifiedOciWitnessQuorum,
         parent_checkpoint: &VerifiedOciObserverCheckpoint,
     ) -> VerifiedOciWitnessBranchQuorum {
         let endorsements = make_test_verified_branch_endorsements_after_parent(
@@ -1535,6 +1547,16 @@ mod tests {
             Some(parent_checkpoint),
         )
         .unwrap();
+        let branch_digests: Vec<String> = endorsements
+            .iter()
+            .map(|endorsement| endorsement.endorsement_digest_blake3().to_owned())
+            .collect();
+        let (proof_keys, quorum) = make_test_witness_quorum_for_request_with_branch_endorsement_digests(
+            request,
+            &branch_digests,
+        )
+        .unwrap();
+        assert_eq!(proof_keys, witness_keys);
         VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
     }
 
