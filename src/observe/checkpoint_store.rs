@@ -2077,6 +2077,17 @@ mod tests {
         let mut store = open_store(&temp);
         assert!(store.prepare_checkpoint(&checkpoint, &request, 1_100).is_ok());
     }
+    #[test]
+    fn rejects_merkle_receipt_that_does_not_commit_to_branch_endorsement() {
+        let checkpoint = verified_checkpoint(1, None);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let (witness_keys, quorum) = make_test_witness_quorum_for_request(&request, 3).unwrap();
+        let endorsements =
+            make_test_verified_branch_endorsements(&checkpoint, &request, &witness_keys).unwrap();
+
+        assert!(VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).is_err());
+    }
+
 }
 
 
