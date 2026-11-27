@@ -343,3 +343,37 @@ Added and exported `observe::witness_branch_ledger::OciWitnessBranchLedger`:
 Six source-level tests cover reopen/idempotency, conflicting same-slot branch rejection, exact next-parent extension, stale-parent rejection, key substitution and revoked-key rejection.
 
 The endorsement is **not yet part of the Merkle witness receipt or quorum token**. A witness can currently create a durable endorsement, but the independent receipt verifier does not require it. Integration is tracked in [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172). The source corpus is now 142 authored test functions (15 task + 24 containment + 27 OCI + 13 receipt chain + 18 signed checkpoint + 18 checkpoint store + 21 witness transparency + 6 branch ledger); none is compiled or executed.
+
+
+## 19. Current implementation status — 27 November 2026
+
+This section supersedes the source-count and integration-status statements in Sections 17–18.
+
+The exact branch head is `1beae84fb4670954e9b596e86f2f0e09b8c6283b`. The selected source inventory is **143 authored Rust test functions**:
+
+- task contract: 15;
+- finite-set policy containment: 24;
+- OCI runtime observer: 27;
+- receipt chain: 13;
+- signed observer checkpoint: 18;
+- durable checkpoint store: 18;
+- witness transparency proofs: 21;
+- durable witness branch ledger: 7.
+
+The branch-ledger test call sites were updated to the current signing API, which requires the caller to present the current trusted-witness record on each endorsement attempt. The signing boundary checks the exact witness identity, trust domain, key ID/generation, public-key bytes, matching private key, validity window and current revocation state before creating or returning an endorsement.
+
+The relying-party integration has advanced beyond the standalone-ledger stage:
+
+- `VerifiedOciWitnessBranchQuorum::bind` requires one verified branch endorsement for each exact Merkle receipt, with matching witness identity, trust domain, checkpoint/request subject, key ID/generation and public-key bytes;
+- its domain-separated evidence digest commits to the base Merkle quorum digest and the sorted branch-endorsement digests;
+- `finalize_witness_quorum` accepts this combined opaque token rather than a raw Merkle quorum, rechecks trust at the commit boundary, and applies the 3-of-4 admission profile;
+- schema v5 persists both exact witness receipt bytes and the matching branch-endorsement digest/bytes in the same durable finalization transaction;
+- v1–v4 migration paths add the required columns where needed and quarantine historical admission state that lacks the new branch evidence.
+
+**Remaining cryptographic integration boundary:** the branch-endorsement digest is not yet included in the Merkle leaf input or the witness receipt wire format. The current combined quorum token binds endorsements to receipts after receipt verification, and the relying party durably stores both, but the public append-only Merkle log itself does not yet commit to the endorsement. The next protocol revision should introduce a versioned leaf/receipt schema and verify the branch endorsement digest as part of the logged leaf; do not describe the current Merkle inclusion proof as covering that digest. This is the remaining scope of [issue #172](https://github.com/Luminous-Dynamics/nixward/issues/172).
+
+The current witness-quorum argument is conditional: 3-of-4 has an honest intersection if at most one of four witnesses is Byzantine and honest witnesses durably enforce one branch per observer parent/sequence. Distinct configured trust-domain IDs are not cryptographic proof of independent administration; operator/control-plane common-cause analysis and externally audited provisioning are still required.
+
+**Evidence status:** all 143 counts above are source-level `#[test]` functions. They have not been compiled or executed in this environment. No exact-head Nixward workflow run was returned for `1beae84fb4670954e9b596e86f2f0e09b8c6283b`; no Cargo/rustc/rustfmt/Nix result is claimed.
+
+Still open: the versioned Merkle-leaf commitment to branch endorsements, witness API and operational key provisioning, cross-client gossip/monitor transport, hard-power-loss and full DB/WAL rollback qualification, task-contract consumption, independent live kernel/packet enforcement, and independently verified participant/service effects.
