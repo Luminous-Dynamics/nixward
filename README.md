@@ -237,3 +237,8 @@ MIT
 
 
 The schema-v3 task contract requires the opaque `VerifiedPolicyContainment` token from the finite-set policy prover and the bounded OCI source-consistency snapshot. Its owner-signable subject binds the exact owner-boundary digest, candidate-policy digest, prover version, containment-report digest and runtime snapshot identity. The containment report uses its own versioned policy-proof schema; neither proof establishes runtime enforcement. The task status remains `runtime-observed-not-enforced-v3`, and the compiled enforcement plan remains disabled pending independent host/runtime evidence.
+
+
+### Witness receipt v2 and branch-binding status
+
+The durable witness protocol now includes a receipt-v2 source increment: the Merkle leaf commits to the exact durable branch-endorsement digest, the verified receipt carries the digest proven by inclusion, and branch-quorum binding rejects a mismatched endorsement. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](docs/OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md), Section 20. This remains source-level and uncompiled/unexecuted; v1 historical-only audit verification, real witness transport, cross-client gossip, power-loss/restore qualification and live enforcement remain open.
