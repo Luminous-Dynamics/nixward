@@ -233,6 +233,8 @@ impl VerifiedOciWitnessBranchQuorum {
                 || endorsement.key_id() != receipt.key_id()
                 || endorsement.key_generation() != receipt.key_generation()
                 || endorsement.signer_public_key_hex() != receipt.signer_public_key_hex()
+                || endorsement.endorsement_digest_blake3()
+                    != receipt.branch_endorsement_digest_blake3()
             {
                 return Err(OciWitnessBranchLedgerError::SubjectMismatch);
             }
