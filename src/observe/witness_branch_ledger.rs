@@ -540,46 +540,36 @@ impl OciWitnessBranchLedger {
                     ))
                 },
             )?;
-        let stored_valid_from = u64::try_from(stored.5)
+        connection.execute(
+            "UPDATE witness_identity
+             SET valid_from_ms = MAX(valid_from_ms, ?1),
+                 valid_until_ms = MIN(valid_until_ms, ?2),
+                 revoked_at_ms = CASE
+                     WHEN revoked_at_ms IS NULL THEN ?3
+                     WHEN ?3 IS NULL THEN revoked_at_ms
+                     ELSE MIN(revoked_at_ms, ?3)
+                 END
+             WHERE singleton = 1",
+            params![
+                to_sql_integer(trusted_identity.valid_from_ms)?,
+                to_sql_integer(trusted_identity.valid_until_ms)?,
+                trusted_identity.revoked_at_ms.map(to_sql_integer).transpose()?
+            ],
+        )?;
+        let effective: (i64, i64, Option<i64>) = connection.query_row(
+            "SELECT valid_from_ms, valid_until_ms, revoked_at_ms
+             FROM witness_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let effective_valid_from = u64::try_from(effective.0)
             .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
-        let stored_valid_until = u64::try_from(stored.6)
+        let effective_valid_until = u64::try_from(effective.1)
             .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
-        let stored_revoked_at = stored
-            .7
+        let effective_revoked_at = effective.2
             .map(u64::try_from)
             .transpose()
             .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
-        if stored.0 != trusted_identity.witness_id
-            || stored.1 != trusted_identity.trust_domain_id
-            || stored.2 != trusted_identity.key_id
-            || stored.3 != to_sql_integer(trusted_identity.key_generation)?
-            || stored.4 != trusted_identity.public_key_hex
-        {
-            return Err(OciWitnessBranchLedgerError::WitnessIdentityMismatch);
-        }
-
-        // Reopening may present an older trust snapshot. The durable ledger
-        // must retain the stricter of persisted and newly supplied limits.
-        let effective_valid_from = stored_valid_from.max(trusted_identity.valid_from_ms);
-        let effective_valid_until = stored_valid_until.min(trusted_identity.valid_until_ms);
-        let effective_revoked_at = match (stored_revoked_at, trusted_identity.revoked_at_ms) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
-        // Persist the stricter trust snapshot before deciding whether it
-        // still permits signing. Even an empty/invalid narrowed window is
-        // a revocation-equivalent latch and must survive a stale reopen.
-        connection.execute(
-            "UPDATE witness_identity
-             SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
-             WHERE singleton = 1",
-            params![
-                to_sql_integer(effective_valid_from)?,
-                to_sql_integer(effective_valid_until)?,
-                effective_revoked_at.map(to_sql_integer).transpose()?
-            ],
-        )?;
         if effective_valid_until <= effective_valid_from {
             return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
         }
@@ -635,6 +625,10 @@ impl OciWitnessBranchLedger {
         {
             return Err(OciWitnessBranchLedgerError::TrustRecordExpanded);
         }
+        // Trust is intersected with the durable row in the same IMMEDIATE
+        // transaction as the branch lock. This prevents a stale open ledger
+        // handle from widening a validity/revocation restriction committed
+        // by another handle between an in-memory check and a signature.
         let effective_valid_from = self.valid_from_ms.max(current_trust.valid_from_ms);
         let effective_valid_until = self.valid_until_ms.min(current_trust.valid_until_ms);
         let effective_revoked_at = match (self.revoked_at_ms, current_trust.revoked_at_ms) {
@@ -642,34 +636,6 @@ impl OciWitnessBranchLedger {
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         };
-        // Persist first, fail second: invalid narrowing is still a
-        // security-relevant trust update and cannot be forgotten on retry.
-        self.connection.execute(
-            "UPDATE witness_identity
-             SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
-             WHERE singleton = 1",
-            params![
-                to_sql_integer(effective_valid_from)?,
-                to_sql_integer(effective_valid_until)?,
-                effective_revoked_at.map(to_sql_integer).transpose()?
-            ],
-        )?;
-        if effective_valid_until <= effective_valid_from {
-            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
-        }
-        self.valid_from_ms = effective_valid_from;
-        self.valid_until_ms = effective_valid_until;
-        self.revoked_at_ms = effective_revoked_at;
-        if now_ms < self.valid_from_ms || now_ms >= self.valid_until_ms {
-            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
-        }
-        if self.revoked_at_ms.is_some_and(|revoked_at| now_ms >= revoked_at) {
-            return Err(OciWitnessBranchLedgerError::KeyRevoked);
-        }
-        if checkpoint.expires_at_ms() <= now_ms {
-            return Err(OciWitnessBranchLedgerError::CheckpointExpired);
-        }
-
         let request_bytes = request
             .canonical_bytes()
             .map_err(|_| OciWitnessBranchLedgerError::WitnessRequestMismatch)?;
@@ -692,6 +658,55 @@ impl OciWitnessBranchLedger {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Atomic database-side intersection: MAX/MIN and the revocation
+        // latch are evaluated against the latest committed row, not this
+        // handle's potentially stale in-memory snapshot.
+        tx.execute(
+            "UPDATE witness_identity
+             SET valid_from_ms = MAX(valid_from_ms, ?1),
+                 valid_until_ms = MIN(valid_until_ms, ?2),
+                 revoked_at_ms = CASE
+                     WHEN revoked_at_ms IS NULL THEN ?3
+                     WHEN ?3 IS NULL THEN revoked_at_ms
+                     ELSE MIN(revoked_at_ms, ?3)
+                 END
+             WHERE singleton = 1",
+            params![
+                to_sql_integer(current_trust.valid_from_ms)?,
+                to_sql_integer(current_trust.valid_until_ms)?,
+                current_trust.revoked_at_ms.map(to_sql_integer).transpose()?
+            ],
+        )?;
+        let effective: (i64, i64, Option<i64>) = tx.query_row(
+            "SELECT valid_from_ms, valid_until_ms, revoked_at_ms
+             FROM witness_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let effective_valid_from = u64::try_from(effective.0)
+            .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
+        let effective_valid_until = u64::try_from(effective.1)
+            .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
+        let effective_revoked_at = effective.2
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
+        if effective_valid_until <= effective_valid_from {
+            tx.commit()?;
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
+        if now_ms < effective_valid_from || now_ms >= effective_valid_until {
+            tx.commit()?;
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
+        if effective_revoked_at.is_some_and(|revoked_at| now_ms >= revoked_at) {
+            tx.commit()?;
+            return Err(OciWitnessBranchLedgerError::KeyRevoked);
+        }
+        self.valid_from_ms = effective_valid_from;
+        self.valid_until_ms = effective_valid_until;
+        self.revoked_at_ms = effective_revoked_at;
 
         let existing: Option<(String, String, Vec<u8>)> = tx
             .query_row(
@@ -1382,6 +1397,69 @@ mod tests {
             OciWitnessBranchLedger::open(temp.path().join("witness-branch.sqlite"), &trust),
             Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid)
         ));
+    }
+
+    #[test]
+    fn stale_open_handles_cannot_widen_persisted_trust_restrictions() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+
+        // Both handles cache the broad original trust before either changes it.
+        let mut restrictive = open_ledger(&temp, &trust);
+        let mut stale = open_ledger(&temp, &trust);
+
+        let mut shortened = trust.clone();
+        shortened.valid_until_ms = 1_500;
+        restrictive
+            .endorse_checkpoint_branch(&checkpoint, &request, &shortened, &signing, 1_100)
+            .unwrap();
+
+        // The stale handle still has a 10_000ms in-memory upper bound and
+        // receives the older broad trust snapshot. SQLite must retain 1_500.
+        assert!(matches!(
+            stale.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_600),
+            Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid)
+        ));
+
+        // A third fresh handle using the original snapshot must also fail.
+        drop(restrictive);
+        drop(stale);
+        assert!(matches!(
+            OciWitnessBranchLedger::open(temp.path().join("witness-branch.sqlite"), &trust),
+            Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid)
+        ));
+    }
+
+    #[test]
+    fn stale_open_handle_cannot_clear_a_revocation_latched_by_another_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+
+        let mut revoker = open_ledger(&temp, &trust);
+        let mut stale = open_ledger(&temp, &trust);
+        let mut revoked = trust.clone();
+        revoked.revoked_at_ms = Some(1_150);
+        revoker
+            .endorse_checkpoint_branch(&checkpoint, &request, &revoked, &signing, 1_100)
+            .unwrap();
+
+        assert!(matches!(
+            stale.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_120),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+                | Err(OciWitnessBranchLedgerError::KeyRevoked)
+        ));
+        drop(revoker);
+        drop(stale);
+        let mut reopened = OciWitnessBranchLedger::open(
+            temp.path().join("witness-branch.sqlite"), &trust
+        ).unwrap_err();
+        let _ = &mut reopened;
     }
 
 
