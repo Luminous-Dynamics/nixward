@@ -242,7 +242,7 @@ impl VerifiedOciWitnessBranchQuorum {
         let mut ordered: Vec<_> = branch_endorsements.iter().collect();
         ordered.sort_by(|left, right| left.witness_id().cmp(right.witness_id()));
         let mut digest = blake3::Hasher::new();
-        digest.update(b"nixward:oci-witness-branch-quorum:v1\0");
+        digest.update(b"nixward:oci-witness-branch-quorum:v2\0");
         digest.update(witness_quorum.evidence_digest_blake3().as_bytes());
         for endorsement in ordered {
             digest.update(&(endorsement.endorsement_digest_blake3().len() as u64).to_le_bytes());
