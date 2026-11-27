@@ -41,6 +41,8 @@ pub enum OciWitnessBranchLedgerError {
     WitnessIdentityMismatch,
     #[error("the signing key does not match the provisioned public key bytes")]
     SigningKeyMismatch,
+    #[error("current witness trust attempts to expand the provisioned validity window or clear a latched revocation")]
+    TrustRecordExpanded,
     #[error("witness signing key is not currently valid")]
     KeyNotCurrentlyValid,
     #[error("witness signing key has been revoked")]
@@ -590,6 +592,21 @@ impl OciWitnessBranchLedger {
             || encode_hex(signing_key.verifying_key().as_bytes()) != self.public_key_hex
         {
             return Err(OciWitnessBranchLedgerError::SigningKeyMismatch);
+        }
+        // The live trust record may tighten the original provisioning but
+        // must never broaden it. In particular, revocation is monotonic:
+        // once latched in the durable identity, a later caller-supplied
+        // record cannot clear or postpone it for the same key generation.
+        let revocation_was_weakened = match (self.revoked_at_ms, current_trust.revoked_at_ms) {
+            (Some(provisioned), Some(current)) => current > provisioned,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if current_trust.valid_from_ms < self.valid_from_ms
+            || current_trust.valid_until_ms > self.valid_until_ms
+            || revocation_was_weakened
+        {
+            return Err(OciWitnessBranchLedgerError::TrustRecordExpanded);
         }
         if now_ms < current_trust.valid_from_ms || now_ms >= current_trust.valid_until_ms {
             return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
@@ -1174,4 +1191,68 @@ mod tests {
             Err(OciWitnessBranchLedgerError::KeyRevoked)
         ));
     }
+    #[test]
+    fn rejects_current_trust_that_expands_provisioned_validity_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let mut ledger = open_ledger(&temp, &trust);
+
+        let mut backdated = trust.clone();
+        backdated.valid_from_ms = 50;
+        assert!(matches!(
+            ledger.endorse_checkpoint_branch(&checkpoint, &request, &backdated, &signing, 1_100),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+
+        let mut extended = trust.clone();
+        extended.valid_until_ms = 20_000;
+        assert!(matches!(
+            ledger.endorse_checkpoint_branch(&checkpoint, &request, &extended, &signing, 1_100),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+
+        assert_eq!(ledger.accepted_head("a1".repeat(32).as_str()).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_clearing_a_latched_revocation_for_the_same_key_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let mut trust = trusted_witness(&signing);
+        trust.revoked_at_ms = Some(1_150);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let mut ledger = open_ledger(&temp, &trust);
+
+        let mut unrevoked = trust.clone();
+        unrevoked.revoked_at_ms = None;
+        assert!(matches!(
+            ledger.endorse_checkpoint_branch(&checkpoint, &request, &unrevoked, &signing, 1_100),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+        assert_eq!(ledger.accepted_head("a1".repeat(32).as_str()).unwrap(), None);
+    }
+
+    #[test]
+    fn accepts_monotonic_tightening_of_current_trust_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+        let mut ledger = open_ledger(&temp, &trust);
+
+        let mut tightened = trust.clone();
+        tightened.valid_from_ms = 200;
+        tightened.valid_until_ms = 9_000;
+        tightened.revoked_at_ms = Some(8_000);
+        let result = ledger.endorse_checkpoint_branch(
+            &checkpoint, &request, &tightened, &signing, 1_100
+        );
+        assert!(result.is_ok());
+    }
+
 }
