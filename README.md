@@ -13,6 +13,11 @@ Consequential machine changes use an evidence-bound transaction lifecycle:
 Cognitive signals and natural-language conversation are advisory only; they never constitute machine-mutation authority. See [docs/SYSTEM_TRANSACTION_ARCHITECTURE.md](docs/SYSTEM_TRANSACTION_ARCHITECTURE.md) for the canonical model.
 
 
+
+## Agentic workload binding (research v0.1; contract schema v3)
+
+Nixward now has a schema-v3 task-bound contract that binds one OCI S2 guest plan, a plan-consistency/artifact-identity receipt, a proof-carrying network policy containment result, an expiring owner-signable authorization subject, and a bounded Podman/procfs consistency snapshot. The snapshot is not a signed host attestation, durable anti-rollback proof, or proof of network enforcement. The task contract status is `runtime-observed-not-enforced-v3`; production BPF activation is not claimed. See [the task-boundary contract](docs/AGENT_TASK_BOUNDARY_V0_1.md), [the OCI observer](docs/OCI_RUNTIME_OBSERVER_V0_1.md), [the receipt-chain prototype](docs/OCI_OBSERVER_RECEIPT_CHAIN_V0_1.md), [the signed observer checkpoint](docs/OCI_OBSERVER_SIGNED_CHECKPOINT_V0_1.md), the [runtime-assurance/SOTA roadmap](docs/AGENT_RUNTIME_ASSURANCE_AND_SOTA_V0_2.md), the [RATS/witness research](docs/OBSERVER_TRUST_AND_WITNESS_RESEARCH_V0_1.md), the [durable checkpoint/witness protocol](docs/OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md), the [witness transparency verifier](src/observe/witness_transparency.rs), and the [durable witness branch ledger](src/observe/witness_branch_ledger.rs). The branch ledger is a signer-side prototype; its endorsement is not yet required by the Merkle receipt/quorum verifier. The native SQLite checkpoint journal now verifies and durably finalizes a 3-of-4 witness quorum, persists receipt bytes and witness high-water marks, and advances accepted checkpoint state only after rechecking current public keys and trust. It does not yet provide witness network transport/gossip, task-contract consumption, or runtime enforcement. Source-level code and claim boundaries are documented in [the durable witness protocol](docs/OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md).
+
 ## Software Ingress Covenant
 
 Nixward does **not** act as an imperative package manager. A cryptographic
@@ -229,3 +234,11 @@ Measured on 16,384-dim vectors (criterion, release mode):
 ## License
 
 MIT
+
+
+The schema-v3 task contract requires the opaque `VerifiedPolicyContainment` token from the finite-set policy prover and the bounded OCI source-consistency snapshot. Its owner-signable subject binds the exact owner-boundary digest, candidate-policy digest, prover version, containment-report digest and runtime snapshot identity. The containment report uses its own versioned policy-proof schema; neither proof establishes runtime enforcement. The task status remains `runtime-observed-not-enforced-v3`, and the compiled enforcement plan remains disabled pending independent host/runtime evidence.
+
+
+### Witness receipt v2 and branch-binding status
+
+The durable witness protocol now includes a receipt-v2 source increment: the Merkle leaf commits to the exact durable branch-endorsement digest, the verified receipt carries the digest proven by inclusion, and branch-quorum binding rejects a mismatched endorsement. See [OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md](docs/OCI_OBSERVER_DURABLE_WITNESS_PROTOCOL_V0_1.md), Section 20. This remains source-level and uncompiled/unexecuted; v1 historical-only audit verification, real witness transport, cross-client gossip, power-loss/restore qualification and live enforcement remain open.
