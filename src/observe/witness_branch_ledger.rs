@@ -540,6 +540,16 @@ impl OciWitnessBranchLedger {
                     ))
                 },
             )?;
+        // The database can be opened only by the exact provisioned witness
+        // identity. Trust monotonicity must never mask identity substitution.
+        if stored.0 != trusted_identity.witness_id
+            || stored.1 != trusted_identity.trust_domain_id
+            || stored.2 != trusted_identity.key_id
+            || stored.3 != to_sql_integer(trusted_identity.key_generation)?
+            || stored.4 != trusted_identity.public_key_hex
+        {
+            return Err(OciWitnessBranchLedgerError::WitnessIdentityMismatch);
+        }
         connection.execute(
             "UPDATE witness_identity
              SET valid_from_ms = MAX(valid_from_ms, ?1),
@@ -1454,6 +1464,22 @@ mod tests {
         assert!(matches!(
             reopened.endorse_checkpoint_branch(&checkpoint, &request, &revoked, &signing, 1_160),
             Err(OciWitnessBranchLedgerError::KeyRevoked)
+        ));
+    }
+
+    #[test]
+    fn refuses_to_reopen_ledger_under_substituted_witness_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let original_signing = SigningKey::from_bytes(&[43u8; 32]);
+        let original_trust = trusted_witness(&original_signing);
+        let ledger_path = temp.path().join("witness-branch.sqlite");
+        drop(OciWitnessBranchLedger::open(&ledger_path, &original_trust).unwrap());
+
+        let substituted_signing = SigningKey::from_bytes(&[44u8; 32]);
+        let substituted_trust = trusted_witness(&substituted_signing);
+        assert!(matches!(
+            OciWitnessBranchLedger::open(&ledger_path, &substituted_trust),
+            Err(OciWitnessBranchLedgerError::WitnessIdentityMismatch)
         ));
     }
 
