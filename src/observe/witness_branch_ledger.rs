@@ -1023,7 +1023,7 @@ mod tests {
         let endorsement = {
             let mut ledger = open_ledger(&temp, &trust);
             let (outcome, endorsement) = ledger
-                .endorse_checkpoint_branch(&checkpoint, &request, &signing, 1_100)
+                .endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_100)
                 .unwrap();
             assert_eq!(outcome, WitnessBranchOutcome::Signed);
             ledger.integrity_check().unwrap();
@@ -1112,7 +1112,7 @@ mod tests {
         let stale_request =
             OciObserverWitnessRequest::from_verified_checkpoint(&stale_parent).unwrap();
         assert!(matches!(
-            ledger.endorse_checkpoint_branch(parent, &parent_request, trust, &signing_key, 1_150),
+            ledger.endorse_checkpoint_branch(&stale_parent, &stale_request, &trust, &signing, 1_150),
             Err(OciWitnessBranchLedgerError::ParentCheckpointMismatch)
         ));
     }
