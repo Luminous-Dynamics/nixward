@@ -1529,7 +1529,7 @@ mod tests {
             &branch_digests,
         )
         .unwrap();
-        assert_eq!(proof_keys, witness_keys);
+        assert_eq!(proof_keys.as_slice(), witness_keys);
         VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
     }
 
@@ -1556,7 +1556,7 @@ mod tests {
             &branch_digests,
         )
         .unwrap();
-        assert_eq!(proof_keys, witness_keys);
+        assert_eq!(proof_keys.as_slice(), witness_keys);
         VerifiedOciWitnessBranchQuorum::bind(quorum, endorsements).unwrap()
     }
 
