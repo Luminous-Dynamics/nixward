@@ -1340,7 +1340,7 @@ mod tests {
             // A later stale trust snapshot cannot clear the revocation.
             assert!(matches!(
                 ledger.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_120),
-                Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+                Ok((WitnessBranchOutcome::AlreadySigned, _))
             ));
         }
 
@@ -1449,6 +1449,10 @@ mod tests {
         let mut reopened = open_ledger(&temp, &trust);
         assert!(matches!(
             reopened.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_160),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+        assert!(matches!(
+            reopened.endorse_checkpoint_branch(&checkpoint, &request, &revoked, &signing, 1_160),
             Err(OciWitnessBranchLedgerError::KeyRevoked)
         ));
     }
