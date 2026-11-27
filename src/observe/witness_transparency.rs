@@ -15,15 +15,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-pub const OCI_WITNESS_RECEIPT_SCHEMA_VERSION: u32 = 1;
-pub const OCI_WITNESS_RECEIPT_KIND: &str = "nixward-oci-observer-witness-receipt-v1";
-pub const OCI_WITNESS_TREE_HEAD_KIND: &str = "nixward-oci-observer-witness-tree-head-v1";
+pub const OCI_WITNESS_RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const OCI_WITNESS_RECEIPT_KIND: &str = "nixward-oci-observer-witness-receipt-v2";
+pub const OCI_WITNESS_TREE_HEAD_KIND: &str = "nixward-oci-observer-witness-tree-head-v2";
 pub const OCI_WITNESS_TREE_HASH_ALGORITHM: &str = "sha256-rfc9162";
 
-const TREE_HEAD_DOMAIN: &[u8] = b"nixward:oci-observer-witness-tree-head:v1\0";
-const LEAF_DOMAIN: &[u8] = b"nixward:oci-observer-witness-leaf:v1\0";
-const RECEIPT_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-receipt-digest:v1\0";
-const QUORUM_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-quorum:v1\0";
+const TREE_HEAD_DOMAIN: &[u8] = b"nixward:oci-observer-witness-tree-head:v2\0";
+const LEAF_DOMAIN: &[u8] = b"nixward:oci-observer-witness-leaf:v2\0";
+const RECEIPT_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-receipt-digest:v2\0";
+const QUORUM_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-quorum:v2\0";
 const WITNESS_REQUEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request:v1\0";
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"nixward:oci-observer-witness-request-digest:v1\0";
 const IDEMPOTENCY_DOMAIN: &[u8] = b"nixward:oci-observer-witness-idempotency:v1\0";
@@ -326,6 +326,7 @@ pub fn witness_leaf_input(
     checkpoint_digest_blake3: &str,
     request_digest_blake3: &str,
     idempotency_key_blake3: &str,
+    branch_endorsement_digest_blake3: &str,
 ) -> Result<Vec<u8>, OciWitnessProofError> {
     validate_identifier(witness_id)?;
     validate_identifier(key_id)?;
@@ -335,6 +336,7 @@ pub fn witness_leaf_input(
     validate_digest(checkpoint_digest_blake3)?;
     validate_digest(request_digest_blake3)?;
     validate_digest(idempotency_key_blake3)?;
+    validate_digest(branch_endorsement_digest_blake3)?;
 
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(LEAF_DOMAIN);
@@ -344,6 +346,7 @@ pub fn witness_leaf_input(
     push_string(&mut out, checkpoint_digest_blake3);
     push_string(&mut out, request_digest_blake3);
     push_string(&mut out, idempotency_key_blake3);
+    push_string(&mut out, branch_endorsement_digest_blake3);
     Ok(out)
 }
 
@@ -398,6 +401,7 @@ pub struct OciObserverWitnessReceipt {
     pub checkpoint_digest_blake3: String,
     pub request_digest_blake3: String,
     pub idempotency_key_blake3: String,
+    pub branch_endorsement_digest_blake3: String,
     pub leaf_index: u64,
     pub inclusion_path_sha256: Vec<String>,
     pub previous_tree_size: u64,
@@ -680,6 +684,7 @@ pub struct VerifiedOciWitnessReceipt {
     checkpoint_digest_blake3: String,
     request_digest_blake3: String,
     idempotency_key_blake3: String,
+    branch_endorsement_digest_blake3: String,
     key_id: String,
     key_generation: u64,
     signer_public_key_hex: String,
@@ -707,6 +712,9 @@ impl VerifiedOciWitnessReceipt {
     }
     pub fn idempotency_key_blake3(&self) -> &str {
         &self.idempotency_key_blake3
+    }
+    pub fn branch_endorsement_digest_blake3(&self) -> &str {
+        &self.branch_endorsement_digest_blake3
     }
     pub(crate) fn key_id(&self) -> &str {
         &self.key_id
@@ -869,6 +877,7 @@ pub fn verify_witness_receipt(
         &receipt.checkpoint_digest_blake3,
         &receipt.request_digest_blake3,
         &receipt.idempotency_key_blake3,
+        &receipt.branch_endorsement_digest_blake3,
     )?;
     let leaf_hash = merkle_leaf_hash_sha256(&leaf_input);
     verify_merkle_inclusion_sha256(
@@ -891,6 +900,7 @@ pub fn verify_witness_receipt(
         checkpoint_digest_blake3: receipt.checkpoint_digest_blake3.clone(),
         request_digest_blake3: receipt.request_digest_blake3.clone(),
         idempotency_key_blake3: receipt.idempotency_key_blake3.clone(),
+        branch_endorsement_digest_blake3: receipt.branch_endorsement_digest_blake3.clone(),
         key_id: head.key_id.clone(),
         key_generation: head.key_generation,
         signer_public_key_hex: encode_hex(&public_key),
@@ -973,12 +983,13 @@ pub fn verify_witness_quorum(
 }
 
 #[cfg(test)]
-pub(crate) fn make_test_witness_quorum_for_request(
+pub(crate) fn make_test_witness_quorum_for_request_with_branch_endorsement_digests(
     request: &OciObserverWitnessRequest,
-    witness_count: usize,
+    branch_endorsement_digests: &[String],
 ) -> Result<(Vec<TrustedOciWitnessKey>, VerifiedOciWitnessQuorum), OciWitnessProofError> {
     use ed25519_dalek::{Signer, SigningKey};
 
+    let witness_count = branch_endorsement_digests.len();
     if !(1..=MAX_WITNESSES).contains(&witness_count) {
         return Err(OciWitnessProofError::InvalidQuorumThreshold);
     }
@@ -1016,6 +1027,7 @@ pub(crate) fn make_test_witness_quorum_for_request(
             &subject.checkpoint_digest_blake3,
             &subject.request_digest_blake3,
             &subject.idempotency_key_blake3,
+            &branch_endorsement_digests[index],
         )?;
         let root = merkle_leaf_hash_sha256(&leaf_input);
         let mut tree_head = SignedOciWitnessTreeHead {
@@ -1038,6 +1050,7 @@ pub(crate) fn make_test_witness_quorum_for_request(
             checkpoint_digest_blake3: subject.checkpoint_digest_blake3.clone(),
             request_digest_blake3: subject.request_digest_blake3.clone(),
             idempotency_key_blake3: subject.idempotency_key_blake3.clone(),
+            branch_endorsement_digest_blake3: branch_endorsement_digests[index].clone(),
             leaf_index: 0,
             inclusion_path_sha256: Vec::new(),
             previous_tree_size: 0,
@@ -1069,6 +1082,18 @@ pub(crate) fn make_test_witness_quorum_for_request(
     let quorum = verify_witness_quorum(&subject, &evidence, witness_count)?;
     drop(signing_keys);
     Ok((trusted_keys, quorum))
+}
+
+#[cfg(test)]
+pub(crate) fn make_test_witness_quorum_for_request(
+    request: &OciObserverWitnessRequest,
+    witness_count: usize,
+) -> Result<(Vec<TrustedOciWitnessKey>, VerifiedOciWitnessQuorum), OciWitnessProofError> {
+    let branch_endorsement_digests = vec!["00".repeat(32); witness_count];
+    make_test_witness_quorum_for_request_with_branch_endorsement_digests(
+        request,
+        &branch_endorsement_digests,
+    )
 }
 
 #[cfg(test)]
@@ -1168,6 +1193,7 @@ mod tests {
         prior_entries: &[Vec<u8>],
     ) -> (OciObserverWitnessReceipt, OciWitnessReceiptExpectation) {
         let sub = subject();
+        let branch_endorsement_digest_blake3 = "11".repeat(32);
         let leaf_input = witness_leaf_input(
             &trusted.witness_id,
             &trusted.key_id,
@@ -1175,6 +1201,7 @@ mod tests {
             &sub.checkpoint_digest_blake3,
             &sub.request_digest_blake3,
             &sub.idempotency_key_blake3,
+            &branch_endorsement_digest_blake3,
         )
         .unwrap();
 
@@ -1206,6 +1233,7 @@ mod tests {
             checkpoint_digest_blake3: sub.checkpoint_digest_blake3,
             request_digest_blake3: sub.request_digest_blake3,
             idempotency_key_blake3: sub.idempotency_key_blake3,
+            branch_endorsement_digest_blake3,
             leaf_index: leaf_index as u64,
             inclusion_path_sha256: inclusion_path(&entries, leaf_index),
             previous_tree_size,
@@ -1394,6 +1422,16 @@ mod tests {
         let (_signing, trust, mut receipt, expectation) =
             single_receipt_evidence("witness-a");
         receipt.inclusion_path_sha256.push("aa".repeat(32));
+        assert_eq!(
+            verify_witness_receipt(&receipt, &trust, &subject(), &expectation),
+            Err(OciWitnessProofError::InvalidInclusionProof)
+        );
+    }
+
+    #[test]
+    fn rejects_branch_endorsement_digest_substitution() {
+        let (_signing, trust, mut receipt, expectation) = single_receipt_evidence("witness-a");
+        receipt.branch_endorsement_digest_blake3 = "ff".repeat(32);
         assert_eq!(
             verify_witness_receipt(&receipt, &trust, &subject(), &expectation),
             Err(OciWitnessProofError::InvalidInclusionProof)
