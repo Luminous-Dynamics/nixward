@@ -829,10 +829,11 @@ pub fn verify_witness_receipt(
     {
         return Err(OciWitnessProofError::KeyNotCurrentlyValid);
     }
-    if trusted_key
-        .revoked_at_ms
-        .is_some_and(|revoked_at| expectation.now_ms >= revoked_at)
-    {
+    if trusted_key.revoked_at_ms.is_some_and(|revoked_at| {
+        expectation.now_ms >= revoked_at || head.timestamp_ms >= revoked_at
+    }) {
+        // Clock-skew tolerance must not allow a tree head signed at or after
+        // the key's effective revocation time to qualify for new admission.
         return Err(OciWitnessProofError::KeyRevoked);
     }
     if head.timestamp_ms > expectation.now_ms
@@ -1457,6 +1458,25 @@ mod tests {
         assert_eq!(
             verify_witness_receipt(&receipt, &trust, &subject(), &expectation),
             Err(OciWitnessProofError::TreeHeadStale)
+        );
+    }
+
+    #[test]
+    fn rejects_future_tree_head_after_scheduled_revocation_within_clock_skew() {
+        let (signing, mut trust, mut receipt, mut expectation) =
+            single_receipt_evidence("witness-a");
+        trust.revoked_at_ms = Some(1_150);
+        expectation.now_ms = 1_120;
+        expectation.max_future_skew_ms = 100;
+        receipt.tree_head.timestamp_ms = 1_160;
+        receipt.tree_head.signature_hex =
+            encode_hex(&signing.sign(&receipt.tree_head.signing_bytes().unwrap()).to_bytes());
+
+        // The head is only 40ms in the future, so it is within the declared
+        // clock-skew window, but it is signed after the scheduled revocation.
+        assert_eq!(
+            verify_witness_receipt(&receipt, &trust, &subject(), &expectation),
+            Err(OciWitnessProofError::KeyRevoked)
         );
     }
 
