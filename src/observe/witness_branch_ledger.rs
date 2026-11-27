@@ -567,9 +567,9 @@ impl OciWitnessBranchLedger {
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         };
-        if effective_valid_until <= effective_valid_from {
-            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
-        }
+        // Persist the stricter trust snapshot before deciding whether it
+        // still permits signing. Even an empty/invalid narrowed window is
+        // a revocation-equivalent latch and must survive a stale reopen.
         connection.execute(
             "UPDATE witness_identity
              SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
@@ -580,6 +580,9 @@ impl OciWitnessBranchLedger {
                 effective_revoked_at.map(to_sql_integer).transpose()?
             ],
         )?;
+        if effective_valid_until <= effective_valid_from {
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
 
         Ok(Self {
             connection,
@@ -639,9 +642,8 @@ impl OciWitnessBranchLedger {
             (Some(value), None) | (None, Some(value)) => Some(value),
             (None, None) => None,
         };
-        if effective_valid_until <= effective_valid_from {
-            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
-        }
+        // Persist first, fail second: invalid narrowing is still a
+        // security-relevant trust update and cannot be forgotten on retry.
         self.connection.execute(
             "UPDATE witness_identity
              SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
@@ -652,6 +654,9 @@ impl OciWitnessBranchLedger {
                 effective_revoked_at.map(to_sql_integer).transpose()?
             ],
         )?;
+        if effective_valid_until <= effective_valid_from {
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
         self.valid_from_ms = effective_valid_from;
         self.valid_until_ms = effective_valid_until;
         self.revoked_at_ms = effective_revoked_at;
@@ -1350,5 +1355,34 @@ mod tests {
             Err(OciWitnessBranchLedgerError::KeyRevoked)
         ));
     }
+    #[test]
+    fn persists_invalid_tightened_window_and_rejects_stale_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+
+        {
+            let mut ledger = open_ledger(&temp, &trust);
+            let mut invalid_tightening = trust.clone();
+            invalid_tightening.valid_from_ms = 9_000;
+            invalid_tightening.valid_until_ms = 8_000;
+            assert!(matches!(
+                ledger.endorse_checkpoint_branch(
+                    &checkpoint, &request, &invalid_tightening, &signing, 1_100
+                ),
+                Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid)
+            ));
+        }
+
+        // A caller presenting the old broad trust record after restart must
+        // not restore the interval invalidated by the stricter update.
+        assert!(matches!(
+            OciWitnessBranchLedger::open(temp.path().join("witness-branch.sqlite"), &trust),
+            Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid)
+        ));
+    }
+
 
 }
