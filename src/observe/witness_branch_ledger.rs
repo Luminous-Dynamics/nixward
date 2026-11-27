@@ -540,6 +540,10 @@ impl OciWitnessBranchLedger {
                     ))
                 },
             )?;
+        let stored_valid_from = u64::try_from(stored.5)
+            .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
+        let stored_valid_until = u64::try_from(stored.6)
+            .map_err(|_| OciWitnessBranchLedgerError::IntegerOutOfRange)?;
         let stored_revoked_at = stored
             .7
             .map(u64::try_from)
@@ -550,12 +554,32 @@ impl OciWitnessBranchLedger {
             || stored.2 != trusted_identity.key_id
             || stored.3 != to_sql_integer(trusted_identity.key_generation)?
             || stored.4 != trusted_identity.public_key_hex
-            || stored.5 != to_sql_integer(trusted_identity.valid_from_ms)?
-            || stored.6 != to_sql_integer(trusted_identity.valid_until_ms)?
-            || stored_revoked_at != trusted_identity.revoked_at_ms
         {
             return Err(OciWitnessBranchLedgerError::WitnessIdentityMismatch);
         }
+
+        // Reopening may present an older trust snapshot. The durable ledger
+        // must retain the stricter of persisted and newly supplied limits.
+        let effective_valid_from = stored_valid_from.max(trusted_identity.valid_from_ms);
+        let effective_valid_until = stored_valid_until.min(trusted_identity.valid_until_ms);
+        let effective_revoked_at = match (stored_revoked_at, trusted_identity.revoked_at_ms) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        if effective_valid_until <= effective_valid_from {
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
+        connection.execute(
+            "UPDATE witness_identity
+             SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
+             WHERE singleton = 1",
+            params![
+                to_sql_integer(effective_valid_from)?,
+                to_sql_integer(effective_valid_until)?,
+                effective_revoked_at.map(to_sql_integer).transpose()?
+            ],
+        )?;
 
         Ok(Self {
             connection,
@@ -564,9 +588,9 @@ impl OciWitnessBranchLedger {
             key_id: trusted_identity.key_id.clone(),
             key_generation: trusted_identity.key_generation,
             public_key_hex: trusted_identity.public_key_hex.clone(),
-            valid_from_ms: trusted_identity.valid_from_ms,
-            valid_until_ms: trusted_identity.valid_until_ms,
-            revoked_at_ms: trusted_identity.revoked_at_ms,
+            valid_from_ms: effective_valid_from,
+            valid_until_ms: effective_valid_until,
+            revoked_at_ms: effective_revoked_at,
         })
     }
 
@@ -593,10 +617,10 @@ impl OciWitnessBranchLedger {
         {
             return Err(OciWitnessBranchLedgerError::SigningKeyMismatch);
         }
-        // The live trust record may tighten the original provisioning but
-        // must never broaden it. In particular, revocation is monotonic:
-        // once latched in the durable identity, a later caller-supplied
-        // record cannot clear or postpone it for the same key generation.
+        // The live trust record may tighten the durable provisioning but
+        // must never broaden it. Revocation and validity reductions are
+        // latched before any signature is returned, including when the key
+        // remains temporarily valid before a future revocation timestamp.
         let revocation_was_weakened = match (self.revoked_at_ms, current_trust.revoked_at_ms) {
             (Some(provisioned), Some(current)) => current > provisioned,
             (Some(_), None) => true,
@@ -608,10 +632,33 @@ impl OciWitnessBranchLedger {
         {
             return Err(OciWitnessBranchLedgerError::TrustRecordExpanded);
         }
-        if now_ms < current_trust.valid_from_ms || now_ms >= current_trust.valid_until_ms {
+        let effective_valid_from = self.valid_from_ms.max(current_trust.valid_from_ms);
+        let effective_valid_until = self.valid_until_ms.min(current_trust.valid_until_ms);
+        let effective_revoked_at = match (self.revoked_at_ms, current_trust.revoked_at_ms) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        if effective_valid_until <= effective_valid_from {
             return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
         }
-        if current_trust.revoked_at_ms.is_some_and(|revoked_at| now_ms >= revoked_at) {
+        self.connection.execute(
+            "UPDATE witness_identity
+             SET valid_from_ms = ?1, valid_until_ms = ?2, revoked_at_ms = ?3
+             WHERE singleton = 1",
+            params![
+                to_sql_integer(effective_valid_from)?,
+                to_sql_integer(effective_valid_until)?,
+                effective_revoked_at.map(to_sql_integer).transpose()?
+            ],
+        )?;
+        self.valid_from_ms = effective_valid_from;
+        self.valid_until_ms = effective_valid_until;
+        self.revoked_at_ms = effective_revoked_at;
+        if now_ms < self.valid_from_ms || now_ms >= self.valid_until_ms {
+            return Err(OciWitnessBranchLedgerError::KeyNotCurrentlyValid);
+        }
+        if self.revoked_at_ms.is_some_and(|revoked_at| now_ms >= revoked_at) {
             return Err(OciWitnessBranchLedgerError::KeyRevoked);
         }
         if checkpoint.expires_at_ms() <= now_ms {
@@ -1253,6 +1300,55 @@ mod tests {
             &checkpoint, &request, &tightened, &signing, 1_100
         );
         assert!(result.is_ok());
+        drop(ledger);
+
+        // The on-disk restrictions survive reopen even when the caller has
+        // only the older, broader provisioning snapshot.
+        let mut reopened = open_ledger(&temp, &trust);
+        assert!(matches!(
+            reopened.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_200),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+    }
+
+    #[test]
+    fn latches_dynamic_revocation_across_calls_and_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let signing = SigningKey::from_bytes(&[43u8; 32]);
+        let trust = trusted_witness(&signing);
+        let checkpoint = verified_checkpoint(10, None, 9);
+        let request = OciObserverWitnessRequest::from_verified_checkpoint(&checkpoint).unwrap();
+
+        {
+            let mut ledger = open_ledger(&temp, &trust);
+            let mut revoked = trust.clone();
+            revoked.revoked_at_ms = Some(1_150);
+            let signed = ledger.endorse_checkpoint_branch(
+                &checkpoint, &request, &revoked, &signing, 1_100
+            );
+            assert!(signed.is_ok());
+
+            // A later stale trust snapshot cannot clear the revocation.
+            assert!(matches!(
+                ledger.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_120),
+                Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+            ));
+        }
+
+        // The durable revocation survives process restart and cannot be
+        // cleared by reopening with the original, unrevoked provisioning.
+        let mut reopened = open_ledger(&temp, &trust);
+        assert!(matches!(
+            reopened.endorse_checkpoint_branch(&checkpoint, &request, &trust, &signing, 1_120),
+            Err(OciWitnessBranchLedgerError::TrustRecordExpanded)
+        ));
+
+        let mut revoked = trust.clone();
+        revoked.revoked_at_ms = Some(1_150);
+        assert!(matches!(
+            reopened.endorse_checkpoint_branch(&checkpoint, &request, &revoked, &signing, 1_160),
+            Err(OciWitnessBranchLedgerError::KeyRevoked)
+        ));
     }
 
 }
